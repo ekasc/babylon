@@ -111,9 +111,11 @@ export interface WorkflowsUpdate {
 export interface WorkflowsBridgeOptions {
   /** Project cwd the runs belong to (from the pi host session). */
   cwd: string;
+  /** Override only for isolated tests; defaults to ~/.pi/workflows. */
+  workflowHomeDir?: string;
   /** Execute an extension command via the in-process pi session (`/workflows …`). */
   runCommand: (command: string) => Promise<unknown>;
-  /** Current pi session id, when known — used to prefer `/workflows rm` for local runs. */
+  /** Current pi session id. Runs owned by other sessions are not exposed. */
   getSessionId?: () => Promise<string | null | undefined>;
   /** Called with fresh summaries whenever the poll detects a change. */
   onUpdate: (runs: WorkflowRunSummary[]) => void;
@@ -130,7 +132,11 @@ interface ParsedRun {
 /** Stable per-project namespace key, mirroring workflowProjectKey() in the extension. */
 function projectKey(cwd: string): string {
   const projectPath = resolve(cwd);
-  const slug = basename(projectPath).replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "") || "project";
+  const slug = (basename(projectPath) || "project")
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48) || "project";
   const hash = createHash("sha256").update(projectPath).digest("hex").slice(0, 12);
   return `${slug}-${hash}`;
 }
@@ -139,6 +145,7 @@ export class WorkflowsBridge {
   readonly cwd: string;
   private opts: WorkflowsBridgeOptions;
   private timer: NodeJS.Timeout | null = null;
+  private active = false;
   private lastSignature = "";
   private lastRuns: WorkflowRunSummary[] = [];
   private parsedByPath = new Map<string, { signature: string; run: ParsedRun }>();
@@ -148,21 +155,32 @@ export class WorkflowsBridge {
     this.cwd = opts.cwd;
   }
 
-  /** Runs dirs for this project: user-level primary, legacy project-relative. */
-  private runsDirs(): string[] {
-    const primary = join(homedir(), ".pi", "workflows", "projects", projectKey(this.cwd), "runs");
-    const legacy = join(this.cwd, ".pi", "workflows", "runs");
-    return [primary, legacy];
+  /** Runs dirs for this project: lexical and canonical namespaces, then legacy. */
+  private async runsDirs(): Promise<string[]> {
+    const workflowHome = this.opts.workflowHomeDir ?? join(homedir(), ".pi", "workflows");
+    const cwdPaths = [resolve(this.cwd)];
+    try {
+      const canonical = await fsp.realpath(this.cwd);
+      if (!cwdPaths.includes(canonical)) cwdPaths.push(canonical);
+    } catch {
+      // The session lifecycle handles missing cwd. Keep lexical lookup usable.
+    }
+    return [
+      ...cwdPaths.map((cwd) => join(workflowHome, "projects", projectKey(cwd), "runs")),
+      join(this.cwd, ".pi", "workflows", "runs"),
+    ];
   }
 
   start(): void {
     if (this.timer) return;
+    this.active = true;
     // Prime immediately (don't wait a full interval for the first payload).
     void this.refresh();
     this.timer = setInterval(() => void this.refresh(), this.opts.pollIntervalMs ?? 1500);
   }
 
   dispose(): void {
+    this.active = false;
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
@@ -177,7 +195,7 @@ export class WorkflowsBridge {
     const byRunId = new Map<string, ParsedRun>();
     const sigParts: string[] = [];
     const seenPaths = new Set<string>();
-    for (const dir of this.runsDirs()) {
+    for (const dir of await this.runsDirs()) {
       let entries: string[];
       try {
         entries = await fsp.readdir(dir);
@@ -226,10 +244,16 @@ export class WorkflowsBridge {
   private async refresh(): Promise<void> {
     try {
       const { runs, signature } = await this.scan();
-      const summaries = runs.map((r) => toSummary(r.state));
+      if (!this.active) return;
+      const sessionId = await this.opts.getSessionId?.();
+      if (!this.active) return;
+      const summaries = runs
+        .filter((run) => !run.state.sessionId || run.state.sessionId === sessionId)
+        .map((run) => toSummary(run.state));
+      const scopedSignature = `${sessionId ?? "legacy"}|${signature}`;
       this.lastRuns = summaries;
-      if (signature !== this.lastSignature) {
-        this.lastSignature = signature;
+      if (scopedSignature !== this.lastSignature) {
+        this.lastSignature = scopedSignature;
         this.opts.onUpdate(summaries);
       }
     } catch {
@@ -241,11 +265,14 @@ export class WorkflowsBridge {
   // IPC surface
   // -------------------------------------------------------------------------
 
-  /** Fresh summaries (always reads disk; also keeps the change-signature honest). */
+  /** Fresh summaries scoped to the active conversation session. */
   async list(): Promise<WorkflowRunSummary[]> {
     try {
       const { runs } = await this.scan();
-      const summaries = runs.map((r) => toSummary(r.state));
+      const sessionId = await this.opts.getSessionId?.();
+      const summaries = runs
+        .filter((run) => !run.state.sessionId || run.state.sessionId === sessionId)
+        .map((run) => toSummary(run.state));
       this.lastRuns = summaries;
       return summaries;
     } catch {
@@ -253,15 +280,20 @@ export class WorkflowsBridge {
     }
   }
 
-  /** Full run state for one runId, primary then legacy (with .bak recovery). */
+  /** Full run state for one runId in the active session, with .bak recovery. */
   async get(runId: string): Promise<WorkflowRunDetail | null> {
     if (!validRunId(runId)) return null;
-    for (const dir of this.runsDirs()) {
+    const sessionId = await this.opts.getSessionId?.();
+    for (const dir of await this.runsDirs()) {
       for (const name of [`${runId}.json`, `${runId}.json.bak`]) {
         try {
           const raw = await fsp.readFile(join(dir, name), "utf8");
           const state = JSON.parse(raw) as WorkflowRunDetail;
-          if (state && state.runId === runId) return state;
+          if (
+            state &&
+            state.runId === runId &&
+            (!state.sessionId || state.sessionId === sessionId)
+          ) return state;
         } catch {
           // try next candidate
         }
@@ -333,7 +365,7 @@ export class WorkflowsBridge {
   /** Best-effort removal of a run's files (+ sidecars) in both locations. */
   private async removeFiles(runId: string): Promise<boolean> {
     let deleted = false;
-    for (const dir of this.runsDirs()) {
+    for (const dir of await this.runsDirs()) {
       for (const name of [`${runId}.json`, `${runId}.json.bak`, `${runId}.lock`, `${runId}.tmp`]) {
         try {
           await fsp.unlink(join(dir, name));

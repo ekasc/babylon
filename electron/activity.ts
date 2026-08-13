@@ -42,6 +42,8 @@ export interface SubagentActivity {
   profile?: string;
   thinking?: string;
   sessionFile?: string | null;
+  parentSessionId?: string | null;
+  parentSessionFile?: string | null;
   latestActivity?: string | null;
   recentMessages?: Array<{ at: string; role: string; text: string }>;
   revision?: number;
@@ -124,7 +126,7 @@ export class ActivityBridge {
     return this.last;
   }
 
-  private async refresh(notify = true): Promise<void> {
+  async refresh(notify = true): Promise<void> {
     const [threadScan, subagentScan] = await Promise.all([this.scanThreads(), this.scanSubagents()]);
     const signature = `${threadScan.signature}|${subagentScan.signature}`;
     const persistedIds = new Set(subagentScan.items.map((item) => item.runId));
@@ -216,6 +218,8 @@ export class ActivityBridge {
                     profile: record.profile,
                     thinking: record.thinking,
                     sessionFile: record.sessionFile,
+                    parentSessionId: record.parentSessionId,
+                    parentSessionFile: record.parentSessionFile,
                     latestActivity: record.latestActivity,
                     recentMessages: record.recentMessages,
                     revision: record.revision,

@@ -51,7 +51,7 @@ function updateWorkflowsBridge(cwd: string): void {
   if (!cwd) return;
   if (workflowsBridge?.cwd === cwd) return;
   workflowsBridge?.dispose();
-  workflowsBridge = new WorkflowsBridge({
+  const nextBridge = new WorkflowsBridge({
     cwd,
     runCommand: async (command: string) => {
       // Extension commands execute synchronously via session.prompt("/…") — no
@@ -68,11 +68,13 @@ function updateWorkflowsBridge(cwd: string): void {
       }
     },
     onUpdate: (runs) => {
+      if (workflowsBridge !== nextBridge) return;
       const payload: WorkflowsUpdate = { runs };
       win?.webContents.send("pideck:workflows-update", payload);
     },
   });
-  workflowsBridge.start();
+  workflowsBridge = nextBridge;
+  nextBridge.start();
 }
 
 // ---------------------------------------------------------------------------
@@ -580,9 +582,17 @@ function registerIpc(): void {
       if (!/^[a-f0-9-]{20,}$/i.test(opts.runId)) throw new Error("invalid subagent run id");
       if (opts.action !== "steer" && opts.action !== "follow-up" && opts.action !== "stop") throw new Error("invalid subagent action");
       if (opts.action !== "stop" && !opts.message?.trim()) throw new Error("message is required");
-      return getHost().controlSubagent(opts.action, opts.runId, opts.message?.trim());
+      const result = await getHost().controlSubagent(opts.action, opts.runId, opts.message?.trim());
+      await activityBridge?.refresh();
+      return result;
     }
   );
+  handle("pideck:subagents:promote", async (_e, runId: string) => {
+    if (!/^[a-f0-9-]{20,}$/i.test(runId)) throw new Error("invalid subagent run id");
+    const result = await getHost().promoteSubagent(runId);
+    await activityBridge?.refresh();
+    return result;
+  });
 
   // Workflows (pi-dynamic-workflows run state)
   handle("pideck:workflows:list", () => workflowsBridge?.list() ?? Promise.resolve([]));

@@ -14,6 +14,7 @@ import {
 
 export type SubagentDelivery = "steer" | "follow-up";
 export type SubagentControlAction = SubagentDelivery | "stop";
+export type SubagentParentEvent = SubagentControlAction | "reply";
 export type ManagedSubagentStatus = "starting" | "running" | "idle" | "failed" | "stopped" | "interrupted";
 
 export interface ManagedSubagentRecord {
@@ -28,6 +29,8 @@ export interface ManagedSubagentRecord {
   profile: "read-only" | "verify" | "write";
   thinking: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
   sessionFile: string | null;
+  parentSessionId: string | null;
+  parentSessionFile: string | null;
   startedAt: string;
   updatedAt: string;
   completedAt: string | null;
@@ -96,6 +99,7 @@ export class ManagedSubagents {
       agentDir: string;
       modelRuntime: ModelRuntime;
       onUpdate?: () => void;
+      onParentMessage?: (record: ManagedSubagentRecord, action: SubagentParentEvent, message?: string) => void | Promise<void>;
     }
   ) {}
 
@@ -181,9 +185,11 @@ export class ManagedSubagents {
         record.latestActivity = "stopped from Babylon";
         this.addMessage(record, "status", record.latestActivity);
         await this.save(record);
+        await this.options.onParentMessage?.(record, action);
         return record;
       }
       await this.stopRuntime(live, "stopped from Babylon");
+      await this.options.onParentMessage?.(live.record, action);
       return live.record;
     }
     const text = message?.trim();
@@ -203,7 +209,48 @@ export class ManagedSubagents {
     } else {
       void this.runTurn(runtime, action === "steer" ? `[Parent Steering]\n${text}` : `[Parent Follow-Up]\n${text}`);
     }
+    await this.options.onParentMessage?.(runtime.record, action, text);
     return runtime.record;
+  }
+
+  async promote(cwd: string, runId: string): Promise<{ sessionFile: string; cwd: string; parentSessionFile: string | null }> {
+    if (!ID.test(runId)) throw new Error("Invalid subagent run id");
+    const persisted = await this.readRecord(cwd, runId);
+    if (!persisted) throw new Error("Subagent run not found");
+    const runtime = this.runtimes.get(runId);
+    if (runtime?.running) throw new Error("Stop or wait for the subagent turn before opening it as the main session");
+    const record = runtime?.record ?? persisted;
+    if (!record.sessionFile) throw new Error("This subagent has no persisted session to open");
+    await fs.access(record.sessionFile).catch(() => { throw new Error("The subagent session file no longer exists"); });
+    const supervision = [
+      `[Babylon Supervision] You are still subagent ${record.name ?? record.runId}, supervised by parent session ${record.parentSessionId ?? "unknown"}.`,
+      "Do not claim to be the parent/main agent. Replies in this promoted conversation remain subagent replies and Babylon relays them to the parent conversation.",
+    ].join("\n");
+    if (runtime) {
+      await runtime.session.sendCustomMessage({
+        customType: "babylon_subagent_identity",
+        content: supervision,
+        display: true,
+        details: { runId: record.runId, name: record.name, parentSessionId: record.parentSessionId, parentSessionFile: record.parentSessionFile },
+      });
+      runtime.unsubscribe?.();
+      runtime.unsubscribe = null;
+      runtime.session.dispose();
+      this.runtimes.delete(runId);
+    } else {
+      SessionManager.open(record.sessionFile, undefined, record.cwd).appendCustomMessageEntry(
+        "babylon_subagent_identity",
+        supervision,
+        true,
+        { runId: record.runId, name: record.name, parentSessionId: record.parentSessionId, parentSessionFile: record.parentSessionFile }
+      );
+    }
+    record.status = "stopped";
+    record.completedAt ??= new Date().toISOString();
+    record.latestActivity = "Opened as main session";
+    this.addMessage(record, "status", record.latestActivity);
+    await this.save(record);
+    return { sessionFile: record.sessionFile, cwd: record.cwd, parentSessionFile: record.parentSessionFile };
   }
 
   async dispose(): Promise<void> {
@@ -249,6 +296,8 @@ export class ManagedSubagents {
       profile,
       thinking,
       sessionFile: null,
+      parentSessionId: ctx.sessionManager.getSessionId(),
+      parentSessionFile: ctx.sessionManager.getSessionFile() ?? null,
       startedAt: now,
       updatedAt: now,
       completedAt: null,
@@ -301,7 +350,10 @@ export class ManagedSubagents {
         noSkills: true,
         noPromptTemplates: true,
         appendSystemPrompt: [
-          "You are an isolated subagent supervised by a parent session. Do not spawn workflows, threads, or subagents.",
+          `You are a supervised subagent, run ${record.runId}. Your parent session is ${record.parentSessionId ?? "unknown"}.`,
+          "Messages prefixed [Parent Steering] or [Parent Follow-Up] were sent by your parent through Babylon Activity. Never claim that you are the main agent.",
+          "You cannot directly inspect or message the parent session. Reply in this conversation; Babylon records the exchange for the parent.",
+          "Do not spawn workflows, threads, or subagents.",
           record.profile === "write"
             ? "Work only within the assigned task and report all changes."
             : record.profile === "verify"
@@ -333,6 +385,7 @@ export class ManagedSubagents {
           record.output = text.slice(-1_048_576);
           this.addMessage(record, "assistant", text);
           void this.save(record);
+          void this.options.onParentMessage?.(record, "reply", text);
         }
       }
     });
@@ -433,6 +486,8 @@ export class ManagedSubagents {
         !["off", "minimal", "low", "medium", "high", "xhigh"].includes(value.thinking) ||
         !Array.isArray(value.recentMessages)
       ) return null;
+      value.parentSessionId = typeof value.parentSessionId === "string" ? value.parentSessionId : null;
+      value.parentSessionFile = typeof value.parentSessionFile === "string" ? value.parentSessionFile : null;
       return value as ManagedSubagentRecord;
     } catch {
       return null;

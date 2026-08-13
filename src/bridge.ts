@@ -81,6 +81,8 @@ export interface SubagentActivity {
   profile?: string;
   thinking?: string;
   sessionFile?: string | null;
+  parentSessionId?: string | null;
+  parentSessionFile?: string | null;
   latestActivity?: string | null;
   recentMessages?: Array<{ at: string; role: string; text: string }>;
   revision?: number;
@@ -301,7 +303,8 @@ export interface Bridge {
 
   activityList(): Promise<ActivityUpdate>;
   threadsControl(action: "steer" | "follow-up" | "stop", threadId: string, message?: string): Promise<void>;
-  subagentsControl(action: "steer" | "follow-up" | "stop", runId: string, message?: string): Promise<void>;
+  subagentsControl(action: "steer" | "follow-up" | "stop", runId: string, message?: string): Promise<SubagentActivity>;
+  subagentsPromote(runId: string): Promise<{ sessionFile: string; cwd: string; parentSessionFile: string | null }>;
   onActivityUpdate(cb: (payload: ActivityUpdate) => void): () => void;
 
   workflowsList(): Promise<WorkflowRunSummary[]>;
@@ -376,7 +379,8 @@ export const bridge: Bridge = window.pideck ?? {
 
   activityList: () => Promise.resolve({ threads: [], subagents: [] }),
   threadsControl: () => Promise.resolve(),
-  subagentsControl: () => Promise.resolve(),
+  subagentsControl: () => Promise.reject(new Error("bridge unavailable")),
+  subagentsPromote: () => Promise.reject(new Error("bridge unavailable")),
   onActivityUpdate: () => () => {},
 
   workflowsList: () => Promise.resolve([]),

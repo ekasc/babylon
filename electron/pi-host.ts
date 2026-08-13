@@ -18,7 +18,7 @@ import { projectHistory } from "./session-history";
 import { ActiveRollback, RollbackStore, entryDigest, type TurnCheckpoint } from "./rollback-store";
 import { SnapshotStore, type RestoreChange, type SnapshotCapture } from "./snapshot-store";
 import { toPiImages } from "./prompt-images";
-import { ManagedSubagents, type SubagentControlAction } from "./subagents";
+import { ManagedSubagents, type ManagedSubagentRecord, type SubagentControlAction, type SubagentParentEvent } from "./subagents";
 import {
   AgentSessionRuntime,
   ModelRuntime,
@@ -125,6 +125,7 @@ export class PiHost {
       agentDir,
       modelRuntime: this.modelRuntime,
       onUpdate: () => this.opts.onEvent({ type: "pideck_subagents_changed" }),
+      onParentMessage: (record, action, message) => this.notifySubagentParent(record, action, message),
     });
     const trustStore = new ProjectTrustStore(agentDir);
     const globalSettings = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
@@ -318,9 +319,33 @@ export class PiHost {
       },
     });
     this.unsubscribeEvents?.();
-    this.unsubscribeEvents = session.subscribe((event) =>
-      this.opts.onEvent({ ...event, sessionId: session.sessionId, sessionFile: session.sessionFile })
-    );
+    this.unsubscribeEvents = session.subscribe((event) => {
+      this.opts.onEvent({ ...event, sessionId: session.sessionId, sessionFile: session.sessionFile });
+      if (event.type === "message_end" && event.message?.role === "assistant") {
+        void this.relayPromotedSubagentReply(session, messageText(event.message));
+      }
+    });
+  }
+
+  private async relayPromotedSubagentReply(session: AgentSession, text: string): Promise<void> {
+    if (!text.trim()) return;
+    const identity = [...session.sessionManager.getEntries()].reverse().find(
+      (entry: any) => entry.type === "custom_message" && entry.customType === "babylon_subagent_identity"
+    ) as any;
+    const parentSessionFile = identity?.details?.parentSessionFile;
+    if (typeof parentSessionFile !== "string" || !parentSessionFile || parentSessionFile === session.sessionFile) return;
+    try {
+      const parent = SessionManager.open(parentSessionFile, undefined, session.sessionManager.getCwd());
+      const label = identity.details?.name ?? identity.details?.runId?.slice?.(0, 8) ?? "subagent";
+      parent.appendCustomMessageEntry(
+        "babylon_subagent_activity",
+        `[Babylon Subagent Activity]\nSubagent ${label} replied:\n\n${text}`,
+        true,
+        { runId: identity.details?.runId, action: "reply", message: text }
+      );
+    } catch {
+      // Parent may have moved or been deleted; the promoted child remains usable.
+    }
   }
 
   private rejectAllUi(error: Error): void {
@@ -975,8 +1000,28 @@ export class PiHost {
     return result;
   }
 
+  private async notifySubagentParent(record: ManagedSubagentRecord, action: SubagentParentEvent, message?: string): Promise<void> {
+    if (!record.parentSessionId || record.parentSessionId !== this.runtime.session.sessionId) return;
+    const label = record.name ?? record.runId.slice(0, 8);
+    const content = action === "stop"
+      ? `[Babylon Subagent Activity]\nSubagent ${label} was stopped from Activity.`
+      : action === "reply"
+        ? `[Babylon Subagent Activity]\nSubagent ${label} replied:\n\n${message}`
+        : `[Babylon Subagent Activity]\nThe user sent this ${action === "steer" ? "steering message" : "follow-up"} to subagent ${label}:\n\n${message}`;
+    await this.runtime.session.sendCustomMessage({
+      customType: "babylon_subagent_activity",
+      content,
+      display: true,
+      details: { runId: record.runId, action, message },
+    });
+  }
+
   async controlSubagent(action: SubagentControlAction, runId: string, message?: string): Promise<any> {
     return this.managedSubagents.control(this.cwd, action, runId, message);
+  }
+
+  async promoteSubagent(runId: string): Promise<{ sessionFile: string; cwd: string; parentSessionFile: string | null }> {
+    return this.managedSubagents.promote(this.cwd, runId);
   }
 
   async dispose(): Promise<void> {

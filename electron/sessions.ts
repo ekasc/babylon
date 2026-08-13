@@ -302,6 +302,16 @@ export async function readSessionMessages(path: string): Promise<any[]> {
   const messages: any[] = [];
   for (const entry of parseLines(raw)) {
     if (entry?.type === "message" && entry.message) messages.push(entry.message);
+    else if (entry?.type === "custom_message") {
+      messages.push({
+        role: "custom",
+        customType: entry.customType,
+        content: entry.content,
+        display: entry.display,
+        details: entry.details,
+        timestamp: Date.parse(entry.timestamp),
+      });
+    }
   }
   return messages;
 }

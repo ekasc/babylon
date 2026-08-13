@@ -59,6 +59,7 @@ export default function App() {
     return Number.isFinite(stored) && stored >= 360 && stored <= 760 ? stored : 520;
   });
   const [draftRequest, setDraftRequest] = useState<{ id: number; text: string } | null>(null);
+  const [promotedParent, setPromotedParent] = useState<{ path: string; cwd: string } | null>(null);
   const [activity, setActivity] = useState<ActivityUpdate>({ threads: [], subagents: [] });
   const [workflowRuns, setWorkflowRuns] = useState<WorkflowRunSummary[]>([]);
   const [wtBusy, setWtBusy] = useState(false);
@@ -567,7 +568,10 @@ export default function App() {
         activityOpen={showWorkflowsPanel}
         treeOpen={showBranchPanel}
         canOpenTree={ready && hasSession}
-        onOpen={openSession}
+        onOpen={(path, cwd) => {
+          setPromotedParent(null);
+          void openSession(path, cwd);
+        }}
         onNew={newSession}
         onOpenActivity={() => {
           setShowWorkflowsPanel((open) => !open);
@@ -594,11 +598,12 @@ export default function App() {
                 onRollback={(entryId) => void prepareRollback(entryId)}
               />
             ) : (
-              <Hero status={status} groups={groups} onOpen={openSession} onNew={newSession} />
+              <Hero status={status} groups={groups} onOpen={(path, cwd) => { setPromotedParent(null); void openSession(path, cwd); }} onNew={newSession} />
             )}
           </div>
 
           <header className="thread-header titlebar absolute inset-x-0 top-0 z-10 flex h-16 items-center gap-3 px-5">
+            {promotedParent ? <button onClick={() => { const parent = promotedParent; setPromotedParent(null); void openSession(parent.path, parent.cwd); }} title="Back to parent session" className="thread-action px-2 text-[13px]">← Parent</button> : null}
             <StatusDot status={liveReady ? "ready" : status.status} />
             <div className="min-w-0 flex items-baseline gap-2.5">
               <div className="truncate text-[15px] font-semibold tracking-[-0.01em]">
@@ -667,8 +672,12 @@ export default function App() {
                 />
               ) : (
                 <WorkflowsPanel
-                  onOpenSession={(path) => {
-                    if (status.cwd) void openSession(path, status.cwd);
+                  onOpenSession={(path, targetCwd, parentPath) => {
+                    const cwd = targetCwd ?? status.cwd;
+                    if (cwd) {
+                      if (parentPath && status.cwd) setPromotedParent({ path: parentPath, cwd: status.cwd });
+                      void openSession(path, cwd);
+                    }
                     setShowWorkflowsPanel(false);
                   }}
                   onClose={() => setShowWorkflowsPanel(false)}
@@ -687,7 +696,10 @@ export default function App() {
             commands={commands}
             onClose={() => setShowCommandPalette(false)}
             onNew={() => void newSession()}
-            onOpen={(path, cwd) => void openSession(path, cwd)}
+            onOpen={(path, cwd) => {
+              setPromotedParent(null);
+              void openSession(path, cwd);
+            }}
             onCommand={(command) =>
               setDraftRequest({ id: Date.now(), text: insertCommand(command) })
             }

@@ -205,6 +205,12 @@ export function messagesToItems(messages: any[]): ChatItem[] {
         });
         break;
       }
+      case "custom": {
+        if (m.display && m.customType === "babylon_subagent_activity") {
+          items.push({ kind: "system", key: msgKey("c", m, messageIndex), text: textOf(m.content) });
+        }
+        break;
+      }
     }
   }
   return items;
@@ -271,6 +277,9 @@ function applyEvent(state: State, ev: any): State {
             { kind: "assistant", key: nextKey("a"), blocks: [], model: m.model, streaming: true },
           ],
         };
+      }
+      if (m?.role === "custom" && m.display && m.customType === "babylon_subagent_activity") {
+        return { ...state, items: [...state.items, { kind: "system", key: nextKey("c"), text: textOf(m.content) }] };
       }
       if (m?.role === "user") {
         const text = textOf(m.content).trim();
