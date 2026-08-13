@@ -31,4 +31,45 @@ describe("ActivityBridge", () => {
     expect(state.threads[0]).toMatchObject({ threadId: "thread-1", status: "running" });
     expect(state.subagents[0]).toMatchObject({ runId: "run-1", status: "completed", requestedModel: "provider/model" });
   });
+
+  it("reads steerable managed subagent records", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "pideck-managed-subagent-"));
+    roots.push(cwd);
+    const runId = "12345678-1234-1234-1234-123456789abc";
+    const runDir = join(cwd, ".pi", "state", "subagents", "runs", runId);
+    await mkdir(runDir, { recursive: true });
+    await writeFile(join(runDir, "run.json"), JSON.stringify({
+      version: 1,
+      runId,
+      name: "reviewer",
+      task: "Review the change",
+      cwd,
+      status: "idle",
+      requestedModel: "provider/model",
+      sessionModel: "provider/model",
+      profile: "read-only",
+      thinking: "high",
+      sessionFile: join(runDir, "sessions", "run.jsonl"),
+      startedAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:01Z",
+      completedAt: "2026-01-01T00:00:01Z",
+      output: "Ready",
+      error: null,
+      latestActivity: "Ready for more messages",
+      recentMessages: [{ at: "2026-01-01T00:00:01Z", role: "assistant", text: "Ready" }],
+      revision: 2,
+    }));
+
+    const bridge = new ActivityBridge({ cwd, onUpdate: () => undefined });
+    const state = await bridge.list();
+    bridge.dispose();
+    expect(state.subagents[0]).toMatchObject({
+      runId,
+      status: "idle",
+      controllable: true,
+      name: "reviewer",
+      task: "Review the change",
+      recentMessages: [expect.objectContaining({ role: "assistant", text: "Ready" })],
+    });
+  });
 });

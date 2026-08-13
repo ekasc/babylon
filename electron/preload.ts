@@ -47,6 +47,8 @@ const api = {
   activityList: (): Promise<any> => ipcRenderer.invoke("pideck:activity:list"),
   threadsControl: (action: string, threadId: string, message?: string): Promise<void> =>
     ipcRenderer.invoke("pideck:threads:control", { action, threadId, message }),
+  subagentsControl: (action: string, runId: string, message?: string): Promise<void> =>
+    ipcRenderer.invoke("pideck:subagents:control", { action, runId, message }),
   onActivityUpdate: (cb: (update: any) => void): (() => void) => {
     const listener = (_e: unknown, update: any) => cb(update);
     ipcRenderer.on("pideck:activity-update", listener);

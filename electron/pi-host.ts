@@ -18,6 +18,7 @@ import { projectHistory } from "./session-history";
 import { ActiveRollback, RollbackStore, entryDigest, type TurnCheckpoint } from "./rollback-store";
 import { SnapshotStore, type RestoreChange, type SnapshotCapture } from "./snapshot-store";
 import { toPiImages } from "./prompt-images";
+import { ManagedSubagents, type SubagentControlAction } from "./subagents";
 import {
   AgentSessionRuntime,
   ModelRuntime,
@@ -84,6 +85,7 @@ export class PiHost {
   private _cwd: string;
   private readonly snapshots: SnapshotStore;
   private readonly rollbacks: RollbackStore;
+  private managedSubagents!: ManagedSubagents;
   private readonly rollbackPlans = new Map<string, {
     id: string;
     sessionId: string;
@@ -119,6 +121,11 @@ export class PiHost {
     const agentDir = this.opts.agentDir ?? getAgentDir();
     const cwd = resolve(this.opts.cwd);
     this.modelRuntime = await ModelRuntime.create();
+    this.managedSubagents = new ManagedSubagents({
+      agentDir,
+      modelRuntime: this.modelRuntime,
+      onUpdate: () => this.opts.onEvent({ type: "pideck_subagents_changed" }),
+    });
     const trustStore = new ProjectTrustStore(agentDir);
     const globalSettings = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
     const trustByCwd = new Map<string, boolean>();
@@ -162,6 +169,7 @@ export class PiHost {
         services,
         sessionManager: input.sessionManager,
         sessionStartEvent: input.sessionStartEvent,
+        customTools: [this.managedSubagents.tool()],
       });
       const out: CreateAgentSessionRuntimeResult = {
         session: result.session,
@@ -948,8 +956,32 @@ export class PiHost {
     });
   }
 
+  async controlThread(action: "steer" | "follow-up" | "stop", threadId: string, message?: string): Promise<any> {
+    await this.ensureSession();
+    const session = this.runtime.session;
+    const toolName = action === "stop" ? "close_thread" : "send_input";
+    const tool = session.getToolDefinition(toolName);
+    if (!tool) throw new Error("Threads extension is not available in this session");
+    const result = await tool.execute(
+      `babylon-thread-${randomUUID()}`,
+      action === "stop"
+        ? { threadId, reason: "stopped from Babylon" }
+        : { threadId, message: message!.trim(), delivery: action === "steer" ? "steer" : "follow_up" },
+      undefined,
+      undefined,
+      session.extensionRunner.createContext()
+    );
+    if ((result as any)?.isError) throw new Error((result as any)?.content?.[0]?.text ?? "Thread control failed");
+    return result;
+  }
+
+  async controlSubagent(action: SubagentControlAction, runId: string, message?: string): Promise<any> {
+    return this.managedSubagents.control(this.cwd, action, runId, message);
+  }
+
   async dispose(): Promise<void> {
     this.rejectAllUi(new Error("host disposed"));
+    await this.managedSubagents?.dispose().catch(() => undefined);
     this.unsubscribeEvents?.();
     this.unsubscribeEvents = null;
     try {

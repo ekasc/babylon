@@ -332,7 +332,7 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props)
             <ThreadsView threads={activity.threads} onOpen={setSelectedThread} />
           )
         ) : tab === "subagents" ? (
-          selectedSubagent ? <SubagentDetail run={selectedSubagent} /> : <SubagentsView subagents={activity.subagents} onOpen={setSelectedSubagent} />
+          selectedSubagent ? <SubagentDetail run={selectedSubagent} toast={toast} /> : <SubagentsView subagents={activity.subagents} onOpen={setSelectedSubagent} />
         ) : loading ? (
           <p className="px-2 py-8 text-center text-[14px] text-dim">Loading runs…</p>
         ) : loadError ? (
@@ -779,9 +779,30 @@ function SubagentsView({ subagents, onOpen }: { subagents: SubagentActivity[]; o
   return <div className="divide-y divide-line">{subagents.map((run) => <button key={run.runId} onClick={() => onOpen(run)} className="flex w-full items-start gap-3 px-2 py-3 text-left hover:bg-inset"><span className={`mt-1.5 h-2 w-2 rounded-full ${run.status === "running" ? "bg-accent" : run.status === "routing_mismatch" ? "bg-err" : run.status === "completed" ? "bg-ok" : "bg-dim"}`} /><span className="min-w-0 flex-1"><strong className="block truncate text-[14px]">{run.requestedModel ?? "Subagent"}</strong><span className="mt-1 block text-[13px] text-dim">{run.status.replace("_", " ")} · {timeAgo(run.updatedAt)}</span></span><ChevronIcon size={13} className="mt-1 text-dim" /></button>)}</div>;
 }
 
-function SubagentDetail({ run }: { run: SubagentActivity }) {
-  const ended = run.status !== "running";
-  return <div className="px-2"><div className="border-b border-line pb-4"><div className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full ${ended ? "bg-dim" : "bg-accent"}`} /><h2 className="min-w-0 flex-1 truncate text-[16px] font-semibold">{run.requestedModel ?? "Subagent"}</h2><span className="text-[13px] text-dim">{run.status.replace("_", " ")}</span></div><dl className="mt-3 grid grid-cols-[90px_1fr] gap-y-1 text-[13px]"><dt className="text-dim">Requested</dt><dd className="truncate">{run.requestedModel ?? "—"}</dd><dt className="text-dim">Observed</dt><dd className="truncate">{run.sessionModel ?? run.payloadModel ?? "—"}</dd><dt className="text-dim">Run</dt><dd className="font-mono text-[12px]">{run.runId}</dd></dl></div>{run.output ? <div className="py-4"><Markdown text={clampText(run.output, 10000)} /></div> : null}{run.stderr ? <pre className="max-h-48 overflow-auto border-t border-line py-3 font-mono text-[12px] text-warn">{clampText(run.stderr, 3000)}</pre> : null}<div className="border-t border-line pt-3 text-[13px] text-dim">{ended ? "This subagent session has ended and cannot receive messages." : "Live steering will be enabled after the subagent runtime exposes a control channel."}</div></div>;
+function SubagentDetail({ run, toast }: { run: SubagentActivity; toast(type: "info" | "warning" | "error", text: string): void }) {
+  const live = run.status === "starting" || run.status === "running";
+  const controllable = run.controllable === true;
+  const control = async (action: "steer" | "follow-up" | "stop") => {
+    const message = action === "stop" ? undefined : window.prompt(action === "steer" ? "Redirect this subagent" : "Send another task") ?? undefined;
+    if (action !== "stop" && !message?.trim()) return;
+    if (action === "stop" && !window.confirm("Stop this subagent? It will become read-only.")) return;
+    try {
+      await bridge.subagentsControl(action, run.runId, message);
+      toast("info", action === "stop" ? "Subagent stopped" : action === "steer" ? "Steering sent" : "Follow-up sent");
+    } catch (error: any) {
+      toast("error", error?.message ?? `${action} failed`);
+    }
+  };
+  return <div className="px-2">
+    <div className="border-b border-line pb-4">
+      <div className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full ${live ? "bg-accent" : run.status === "failed" ? "bg-err" : "bg-dim"}`} /><h2 className="min-w-0 flex-1 truncate text-[16px] font-semibold">{run.name ?? run.requestedModel ?? "Subagent"}</h2><span className="text-[13px] text-dim">{run.status.replace("_", " ")}</span></div>
+      {run.task ? <p className="mt-2 text-[14px] leading-6 text-dim">{run.task}</p> : null}
+      <dl className="mt-3 grid grid-cols-[90px_1fr] gap-y-1 text-[13px]"><dt className="text-dim">Requested</dt><dd className="truncate">{run.requestedModel ?? "—"}</dd><dt className="text-dim">Observed</dt><dd className="truncate">{run.sessionModel ?? run.payloadModel ?? "—"}</dd>{run.profile ? <><dt className="text-dim">Profile</dt><dd>{run.profile}{run.thinking ? ` · ${run.thinking}` : ""}</dd></> : null}<dt className="text-dim">Run</dt><dd className="font-mono text-[12px]">{run.runId}</dd></dl>
+    </div>
+    {run.recentMessages?.length ? <div className="max-h-[46vh] overflow-y-auto py-4">{run.recentMessages.map((message, index) => <div key={`${message.at}-${index}`} className="border-l border-line py-2 pl-3"><span className="text-[12px] font-medium text-dim">{message.role}</span><p className="mt-1 whitespace-pre-wrap text-[14px] leading-6">{message.text}</p></div>)}</div> : run.output ? <div className="py-4"><Markdown text={clampText(run.output, 10000)} /></div> : null}
+    {run.stderr ? <pre className="max-h-48 overflow-auto border-t border-line py-3 font-mono text-[12px] text-warn">{clampText(run.stderr, 3000)}</pre> : null}
+    <div className="flex flex-wrap gap-2 border-t border-line pt-3">{controllable ? <><button onClick={() => void control("steer")} className="context-button is-primary">Steer</button><button onClick={() => void control("follow-up")} className="context-button">Message</button><button onClick={() => void control("stop")} className="context-button text-err">Stop</button></> : <span className="text-[13px] text-dim">Legacy and stopped subagents are read-only.</span>}</div>
+  </div>;
 }
 
 function EmptyActivity({ icon, title, text }: { icon: string; title: string; text: string }) {

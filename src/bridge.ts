@@ -66,7 +66,7 @@ export interface ThreadActivity {
 
 export interface SubagentActivity {
   runId: string;
-  status: "running" | "completed" | "routing_mismatch" | "unknown";
+  status: "starting" | "running" | "idle" | "failed" | "stopped" | "interrupted" | "completed" | "routing_mismatch" | "unknown";
   requestedModel?: string;
   sessionModel?: string;
   payloadModel?: string;
@@ -75,6 +75,15 @@ export interface SubagentActivity {
   updatedAt: string;
   output?: string;
   stderr?: string;
+  controllable?: boolean;
+  name?: string | null;
+  task?: string;
+  profile?: string;
+  thinking?: string;
+  sessionFile?: string | null;
+  latestActivity?: string | null;
+  recentMessages?: Array<{ at: string; role: string; text: string }>;
+  revision?: number;
 }
 
 export interface ActivityUpdate {
@@ -292,6 +301,7 @@ export interface Bridge {
 
   activityList(): Promise<ActivityUpdate>;
   threadsControl(action: "steer" | "follow-up" | "stop", threadId: string, message?: string): Promise<void>;
+  subagentsControl(action: "steer" | "follow-up" | "stop", runId: string, message?: string): Promise<void>;
   onActivityUpdate(cb: (payload: ActivityUpdate) => void): () => void;
 
   workflowsList(): Promise<WorkflowRunSummary[]>;
@@ -366,6 +376,7 @@ export const bridge: Bridge = window.pideck ?? {
 
   activityList: () => Promise.resolve({ threads: [], subagents: [] }),
   threadsControl: () => Promise.resolve(),
+  subagentsControl: () => Promise.resolve(),
   onActivityUpdate: () => () => {},
 
   workflowsList: () => Promise.resolve([]),

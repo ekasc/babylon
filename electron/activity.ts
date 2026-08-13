@@ -27,7 +27,7 @@ export interface ThreadActivity {
 
 export interface SubagentActivity {
   runId: string;
-  status: "running" | "completed" | "routing_mismatch" | "unknown";
+  status: "starting" | "running" | "idle" | "failed" | "stopped" | "interrupted" | "completed" | "routing_mismatch" | "unknown";
   requestedModel?: string;
   sessionModel?: string;
   payloadModel?: string;
@@ -36,6 +36,15 @@ export interface SubagentActivity {
   updatedAt: string;
   output?: string;
   stderr?: string;
+  controllable?: boolean;
+  name?: string | null;
+  task?: string;
+  profile?: string;
+  thinking?: string;
+  sessionFile?: string | null;
+  latestActivity?: string | null;
+  recentMessages?: Array<{ at: string; role: string; text: string }>;
+  revision?: number;
 }
 
 export interface ActivityUpdate {
@@ -121,7 +130,7 @@ export class ActivityBridge {
     const persistedIds = new Set(subagentScan.items.map((item) => item.runId));
     const transient = [...this.transientSubagents.values()].filter((item) => !persistedIds.has(item.runId));
     this.last = { threads: threadScan.items, subagents: [...transient, ...subagentScan.items] };
-    if (notify && signature !== this.signature) this.options.onUpdate(this.last);
+    if (notify && (signature !== this.signature || transient.length > 0)) this.options.onUpdate(this.last);
     this.signature = signature;
   }
 
@@ -166,17 +175,56 @@ export class ActivityBridge {
           .filter((entry) => entry.isDirectory())
           .map(async (entry): Promise<SubagentActivity | null> => {
             const runDir = join(root, entry.name);
+            const recordPath = join(runDir, "run.json");
             const routePath = join(runDir, "provider-models.jsonl");
             const stdoutPath = join(runDir, "stdout.log");
             const stderrPath = join(runDir, "stderr.log");
-            const [routeStat, stdoutStat, stderrStat] = await Promise.all([
+            const [recordStat, routeStat, stdoutStat, stderrStat] = await Promise.all([
+              fs.stat(recordPath).catch(() => null),
               fs.stat(routePath).catch(() => null),
               fs.stat(stdoutPath).catch(() => null),
               fs.stat(stderrPath).catch(() => null),
             ]);
-            const newest = Math.max(routeStat?.mtimeMs ?? 0, stdoutStat?.mtimeMs ?? 0, stderrStat?.mtimeMs ?? 0);
+            const newest = Math.max(recordStat?.mtimeMs ?? 0, routeStat?.mtimeMs ?? 0, stdoutStat?.mtimeMs ?? 0, stderrStat?.mtimeMs ?? 0);
             if (!newest) return null;
-            parts.push(`${entry.name}:${routeStat?.size ?? 0}:${stdoutStat?.size ?? 0}:${stderrStat?.size ?? 0}:${newest}`);
+            parts.push(`${entry.name}:${recordStat?.size ?? 0}:${routeStat?.size ?? 0}:${stdoutStat?.size ?? 0}:${stderrStat?.size ?? 0}:${newest}`);
+            if (recordStat) {
+              try {
+                const record = JSON.parse(await fs.readFile(recordPath, "utf8"));
+                if (
+                  record?.version === 1 &&
+                  record.runId === entry.name &&
+                  record.cwd === this.cwd &&
+                  typeof record.status === "string" &&
+                  typeof record.requestedModel === "string" &&
+                  typeof record.sessionModel === "string" &&
+                  Array.isArray(record.recentMessages)
+                ) {
+                  return {
+                    runId: record.runId,
+                    status: record.status,
+                    requestedModel: record.requestedModel,
+                    sessionModel: record.sessionModel,
+                    matched: true,
+                    startedAt: record.startedAt,
+                    updatedAt: record.updatedAt,
+                    output: record.output || undefined,
+                    stderr: record.error || undefined,
+                    controllable: record.status !== "stopped",
+                    name: record.name,
+                    task: record.task,
+                    profile: record.profile,
+                    thinking: record.thinking,
+                    sessionFile: record.sessionFile,
+                    latestActivity: record.latestActivity,
+                    recentMessages: record.recentMessages,
+                    revision: record.revision,
+                  } satisfies SubagentActivity;
+                }
+              } catch {
+                // A writer may be replacing the record; retry on the next poll.
+              }
+            }
             const routes = routeStat ? parseJsonLines(await fs.readFile(routePath, "utf8").catch(() => "")) : [];
             const lastRoute = routes[routes.length - 1] as any;
             const output = stdoutStat ? await readTail(stdoutPath, 32 * 1024) : undefined;

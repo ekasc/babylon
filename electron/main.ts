@@ -571,11 +571,16 @@ function registerIpc(): void {
         throw new Error("invalid thread action");
       }
       if (opts.action !== "stop" && !opts.message?.trim()) throw new Error("message is required");
-      const command =
-        opts.action === "stop"
-          ? `/threads stop ${opts.threadId}`
-          : `/threads ${opts.action} ${opts.threadId} ${opts.message!.trim()}`;
-      await getHost().session.prompt(command);
+      return getHost().controlThread(opts.action, opts.threadId, opts.message?.trim());
+    }
+  );
+  handle(
+    "pideck:subagents:control",
+    async (_e, opts: { action: "steer" | "follow-up" | "stop"; runId: string; message?: string }) => {
+      if (!/^[a-f0-9-]{20,}$/i.test(opts.runId)) throw new Error("invalid subagent run id");
+      if (opts.action !== "steer" && opts.action !== "follow-up" && opts.action !== "stop") throw new Error("invalid subagent action");
+      if (opts.action !== "stop" && !opts.message?.trim()) throw new Error("message is required");
+      return getHost().controlSubagent(opts.action, opts.runId, opts.message?.trim());
     }
   );
 

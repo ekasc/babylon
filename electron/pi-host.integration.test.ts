@@ -39,6 +39,7 @@ describe("PiHost resource and command integration", () => {
       ])
     );
 
+    expect(host.session.getToolDefinition("subagent")).toBeDefined();
     await host.prompt("/hello");
     expect(events).toEqual(expect.arrayContaining([expect.objectContaining({ type: "extension_ui_request", method: "notify", message: "HELLO_FROM_EXTENSION" })]));
     await host.dispose();
