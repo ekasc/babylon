@@ -1,0 +1,26 @@
+# Dependencies and build output
+node_modules/
+dist/
+dist-electron/
+
+# Local Pi/agent state and research material
+.pi/
+.pi-docs/
+.superpowers/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Logs, coverage, and editor/OS files
+*.log
+coverage/
+.DS_Store
+.vscode/
+.idea/
+
+# Local screenshots
+ui-shot-*.png
