@@ -1,11 +1,14 @@
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
+import { detectThreadEvents, type ThreadEvent } from "./threads";
 
 export interface ThreadActivity {
   threadId: string;
   name: string | null;
   goal: string;
   status: string;
+  cwd?: string;
+  parentSessionFile?: string | null;
   mode: string;
   profile: string;
   model: string;
@@ -21,6 +24,7 @@ export interface ThreadActivity {
   testsRun: string[];
   blocker: string | null;
   failureReason: string | null;
+  milestones?: Array<{ at: string; name: string; note?: string }>;
   recentMessages?: Array<{ at: string; role: string; text: string }>;
   revision?: number;
 }
@@ -58,7 +62,15 @@ interface Options {
   cwd: string;
   onUpdate: (update: ActivityUpdate) => void;
   pollIntervalMs?: number;
+  /** Resolves a parent session file for a thread/subagent parent session id. */
+  resolveParentSessionFile?: (sessionId: string) => Promise<string | null>;
+  /** Emitted when a thread crosses a milestone, terminal state, or blockage. */
+  onThreadEvent?: (thread: ThreadActivity, event: ThreadEvent) => void | Promise<void>;
 }
+
+/** Min gap between milestone notifications for the same thread (terminal and
+ *  blocked events always pass). Keeps the parent conversation uncluttered. */
+const MILESTONE_NOTIFY_GAP_MS = 45_000;
 
 export class ActivityBridge {
   readonly cwd: string;
@@ -66,6 +78,8 @@ export class ActivityBridge {
   private signature = "";
   private last: ActivityUpdate = { threads: [], subagents: [] };
   private transientSubagents = new Map<string, SubagentActivity>();
+  private prevThreads = new Map<string, { status?: string; blocker?: string | null; milestones?: any[] }>();
+  private lastThreadNotify = new Map<string, number>();
 
   constructor(private readonly options: Options) {
     this.cwd = options.cwd;
@@ -132,8 +146,56 @@ export class ActivityBridge {
     const persistedIds = new Set(subagentScan.items.map((item) => item.runId));
     const transient = [...this.transientSubagents.values()].filter((item) => !persistedIds.has(item.runId));
     this.last = { threads: threadScan.items, subagents: [...transient, ...subagentScan.items] };
+    this.emitThreadEvents(threadScan.items);
     if (notify && (signature !== this.signature || transient.length > 0)) this.options.onUpdate(this.last);
     this.signature = signature;
+  }
+
+  /** Milestone watching: diff each thread's state since the last poll and emit
+   *  events (milestone / terminal / blocked) for the orchestrator loop. */
+  private emitThreadEvents(threads: ThreadActivity[]): void {
+    if (!this.options.onThreadEvent) {
+      for (const thread of threads) {
+        this.prevThreads.set(thread.threadId, {
+          status: thread.status,
+          blocker: thread.blocker ?? null,
+          milestones: thread.milestones ?? [],
+        });
+      }
+      this.pruneThreads(threads);
+      return;
+    }
+    for (const thread of threads) {
+      const prev = this.prevThreads.get(thread.threadId);
+      const events = detectThreadEvents(prev, {
+        threadId: thread.threadId,
+        name: thread.name ?? null,
+        status: thread.status,
+        blocker: thread.blocker ?? null,
+        milestones: thread.milestones ?? [],
+      });
+      this.prevThreads.set(thread.threadId, {
+        status: thread.status,
+        blocker: thread.blocker ?? null,
+        milestones: thread.milestones ?? [],
+      });
+      const now = Date.now();
+      const lastNotify = this.lastThreadNotify.get(thread.threadId) ?? 0;
+      for (const event of events) {
+        const isPriority = event.type !== "milestone";
+        if (event.type === "milestone" && now - lastNotify < MILESTONE_NOTIFY_GAP_MS) continue;
+        this.lastThreadNotify.set(thread.threadId, now);
+        void this.options.onThreadEvent(thread, event);
+        if (!isPriority) break; // one milestone notification per poll
+      }
+    }
+    this.pruneThreads(threads);
+  }
+
+  private pruneThreads(threads: ThreadActivity[]): void {
+    const seen = new Set(threads.map((thread) => thread.threadId));
+    for (const id of [...this.prevThreads.keys()]) if (!seen.has(id)) this.prevThreads.delete(id);
+    for (const id of [...this.lastThreadNotify.keys()]) if (!seen.has(id)) this.lastThreadNotify.delete(id);
   }
 
   private publishTransient(): void {
@@ -155,15 +217,23 @@ export class ActivityBridge {
             try {
               const stat = await fs.stat(path);
               parts.push(`${entry.name}:${stat.ino}:${stat.size}:${stat.mtimeMs}`);
-              const state = JSON.parse(await fs.readFile(path, "utf8")) as ThreadActivity;
-              return state?.threadId ? state : null;
+              const state = JSON.parse(await fs.readFile(path, "utf8")) as Partial<ThreadActivity> & { parentSessionId?: string };
+              if (!state?.threadId) return null;
+              const item: ThreadActivity = {
+                ...(state as ThreadActivity),
+                cwd: this.cwd,
+                parentSessionFile: state.parentSessionId
+                  ? ((await this.options.resolveParentSessionFile?.(state.parentSessionId)) ?? null)
+                  : null,
+              };
+              return item;
             } catch {
               return null;
             }
           })
       )
     ).filter((item): item is ThreadActivity => item !== null);
-    items.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+    items.sort((a, b) => Date.parse(b.updatedAt ?? "") - Date.parse(a.updatedAt ?? ""));
     return { items, signature: parts.sort().join(";") };
   }
 
