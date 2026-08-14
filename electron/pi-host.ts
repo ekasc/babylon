@@ -87,6 +87,11 @@ export class PiHost {
   private _cwd: string;
   private readonly snapshots: SnapshotStore;
   private readonly rollbacks: RollbackStore;
+  /** The session file the host currently owns (null when none is open). */
+  get activeSessionFile(): string | null {
+    return this.runtime?.session?.sessionFile ?? null;
+  }
+
   private managedSubagents!: ManagedSubagents;
   private threads!: ThreadManager;
   private readonly rollbackPlans = new Map<string, {
@@ -148,16 +153,6 @@ export class PiHost {
     const trustStore = new ProjectTrustStore(agentDir);
     const globalSettings = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
     const trustByCwd = new Map<string, boolean>();
-    // Per-cwd service cache. Extensions, skills, prompts, settings and tools are
-    // cwd-bound, so services must NOT leak across projects — but they are fully
-    // shareable across sessions in the SAME cwd. pi separates service creation
-    // from session creation for exactly this reason; rebuilding services on
-    // every switch reloaded all extensions/skills/templates and made session
-    // opens cost ~1s. Keyed by cwd; rebuilt if the trust decision changes.
-    const serviceByCwd = new Map<
-      string,
-      { projectTrusted: boolean; settingsManager: SettingsManager; services: Awaited<ReturnType<typeof createAgentSessionServices>> }
-    >();
 
     const createRuntime: CreateAgentSessionRuntimeFactory = async (input) => {
       const runtimeCwd = resolve(input.cwd);
@@ -187,19 +182,13 @@ export class PiHost {
       // cwd-bound. Reusing them after session replacement makes project A leak
       // into project B and leaves extension contexts stale. Only ModelRuntime is
       // process-wide and safe to share.
-      let cached = serviceByCwd.get(runtimeCwd);
-      if (!cached || cached.projectTrusted !== projectTrusted) {
-        const settingsManager = SettingsManager.create(runtimeCwd, agentDir, { projectTrusted });
-        const services = await createAgentSessionServices({
-          cwd: runtimeCwd,
-          agentDir,
-          settingsManager,
-          modelRuntime: this.modelRuntime,
-        });
-        cached = { projectTrusted, settingsManager, services };
-        serviceByCwd.set(runtimeCwd, cached);
-      }
-      const { settingsManager, services } = cached;
+      const settingsManager = SettingsManager.create(runtimeCwd, agentDir, { projectTrusted });
+      const services = await createAgentSessionServices({
+        cwd: runtimeCwd,
+        agentDir,
+        settingsManager,
+        modelRuntime: this.modelRuntime,
+      });
       const result = await createAgentSessionFromServices({
         services,
         sessionManager: input.sessionManager,
@@ -358,7 +347,58 @@ export class PiHost {
       if (event.type === "message_end" && event.message?.role === "assistant") {
         void this.relayPromotedSubagentReply(session, messageText(event.message));
       }
+      if (event.type === "message_end" && event.message?.role === "user" && !session.sessionManager.getSessionName()) {
+        void this.suggestSessionName(session);
+      }
     });
+  }
+
+  // One-shot, non-blocking session naming: after the first user message in a
+  // session without a display name, ask a cheap model for a short title and
+  // persist it via a session_info entry, so the sidebar shows a real name
+  // instead of the raw prompt.
+  private sessionNaming = new Set<string>();
+  private async suggestSessionName(session: AgentSession): Promise<void> {
+    const sessionId = session.sessionId;
+    if (this.sessionNaming.has(sessionId)) return;
+    this.sessionNaming.add(sessionId);
+    try {
+      const entries = session.sessionManager.getEntries();
+      const userTexts = entries
+        .filter((entry: any) => entry.type === "message" && entry.message?.role === "user")
+        .map((entry: any) => messageText(entry.message.content));
+      const sample = userTexts.slice(-4).join("\n").slice(0, 1500);
+      if (!sample.trim()) return;
+      const title = await this.generateSessionTitle(sample);
+      if (!title || session.sessionManager.getSessionName()) return;
+      session.sessionManager.appendSessionInfo(title);
+      this.opts.onEvent({ type: "pideck_sessions_changed" });
+    } catch {
+      // Naming is best-effort; the prompt remains the fallback title.
+    } finally {
+      this.sessionNaming.delete(sessionId);
+    }
+  }
+
+  private async generateSessionTitle(sample: string): Promise<string | null> {
+    const model =
+      this.modelRuntime.getModel("opencode-go", "deepseek-v4-flash") ??
+      this.runtime.session.model;
+    if (!model) return null;
+    const prompt =
+      "You are naming a coding-agent conversation. Reply with ONLY a short title (3-6 words, no quotes, no period) that captures the intent of this conversation:\n\n" +
+      sample;
+    const response = await this.modelRuntime.completeSimple(
+      model,
+      { messages: [{ role: "user", content: prompt }] } as any,
+      { reasoning: "low", maxTokens: 200 }
+    );
+    const text = (response?.content ?? [])
+      .map((block: any) => (block?.type === "text" ? block.text ?? "" : ""))
+      .join("")
+      .trim();
+    if (!text) return null;
+    return text.replace(/^["']+|["']+$/g, "").slice(0, 60);
   }
 
   private async relayPromotedSubagentReply(session: AgentSession, text: string): Promise<void> {

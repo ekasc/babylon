@@ -12,7 +12,7 @@ import Hero from "./components/Hero";
 import WorkspacePane from "./components/WorkspacePane";
 import { RollbackConfirm, RollbackDock } from "./components/Rollback";
 import { WorktreeBanner, WorktreeModal, type WorktreeInfo } from "./components/Worktree";
-import { FlaskIcon, FolderIcon, MoreIcon, PiMark } from "./components/icons";
+import { FlaskIcon, FolderIcon, LayersIcon, MoreIcon, PiMark } from "./components/icons";
 
 const BranchPanel = lazy(() => import("./components/BranchPanel"));
 const WorkflowsPanel = lazy(() => import("./components/WorkflowsPanel"));
@@ -24,10 +24,12 @@ function shortPath(cwd?: string): string {
   return parts.slice(-2).join("/") || cwd;
 }
 
-function StatusDot({ status }: { status: string }) {
+function StatusDot({ status, working }: { status: string; working: boolean }) {
   const cls =
     status === "ready"
-      ? "bg-ok"
+      ? working
+        ? "bg-ok status-dot-working"
+        : "bg-ok"
       : status === "starting"
         ? "animate-pulse bg-accent"
         : status === "error"
@@ -548,7 +550,28 @@ export default function App() {
     }
   }, [growRenderCap, scheduleTranscript]);
 
+  // Codex-style: with a project open, "new session" starts a chat in it — no
+  // folder dialog. Only prompt for a folder when no project is open yet.
   const newSession = useCallback(async () => {
+    const activeCwd = status.cwd;
+    if (activeCwd) {
+      await openSession(undefined, activeCwd);
+      return;
+    }
+    const cwd = await bridge.pickFolder();
+    if (cwd) await openSession(undefined, cwd);
+  }, [openSession, status.cwd]);
+
+  // New chat inside a specific listed project.
+  const newSessionIn = useCallback(
+    async (cwd: string) => {
+      await openSession(undefined, cwd);
+    },
+    [openSession]
+  );
+
+  // Switch to a different (or new) project folder.
+  const openFolder = useCallback(async () => {
     const cwd = await bridge.pickFolder();
     if (cwd) await openSession(undefined, cwd);
   }, [openSession]);
@@ -770,8 +793,6 @@ export default function App() {
         groups={groups}
         activePath={activeSessionPath ?? status.sessionPath}
         activeCwd={status.cwd}
-        activityCount={liveActivityCount}
-        activityOpen={showWorkflowsPanel}
         treeOpen={showBranchPanel}
         canOpenTree={ready && hasSession}
         onPrefetch={prefetchSession}
@@ -780,10 +801,17 @@ export default function App() {
           void openSession(path, cwd, name);
         }}
         onNew={newSession}
-        onOpenActivity={() => {
-          setShowWorkflowsPanel((open) => !open);
-          setShowBranchPanel(false);
+        onNewSessionIn={newSessionIn}
+        onDeleteSession={async (path, name) => {
+          if (!window.confirm(`Delete chat “${name}”? This cannot be undone.`)) return;
+          try {
+            await bridge.deleteSession(path);
+            toast("info", "Chat deleted");
+          } catch (error: any) {
+            toast("error", error?.message ?? "could not delete chat");
+          }
         }}
+        onOpenFolder={openFolder}
         onOpenTree={() => {
           if (!ready || !hasSession) return;
           setShowBranchPanel((open) => !open);
@@ -803,7 +831,7 @@ export default function App() {
                 loadingEarlier={loadingEarlier}
                 onNeedEarlier={() => void loadEarlier()}
                 streaming={state.streaming}
-                chromeTop={bannerVisible ? 104 : 66}
+                chromeTop={bannerVisible ? 110 : 72}
                 chromeBottom={history.activeRollback ? 226 : 156}
                 historyTurns={history.turns}
                 onRollback={(entryId) => void prepareRollback(entryId)}
@@ -815,7 +843,7 @@ export default function App() {
 
           <header className="thread-header titlebar absolute inset-x-0 top-0 z-10 flex h-16 items-center gap-3 px-5">
             {promotedParent ? <button onClick={() => { const parent = promotedParent; setPromotedParent(null); void openSession(parent.path, parent.cwd); }} title="Back to parent session" className="thread-action px-2 text-[13px]">← Parent</button> : null}
-            <StatusDot status={liveReady ? "ready" : status.status} />
+            <StatusDot status={liveReady ? "ready" : status.status} working={state.streaming} />
             <div className="min-w-0 flex items-baseline gap-2.5">
               <div className="truncate text-[15px] font-semibold tracking-[-0.01em]">
                 {headerName ?? agentState?.sessionName ?? (hasSession ? "Untitled session" : "Babylon")}
@@ -825,7 +853,21 @@ export default function App() {
               </div>
             </div>
             <div className="ml-auto flex shrink-0 items-center gap-1.5">
-              {hasSession && worktreeInfo?.isWorktree ? <span className="execution-context"><FlaskIcon size={13} /> Worktree</span> : hasSession ? <span className="execution-context">Local</span> : null}
+              {hasSession && worktreeInfo?.isWorktree ? <span className="execution-context"><FlaskIcon size={13} /> Worktree</span> : null}
+              {hasSession ? (
+                <button
+                  onClick={() => {
+                    setShowWorkflowsPanel((open) => !open);
+                    setShowBranchPanel(false);
+                  }}
+                  title="Activity — workflows, threads, subagents"
+                  aria-pressed={showWorkflowsPanel}
+                  className={`thread-action relative ${showWorkflowsPanel ? "is-active" : ""}`}
+                >
+                  <LayersIcon size={16} />
+                  {liveActivityCount > 0 ? <span className="sidebar-count absolute -right-1 -top-1">{liveActivityCount}</span> : null}
+                </button>
+              ) : null}
               {hasSession ? (
                 <button onClick={() => setShowWorktreeModal(true)} title="Session and worktree actions" className="thread-action">
                   <MoreIcon size={16} />

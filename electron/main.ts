@@ -85,11 +85,16 @@ function updateWorkflowsBridge(cwd: string): void {
 // ---------------------------------------------------------------------------
 
 function createWindow(): void {
+  // Headless mode (PIDECK_HEADLESS=1) runs the full renderer for automated
+  // verification without ever showing a window, so dev/testing never disturbs
+  // the user's screen.
+  const headless = process.env.PIDECK_HEADLESS === "1";
   win = new BrowserWindow({
     width: 1280,
     height: 840,
     minWidth: 940,
     minHeight: 620,
+    show: !headless,
     title: "Babylon",
     titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
     trafficLightPosition: { x: 16, y: 16 },
@@ -351,6 +356,15 @@ function registerIpc(): void {
   handle("pideck:get-tool-output", async (_e, toolCallId: string) => {
     if (typeof toolCallId !== "string" || !/^[a-zA-Z0-9|_\-:.]{1,200}$/.test(toolCallId)) throw new Error("invalid tool call id");
     return getHost().getToolOutput(toolCallId);
+  });
+
+  handle("pideck:delete-session", async (_e, path: string) => {
+    const target = validateSessionPath(path);
+    if (getHost().activeSessionFile === target) {
+      throw new Error("Close this chat before deleting it");
+    }
+    await fsp.rm(target, { force: true });
+    sessionIndex.touch();
   });
 
   handle("pideck:pick-folder", async () => {

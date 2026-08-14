@@ -8,6 +8,7 @@ const api = {
     ipcRenderer.invoke("pideck:get-session-window", path, endOffset, countBytes),
   getToolOutput: (toolCallId: string): Promise<{ content: string; truncated: boolean }> =>
     ipcRenderer.invoke("pideck:get-tool-output", toolCallId),
+  deleteSession: (path: string): Promise<void> => ipcRenderer.invoke("pideck:delete-session", path),
   pickFolder: (): Promise<string | null> => ipcRenderer.invoke("pideck:pick-folder"),
   openSession: (opts: { path?: string; cwd: string; requestId?: number }): Promise<void> =>
     ipcRenderer.invoke("pideck:open-session", opts),

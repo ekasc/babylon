@@ -1,6 +1,6 @@
 import { memo, useMemo, useRef, useState } from "react";
 import type { ProjectGroup, SessionMeta } from "../bridge";
-import { ChevronIcon, FlaskIcon, LayersIcon, PiMark, SearchIcon } from "./icons";
+import { ChevronIcon, FlaskIcon, PiMark, SearchIcon } from "./icons";
 
 function timeAgo(ms: number): string {
   const seconds = Math.max(0, (Date.now() - ms) / 1000);
@@ -19,14 +19,14 @@ interface Props {
   groups: ProjectGroup[];
   activePath?: string;
   activeCwd?: string;
-  activityCount: number;
-  activityOpen: boolean;
   treeOpen: boolean;
   canOpenTree: boolean;
   onOpen(path: string | undefined, cwd: string, name?: string): void;
   onPrefetch?(path: string): void;
   onNew(): void;
-  onOpenActivity(): void;
+  onNewSessionIn?(cwd: string): void;
+  onDeleteSession?(path: string, name: string): void;
+  onOpenFolder(): void;
   onOpenTree(): void;
   onSearch(): void;
 }
@@ -35,15 +35,16 @@ export default function Sidebar({
   groups,
   activePath,
   activeCwd,
-  activityCount,
-  activityOpen,
   treeOpen,
   canOpenTree,
   onOpen,
   onNew,
-  onOpenActivity,
+  onNewSessionIn,
+  onDeleteSession,
+  onOpenFolder,
   onOpenTree,
   onSearch,
+  onPrefetch,
 }: Props) {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const orderedGroups = useMemo(
@@ -76,11 +77,6 @@ export default function Sidebar({
           <span className="sidebar-action-icon text-[20px] leading-none">＋</span>
           <span>New session</span>
         </button>
-        <button onClick={onOpenActivity} className={`sidebar-action ${activityOpen ? "is-active" : ""}`}>
-          <LayersIcon size={16} className="sidebar-action-icon" />
-          <span>Activity</span>
-          {activityCount > 0 ? <span className="sidebar-count">{activityCount}</span> : null}
-        </button>
         <button onClick={onSearch} className="sidebar-action">
           <SearchIcon size={16} className="sidebar-action-icon" />
           <span>Search</span>
@@ -105,15 +101,27 @@ export default function Sidebar({
             const isCollapsed = collapsed.has(group.cwd);
             return (
               <section key={group.cwd} className="mb-3">
-                <button
-                  onClick={() => toggleProject(group.cwd)}
-                  className="sidebar-project"
-                  title={group.cwd}
-                  aria-expanded={!isCollapsed}
-                >
-                  <ChevronIcon size={12} className={`sidebar-disclosure shrink-0 ${isCollapsed ? "" : "rotate-90"}`} />
-                  <span className="truncate">{projectName(group.cwd)}</span>
-                </button>
+                <div className="group/project flex items-center gap-0.5">
+                  <button
+                    onClick={() => toggleProject(group.cwd)}
+                    className="sidebar-project flex-1"
+                    title={group.cwd}
+                    aria-expanded={!isCollapsed}
+                  >
+                    <ChevronIcon size={12} className={`sidebar-disclosure shrink-0 ${isCollapsed ? "" : "rotate-90"}`} />
+                    <span className="truncate">{projectName(group.cwd)}</span>
+                  </button>
+                  <button
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onNewSessionIn?.(group.cwd);
+                    }}
+                    title={`New chat in ${projectName(group.cwd)}`}
+                    className="sidebar-project-add shrink-0"
+                  >
+                    ＋
+                  </button>
+                </div>
                 {!isCollapsed ? (
                   <div className="sidebar-session-group ml-3 mt-0.5 border-l border-line/70 pl-1.5">
                     {group.sessions.length ? group.sessions.map((session) => (
@@ -123,6 +131,8 @@ export default function Sidebar({
                         cwd={group.cwd}
                         active={activePath === session.path}
                         onOpen={onOpen}
+                        onPrefetch={onPrefetch}
+                        onDelete={onDeleteSession}
                       />
                     )) : <p className="px-3 py-2 text-[13px] text-dim">No sessions</p>}
                   </div>
@@ -131,6 +141,10 @@ export default function Sidebar({
             );
           })
         )}
+        <button onClick={onOpenFolder} className="sidebar-action mt-1">
+          <span className="sidebar-action-icon text-[14px] leading-none">📁</span>
+          <span>Open folder…</span>
+        </button>
       </div>
 
       <div className="sidebar-footer px-3 py-3 text-[13px] text-dim">
@@ -146,12 +160,14 @@ const SessionRow = memo(function SessionRow({
   active,
   onOpen,
   onPrefetch,
+  onDelete,
 }: {
   session: SessionMeta;
   cwd: string;
   active: boolean;
   onOpen(path: string | undefined, cwd: string, name?: string): void;
   onPrefetch?(path: string): void;
+  onDelete?(path: string, name: string): void;
 }) {
   const title = session.name ?? session.firstUserText ?? session.id.slice(0, 8);
   // Hover intent: after 150ms of dwelling, warm the transcript into the cache
@@ -165,6 +181,7 @@ const SessionRow = memo(function SessionRow({
   };
   return (
     <button
+      className={`sidebar-session group/session ${active ? "is-active" : ""}`}
       onClick={() => onOpen(session.path, cwd, title)}
       onMouseEnter={() => {
         if (!onPrefetch || active) return;
@@ -175,7 +192,6 @@ const SessionRow = memo(function SessionRow({
       onFocus={() => {
         if (onPrefetch && !active) onPrefetch(session.path);
       }}
-      className={`sidebar-session ${active ? "is-active" : ""}`}
       title={`${title}\n${session.path}`}
     >
       <span className="min-w-0 flex-1 truncate">
@@ -183,6 +199,28 @@ const SessionRow = memo(function SessionRow({
         {title}
       </span>
       <span className="shrink-0 text-[12px] tabular-nums text-dim">{timeAgo(session.mtime)}</span>
+      {onDelete ? (
+        <span
+          role="button"
+          tabIndex={0}
+          aria-label={`Delete chat ${title}`}
+          title="Delete chat"
+          className="sidebar-session-delete"
+          onClick={(event) => {
+            event.stopPropagation();
+            onDelete(session.path, title);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              event.stopPropagation();
+              onDelete(session.path, title);
+            }
+          }}
+        >
+          ✕
+        </span>
+      ) : null}
     </button>
   );
 });
