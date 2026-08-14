@@ -28,6 +28,10 @@ export interface ManagedSubagentRecord {
   sessionModel: string;
   profile: "read-only" | "verify" | "write";
   thinking: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+  /** Persistent agents keep a goal across turns (thread-equivalent mode). */
+  persistent?: boolean;
+  goal?: string | null;
+  milestones?: Array<{ at: string; name: string; note?: string }>;
   sessionFile: string | null;
   parentSessionId: string | null;
   parentSessionFile: string | null;
@@ -56,6 +60,9 @@ interface SubagentParams {
   thinking?: ManagedSubagentRecord["thinking"];
   timeoutMs?: number;
   name?: string;
+  /** Persistent agents keep pursuing the goal across follow-up turns. */
+  persistent?: boolean;
+  goal?: string;
 }
 
 const PROFILE_TOOLS: Record<ManagedSubagentRecord["profile"], string[]> = {
@@ -101,7 +108,9 @@ export class ManagedSubagents {
       onUpdate?: () => void;
       onParentMessage?: (record: ManagedSubagentRecord, action: SubagentParentEvent, message?: string) => void | Promise<void>;
     }
-  ) {}
+  ) {
+    void this.recoverPersistent();
+  }
 
   tool(): ToolDefinition<any, any> {
     return {
@@ -112,6 +121,7 @@ export class ManagedSubagents {
       promptGuidelines: [
         "Use subagent for narrow independent work and retain the returned runId for steering or follow-up messages.",
         "Use read-only for inspection, verify for tests, and write only for a bounded implementation task.",
+        "For long-running, multi-turn work set persistent: true and give a goal; the agent keeps pursuing it across follow-ups and reports milestones.",
       ],
       parameters: {
         type: "object",
@@ -124,6 +134,8 @@ export class ManagedSubagents {
           thinking: { type: "string", enum: ["off", "minimal", "low", "medium", "high", "xhigh"] },
           timeoutMs: { type: "integer", minimum: 1000, maximum: 3_600_000 },
           name: { type: "string" },
+          persistent: { type: "boolean", description: "Keep pursuing a goal across follow-up turns (multi-turn agent, like a thread)." },
+          goal: { type: "string", description: "Standing goal for persistent agents; defaults to the task." },
         },
       } as any,
       execute: async (_toolCallId, raw, signal, onUpdate, ctx) => {
@@ -282,6 +294,8 @@ export class ManagedSubagents {
     if (!model) throw new Error(`Subagent model not found: ${requestedModel}`);
     const profile = params.profile ?? "read-only";
     const thinking = params.thinking ?? "high";
+    const persistent = params.persistent === true;
+    const goal = persistent ? (params.goal?.trim() || task) : null;
     const runId = randomUUID();
     const now = new Date().toISOString();
     const record: ManagedSubagentRecord = {
@@ -295,6 +309,9 @@ export class ManagedSubagents {
       sessionModel: exactModel(model),
       profile,
       thinking,
+      persistent,
+      goal,
+      milestones: [],
       sessionFile: null,
       parentSessionId: ctx.sessionManager.getSessionId(),
       parentSessionFile: ctx.sessionManager.getSessionFile() ?? null,
@@ -320,6 +337,79 @@ export class ManagedSubagents {
     const runtime = await this.createRuntime(record);
     this.runtimes.set(record.runId, runtime);
     return runtime;
+  }
+
+  /** Custom tool available inside persistent subagent sessions: the agent
+   *  reports a milestone checkpoint toward its goal, mirroring threads. */
+  milestoneTool(): ToolDefinition<any, any> {
+    return {
+      name: "report_milestone",
+      label: "Report Milestone",
+      description: "Report a milestone checkpoint toward your standing goal. Call this when you complete a meaningful, verifiable unit of work (a plan, a compiling change, passing tests). The parent is notified at checkpoints.",
+      promptSnippet: "Report a milestone toward the goal",
+      promptGuidelines: [
+        "Call report_milestone at each meaningful, verifiable checkpoint toward the goal.",
+        "Keep notes short and evidence-based (files, tests, commands).",
+      ],
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["name"],
+        properties: {
+          name: { type: "string", minLength: 1, maxLength: 80, description: "Short milestone name." },
+          note: { type: "string", maxLength: 2000, description: "Optional evidence note." },
+        },
+      } as any,
+      execute: async (_toolCallId: string, raw: any, _signal, _onUpdate, ctx: any) => {
+        const sessionId = ctx.sessionManager?.getSessionId?.();
+        const runtime = sessionId
+          ? [...this.runtimes.values()].find((r) => r.session.sessionId === sessionId)
+          : undefined;
+        if (!runtime?.record.persistent) {
+          return {
+            content: [{ type: "text", text: "report_milestone is only available inside a persistent agent session." }],
+            details: { error: true },
+            isError: true,
+          };
+        }
+        const record = runtime.record;
+        (record.milestones ??= []).push({
+          at: new Date().toISOString(),
+          name: String(raw?.name ?? "").slice(0, 80),
+          note: raw?.note ? String(raw.note).slice(0, 2000) : undefined,
+        });
+        await this.save(record);
+        return {
+          content: [{ type: "text", text: `Milestone reported: ${raw?.name}.` }],
+          details: { milestone: raw?.name },
+        };
+      },
+    };
+  }
+
+  /** After a process restart, no subagent runtime survives. Persistent agents
+   *  keep their session file, so mark stale "running"/"starting" records as
+   *  interrupted — the parent can resume them from Activity (follow-ups
+   *  re-create the runtime from the persisted session). */
+  async recoverPersistent(): Promise<void> {
+    const roots = await fs.readdir(join(this.options.agentDir, "state", "subagents", "runs")).catch(() => []);
+    await Promise.all(
+      roots.map(async (runId) => {
+        if (!/^[a-f0-9-]{20,}$/i.test(runId)) return;
+        const recordPath = join(this.options.agentDir, "state", "subagents", "runs", runId, "run.json");
+        try {
+          const parsed = JSON.parse(await fs.readFile(recordPath, "utf8")) as ManagedSubagentRecord;
+          if (parsed?.persistent && (parsed.status === "running" || parsed.status === "starting")) {
+            parsed.status = "interrupted";
+            parsed.latestActivity = "Interrupted by restart — continue from Activity";
+            parsed.updatedAt = new Date().toISOString();
+            await this.save(parsed);
+          }
+        } catch {
+          /* malformed or gone */
+        }
+      })
+    );
   }
 
   private async createRuntime(record: ManagedSubagentRecord): Promise<ManagedRuntime> {
@@ -351,6 +441,9 @@ export class ManagedSubagents {
         noPromptTemplates: true,
         appendSystemPrompt: [
           `You are a supervised subagent, run ${record.runId}. Your parent session is ${record.parentSessionId ?? "unknown"}.`,
+          ...(record.persistent
+            ? [`You are a persistent agent with a standing goal: ${record.goal ?? record.task}. Keep pursuing this goal across every turn; parent follow-ups continue the mission, not new side-tasks.`]
+            : []),
           "Messages prefixed [Parent Steering] or [Parent Follow-Up] were sent by your parent through Babylon Activity. Never claim that you are the main agent.",
           "You cannot directly inspect or message the parent session. Reply in this conversation; Babylon records the exchange for the parent.",
           "Do not spawn workflows, threads, or subagents.",
@@ -369,6 +462,7 @@ export class ManagedSubagents {
       model,
       thinkingLevel: record.thinking as any,
       tools: PROFILE_TOOLS[record.profile],
+      customTools: record.persistent ? [this.milestoneTool()] : undefined,
       excludeTools: ["subagent", "workflow", "spawn_thread", "send_input"] as any,
     });
     const runtime: ManagedRuntime = { record, session: created.session, running: null, unsubscribe: null, timeout: null };

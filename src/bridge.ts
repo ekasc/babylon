@@ -87,6 +87,9 @@ export interface SubagentActivity {
   parentSessionId?: string | null;
   parentSessionFile?: string | null;
   latestActivity?: string | null;
+  persistent?: boolean;
+  goal?: string | null;
+  milestones?: Array<{ at: string; name: string; note?: string }>;
   recentMessages?: Array<{ at: string; role: string; text: string }>;
   revision?: number;
 }
@@ -264,6 +267,7 @@ export interface Bridge {
   getSessionMessages(path: string): Promise<SessionWindow>;
   getSessionWindow(path: string, endOffset: number, countBytes?: number): Promise<SessionWindow>;
   getToolOutput(toolCallId: string): Promise<{ content: string; truncated: boolean }>;
+  deleteSession(path: string): Promise<void>;
   pickFolder(): Promise<string | null>;
   openSession(opts: { path?: string; cwd: string; requestId?: number }): Promise<void>;
 
@@ -354,6 +358,7 @@ export const bridge: Bridge = window.pideck ?? {
   getSessionMessages: () => Promise.resolve({ messages: [], startOffset: 0 }),
   getSessionWindow: () => Promise.resolve({ messages: [], startOffset: 0 }),
   getToolOutput: () => Promise.reject(new Error("bridge unavailable")),
+  deleteSession: () => Promise.reject(new Error("bridge unavailable")),
   pickFolder: () => Promise.resolve(null),
   openSession: () => Promise.resolve(),
 

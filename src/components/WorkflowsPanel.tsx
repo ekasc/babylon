@@ -31,7 +31,11 @@ interface Props {
   toast(type: "info" | "warning" | "error", text: string): void;
 }
 
-type ActivityTab = "workflows" | "threads" | "subagents";
+type ActivityTab = "workflows" | "agents";
+
+type AgentItem =
+  | { kind: "thread"; thread: ThreadActivity }
+  | { kind: "subagent"; run: SubagentActivity };
 
 const RUN_STATUS: Record<WorkflowRunStatus, { label: string; dot: string; text: string }> = {
   pending: { label: "Pending", dot: "bg-dim", text: "text-dim" },
@@ -99,8 +103,7 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props)
   const [runs, setRuns] = useState<WorkflowRunSummary[]>([]);
   const [detail, setDetail] = useState<WorkflowRunDetail | null>(null);
   const [agent, setAgent] = useState<WorkflowAgentDetail | null>(null);
-  const [selectedThread, setSelectedThread] = useState<ThreadActivity | null>(null);
-  const [selectedSubagent, setSelectedSubagent] = useState<SubagentActivity | null>(null);
+  const [selectedAgent, setSelectedAgent] = useState<AgentItem | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -125,8 +128,15 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props)
     void bridge.activityList().then(setActivity).catch(() => undefined);
     return bridge.onActivityUpdate((next) => {
       setActivity(next);
-      setSelectedThread((current) => current ? next.threads.find((item) => item.threadId === current.threadId) ?? null : null);
-      setSelectedSubagent((current) => current ? next.subagents.find((item) => item.runId === current.runId) ?? null : null);
+      setSelectedAgent((current) => {
+        if (!current) return null;
+        if (current.kind === "thread") {
+          const thread = next.threads.find((item) => item.threadId === current.thread.threadId);
+          return thread ? { kind: "thread", thread } : null;
+        }
+        const run = next.subagents.find((item) => item.runId === current.run.runId);
+        return run ? { kind: "subagent", run } : null;
+      });
     });
   }, [load]);
 
@@ -245,20 +255,19 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props)
   const back = useCallback(() => {
     if (agent) setAgent(null);
     else if (detail) setDetail(null);
-    else if (selectedThread) setSelectedThread(null);
-    else if (selectedSubagent) setSelectedSubagent(null);
+    else if (selectedAgent) setSelectedAgent(null);
     else onClose();
-  }, [agent, detail, selectedThread, selectedSubagent, onClose]);
+  }, [agent, detail, selectedAgent, onClose]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
-      if (agent || detail || selectedThread || selectedSubagent) back();
+      if (agent || detail || selectedAgent) back();
       else onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [agent, detail, selectedThread, selectedSubagent, back, onClose]);
+  }, [agent, detail, selectedAgent, back, onClose]);
 
   const live = useMemo(
     () =>
@@ -271,8 +280,8 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props)
   return (
     <section aria-label="Activity workspace" className="context-pane flex h-full min-w-0 flex-col">
       {/* Header */}
-      <div className="context-header flex h-14 shrink-0 items-center gap-2 px-4">
-        {(agent || detail || selectedThread || selectedSubagent) && (
+      <div className="context-header flex h-16 shrink-0 items-center gap-2 px-4">
+        {(agent || detail || selectedAgent) && (
           <button
             onClick={back}
             title="Back"
@@ -285,7 +294,7 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props)
         <span className="text-[14px] font-semibold tracking-tight">Activity</span>
         {live ? <span className="h-2 w-2 rounded-full bg-accent" title="Work is active" /> : null}
         <span className="truncate text-[14px] tracking-[0.02em] text-dim">
-          {tab === "threads" ? selectedThread ? "thread transcript" : "persistent threads" : tab === "subagents" ? selectedSubagent ? "execution record" : "isolated runs" : agent ? "agent transcript" : detail ? "run detail" : "workflows · agents"}
+          {tab === "agents" ? selectedAgent ? "agent transcript" : "subagents · threads" : agent ? "agent transcript" : detail ? "run detail" : "workflows · agents"}
         </span>
         <div className="ml-auto flex items-center gap-0.5">
           {!agent && !detail && (
@@ -310,34 +319,31 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props)
         </div>
       </div>
 
-      <div className="operator-inspector-tabs grid shrink-0 grid-cols-3 px-3">
-        {(["workflows", "threads", "subagents"] as const).map((value) => (
+      <div className="operator-inspector-tabs grid shrink-0 grid-cols-2 px-4">
+        {(["workflows", "agents"] as const).map((value) => (
           <button
             key={value}
             onClick={() => {
               setTab(value);
               setAgent(null);
               setDetail(null);
-              setSelectedThread(null);
-              setSelectedSubagent(null);
+              setSelectedAgent(null);
             }}
             className={`px-2 py-2.5 text-[14px] font-semibold capitalize tracking-wide ${tab === value ? "is-active" : ""}`}
           >
-            {value} · {value === "workflows" ? runs.length : value === "threads" ? activity.threads.length : activity.subagents.length}
+            {value} · {value === "workflows" ? runs.length : activity.threads.length + activity.subagents.length}
           </button>
         ))}
       </div>
 
       {/* Content */}
-      <div className="context-content min-h-0 flex-1 overflow-y-auto px-3 py-4">
-        {tab === "threads" ? (
-          selectedThread ? (
-            <ThreadDetail thread={selectedThread} toast={toast} onOpenSession={onOpenSession} onUpdate={setSelectedThread} />
+      <div className="context-content min-h-0 flex-1 overflow-y-auto px-4 py-4">
+        {tab === "agents" ? (
+          selectedAgent ? (
+            <AgentDetail item={selectedAgent} toast={toast} onOpenSession={onOpenSession} onUpdate={setSelectedAgent} />
           ) : (
-            <ThreadsView threads={activity.threads} onOpen={setSelectedThread} />
+            <AgentsView threads={activity.threads} subagents={activity.subagents} onOpen={setSelectedAgent} />
           )
-        ) : tab === "subagents" ? (
-          selectedSubagent ? <SubagentDetail run={selectedSubagent} toast={toast} onOpenSession={onOpenSession} onUpdate={setSelectedSubagent} /> : <SubagentsView subagents={activity.subagents} onOpen={setSelectedSubagent} />
         ) : loading ? (
           <p className="px-2 py-8 text-center text-[14px] text-dim">Loading runs…</p>
         ) : loadError ? (
@@ -751,86 +757,99 @@ export function AgentView({ agent }: { agent: WorkflowAgentDetail }) {
   );
 }
 
-function ThreadsView({ threads, onOpen }: { threads: ThreadActivity[]; onOpen(thread: ThreadActivity): void }) {
-  if (!threads.length) return <EmptyActivity icon="◌" title="No persistent threads" text="Threads created with spawn_thread appear here." />;
-  const attach = useFlipList(threads.map((thread) => thread.threadId));
-  return <div className="divide-y divide-line">{threads.map((thread) => {
-    const live = ["queued", "starting", "running", "interrupting"].includes(thread.status);
-    return <button key={thread.threadId} ref={(node) => attach(node, thread.threadId)} onClick={() => onOpen(thread)} className="flex w-full items-start gap-3 px-2 py-3 text-left hover:bg-inset">
-      <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${live ? "bg-accent" : thread.status === "completed" ? "bg-ok" : "bg-dim"}`} />
-      <span className="min-w-0 flex-1"><span className="flex items-center gap-2"><strong className="truncate text-[14px]">{thread.name ?? thread.goal}</strong><span className="text-[12px] text-dim">{thread.status}</span></span><span className="mt-1 block line-clamp-2 text-[13px] leading-5 text-dim">{thread.goal}</span></span>
+function AgentsView({ threads, subagents, onOpen }: { threads: ThreadActivity[]; subagents: SubagentActivity[]; onOpen(item: AgentItem): void }) {
+  const items: AgentItem[] = [
+    ...threads.map((thread) => ({ kind: "thread" as const, thread })),
+    ...subagents.map((run) => ({ kind: "subagent" as const, run })),
+  ].sort(
+    (a, b) =>
+      Date.parse(b.kind === "thread" ? b.thread.updatedAt : b.run.updatedAt) -
+      Date.parse(a.kind === "thread" ? a.thread.updatedAt : a.run.updatedAt)
+  );
+  if (!items.length) return <EmptyActivity icon="diamond" title="No agents yet" text="Subagents and persistent threads appear here. Spawn one from the chat." />;
+  const attach = useFlipList(items.map((item) => (item.kind === "thread" ? item.thread.threadId : item.run.runId)));
+  return <div className="divide-y divide-line">{items.map((item) => {
+    const id = item.kind === "thread" ? item.thread.threadId : item.run.runId;
+    const name = item.kind === "thread" ? (item.thread.name ?? item.thread.goal) : (item.run.name ?? item.run.requestedModel ?? "Subagent");
+    const status = item.kind === "thread" ? item.thread.status : item.run.status;
+    const updated = item.kind === "thread" ? item.thread.updatedAt : item.run.updatedAt;
+    const live = item.kind === "thread"
+      ? ["queued", "starting", "running", "interrupting"].includes(status)
+      : ["starting", "running"].includes(status);
+    const badge = item.kind === "thread" ? "thread" : item.run.persistent ? "persistent" : "bounded";
+    const dot = live ? "bg-accent" : status === "completed" || status === "idle" ? "bg-ok" : status === "failed" || status === "routing_mismatch" ? "bg-err" : status === "blocked" ? "bg-warn" : "bg-dim";
+    return <button key={id} ref={(node) => attach(node, id)} onClick={() => onOpen(item)} className="flex w-full items-start gap-3 px-2 py-3 text-left hover:bg-inset">
+      <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${dot}`} />
+      <span className="min-w-0 flex-1">
+        <span className="flex items-center gap-2"><strong className="truncate text-[14px]">{name}</strong><span className="shrink-0 rounded bg-inset px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-dim">{badge}</span></span>
+        <span className="mt-1 block truncate text-[13px] text-dim">{status.replace("_", " ")} · {timeAgo(updated)}</span>
+      </span>
       <ChevronIcon size={13} className="mt-1 text-dim" />
     </button>;
   })}</div>;
 }
 
-function ThreadDetail({ thread, toast, onOpenSession, onUpdate }: { thread: ThreadActivity; toast(type: "info" | "warning" | "error", text: string): void; onOpenSession?(path: string, cwd?: string, parentPath?: string): void; onUpdate(thread: ThreadActivity): void }) {
-  const live = ["queued", "starting", "running", "interrupting"].includes(thread.status);
-  const control = async (action: "steer" | "follow-up" | "stop") => {
-    const message = action === "stop" ? undefined : window.prompt(action === "steer" ? "Interrupt and redirect this thread" : "Queue a follow-up") ?? undefined;
-    if (action !== "stop" && !message?.trim()) return;
-    if (action === "stop" && !window.confirm("Stop this thread?")) return;
-    try { const next = await bridge.threadsControl(action, thread.threadId, message); onUpdate(next); toast("info", action === "stop" ? "Thread stopped" : action === "steer" ? "Thread redirected" : "Follow-up queued"); }
-    catch (error: any) { toast("error", error?.message ?? `${action} failed`); }
-  };
-  const promote = async () => {
-    try {
-      const target = await bridge.threadsPromote(thread.threadId);
-      onUpdate({ ...thread, status: "stopped", latestActivity: "Opened as main session" });
-      onOpenSession?.(target.sessionFile, target.cwd, target.parentSessionFile ?? thread.parentSessionFile ?? undefined);
-    } catch (error: any) {
-      toast("error", error?.message ?? "could not open thread as a session");
-    }
-  };
-  return <div className="px-2">
-    <div className="border-b border-line pb-4"><div className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full ${live ? "bg-accent" : "bg-dim"}`} /><h2 className="min-w-0 flex-1 truncate text-[16px] font-semibold">{thread.name ?? thread.goal}</h2><span className="text-[13px] text-dim">{thread.status}</span></div><p className="mt-2 text-[14px] leading-6 text-dim">{thread.goal}</p><p className="mt-2 text-[12px] text-dim">{thread.model} · {thread.profile} · {thread.threadId.slice(0, 8)}</p>{thread.milestones?.length ? <div className="mt-3 rounded-lg border border-line bg-inset/40 px-3 py-2"><span className="text-[11px] font-semibold uppercase tracking-wide text-dim">Milestones</span><ul className="mt-1 space-y-1">{thread.milestones.map((m, index) => <li key={`${m.at}-${index}`} className="flex items-start gap-2 text-[13px]"><span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-ok" /><span className="min-w-0"><span className="font-medium">{m.name}</span>{m.note ? <span className="text-dim"> — {m.note}</span> : null}<span className="ml-1 text-[11px] text-dim">{new Date(m.at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</span></span></li>)}</ul></div> : null}</div>
-    <div className="max-h-[52vh] overflow-y-auto py-4">{thread.recentMessages?.length ? thread.recentMessages.map((message, index) => <div key={`${message.at}-${index}`} className="border-l border-line py-2 pl-3"><span className="text-[12px] font-medium text-dim">{message.role}</span><p className="mt-1 whitespace-pre-wrap text-[14px] leading-6">{message.text}</p></div>) : thread.latestSummary ? <Markdown text={thread.latestSummary} /> : <p className="text-[14px] text-dim">No transcript messages available yet.</p>}</div>
-    <div className="flex flex-wrap gap-2 border-t border-line pt-3">{thread.sessionFile && onOpenSession ? <button onClick={() => void promote()} disabled={live} title={live ? "Stop or wait for the thread to finish first" : "Move this thread conversation into the main workspace"} className="context-button disabled:opacity-50">Open as session</button> : null}{live ? <><button onClick={() => void control("steer")} className="context-button is-primary">Steer</button><button onClick={() => void control("follow-up")} className="context-button">Follow up</button><button onClick={() => void control("stop")} className="context-button text-err">Stop</button></> : <span className="text-[13px] text-dim">This thread is read-only.</span>}</div>
-  </div>;
-}
+function AgentDetail({ item, toast, onOpenSession, onUpdate }: { item: AgentItem; toast(type: "info" | "warning" | "error", text: string): void; onOpenSession?(path: string, cwd?: string, parentPath?: string): void; onUpdate(item: AgentItem): void }) {
+  const thread = item.kind === "thread" ? item.thread : null;
+  const run = item.kind === "subagent" ? item.run : null;
+  const id = thread ? thread.threadId : run!.runId;
+  const status = thread ? thread.status : run!.status;
+  const name = thread ? (thread.name ?? thread.goal) : (run!.name ?? run!.requestedModel ?? "Subagent");
+  const live = thread
+    ? ["queued", "starting", "running", "interrupting"].includes(status)
+    : ["starting", "running"].includes(status);
+  const badge = thread ? "thread" : run!.persistent ? "persistent" : "bounded";
+  const description = thread ? thread.goal : (run!.task ?? run!.goal);
+  const model = thread ? thread.model : (run!.requestedModel ?? "—");
+  const profile = thread ? thread.profile : run!.profile;
+  const milestones = thread ? thread.milestones : run!.milestones;
+  const recent = thread ? thread.recentMessages : run!.recentMessages;
+  const controllable = thread ? live : run!.controllable === true;
+  const sessionFile = thread ? thread.sessionFile : run!.sessionFile;
 
-function SubagentsView({ subagents, onOpen }: { subagents: SubagentActivity[]; onOpen(run: SubagentActivity): void }) {
-  if (!subagents.length) return <EmptyActivity icon="◇" title="No subagent runs" text="Bounded subagent executions and routing evidence appear here." />;
-  const attach = useFlipList(subagents.map((run) => run.runId));
-  return <div className="divide-y divide-line">{subagents.map((run) => <button key={run.runId} ref={(node) => attach(node, run.runId)} onClick={() => onOpen(run)} className="flex w-full items-start gap-3 px-2 py-3 text-left hover:bg-inset"><span className={`mt-1.5 h-2 w-2 rounded-full ${run.status === "running" ? "bg-accent" : run.status === "routing_mismatch" ? "bg-err" : run.status === "completed" ? "bg-ok" : "bg-dim"}`} /><span className="min-w-0 flex-1"><strong className="block truncate text-[14px]">{run.requestedModel ?? "Subagent"}</strong><span className="mt-1 block text-[13px] text-dim">{run.status.replace("_", " ")} · {timeAgo(run.updatedAt)}</span></span><ChevronIcon size={13} className="mt-1 text-dim" /></button>)}</div>;
-}
-
-function SubagentDetail({ run, toast, onOpenSession, onUpdate }: { run: SubagentActivity; toast(type: "info" | "warning" | "error", text: string): void; onOpenSession?(path: string, cwd?: string, parentPath?: string): void; onUpdate(run: SubagentActivity): void }) {
-  const live = run.status === "starting" || run.status === "running";
-  const controllable = run.controllable === true;
   const control = async (action: "steer" | "follow-up" | "stop") => {
-    const message = action === "stop" ? undefined : window.prompt(action === "steer" ? "Redirect this subagent" : "Send another task") ?? undefined;
+    const message = action === "stop" ? undefined : window.prompt(action === "steer" ? "Interrupt and redirect this agent" : "Send a follow-up") ?? undefined;
     if (action !== "stop" && !message?.trim()) return;
-    if (action === "stop" && !window.confirm("Stop this subagent? It will become read-only.")) return;
+    if (action === "stop" && !window.confirm(`Stop this ${thread ? "thread" : "subagent"}?`)) return;
     try {
-      const next = await bridge.subagentsControl(action, run.runId, message);
-      onUpdate(next);
-      toast("info", action === "stop" ? "Subagent stopped" : action === "steer" ? "Steering sent" : "Follow-up sent");
+      if (thread) {
+        const next = await bridge.threadsControl(action, id, message);
+        onUpdate({ kind: "thread", thread: next });
+      } else {
+        const next = await bridge.subagentsControl(action, id, message);
+        onUpdate({ kind: "subagent", run: next });
+      }
+      toast("info", action === "stop" ? "Agent stopped" : action === "steer" ? "Agent redirected" : "Follow-up sent");
     } catch (error: any) {
       toast("error", error?.message ?? `${action} failed`);
     }
   };
+
   const promote = async () => {
     try {
-      const target = await bridge.subagentsPromote(run.runId);
-      onUpdate({ ...run, status: "stopped", controllable: false, latestActivity: "Opened as main session" });
-      onOpenSession?.(target.sessionFile, target.cwd, target.parentSessionFile ?? run.parentSessionFile ?? undefined);
+      const target = thread ? await bridge.threadsPromote(id) : await bridge.subagentsPromote(id);
+      if (thread) onUpdate({ kind: "thread", thread: { ...thread, status: "stopped", latestActivity: "Opened as main session" } });
+      else onUpdate({ kind: "subagent", run: { ...run!, status: "stopped", controllable: false, latestActivity: "Opened as main session" } });
+      onOpenSession?.(target.sessionFile, target.cwd, target.parentSessionFile ?? undefined);
     } catch (error: any) {
-      toast("error", error?.message ?? "could not open subagent as a session");
+      toast("error", error?.message ?? "could not open agent as a session");
     }
   };
+
   return <div className="px-2">
     <div className="border-b border-line pb-4">
-      <div className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full ${live ? "bg-accent" : run.status === "failed" ? "bg-err" : "bg-dim"}`} /><h2 className="min-w-0 flex-1 truncate text-[16px] font-semibold">{run.name ?? run.requestedModel ?? "Subagent"}</h2><span className="text-[13px] text-dim">{run.status.replace("_", " ")}</span></div>
-      {run.task ? <p className="mt-2 text-[14px] leading-6 text-dim">{run.task}</p> : null}
-      <dl className="mt-3 grid grid-cols-[90px_1fr] gap-y-1 text-[13px]"><dt className="text-dim">Requested</dt><dd className="truncate">{run.requestedModel ?? "—"}</dd><dt className="text-dim">Observed</dt><dd className="truncate">{run.sessionModel ?? run.payloadModel ?? "—"}</dd>{run.profile ? <><dt className="text-dim">Profile</dt><dd>{run.profile}{run.thinking ? ` · ${run.thinking}` : ""}</dd></> : null}<dt className="text-dim">Run</dt><dd className="font-mono text-[12px]">{run.runId}</dd></dl>
+      <div className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full ${live ? "bg-accent" : status === "failed" || status === "routing_mismatch" ? "bg-err" : status === "blocked" ? "bg-warn" : status === "completed" || status === "idle" ? "bg-ok" : "bg-dim"}`} /><h2 className="min-w-0 flex-1 truncate text-[16px] font-semibold">{name}</h2><span className="shrink-0 rounded bg-inset px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-dim">{badge}</span><span className="text-[13px] text-dim">{status.replace("_", " ")}</span></div>
+      {description ? <p className="mt-2 text-[14px] leading-6 text-dim">{description}</p> : null}
+      <p className="mt-2 text-[12px] text-dim">{model} · {profile ?? "—"} · {id.slice(0, 8)}</p>
+      {milestones?.length ? <div className="mt-3 rounded-lg border border-line bg-inset/40 px-3 py-2"><span className="text-[11px] font-semibold uppercase tracking-wide text-dim">Milestones</span><ul className="mt-1 space-y-1">{milestones.map((m, index) => <li key={`${m.at}-${index}`} className="flex items-start gap-2 text-[13px]"><span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-ok" /><span className="min-w-0"><span className="font-medium">{m.name}</span>{m.note ? <span className="text-dim"> — {m.note}</span> : null}<span className="ml-1 text-[11px] text-dim">{new Date(m.at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</span></span></li>)}</ul></div> : null}
     </div>
-    {run.recentMessages?.length ? <div className="max-h-[46vh] overflow-y-auto py-4">{run.recentMessages.map((message, index) => <div key={`${message.at}-${index}`} className="border-l border-line py-2 pl-3"><span className="text-[12px] font-medium text-dim">{message.role}</span><p className="mt-1 whitespace-pre-wrap text-[14px] leading-6">{message.text}</p></div>)}</div> : run.output ? <div className="py-4"><Markdown text={clampText(run.output, 10000)} /></div> : null}
-    {run.stderr ? <pre className="max-h-48 overflow-auto border-t border-line py-3 font-mono text-[12px] text-warn">{clampText(run.stderr, 3000)}</pre> : null}
-    <div className="flex flex-wrap gap-2 border-t border-line pt-3">{run.sessionFile && onOpenSession ? <button onClick={() => void promote()} disabled={live} title={live ? "Stop or wait for the active turn first" : "Move this subagent conversation into the main workspace"} className="context-button disabled:opacity-50">Open as session</button> : null}{controllable ? <><button onClick={() => void control("steer")} className="context-button is-primary">Steer</button><button onClick={() => void control("follow-up")} className="context-button">Message</button><button onClick={() => void control("stop")} className="context-button text-err">Stop</button></> : <span className="text-[13px] text-dim">Legacy and stopped subagents are read-only.</span>}</div>
+    <div className="max-h-[46vh] overflow-y-auto py-4">
+      {recent?.length ? recent.map((message, index) => <div key={`${message.at}-${index}`} className="border-l border-line py-2 pl-3"><span className="text-[12px] font-medium text-dim">{message.role}</span><p className="mt-1 whitespace-pre-wrap text-[14px] leading-6">{message.text}</p></div>) : run?.output ? <Markdown text={clampText(run.output, 10000)} /> : thread?.latestSummary ? <Markdown text={thread.latestSummary} /> : <p className="text-[14px] text-dim">No transcript messages available yet.</p>}
+    </div>
+    {run?.stderr ? <pre className="max-h-48 overflow-auto border-t border-line py-3 font-mono text-[12px] text-warn">{clampText(run.stderr, 3000)}</pre> : null}
+    <div className="flex flex-wrap gap-2 border-t border-line pt-3">{sessionFile && onOpenSession ? <button onClick={() => void promote()} disabled={live} title={live ? "Stop or wait for the active turn first" : "Move this conversation into the main workspace"} className="context-button disabled:opacity-50">Open as session</button> : null}{controllable ? <><button onClick={() => void control("steer")} className="context-button is-primary">Steer</button><button onClick={() => void control("follow-up")} className="context-button">Follow up</button><button onClick={() => void control("stop")} className="context-button text-err">Stop</button></> : <span className="text-[13px] text-dim">This agent is read-only.</span>}</div>
   </div>;
 }
-
 function EmptyActivity({ icon, title, text }: { icon: string; title: string; text: string }) {
   return <div className="flex flex-col items-center gap-2 px-6 py-16 text-center"><span className="text-3xl text-dim">{icon}</span><p className="text-[14px] font-medium">{title}</p><p className="text-[14px] leading-relaxed text-dim">{text}</p></div>;
 }

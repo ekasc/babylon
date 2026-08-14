@@ -49,6 +49,9 @@ export interface SubagentActivity {
   parentSessionId?: string | null;
   parentSessionFile?: string | null;
   latestActivity?: string | null;
+  persistent?: boolean;
+  goal?: string | null;
+  milestones?: Array<{ at: string; name: string; note?: string }>;
   recentMessages?: Array<{ at: string; role: string; text: string }>;
   revision?: number;
 }
@@ -291,6 +294,9 @@ export class ActivityBridge {
                     parentSessionId: record.parentSessionId,
                     parentSessionFile: record.parentSessionFile,
                     latestActivity: record.latestActivity,
+                    persistent: record.persistent === true,
+                    goal: record.goal ?? null,
+                    milestones: record.milestones ?? [],
                     recentMessages: record.recentMessages,
                     revision: record.revision,
                   } satisfies SubagentActivity;
