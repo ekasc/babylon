@@ -1,12 +1,7 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import type { CommandInfo, ProjectGroup, SessionMeta } from "../bridge";
-import { rankCommands } from "../commands";
+import { buildPaletteIndex, searchPalette, type PaletteResult } from "../paletteSearch";
 import { PiMark } from "./icons";
-
-type Result =
-  | { type: "new"; key: "new" }
-  | { type: "session"; key: string; session: SessionMeta; cwd: string }
-  | { type: "command"; key: string; command: CommandInfo };
 
 export default function CommandPalette({
   groups,
@@ -25,30 +20,71 @@ export default function CommandPalette({
 }) {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
+  // Worker results arrive async; null means the worker hasn't answered yet.
+  const [workerResults, setWorkerResults] = useState<PaletteResult[] | null>(null);
+  const [workerAvailable, setWorkerAvailable] = useState(false);
   const deferred = useDeferredValue(query.trim().toLowerCase());
   const inputRef = useRef<HTMLInputElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
-  const results = useMemo<Result[]>(() => {
-    const sessions = groups
-      .flatMap((group) => group.sessions.map((session) => ({ session, cwd: group.cwd })))
-      .filter(({ session, cwd }) => !deferred || `${session.name ?? ""} ${session.firstUserText ?? ""} ${cwd}`.toLowerCase().includes(deferred))
-      .sort((a, b) => b.session.mtime - a.session.mtime)
-      .slice(0, deferred ? 20 : 8)
-      .map(({ session, cwd }) => ({ type: "session" as const, key: session.path, session, cwd }));
-    const commandResults = rankCommands(commands, deferred, deferred ? 16 : 8).map((command) => ({
-      type: "command" as const,
-      key: `${command.source}:${command.name}`,
-      command,
-    }));
-    return [{ type: "new", key: "new" }, ...sessions, ...commandResults];
-  }, [groups, commands, deferred]);
+  const workerRef = useRef<Worker | null>(null);
+  const queryIdRef = useRef(0);
+  const queryRef = useRef("");
+  queryRef.current = query.trim().toLowerCase();
+
+  // One worker for the palette's lifetime; rebuilt when the data set changes.
+  useEffect(() => {
+    let worker: Worker | null = null;
+    try {
+      worker = new Worker(new URL("../paletteWorker.ts", import.meta.url), { type: "module" });
+    } catch {
+      worker = null; // file:// production: fall back to the inline path below.
+    }
+    if (worker) {
+      worker.onmessage = (event) => {
+        const data = event.data;
+        if (data?.type !== "results" || data.id !== queryIdRef.current) return;
+        setWorkerResults(data.results);
+      };
+      worker.postMessage({ type: "index", groups, commands });
+      worker.postMessage({ type: "query", id: queryIdRef.current, query: queryRef.current });
+      setWorkerAvailable(true);
+    }
+    workerRef.current = worker;
+    return () => {
+      worker?.terminate();
+      workerRef.current = null;
+      setWorkerAvailable(false);
+      setWorkerResults(null);
+    };
+  }, [groups, commands]);
+
+  useEffect(() => {
+    if (!workerRef.current) return;
+    const id = ++queryIdRef.current;
+    workerRef.current.postMessage({ type: "query", id, query: queryRef.current });
+  }, [query]);
+
+  // Inline fallback (no worker): identical search behavior, deferred. The
+  // index is built once per data change, not per keystroke, and the fallback
+  // is skipped entirely while a worker is answering.
+  const inlineIndex = useMemo(() => buildPaletteIndex(groups, commands), [groups, commands]);
+  const inlineResults = useMemo<PaletteResult[]>(
+    () => (workerAvailable ? [] : searchPalette(inlineIndex, deferred)),
+    [inlineIndex, deferred, workerAvailable]
+  );
+  const results = workerAvailable
+    ? (workerResults ?? [{ type: "new", key: "new" }])
+    : inlineResults;
 
   useEffect(() => {
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     inputRef.current?.focus();
     return () => previousFocus?.focus();
   }, []);
-  useEffect(() => setSelected(0), [deferred]);
+  useEffect(() => setSelected(0), [query]);
+  useEffect(() => {
+    setSelected((current) => Math.min(current, Math.max(0, results.length - 1)));
+  }, [results]);
 
   const choose = (result = results[selected]) => {
     if (!result) return;
