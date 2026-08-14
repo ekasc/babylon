@@ -1,0 +1,216 @@
+{
+  "capturedAt": "2026-08-14T03:00:55.343Z",
+  "totalSessions": 103,
+  "sessions": [
+    {
+      "name": "2026-08-13T05-29-26-464Z_019ff998-c4bf-77af-813d",
+      "sizeMB": 17.6,
+      "messages": 2660,
+      "parseMs": 41.1,
+      "payloadFullMB": 14,
+      "payloadClampedMB": 13.4,
+      "clampedCount": 52,
+      "perType": {
+        "textKB": 127,
+        "thinkingKB": 389,
+        "imageKB": 7488,
+        "toolKB": 3953,
+        "diffKB": 1316
+      },
+      "worstEntryKB": 2728.4482421875
+    },
+    {
+      "name": "2026-07-16T02-24-49-779Z_019f68bd-b072-7bbf-b2a6",
+      "sizeMB": 14.3,
+      "messages": 3053,
+      "parseMs": 38.1,
+      "payloadFullMB": 9.7,
+      "payloadClampedMB": 8.9,
+      "clampedCount": 47,
+      "perType": {
+        "textKB": 214,
+        "thinkingKB": 142,
+        "imageKB": 3770,
+        "toolKB": 4282,
+        "diffKB": 718
+      },
+      "worstEntryKB": 878.7958984375
+    },
+    {
+      "name": "2026-08-09T00-38-24-128Z_019fe3f4-e080-7509-a473",
+      "sizeMB": 13.9,
+      "messages": 457,
+      "parseMs": 23.5,
+      "payloadFullMB": 13.4,
+      "payloadClampedMB": 13.3,
+      "clampedCount": 4,
+      "perType": {
+        "textKB": 25,
+        "thinkingKB": 7,
+        "imageKB": 13259,
+        "toolKB": 261,
+        "diffKB": 59
+      },
+      "worstEntryKB": 2444.126953125
+    },
+    {
+      "name": "2026-08-10T23-26-38-208Z_019fedff-e480-7703-97e7",
+      "sizeMB": 13.3,
+      "messages": 1986,
+      "parseMs": 26.8,
+      "payloadFullMB": 11.1,
+      "payloadClampedMB": 10.9,
+      "clampedCount": 9,
+      "perType": {
+        "textKB": 153,
+        "thinkingKB": 396,
+        "imageKB": 8038,
+        "toolKB": 1613,
+        "diffKB": 555
+      },
+      "worstEntryKB": 3132.564453125
+    },
+    {
+      "name": "2026-07-16T02-27-58-817Z_019f68c0-92e1-7f1f-a1f6",
+      "sizeMB": 12.7,
+      "messages": 962,
+      "parseMs": 26.4,
+      "payloadFullMB": 11.5,
+      "payloadClampedMB": 11.4,
+      "clampedCount": 13,
+      "perType": {
+        "textKB": 88,
+        "thinkingKB": 17,
+        "imageKB": 10033,
+        "toolKB": 1020,
+        "diffKB": 274
+      },
+      "worstEntryKB": 1311.107421875
+    },
+    {
+      "name": "2026-07-16T06-46-17-326Z_019f69ad-0fee-7efd-912e",
+      "sizeMB": 8.8,
+      "messages": 2119,
+      "parseMs": 23.8,
+      "payloadFullMB": 5.9,
+      "payloadClampedMB": 5.5,
+      "clampedCount": 20,
+      "perType": {
+        "textKB": 247,
+        "thinkingKB": 274,
+        "imageKB": 1771,
+        "toolKB": 2492,
+        "diffKB": 521
+      },
+      "worstEntryKB": 743.2998046875
+    },
+    {
+      "name": "2026-08-09T05-26-18-008Z_019fe4fc-7498-7f07-b409",
+      "sizeMB": 8.2,
+      "messages": 91,
+      "parseMs": 13,
+      "payloadFullMB": 8,
+      "payloadClampedMB": 7.9,
+      "clampedCount": 2,
+      "perType": {
+        "textKB": 19,
+        "thinkingKB": 2,
+        "imageKB": 7899,
+        "toolKB": 138,
+        "diffKB": 48
+      },
+      "worstEntryKB": 2846.416015625
+    },
+    {
+      "name": "2026-07-21T10-40-56-032Z_019f8443-aee0-743f-9519",
+      "sizeMB": 8.1,
+      "messages": 1414,
+      "parseMs": 18.3,
+      "payloadFullMB": 6.1,
+      "payloadClampedMB": 5.7,
+      "clampedCount": 21,
+      "perType": {
+        "textKB": 191,
+        "thinkingKB": 349,
+        "imageKB": 2513,
+        "toolKB": 1580,
+        "diffKB": 1018
+      },
+      "worstEntryKB": 1395.5185546875
+    },
+    {
+      "name": "2026-08-12T03-40-59-751Z_019ff40f-1fe6-72d6-aba5",
+      "sizeMB": 7.8,
+      "messages": 2072,
+      "parseMs": 17.7,
+      "payloadFullMB": 5.1,
+      "payloadClampedMB": 5,
+      "clampedCount": 10,
+      "perType": {
+        "textKB": 78,
+        "thinkingKB": 41,
+        "imageKB": 1703,
+        "toolKB": 1834,
+        "diffKB": 978
+      },
+      "worstEntryKB": 691.603515625
+    },
+    {
+      "name": "2026-08-12T05-40-20-538Z_019ff47c-63ba-75a3-b0e8",
+      "sizeMB": 7,
+      "messages": 1654,
+      "parseMs": 16.3,
+      "payloadFullMB": 5.3,
+      "payloadClampedMB": 5.1,
+      "clampedCount": 14,
+      "perType": {
+        "textKB": 102,
+        "thinkingKB": 458,
+        "imageKB": 2314,
+        "toolKB": 1698,
+        "diffKB": 395
+      },
+      "worstEntryKB": 2314.7197265625
+    },
+    {
+      "name": "2026-08-09T07-30-08-026Z_019fe56d-d419-79e3-87d3",
+      "sizeMB": 6.5,
+      "messages": 1252,
+      "parseMs": 14.2,
+      "payloadFullMB": 5.2,
+      "payloadClampedMB": 5.1,
+      "clampedCount": 6,
+      "perType": {
+        "textKB": 62,
+        "thinkingKB": 205,
+        "imageKB": 3475,
+        "toolKB": 784,
+        "diffKB": 368
+      },
+      "worstEntryKB": 3132.599609375
+    },
+    {
+      "name": "2026-07-26T00-21-54-900Z_019f9bcc-c054-7704-82dd",
+      "sizeMB": 5.2,
+      "messages": 1393,
+      "parseMs": 14,
+      "payloadFullMB": 3.4,
+      "payloadClampedMB": 3.2,
+      "clampedCount": 18,
+      "perType": {
+        "textKB": 107,
+        "thinkingKB": 21,
+        "imageKB": 859,
+        "toolKB": 1602,
+        "diffKB": 533
+      },
+      "worstEntryKB": 464.8583984375
+    }
+  ],
+  "summary": {
+    "totalBytes": 129452787,
+    "messages": 19113,
+    "clampedCount": 216,
+    "totalMB": 123.5
+  }
+}
