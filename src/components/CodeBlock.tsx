@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { highlight } from "../lib/highlight";
+import { cachedHighlight, highlight } from "../lib/highlight";
 
 interface Props {
   code: string;
@@ -9,10 +9,14 @@ interface Props {
 }
 
 export default function CodeBlock({ code, lang, bare }: Props) {
-  const [html, setHtml] = useState<string | null>(null);
+  // Start from the render cache: re-mounted blocks (session switches, list
+  // reconciliation) are highlighted on the very first frame, so there is no
+  // plain-to-highlighted pop.
+  const [html, setHtml] = useState<string | null>(() => cachedHighlight(code, lang));
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
+    if (cachedHighlight(code, lang) != null) return; // nothing to re-render
     let alive = true;
     // Small debounce: streaming markdown churns code blocks per delta.
     const timer = setTimeout(() => {

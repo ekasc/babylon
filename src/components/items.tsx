@@ -1,7 +1,6 @@
 import { memo, useEffect, useState } from "react";
 import type { ChatItem } from "../store";
-import type { HistoryTurn } from "../bridge";
-import { langFromPath } from "../lib/highlight";
+import { bridge, type HistoryTurn } from "../bridge";
 import CodeBlock from "./CodeBlock";
 import Markdown from "./Markdown";
 import { ChevronIcon, ToolGlyph } from "./icons";
@@ -17,6 +16,8 @@ export const UserMessage = memo(function UserMessage({ item, historyTurn, rollba
               key={i}
               src={src}
               alt="attachment"
+              loading="lazy"
+              decoding="async"
               className="max-h-48 max-w-[260px] rounded-lg border border-line object-contain"
             />
           ))}
@@ -103,6 +104,7 @@ function argSummary(name: string, args: any): string {
 
 export const ToolCard = memo(function ToolCard({ item }: { item: Extract<ChatItem, { kind: "tool" }> }) {
   const [open, setOpen] = useState(false);
+  const [fullOutput, setFullOutput] = useState<string | null>(null);
 
   useEffect(() => {
     if (item.status === "running" || item.status === "error") setOpen(true);
@@ -110,7 +112,6 @@ export const ToolCard = memo(function ToolCard({ item }: { item: Extract<ChatIte
 
   const patch = item.details?.patch ?? item.details?.diff;
   const hasPatch = typeof patch === "string" && patch.trim().length > 0;
-  const readLang = item.name === "read" ? langFromPath(item.args?.path ?? "") : undefined;
 
   return (
     <div className={`conversation-tool ${item.status === "running" ? "is-running" : item.status === "error" ? "is-error" : ""}`}>
@@ -131,14 +132,25 @@ export const ToolCard = memo(function ToolCard({ item }: { item: Extract<ChatIte
         <div className="ml-5 mt-1 border-l border-line pl-3">
           {hasPatch ? (
             <DiffView patch={patch} />
-          ) : readLang && item.output ? (
-            <div className="max-h-72 overflow-auto">
-              <CodeBlock bare code={item.output} lang={readLang} />
-            </div>
           ) : (
-            <pre className="max-h-72 overflow-auto whitespace-pre-wrap px-3 py-2 font-mono text-[13px] leading-relaxed">
-              {item.output || (item.status === "running" ? "running…" : "(no output)")}
-            </pre>
+            <>
+              <pre className="max-h-72 overflow-auto whitespace-pre-wrap px-3 py-2 font-mono text-[13px] leading-relaxed">
+                {fullOutput ?? item.output ?? (item.status === "running" ? "running…" : "(no output)")}
+              </pre>
+              {item.truncated && fullOutput == null ? (
+                <button
+                  onClick={() => {
+                    bridge
+                      .getToolOutput(item.toolCallId)
+                      .then((result) => setFullOutput(result.content))
+                      .catch(() => undefined);
+                  }}
+                  className="context-button mt-1"
+                >
+                  Show full output
+                </button>
+              ) : null}
+            </>
           )}
         </div>
       )}
