@@ -7,7 +7,7 @@ import { ChevronIcon, ToolGlyph } from "./icons";
 
 export const UserMessage = memo(function UserMessage({ item, historyTurn, rollbackDisabled, onRollback }: { item: Extract<ChatItem, { kind: "user" }>; historyTurn?: HistoryTurn; rollbackDisabled?: boolean; onRollback?(entryId: string): void }) {
   return (
-    <article className="conversation-user group/user relative">
+    <article className={`conversation-user group/user relative ${item.optimistic ? "conversation-user-sent" : ""}`}>
       <div className="whitespace-pre-wrap text-[15px] leading-[1.55]">
       {item.images && item.images.length > 0 && (
         <span className="mb-3 flex flex-wrap gap-2">
@@ -79,7 +79,7 @@ function Thinking({ text, open }: { text: string; open: boolean }) {
 }
 
 export const SystemLine = memo(function SystemLine({ text }: { text: string }) {
-  return <p className="my-4 border-l-2 border-line py-1 pl-3 text-[13px] text-dim">{text}</p>;
+  return <p className="conversation-system-in my-4 border-l-2 border-line py-1 pl-3 text-[13px] text-dim">{text}</p>;
 });
 
 // ---------------------------------------------------------------------------

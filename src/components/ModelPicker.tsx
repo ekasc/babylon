@@ -94,7 +94,7 @@ export default function ModelPicker({ models, current, disabled, onSelect }: Pro
       </button>
 
       {open && (
-        <div className="operator-popover absolute bottom-full left-0 z-50 mb-2 w-[410px] max-w-[calc(100vw-32px)] overflow-hidden">
+        <div className="operator-popover absolute bottom-full left-0 z-50 mb-2 w-[410px] max-w-[calc(100vw-32px)] overflow-hidden p-1.5">
           <div className="border-b border-line/60 p-3">
             <input
               ref={searchRef}
@@ -121,7 +121,7 @@ export default function ModelPicker({ models, current, disabled, onSelect }: Pro
                       key={key}
                       data-active={active}
                       onClick={() => pick(m.provider, m.id)}
-                      className={`flex w-full items-center gap-3 px-4 py-2.5 text-left hover:bg-inset ${
+                      className={`flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left hover:bg-inset ${
                         active ? "bg-accent-soft" : ""
                       }`}
                     >

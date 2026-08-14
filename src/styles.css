@@ -79,7 +79,7 @@ body {
 button,input,textarea,select{font:inherit}
 button{cursor:default;-webkit-tap-highlight-color:transparent}
 button:disabled{cursor:not-allowed;opacity:.42}
-button:not(:disabled):active{transform:scale(.97);transition-duration:70ms}
+button:not(:disabled):active{filter:brightness(.94)}
 button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 .titlebar{-webkit-app-region:drag}.titlebar button,.titlebar input,.titlebar select{-webkit-app-region:no-drag}
 *{scrollbar-width:thin;scrollbar-color:var(--line-strong) transparent}
@@ -98,6 +98,8 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 .sidebar-project:hover{background:color-mix(in srgb,var(--fg) 5%,transparent)}
 .sidebar-disclosure{transition:transform 180ms cubic-bezier(.2,.8,.2,1)}
 .sidebar-session-group{transform-origin:top;animation:reveal-group 180ms cubic-bezier(.2,.8,.2,1) both}
+.sidebar-session-delete{display:grid;width:20px;height:20px;flex-shrink:0;place-items:center;border:0;border-radius:5px;background:transparent;color:var(--dim);font-size:11px;opacity:0;cursor:default}.group\/session:hover .sidebar-session-delete,.sidebar-session-delete:focus-visible{opacity:1}.sidebar-session-delete:hover{background:color-mix(in srgb,var(--err) 14%,transparent);color:var(--err)}
+.sidebar-project-add{display:grid;width:24px;height:24px;place-items:center;border:0;border-radius:6px;background:transparent;color:var(--dim);font-size:14px;opacity:0}.group\/project:hover .sidebar-project-add,.sidebar-project-add:focus-visible{opacity:1}.sidebar-project-add:hover{background:var(--inset);color:var(--fg)}
 .sidebar-session{display:flex;width:100%;min-height:38px;align-items:center;gap:8px;border:0;border-radius:7px;background:transparent;color:var(--dim);padding:7px 9px;text-align:left;font-size:14px;line-height:1.35;content-visibility:auto;contain-intrinsic-size:auto 38px}
 .sidebar-session:hover{background:color-mix(in srgb,var(--fg) 5%,transparent);color:var(--fg)}
 .sidebar-session.is-active{background:color-mix(in srgb,var(--fg) 9%,transparent);color:var(--fg)}
@@ -128,7 +130,7 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 .composer-surface{overflow:visible;border:1px solid color-mix(in srgb,var(--line-strong) 72%,transparent);border-radius:20px;background:var(--composer);box-shadow:0 12px 32px rgba(0,0,0,.12),inset 0 1px 0 color-mix(in srgb,#fff 45%,transparent);backdrop-filter:blur(24px) saturate(170%);-webkit-backdrop-filter:blur(24px) saturate(170%);transition:border-color 150ms ease,box-shadow 180ms ease,background-color 180ms ease}
 .composer-surface:focus-within{border-color:color-mix(in srgb,var(--focus) 55%,var(--line));box-shadow:0 15px 38px rgba(0,0,0,.15),0 0 0 3px color-mix(in srgb,var(--focus) 13%,transparent),inset 0 1px 0 color-mix(in srgb,#fff 48%,transparent)}
 .composer-dock.is-dragging .composer-surface{border-color:var(--focus);box-shadow:0 15px 38px rgba(0,0,0,.15),0 0 0 4px color-mix(in srgb,var(--focus) 16%,transparent)}
-.composer-meta{display:flex;min-height:38px;align-items:center;gap:8px;padding:3px 9px 7px}
+.composer-meta{display:flex;min-height:40px;align-items:center;gap:8px;padding:4px 10px 9px}.composer-meta>span{white-space:nowrap;flex-shrink:0}
 .operator-send{display:flex;height:36px;align-items:center;gap:7px;border:0;border-radius:18px;background:var(--fg);color:var(--bg);padding:0 13px;font-size:13px;font-weight:650;box-shadow:0 1px 2px rgba(0,0,0,.18)}
 .operator-send:disabled{opacity:.34}
 .composer-stream-controls{display:flex;height:38px;align-items:stretch;overflow:hidden;border:1px solid var(--line);border-radius:10px;background:color-mix(in srgb,var(--inset) 52%,transparent)}
@@ -140,18 +142,18 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 .operator-meta-control{border:0;border-radius:7px;background:transparent;color:var(--dim)}
 .operator-meta-control:hover{background:var(--inset);color:var(--fg)}
 .operator-popover{border:1px solid var(--line-strong);border-radius:12px;background:var(--popover);box-shadow:0 18px 46px rgba(0,0,0,.3),inset 0 1px 0 color-mix(in srgb,#fff 22%,transparent);transform-origin:bottom left;animation:materialize-popover 170ms cubic-bezier(.2,.8,.2,1) both}
-textarea.composer{field-sizing:content;min-height:44px;max-height:220px;font-size:15px;line-height:1.55}
+textarea.composer{field-sizing:content;min-height:40px;max-height:220px;font-size:15px;line-height:1.55}
 textarea.composer:focus-visible{outline:none;box-shadow:none}
 .primary-button{display:flex;height:40px;align-items:center;justify-content:center;gap:7px;border:0;border-radius:8px;background:var(--fg);color:var(--bg);font-size:14px;font-weight:650}
 
 /* Context workspace */
-.context-workspace{min-width:360px;max-width:760px;border-left:1px solid var(--hairline);background:color-mix(in srgb,var(--context) 88%,transparent);backdrop-filter:blur(24px) saturate(145%);-webkit-backdrop-filter:blur(24px) saturate(145%);box-shadow:-10px 0 30px -30px rgba(0,0,0,.8)}
+.context-workspace{min-width:360px;max-width:760px;border-left:1px solid var(--hairline);background:color-mix(in srgb,var(--context) 88%,transparent);backdrop-filter:blur(24px) saturate(145%);-webkit-backdrop-filter:blur(24px) saturate(145%);box-shadow:-10px 0 30px -30px rgba(0,0,0,.8);animation:context-pane-in 220ms cubic-bezier(.2,.8,.2,1)}
 .context-resizer{position:absolute;z-index:20;inset-block:0;left:-4px;width:8px;cursor:col-resize;touch-action:none}
 .context-resizer::after{content:"";position:absolute;inset-block:0;left:3px;width:1px;background:transparent}
 .context-resizer:hover::after,.context-resizer:active::after{background:var(--focus)}
 .context-pane{background:transparent}
 .context-header{position:relative;background:color-mix(in srgb,var(--context) 76%,transparent);backdrop-filter:blur(18px) saturate(150%);-webkit-backdrop-filter:blur(18px) saturate(150%)}
-.context-header::after{content:"";position:absolute;inset-inline:12px;bottom:0;height:1px;background:var(--hairline)}
+.context-header::after{content:"";position:absolute;inset-inline:0;bottom:0;height:1px;background:var(--hairline)}
 .context-content{mask-image:linear-gradient(to bottom,transparent 0,#000 8px,#000 100%)}
 .operator-inspector-tabs{position:relative;background:color-mix(in srgb,var(--context) 82%,transparent)}.operator-inspector-tabs::after{content:"";position:absolute;inset-inline:12px;bottom:0;height:1px;background:var(--hairline)}
 .operator-inspector-tabs button{position:relative;z-index:1;border:0;border-bottom:2px solid transparent;background:transparent;color:var(--dim)}
@@ -191,17 +193,24 @@ textarea.composer:focus-visible{outline:none;box-shadow:none}
 .codeblock .shiki{overflow-x:auto;margin:0!important;border:0!important;border-radius:0!important;padding:.9em 1em!important;font-size:12.5px;line-height:1.58}.codeblock .shiki code{background:none;padding:0;font-size:inherit}.codeblock-fallback{margin:0;padding:.9em 1em;overflow-x:auto;background:var(--shiki-light-bg, var(--inset));font-family:"SFMono-Regular",Consolas,monospace;font-size:12.5px;line-height:1.58}html.dark .codeblock-fallback{background:var(--shiki-dark-bg, var(--inset))}
 .shiki,.shiki span{color:var(--shiki-light)}.shiki{background-color:var(--shiki-light-bg)}html.dark .shiki,html.dark .shiki span{color:var(--shiki-dark)}html.dark .shiki{background-color:var(--shiki-dark-bg)}.md .codeblock pre{margin:0;border:0;padding:0;background:none}
 
-.command-palette,.modal-surface{border:1px solid color-mix(in srgb,var(--line) 78%,transparent);border-radius:14px;background:var(--popover);box-shadow:0 28px 80px rgba(0,0,0,.32),inset 0 1px 0 color-mix(in srgb,#fff 40%,transparent);backdrop-filter:blur(32px) saturate(180%);-webkit-backdrop-filter:blur(32px) saturate(180%);transform-origin:top center}
+.command-palette,.modal-surface{border:1px solid color-mix(in srgb,var(--line) 78%,transparent);border-radius:14px;background:var(--popover);box-shadow:0 28px 80px rgba(0,0,0,.32),inset 0 1px 0 color-mix(in srgb,#fff 40%,transparent);backdrop-filter:blur(32px) saturate(180%);-webkit-backdrop-filter:blur(32px) saturate(180%);transform-origin:top center;animation:materialize-popover 170ms cubic-bezier(.2,.8,.2,1)}
 .toast{border-color:color-mix(in srgb,var(--line) 75%,transparent)!important;background:var(--popover);backdrop-filter:blur(24px) saturate(170%);-webkit-backdrop-filter:blur(24px) saturate(170%);box-shadow:0 12px 36px rgba(0,0,0,.22)!important}
 .chat-item{contain:layout paint style}.chat-item-long{content-visibility:auto;contain-intrinsic-size:auto 120px}
 @keyframes spin{to{transform:rotate(360deg)}}
+@keyframes context-pane-in{from{opacity:0;transform:translateX(16px);filter:blur(3px)}to{opacity:1;transform:none;filter:none}}
+@keyframes user-message-in{from{opacity:0;transform:translateY(6px) scale(.985)}to{opacity:1;transform:none}}
+@keyframes dot-working{0%,100%{opacity:1}50%{opacity:.45}}
+@keyframes system-line-in{from{opacity:0;transform:translateY(2px)}to{opacity:1;transform:none}}
+.conversation-user-sent{animation:user-message-in 220ms cubic-bezier(.2,.8,.2,1) both}
+.status-dot-working{animation:dot-working 2s ease-in-out infinite}
+.conversation-system-in{animation:system-line-in 260ms cubic-bezier(.2,.8,.2,1) both}
 @keyframes toast-in{from{opacity:0;transform:translateY(7px) scale(.98);filter:blur(3px)}to{opacity:1;transform:none;filter:none}}
 @keyframes pideck-fade{from{opacity:0;filter:blur(2px)}}
 @keyframes reveal-group{from{opacity:.35;transform:translateY(-3px) scaleY(.98)}to{opacity:1;transform:none}}
 @keyframes materialize-popover{from{opacity:0;transform:translateY(5px) scale(.98);filter:blur(4px)}to{opacity:1;transform:none;filter:none}}
 .toast{animation:toast-in .2s cubic-bezier(.2,.8,.2,1)}.fade-in{animation:pideck-fade 150ms ease-out both}
 .glass{background:var(--chrome);backdrop-filter:blur(20px) saturate(160%)}
-button:not(:disabled){transition:transform 90ms ease-out,background-color 130ms ease,color 130ms ease,border-color 130ms ease,opacity 130ms ease}
+button:not(:disabled){transition:background-color 130ms ease,color 130ms ease,border-color 130ms ease,opacity 130ms ease,filter 90ms ease}
 .statusbar-text{letter-spacing:.01em}
 @media(max-width:1050px){.app-sidebar{width:232px}.context-workspace{position:absolute;z-index:30;inset-block:0;right:0;width:min(100%,620px)!important;box-shadow:-18px 0 48px rgba(0,0,0,.24)}.context-resizer{display:none}}
 @media(max-width:720px){.app-sidebar{display:none}.conversation-column{padding-inline:20px}.conversation-user{max-width:90%}}

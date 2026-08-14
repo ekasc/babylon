@@ -43,7 +43,7 @@ export default function BranchPanel({ onClose, refreshToken, onRollback, onUndoR
 
   return (
     <section aria-label="Session history workspace" className="context-pane flex h-full min-w-0 flex-col">
-      <div className="context-header flex h-14 shrink-0 items-center gap-2 px-4">
+      <div className="context-header flex h-16 shrink-0 items-center gap-2 px-4">
         <BranchIcon size={14} className="shrink-0 text-accent" />
         <span className="text-[15px] font-semibold tracking-tight">History</span>
         <span className="truncate text-[13px] text-dim">
@@ -77,7 +77,7 @@ export default function BranchPanel({ onClose, refreshToken, onRollback, onUndoR
 
       {selected ? <TurnDetail turn={selected} onRollback={onRollback} /> : null}
 
-      <div className="context-content min-h-0 flex-1 overflow-y-auto px-3 py-4">
+      <div className="context-content min-h-0 flex-1 overflow-y-auto px-4 py-4">
         {loading ? (
           <p className="px-2 py-6 text-center text-[14px] text-dim">Loading history…</p>
         ) : history.turns.length === 0 ? (

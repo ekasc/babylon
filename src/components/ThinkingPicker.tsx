@@ -59,7 +59,7 @@ export default function ThinkingPicker({ current, available, disabled, onSelect 
       </button>
 
       {open && (
-        <div className="operator-popover absolute bottom-full left-0 z-50 mb-2 w-[280px] overflow-hidden py-1.5">
+        <div className="operator-popover absolute bottom-full left-0 z-50 mb-2 w-[280px] overflow-hidden px-1.5 py-1.5">
           {levels.map((l) => {
             const m = LEVEL_META[l];
             const active = l === current;
@@ -70,7 +70,7 @@ export default function ThinkingPicker({ current, available, disabled, onSelect 
                   onSelect(l);
                   setOpen(false);
                 }}
-                className={`flex w-full items-start gap-3 px-4 py-2.5 text-left hover:bg-inset ${
+                className={`flex w-full items-start gap-3 rounded-md px-3 py-2.5 text-left hover:bg-inset ${
                   active ? "bg-accent-soft" : ""
                 }`}
               >

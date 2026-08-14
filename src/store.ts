@@ -12,7 +12,7 @@ export interface Block {
 export type ToolStatus = "pending" | "running" | "done" | "error";
 
 export type ChatItem =
-  | { kind: "user"; key: string; text: string; entryId?: string; imageCount?: number; images?: string[] }
+  | { kind: "user"; key: string; text: string; entryId?: string; imageCount?: number; images?: string[]; optimistic?: boolean }
   | {
       kind: "assistant";
       key: string;
@@ -260,6 +260,7 @@ export function reducer(state: State, action: Action): State {
             text: action.text,
             imageCount: action.images?.length || undefined,
             images: action.images?.length ? action.images : undefined,
+            optimistic: true,
           },
         ],
       };

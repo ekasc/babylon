@@ -158,11 +158,19 @@ const Composer = memo(function Composer({ streaming, steering, followUp, command
     if ((!t && attachments.length === 0) || sending) return;
     const outgoing = attachments;
     setSending(true);
-    const accepted = await onSend(t, outgoing.length ? outgoing : undefined, streaming ? mode : undefined);
-    setSending(false);
-    if (!accepted) return;
-    for (const attachment of outgoing) URL.revokeObjectURL(attachment.url);
+    // Clear optimistically: the sent text must leave the box the moment the
+    // user submits, not when the (possibly slow) prompt pipeline resolves.
     setText("");
+    try {
+      const accepted = await onSend(t, outgoing.length ? outgoing : undefined, streaming ? mode : undefined);
+      if (!accepted) {
+        setText(t); // restore the draft on failure
+        return;
+      }
+    } finally {
+      setSending(false);
+    }
+    for (const attachment of outgoing) URL.revokeObjectURL(attachment.url);
     setAttachments([]);
   };
 
@@ -206,7 +214,7 @@ const Composer = memo(function Composer({ streaming, steering, followUp, command
 
   return (
     <div
-      className={`composer-dock shrink-0 px-5 pb-4 pt-3 ${dragOver ? "is-dragging" : ""}`}
+      className={`composer-dock shrink-0 px-7 pb-5 pt-3 ${dragOver ? "is-dragging" : ""}`}
       onDragOver={(e) => {
         e.preventDefault();
         setDragOver(true);
@@ -269,7 +277,7 @@ const Composer = memo(function Composer({ streaming, steering, followUp, command
         )}
 
         <div className="composer-surface">
-          <div className="flex items-end gap-2 px-2 pt-2">
+          <div className="flex items-end gap-1.5 px-2 pt-2 pb-1">
           <input
             ref={fileRef}
             type="file"
@@ -284,7 +292,7 @@ const Composer = memo(function Composer({ streaming, steering, followUp, command
           <button
             onClick={() => fileRef.current?.click()}
             title="Attach images (or paste / drag & drop)"
-            className="shrink-0 rounded-lg p-2 text-dim hover:bg-inset hover:text-fg"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-dim hover:bg-inset hover:text-fg"
           >
             <PaperclipIcon size={15} />
           </button>
@@ -305,7 +313,7 @@ const Composer = memo(function Composer({ streaming, steering, followUp, command
             role="combobox"
             aria-autocomplete="list"
             aria-expanded={commandMatches.length > 0}
-            className="composer flex-1 resize-none bg-transparent px-2 py-1.5 text-[15px] outline-none placeholder:text-dim"
+            className="composer flex-1 resize-none bg-transparent px-2 py-2 text-[15px] outline-none placeholder:text-dim"
           />
 
           {streaming ? (
