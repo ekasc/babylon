@@ -2,7 +2,12 @@ import { contextBridge, ipcRenderer } from "electron";
 
 const api = {
   listSessions: (): Promise<any> => ipcRenderer.invoke("pideck:list-sessions"),
-  getSessionMessages: (path: string): Promise<any[]> => ipcRenderer.invoke("pideck:get-session-messages", path),
+  getSessionMessages: (path: string): Promise<{ messages: any[]; startOffset: number }> =>
+    ipcRenderer.invoke("pideck:get-session-messages", path),
+  getSessionWindow: (path: string, endOffset: number, countBytes?: number): Promise<{ messages: any[]; startOffset: number }> =>
+    ipcRenderer.invoke("pideck:get-session-window", path, endOffset, countBytes),
+  getToolOutput: (toolCallId: string): Promise<{ content: string; truncated: boolean }> =>
+    ipcRenderer.invoke("pideck:get-tool-output", toolCallId),
   pickFolder: (): Promise<string | null> => ipcRenderer.invoke("pideck:pick-folder"),
   openSession: (opts: { path?: string; cwd: string; requestId?: number }): Promise<void> =>
     ipcRenderer.invoke("pideck:open-session", opts),
@@ -45,8 +50,9 @@ const api = {
 
   // Threads + subagents activity
   activityList: (): Promise<any> => ipcRenderer.invoke("pideck:activity:list"),
-  threadsControl: (action: string, threadId: string, message?: string): Promise<void> =>
+  threadsControl: (action: string, threadId: string, message?: string): Promise<any> =>
     ipcRenderer.invoke("pideck:threads:control", { action, threadId, message }),
+  threadsPromote: (threadId: string): Promise<any> => ipcRenderer.invoke("pideck:threads:promote", threadId),
   subagentsControl: (action: string, runId: string, message?: string): Promise<any> =>
     ipcRenderer.invoke("pideck:subagents:control", { action, runId, message }),
   subagentsPromote: (runId: string): Promise<any> =>

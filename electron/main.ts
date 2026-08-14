@@ -8,7 +8,8 @@ import { promisify } from "node:util";
 import { ActivityBridge, type ActivityUpdate } from "./activity";
 import { AgentEventBuffer } from "./event-buffer";
 import { PiHost } from "./pi-host";
-import { SessionIndex, readSessionMessages } from "./sessions";
+import { SessionIndex, readSessionRange, readSessionTail, readToolOutput } from "./sessions";
+import { resolveParentSessionFile } from "./threads";
 import { WorkflowsBridge, type WorkflowControlAction, type WorkflowsUpdate } from "./workflows";
 
 const execFileAsync = promisify(execFile);
@@ -43,6 +44,8 @@ function updateActivityBridge(cwd: string): void {
   activityBridge = new ActivityBridge({
     cwd,
     onUpdate: (update: ActivityUpdate) => win?.webContents.send("pideck:activity-update", update),
+    resolveParentSessionFile: (sessionId) => resolveParentSessionFile(sessionId),
+    onThreadEvent: (thread, event) => getHost().notifyThreadEvent(thread, event),
   });
   activityBridge.start();
 }
@@ -311,6 +314,17 @@ function assertTrustedSender(event: IpcMainInvokeEvent): void {
   if (!trusted || event.sender !== win?.webContents) throw new Error("untrusted IPC sender");
 }
 
+/** Resolves a session path and enforces it stays inside the pi sessions dir. */
+function validateSessionPath(path: string): string {
+  const root = resolve(homedir(), ".pi", "agent", "sessions");
+  const target = resolve(path);
+  const rel = relative(root, target);
+  if (!rel || rel.startsWith("..") || isAbsolute(rel) || !target.endsWith(".jsonl")) {
+    throw new Error("session path is outside the pi sessions directory");
+  }
+  return target;
+}
+
 function registerIpc(): void {
   const handle = (
     channel: string,
@@ -324,13 +338,19 @@ function registerIpc(): void {
 
   handle("pideck:list-sessions", () => sessionIndex.list());
   handle("pideck:get-session-messages", (_e, path: string) => {
-    const root = resolve(homedir(), ".pi", "agent", "sessions");
-    const target = resolve(path);
-    const rel = relative(root, target);
-    if (!rel || rel.startsWith("..") || isAbsolute(rel) || !target.endsWith(".jsonl")) {
-      throw new Error("session path is outside the pi sessions directory");
-    }
-    return readSessionMessages(target);
+    const target = validateSessionPath(path);
+    return readSessionTail(target);
+  });
+
+  handle("pideck:get-session-window", (_e, path: string, endOffset: number, countBytes?: number) => {
+    const target = validateSessionPath(path);
+    const maxBytes = Math.min(Math.max(countBytes ?? 2 * 1024 * 1024, 256 * 1024), 16 * 1024 * 1024);
+    return readSessionRange(target, endOffset, maxBytes);
+  });
+
+  handle("pideck:get-tool-output", async (_e, toolCallId: string) => {
+    if (typeof toolCallId !== "string" || !/^[a-zA-Z0-9|_\-:.]{1,200}$/.test(toolCallId)) throw new Error("invalid tool call id");
+    return getHost().getToolOutput(toolCallId);
   });
 
   handle("pideck:pick-folder", async () => {
@@ -573,9 +593,17 @@ function registerIpc(): void {
         throw new Error("invalid thread action");
       }
       if (opts.action !== "stop" && !opts.message?.trim()) throw new Error("message is required");
-      return getHost().controlThread(opts.action, opts.threadId, opts.message?.trim());
+      const result = await getHost().controlThread(opts.action, opts.threadId, opts.message?.trim());
+      await activityBridge?.refresh();
+      return result;
     }
   );
+  handle("pideck:threads:promote", async (_e, threadId: string) => {
+    if (!/^[a-f0-9-]{8,}$/i.test(threadId)) throw new Error("invalid thread id");
+    const result = await getHost().promoteThread(threadId);
+    await activityBridge?.refresh();
+    return result;
+  });
   handle(
     "pideck:subagents:control",
     async (_e, opts: { action: "steer" | "follow-up" | "stop"; runId: string; message?: string }) => {

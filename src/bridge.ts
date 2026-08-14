@@ -45,6 +45,8 @@ export interface ThreadActivity {
   name: string | null;
   goal: string;
   status: string;
+  cwd?: string;
+  parentSessionFile?: string | null;
   mode: string;
   profile: string;
   model: string;
@@ -60,6 +62,7 @@ export interface ThreadActivity {
   testsRun: string[];
   blocker: string | null;
   failureReason: string | null;
+  milestones?: Array<{ at: string; name: string; note?: string }>;
   recentMessages?: Array<{ at: string; role: string; text: string }>;
   revision?: number;
 }
@@ -250,9 +253,17 @@ export interface SessionTreeRow {
   childCount: number;
 }
 
+export interface SessionWindow {
+  messages: any[];
+  /** Byte offset of the first message in the window (for older windows). */
+  startOffset: number;
+}
+
 export interface Bridge {
   listSessions(): Promise<ProjectGroup[]>;
-  getSessionMessages(path: string): Promise<any[]>;
+  getSessionMessages(path: string): Promise<SessionWindow>;
+  getSessionWindow(path: string, endOffset: number, countBytes?: number): Promise<SessionWindow>;
+  getToolOutput(toolCallId: string): Promise<{ content: string; truncated: boolean }>;
   pickFolder(): Promise<string | null>;
   openSession(opts: { path?: string; cwd: string; requestId?: number }): Promise<void>;
 
@@ -302,7 +313,8 @@ export interface Bridge {
   openExternal(url: string): Promise<void>;
 
   activityList(): Promise<ActivityUpdate>;
-  threadsControl(action: "steer" | "follow-up" | "stop", threadId: string, message?: string): Promise<void>;
+  threadsControl(action: "steer" | "follow-up" | "stop", threadId: string, message?: string): Promise<ThreadActivity>;
+  threadsPromote(threadId: string): Promise<{ sessionFile: string; cwd: string; parentSessionFile: string | null }>;
   subagentsControl(action: "steer" | "follow-up" | "stop", runId: string, message?: string): Promise<SubagentActivity>;
   subagentsPromote(runId: string): Promise<{ sessionFile: string; cwd: string; parentSessionFile: string | null }>;
   onActivityUpdate(cb: (payload: ActivityUpdate) => void): () => void;
@@ -339,7 +351,9 @@ export const bridgeAvailable: boolean = !!window.pideck;
 
 export const bridge: Bridge = window.pideck ?? {
   listSessions: () => Promise.resolve([]),
-  getSessionMessages: () => Promise.resolve([]),
+  getSessionMessages: () => Promise.resolve({ messages: [], startOffset: 0 }),
+  getSessionWindow: () => Promise.resolve({ messages: [], startOffset: 0 }),
+  getToolOutput: () => Promise.reject(new Error("bridge unavailable")),
   pickFolder: () => Promise.resolve(null),
   openSession: () => Promise.resolve(),
 
@@ -378,7 +392,8 @@ export const bridge: Bridge = window.pideck ?? {
   openExternal: () => Promise.resolve(),
 
   activityList: () => Promise.resolve({ threads: [], subagents: [] }),
-  threadsControl: () => Promise.resolve(),
+  threadsControl: () => Promise.reject(new Error("bridge unavailable")),
+  threadsPromote: () => Promise.reject(new Error("bridge unavailable")),
   subagentsControl: () => Promise.reject(new Error("bridge unavailable")),
   subagentsPromote: () => Promise.reject(new Error("bridge unavailable")),
   onActivityUpdate: () => () => {},

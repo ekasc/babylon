@@ -29,6 +29,8 @@ export type ChatItem =
       status: ToolStatus;
       output?: string;
       details?: any;
+      /** Output was clamped at the wire; a "show full" fetch is available. */
+      truncated?: boolean;
     }
   | { kind: "system"; key: string; text: string };
 
@@ -103,6 +105,23 @@ export function textOf(content: any): string {
       .join("");
   }
   return String(content);
+}
+
+/**
+ * Merges the live session view into the already-loaded transcript without
+ * dropping anything on screen: only live messages newer than the last loaded
+ * message are appended (timestamps are monotonic within a session). The loaded
+ * file transcript stays stable, which is what keeps big-session opens free of
+ * the wipe-flicker caused by pi's compacted live view replacing the tail.
+ */
+export function mergeLiveMessages(loaded: any[], live: any[]): any[] {
+  const last = loaded.length ? loaded[loaded.length - 1] : null;
+  const lastTs = typeof last?.timestamp === "number" ? last.timestamp : 0;
+  const fresh: any[] = [];
+  for (const message of live ?? []) {
+    if (typeof message?.timestamp === "number" && message.timestamp > lastTs) fresh.push(message);
+  }
+  return fresh.length ? [...loaded, ...fresh] : loaded;
 }
 
 export function messagesToItems(messages: any[]): ChatItem[] {
@@ -181,6 +200,7 @@ export function messagesToItems(messages: any[]): ChatItem[] {
         if (t) {
           t.status = m.isError ? "error" : "done";
           t.output = textOf(m.content);
+          t.truncated = m.truncated === true ? true : undefined;
         } else {
           items.push({
             kind: "tool",
@@ -189,6 +209,7 @@ export function messagesToItems(messages: any[]): ChatItem[] {
             name: m.toolName ?? "tool",
             status: m.isError ? "error" : "done",
             output: textOf(m.content),
+            truncated: m.truncated === true ? true : undefined,
           });
         }
         break;
@@ -206,7 +227,7 @@ export function messagesToItems(messages: any[]): ChatItem[] {
         break;
       }
       case "custom": {
-        if (m.display && m.customType === "babylon_subagent_activity") {
+        if (m.display && (m.customType === "babylon_subagent_activity" || m.customType === "babylon_thread_activity")) {
           items.push({ kind: "system", key: msgKey("c", m, messageIndex), text: textOf(m.content) });
         }
         break;
@@ -278,7 +299,7 @@ function applyEvent(state: State, ev: any): State {
           ],
         };
       }
-      if (m?.role === "custom" && m.display && m.customType === "babylon_subagent_activity") {
+      if (m?.role === "custom" && m.display && (m.customType === "babylon_subagent_activity" || m.customType === "babylon_thread_activity")) {
         return { ...state, items: [...state.items, { kind: "system", key: nextKey("c"), text: textOf(m.content) }] };
       }
       if (m?.role === "user") {
@@ -489,11 +510,31 @@ function sameItem(a: ChatItem, b: ChatItem): boolean {
       a.name === b.name &&
       a.status === b.status &&
       a.output === b.output &&
-      JSON.stringify(a.args) === JSON.stringify(b.args) &&
-      JSON.stringify(a.details) === JSON.stringify(b.details)
+      a.truncated === b.truncated &&
+      cheapSig(a.args) === cheapSig(b.args) &&
+      cheapSig(a.details) === cheapSig(b.details)
     );
   }
   return a.kind === "system" && b.kind === "system" && a.text === b.text;
+}
+
+/** O(keys) structural signature for tool args/details. Large strings are
+ *  compared by length + head/tail instead of byte-for-byte; any change flips
+ *  the signature, which is all sameItem needs (rebuilds stop comparing
+ *  megabytes of patch/diff text). */
+function cheapSig(value: any): string {
+  if (value == null) return "n";
+  if (typeof value === "string") {
+    return value.length > 128 ? `s${value.length}:${value.slice(0, 32)}:${value.slice(-32)}` : `s${value.length}:${value}`;
+  }
+  if (typeof value === "number") return `n${value}`;
+  if (typeof value === "boolean") return `b${value}`;
+  if (Array.isArray(value)) return `a[${value.length}:${value.map(cheapSig).join("|")}]`;
+  if (typeof value === "object") {
+    const keys = Object.keys(value).sort();
+    return `o{${keys.length}:${keys.map((key) => `${key}=${cheapSig(value[key])}`).join(";")}}`;
+  }
+  return "?";
 }
 
 export function fmtTokens(n?: number): string {

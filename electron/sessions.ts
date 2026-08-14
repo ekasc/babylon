@@ -291,18 +291,51 @@ function messageText(content: any): string {
   return content.map((block) => (typeof block === "string" ? block : block?.text ?? "")).join("");
 }
 
-/** Fast file preview. The live SDK hydrate corrects branches/compaction after switching. */
-export async function readSessionMessages(path: string): Promise<any[]> {
-  let raw: string;
-  try {
-    raw = await fs.readFile(path, "utf8");
-  } catch {
-    return [];
+/** Non-diff tool output cap. Diffs (details.patch/diff) ship in full because
+ *  they are the part the user actually reads; read/bash/etc. output is clamped
+ *  here so the renderer never receives megabytes a collapsed card can't show. */
+export const TOOL_OUTPUT_CLAMP = 16 * 1024;
+
+/** Clamps tool-output text in one parsed message, in place. Returns the message. */
+export function clampToolOutput(message: any): any {
+  if (!message || typeof message !== "object") return message;
+  if (message.role === "toolResult" && Array.isArray(message.content)) {
+    let used = 0;
+    const kept: any[] = [];
+    let truncated = false;
+    for (const block of message.content) {
+      if (!block || block.type !== "text") {
+        kept.push(block);
+        continue;
+      }
+      const text = String(block.text ?? "");
+      const remaining = TOOL_OUTPUT_CLAMP - used;
+      if (text.length <= remaining) {
+        kept.push(block);
+        used += text.length;
+        continue;
+      }
+      if (remaining > 0) kept.push({ ...block, text: text.slice(0, remaining) });
+      truncated = true;
+      break; // the rest of the blocks are dropped from the wire view
+    }
+    if (truncated) {
+      message.content = kept;
+      message.truncated = true;
+    }
+  } else if (message.role === "bashExecution" && typeof message.output === "string" && message.output.length > TOOL_OUTPUT_CLAMP) {
+    message.output = message.output.slice(0, TOOL_OUTPUT_CLAMP);
+    message.truncated = true;
   }
+  return message;
+}
+
+function projectMessages(entries: any[]): any[] {
   const messages: any[] = [];
-  for (const entry of parseLines(raw)) {
-    if (entry?.type === "message" && entry.message) messages.push(entry.message);
-    else if (entry?.type === "custom_message") {
+  for (const entry of entries) {
+    if (entry?.type === "message" && entry.message) {
+      messages.push({ ...clampToolOutput(entry.message), entryId: entry.id });
+    } else if (entry?.type === "custom_message") {
       messages.push({
         role: "custom",
         customType: entry.customType,
@@ -314,6 +347,82 @@ export async function readSessionMessages(path: string): Promise<any[]> {
     }
   }
   return messages;
+}
+
+const TAIL_BYTES = 2 * 1024 * 1024;
+
+/** Reads the tail of an append-only session file (last `maxBytes`, aligned to
+ *  line boundaries) and projects the messages. Returns the byte offset of the
+ *  first parsed line so older windows can be fetched on demand. */
+export async function readSessionTail(path: string, maxBytes = TAIL_BYTES): Promise<{ messages: any[]; startOffset: number }> {
+  return readSessionRange(path, undefined, maxBytes);
+}
+
+/** Reads a window of the file ending at `endOffset` (undefined = EOF), aligned
+ *  to line boundaries. Cost is O(maxBytes), never O(file size). */
+export async function readSessionRange(path: string, endOffset: number | undefined, maxBytes: number): Promise<{ messages: any[]; startOffset: number }> {
+  try {
+    const { size } = await fs.stat(path);
+    const end = endOffset ?? size;
+    let window = maxBytes;
+    for (;;) {
+      const start = Math.max(0, end - window);
+      const handle = await fs.open(path, "r");
+      let text: string;
+      try {
+        const buf = Buffer.alloc(end - start);
+        await handle.read(buf, 0, buf.length, start);
+        text = buf.toString("utf8");
+      } finally {
+        await handle.close();
+      }
+      const firstLine = text.indexOf("\n");
+      const from = firstLine === -1 ? 0 : firstLine + 1;
+      const entries: any[] = [];
+      for (const line of text.slice(from).split("\n")) {
+        if (!line.trim()) continue;
+        try {
+          entries.push(JSON.parse(line));
+        } catch {
+          /* bounded edge: partial record */
+        }
+      }
+      if (entries.length || start === 0) {
+        return { messages: projectMessages(entries), startOffset: start + from };
+      }
+      // The chunk ended on a boundary newline or mid-line (e.g. a multi-MB
+      // tool output): extend the window backward until a complete line appears
+      // or the file start is reached.
+      window *= 2;
+    }
+  } catch {
+    return { messages: [], startOffset: 0 };
+  }
+}
+
+/** Reads one toolResult's full content straight from the file on demand.
+ *  Used by the "show full output" affordance after W1 clamping. */
+export async function readToolOutput(path: string, toolCallId: string, cap = 8 * 1024 * 1024): Promise<{ content: string; truncated: boolean }> {
+  try {
+    const raw = await fs.readFile(path, "utf8");
+    for (const line of raw.split("\n")) {
+      if (!line.includes(toolCallId)) continue;
+      let entry: any;
+      try {
+        entry = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const m = entry?.message;
+      if (m?.toolCallId !== toolCallId) continue;
+      const content = messageText(m.content);
+      const truncated = content.length > cap;
+      return { content: truncated ? content.slice(0, cap) : content, truncated };
+    }
+    throw new Error("Tool output not found");
+  } catch (error: any) {
+    throw new Error(`Failed to read tool output: ${error?.message ?? error}`);
+  }
 }
 
 function truncate(value: string, length: number): string {

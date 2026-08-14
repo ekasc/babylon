@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useReducer, useRef, useState } from "react";
-import { bridge, bridgeAvailable, type ActivityUpdate, type CommandInfo, type HistoryProjection, type ProjectGroup, type RollbackPlan, type SessionStatus, type WorkflowRunSummary } from "./bridge";
-import { initialState, reducer } from "./store";
+import { bridge, bridgeAvailable, type ActivityUpdate, type CommandInfo, type HistoryProjection, type ProjectGroup, type RollbackPlan, type SessionStatus, type SessionWindow, type WorkflowRunSummary } from "./bridge";
+import { initialState, mergeLiveMessages, reducer } from "./store";
 import { shouldAcceptEvent } from "./sessionLifecycle";
 import { insertCommand } from "./commands";
 import Sidebar from "./components/Sidebar";
@@ -60,6 +60,21 @@ export default function App() {
   });
   const [draftRequest, setDraftRequest] = useState<{ id: number; text: string } | null>(null);
   const [promotedParent, setPromotedParent] = useState<{ path: string; cwd: string } | null>(null);
+  // Optimistic active session: set synchronously on click so the sidebar row
+  // highlights instantly; the host's status confirm later keeps it exact.
+  const [activeSessionPath, setActiveSessionPath] = useState<string | null>(null);
+  // Optimistic header title: shown instantly from the clicked row, replaced by
+  // the host's sessionName when it hydrates.
+  const [headerName, setHeaderName] = useState<string | null>(null);
+  // "Preparing…" only appears if the host stays not-ready past a beat — fast
+  // switches (now <100ms) never flash it; cold first-opens still get the hint.
+  const [preparingVisible, setPreparingVisible] = useState(false);
+  // How many chat items ChatView mounts; the window is a suffix that grows
+  // upward when older transcript windows stream in.
+  const [renderCap, setRenderCap] = useState(Number.MAX_SAFE_INTEGER);
+  // Whether a stored-transcript window older than the current one exists.
+  const [canLoadMore, setCanLoadMore] = useState(false);
+  const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [activity, setActivity] = useState<ActivityUpdate>({ threads: [], subagents: [] });
   const [workflowRuns, setWorkflowRuns] = useState<WorkflowRunSummary[]>([]);
   const [wtBusy, setWtBusy] = useState(false);
@@ -69,6 +84,21 @@ export default function App() {
   // once the in-process switch completes — no Hero flash, no blocking.
   const [hasSession, setHasSession] = useState(false);
   const [liveReady, setLiveReady] = useState(false);
+
+  // Debounce the "Preparing…" indicator: show it only when the host has been
+  // not-ready for >250ms (cold first-opens), so sub-100ms switches never flash it.
+  useEffect(() => {
+    if (liveReady) {
+      setPreparingVisible(false);
+      return;
+    }
+    if (!hasSession) {
+      setPreparingVisible(false);
+      return;
+    }
+    const timer = setTimeout(() => setPreparingVisible(true), 250);
+    return () => clearTimeout(timer);
+  }, [liveReady, hasSession]);
   // The epoch of the session currently on screen. Agent events are tagged with
   // the epoch captured when they start; events from a stale (previous) session
   // are dropped so streams can't bleed into a freshly-opened transcript.
@@ -78,6 +108,20 @@ export default function App() {
   const switchingRef = useRef(false);
   const liveReadyRef = useRef(false);
   const activePathRef = useRef<string | null>(null);
+  // Stored-transcript windows: the messages currently in view plus the byte
+  // offset of the oldest loaded one, so scrolling to the top streams exactly
+  // the preceding window instead of the whole file. The transcript only ever
+  // grows (older windows prepend, live messages append), never shrinks, which
+  // is what keeps big-session opens free of wipe-flicker.
+  const loadedMessagesRef = useRef<any[]>([]);
+  const earliestOffsetRef = useRef<number | null>(null);
+  const renderCapRef = useRef(Number.MAX_SAFE_INTEGER);
+  const loadingMoreRef = useRef(false);
+  // Per-session transcript cache (bounded LRU, opencode's SESSION_CACHE
+  // pattern): switching back renders from memory instead of re-reading the
+  // file, and the host re-warms in the background.
+  const sessionCacheRef = useRef(new Map<string, { messages: any[]; earliestOffset: number | null; canLoadMore: boolean }>());
+  const prefetchingRef = useRef(new Set<string>());
   const streamingRef = useRef(false);
   const hasSessionRef = useRef(false);
   const rollbackDraftRef = useRef<string | null>(null);
@@ -202,6 +246,56 @@ export default function App() {
     []
   );
 
+  // Chunked transcript rendering: the full transcript is projected once (a
+  // couple of ms) and `rebuild` keeps the store consistent, but ChatView only
+  // mounts a growing window of items per event-loop tick. A huge stored
+  // transcript never blocks the main thread with one multi-hundred-millisecond
+  // React commit. Scheduling uses a MessageChannel (the same trick as React's
+  // scheduler): rAF stalls when the window is occluded or minimized, which
+  // would freeze hydration mid-way.
+  const scheduleTranscript = useCallback((messages: any[], epoch: number) => {
+    const CHUNK = 400;
+    // First paint is a small suffix window (the latest ~150 messages mount in
+    // ~15ms), then the window grows upward in the background. Keeps a switch
+    // to a big session perceptually instant while never freezing the thread.
+    const INITIAL_WINDOW = 150;
+    dispatch({ type: "rebuild", messages });
+    if (messages.length <= INITIAL_WINDOW) {
+      setRenderCap(Number.MAX_SAFE_INTEGER);
+      renderCapRef.current = Number.MAX_SAFE_INTEGER;
+      return;
+    }
+    setRenderCap(INITIAL_WINDOW);
+    renderCapRef.current = INITIAL_WINDOW;
+    const channel = new MessageChannel();
+    let visible = INITIAL_WINDOW;
+    channel.port1.onmessage = () => {
+      if (epoch !== epochRef.current) return;
+      visible += CHUNK;
+      // The window is a suffix: it grows upward toward older messages, so a
+      // bottom-pinned viewport never jumps while a big transcript mounts.
+      if (visible >= messages.length) {
+        setRenderCap(Number.MAX_SAFE_INTEGER);
+        renderCapRef.current = Number.MAX_SAFE_INTEGER;
+        return;
+      }
+      setRenderCap(visible);
+      renderCapRef.current = visible;
+      channel.port2.postMessage(null);
+    };
+    channel.port2.postMessage(null);
+  }, []);
+
+  // Grow the suffix window after older messages are prepended, so the newly
+  // loaded region becomes visible while the current viewport stays put.
+  const growRenderCap = useCallback((by: number) => {
+    setRenderCap((current) => {
+      const next = current >= Number.MAX_SAFE_INTEGER / 2 ? current : current + by;
+      renderCapRef.current = next;
+      return next;
+    });
+  }, []);
+
   const hydrate = useCallback(async (expectedEpoch = epochRef.current) => {
     try {
       const [msgs, ms, commandData, st, statsData, wt, nextHistory] = await Promise.all([
@@ -214,7 +308,12 @@ export default function App() {
         bridge.getHistory(),
       ]);
       if (expectedEpoch !== epochRef.current) return;
-      dispatch({ type: "rebuild", messages: msgs });
+      // Never wipe the on-screen transcript: append only live messages newer
+      // than the last loaded one. This is what keeps big-session opens stable
+      // (the live compacted view no longer replaces the file tail).
+      loadedMessagesRef.current = mergeLiveMessages(loadedMessagesRef.current, msgs);
+      scheduleTranscript(loadedMessagesRef.current, expectedEpoch);
+      setCanLoadMore(earliestOffsetRef.current != null && earliestOffsetRef.current > 0);
       setModels(ms ?? []);
       setCommands(commandData ?? []);
       setAgentState(st);
@@ -245,6 +344,7 @@ export default function App() {
           liveReadyRef.current = true;
           activeSessionIdRef.current = s.state?.sessionId ?? null;
           activePathRef.current = s.sessionPath ?? s.state?.sessionFile ?? activePathRef.current;
+          setActiveSessionPath(activePathRef.current);
           setLiveReady(true);
           void hydrate(epochRef.current);
         } else if (s.status === "starting") {
@@ -259,6 +359,46 @@ export default function App() {
       }),
     [hydrate, toast]
   );
+
+  // Predictive fetch (kills the serial IPC from the click path): hovering a
+  // sidebar row warms its tail into the LRU cache, so a click is a fully
+  // synchronous swap — no await, one batched paint.
+  const prefetchSession = useCallback((path: string) => {
+    const cache = sessionCacheRef.current;
+    if (cache.has(path) || prefetchingRef.current.has(path)) return;
+    prefetchingRef.current.add(path);
+    bridge
+      .getSessionMessages(path)
+      .then((window) => {
+        prefetchingRef.current.delete(path);
+        cache.delete(path);
+        cache.set(path, { messages: window.messages, earliestOffset: window.startOffset, canLoadMore: window.startOffset > 0 });
+        while (cache.size > 6) {
+          const oldest = cache.keys().next().value;
+          if (oldest !== undefined) cache.delete(oldest);
+        }
+      })
+      .catch(() => prefetchingRef.current.delete(path));
+  }, []);
+
+  // Keep the per-session transcript cache fresh (skipped while a switch is in
+  // flight so the previous session's items never land under the new path).
+  useEffect(() => {
+    if (switchingRef.current || state.streaming) return;
+    const path = activePathRef.current;
+    if (!path || !state.items.length) return;
+    const cache = sessionCacheRef.current;
+    cache.delete(path);
+    cache.set(path, {
+      messages: loadedMessagesRef.current,
+      earliestOffset: earliestOffsetRef.current,
+      canLoadMore,
+    });
+    while (cache.size > 6) {
+      const oldest = cache.keys().next().value;
+      if (oldest !== undefined) cache.delete(oldest);
+    }
+  }, [state.items, state.streaming, canLoadMore]);
 
   // When a run settles, resync from the source of truth.
   useEffect(() => {
@@ -276,7 +416,7 @@ export default function App() {
           bridge.getHistory(),
         ]);
         if (expectedEpoch !== epochRef.current) return;
-        dispatch({ type: "rebuild", messages: msgs });
+        scheduleTranscript(msgs, expectedEpoch);
         setAgentState(st);
         setStats(statsData);
         setWorktreeInfo(wt);
@@ -296,19 +436,43 @@ export default function App() {
     })();
   }, [state.settledNonce, refreshSessions]);
 
+  // Clear the switch cover shortly after it fades (animation is 120ms; the
+  // timeout also covers the reduced-motion path where no animation fires). The
   const openSession = useCallback(
-    async (path: string | undefined, cwd: string) => {
+    async (path: string | undefined, cwd: string, displayName?: string) => {
       const expectedEpoch = ++epochRef.current;
       const requestId = ++latestRequestRef.current;
       switchingRef.current = true;
       liveReadyRef.current = false;
       activeSessionIdRef.current = null;
       activePathRef.current = path ?? null;
-      // Fetch the stored transcript FIRST so the UI never renders an empty
-      // chat while we switch — `reset` + `rebuild` batch into one render with
-      // the messages already populated (no empty-state flicker).
-      let cached: any[] | undefined;
-      if (path) {
+      // Optimistic: the sidebar row highlights and the active identity flips
+      // immediately, before any data loads. The old chat stays visible until
+      // the new transcript is ready, then swaps in one frame (tail fetch is
+      // ~30ms even for the largest sessions).
+      setActiveSessionPath(path ?? null);
+      setHeaderName(displayName ?? null);
+      // Transcript cache (opencode's SESSION_CACHE pattern): switching back to
+      // a recently-viewed session renders from memory — no fetch, no re-read —
+      // and the host re-warms in the background. The cache is populated by the
+      // items effect below and evicted LRU (bounded by the 16KB tool-output
+      // clamp, so a few sessions stay cheap).
+      const memo = path ? sessionCacheRef.current.get(path) : undefined;
+      if (memo) {
+        // Refresh LRU recency.
+        const cache = sessionCacheRef.current;
+        cache.delete(path!);
+        cache.set(path!, memo);
+        loadedMessagesRef.current = memo.messages;
+        earliestOffsetRef.current = memo.earliestOffset;
+        setCanLoadMore(memo.canLoadMore);
+      }
+      // Fetch the stored transcript tail FIRST so the UI never renders an
+      // empty chat while we switch — `reset` + `rebuild` batch into one render
+      // with the messages already populated (no empty-state flicker). The tail
+      // read is O(tail), not O(file); older windows load on demand.
+      let cached: SessionWindow | undefined;
+      if (path && !memo) {
         try {
           cached = await bridge.getSessionMessages(path);
         } catch {
@@ -320,15 +484,28 @@ export default function App() {
       setHasSession(true);
       setLiveReady(false);
       setStats(null);
-      setAgentState(null);
-      setModels([]);
+      // Keep the previous agentState (model, thinking level) until hydrate
+      // replaces it: nulling it here blanks the model/thinking pickers to
+      // "select model" / disabled for every switch, which reads as flicker.
+      // The new session's values land within ~100ms via hydrate.
+      // Models are session-independent (one global registry): keep them across
+      // switches so the model picker and thinking options never wait on the
+      // host open. Commands are cwd-bound and must reload per project.
       setCommands([]);
       setWorktreeInfo(null);
       setHistory({ turns: [], leafId: null, hasBranches: false });
       rollbackDraftRef.current = null;
       setRollbackPlan(null);
       dispatch({ type: "reset" });
-      if (cached) dispatch({ type: "rebuild", messages: cached });
+      if (memo) {
+        // Render from memory; the host re-warms below.
+        scheduleTranscript(memo.messages, expectedEpoch);
+      } else {
+        loadedMessagesRef.current = cached?.messages ?? [];
+        earliestOffsetRef.current = cached?.startOffset ?? null;
+        setCanLoadMore(cached != null && cached.startOffset > 0);
+        if (cached?.messages.length) scheduleTranscript(cached.messages, expectedEpoch);
+      }
       try {
         await bridge.openSession({ path, cwd, requestId });
       } catch (e: any) {
@@ -341,6 +518,35 @@ export default function App() {
     },
     [toast]
   );
+
+  // Scroll-up streaming: fetch the next older window of the stored transcript
+  // and prepend it, growing the suffix window so the newly loaded region is
+  // visible while the current viewport stays put.
+  const loadEarlier = useCallback(async () => {
+    const path = activePathRef.current;
+    const endOffset = earliestOffsetRef.current;
+    if (!path || endOffset == null || loadingMoreRef.current) return;
+    const epoch = epochRef.current;
+    loadingMoreRef.current = true;
+    setLoadingEarlier(true);
+    try {
+      const older = await bridge.getSessionWindow(path, endOffset);
+      if (epoch !== epochRef.current || !older.messages.length) return;
+      const added = older.messages.length;
+      loadedMessagesRef.current = [...older.messages, ...loadedMessagesRef.current];
+      earliestOffsetRef.current = older.startOffset;
+      setCanLoadMore(older.startOffset > 0);
+      scheduleTranscript(loadedMessagesRef.current, epoch);
+      growRenderCap(added);
+    } catch {
+      /* file may have moved; the trigger simply stops firing */
+    } finally {
+      if (epoch === epochRef.current) {
+        loadingMoreRef.current = false;
+        setLoadingEarlier(false);
+      }
+    }
+  }, [growRenderCap, scheduleTranscript]);
 
   const newSession = useCallback(async () => {
     const cwd = await bridge.pickFolder();
@@ -562,15 +768,16 @@ export default function App() {
     <div className="app-shell flex h-full">
       <Sidebar
         groups={groups}
-        activePath={status.sessionPath}
+        activePath={activeSessionPath ?? status.sessionPath}
         activeCwd={status.cwd}
         activityCount={liveActivityCount}
         activityOpen={showWorkflowsPanel}
         treeOpen={showBranchPanel}
         canOpenTree={ready && hasSession}
-        onOpen={(path, cwd) => {
+        onPrefetch={prefetchSession}
+        onOpen={(path, cwd, name) => {
           setPromotedParent(null);
-          void openSession(path, cwd);
+          void openSession(path, cwd, name);
         }}
         onNew={newSession}
         onOpenActivity={() => {
@@ -591,6 +798,10 @@ export default function App() {
             {hasSession ? (
               <ChatView
                 items={state.items}
+                renderCount={renderCap}
+                canLoadMore={canLoadMore}
+                loadingEarlier={loadingEarlier}
+                onNeedEarlier={() => void loadEarlier()}
                 streaming={state.streaming}
                 chromeTop={bannerVisible ? 104 : 66}
                 chromeBottom={history.activeRollback ? 226 : 156}
@@ -607,7 +818,7 @@ export default function App() {
             <StatusDot status={liveReady ? "ready" : status.status} />
             <div className="min-w-0 flex items-baseline gap-2.5">
               <div className="truncate text-[15px] font-semibold tracking-[-0.01em]">
-                {agentState?.sessionName ?? (hasSession ? "Untitled session" : "Babylon")}
+                {headerName ?? agentState?.sessionName ?? (hasSession ? "Untitled session" : "Babylon")}
               </div>
               <div className="truncate text-[13px] text-dim">
                 {hasSession && status.cwd ? shortPath(status.cwd) : "Choose a project to begin"}
@@ -624,7 +835,7 @@ export default function App() {
                 <FolderIcon size={16} />
               </button>
             </div>
-            {hasSession && !liveReady ? <span className="shrink-0 text-[13px] text-dim">Preparing…</span> : null}
+            {preparingVisible ? <span className="shrink-0 text-[13px] text-dim">Preparing…</span> : null}
           </header>
 
           {bannerVisible ? (

@@ -18,7 +18,9 @@ import { projectHistory } from "./session-history";
 import { ActiveRollback, RollbackStore, entryDigest, type TurnCheckpoint } from "./rollback-store";
 import { SnapshotStore, type RestoreChange, type SnapshotCapture } from "./snapshot-store";
 import { toPiImages } from "./prompt-images";
+import { clampToolOutput, readToolOutput } from "./sessions";
 import { ManagedSubagents, type ManagedSubagentRecord, type SubagentControlAction, type SubagentParentEvent } from "./subagents";
+import { ThreadManager } from "./threads";
 import {
   AgentSessionRuntime,
   ModelRuntime,
@@ -86,6 +88,7 @@ export class PiHost {
   private readonly snapshots: SnapshotStore;
   private readonly rollbacks: RollbackStore;
   private managedSubagents!: ManagedSubagents;
+  private threads!: ThreadManager;
   private readonly rollbackPlans = new Map<string, {
     id: string;
     sessionId: string;
@@ -127,9 +130,34 @@ export class PiHost {
       onUpdate: () => this.opts.onEvent({ type: "pideck_subagents_changed" }),
       onParentMessage: (record, action, message) => this.notifySubagentParent(record, action, message),
     });
+    this.threads = new ThreadManager({
+      runTool: (toolName, args) => {
+        const session = this.runtime.session;
+        const tool = session.getToolDefinition(toolName);
+        if (!tool) throw new Error("Threads extension is not available in this session");
+        return tool.execute(
+          `babylon-thread-${randomUUID()}`,
+          args,
+          undefined,
+          undefined,
+          session.extensionRunner.createContext()
+        );
+      },
+      onParentMessage: (thread, action, message) => this.notifyThreadParent(thread, action, message),
+    });
     const trustStore = new ProjectTrustStore(agentDir);
     const globalSettings = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
     const trustByCwd = new Map<string, boolean>();
+    // Per-cwd service cache. Extensions, skills, prompts, settings and tools are
+    // cwd-bound, so services must NOT leak across projects — but they are fully
+    // shareable across sessions in the SAME cwd. pi separates service creation
+    // from session creation for exactly this reason; rebuilding services on
+    // every switch reloaded all extensions/skills/templates and made session
+    // opens cost ~1s. Keyed by cwd; rebuilt if the trust decision changes.
+    const serviceByCwd = new Map<
+      string,
+      { projectTrusted: boolean; settingsManager: SettingsManager; services: Awaited<ReturnType<typeof createAgentSessionServices>> }
+    >();
 
     const createRuntime: CreateAgentSessionRuntimeFactory = async (input) => {
       const runtimeCwd = resolve(input.cwd);
@@ -159,13 +187,19 @@ export class PiHost {
       // cwd-bound. Reusing them after session replacement makes project A leak
       // into project B and leaves extension contexts stale. Only ModelRuntime is
       // process-wide and safe to share.
-      const settingsManager = SettingsManager.create(runtimeCwd, agentDir, { projectTrusted });
-      const services = await createAgentSessionServices({
-        cwd: runtimeCwd,
-        agentDir,
-        settingsManager,
-        modelRuntime: this.modelRuntime,
-      });
+      let cached = serviceByCwd.get(runtimeCwd);
+      if (!cached || cached.projectTrusted !== projectTrusted) {
+        const settingsManager = SettingsManager.create(runtimeCwd, agentDir, { projectTrusted });
+        const services = await createAgentSessionServices({
+          cwd: runtimeCwd,
+          agentDir,
+          settingsManager,
+          modelRuntime: this.modelRuntime,
+        });
+        cached = { projectTrusted, settingsManager, services };
+        serviceByCwd.set(runtimeCwd, cached);
+      }
+      const { settingsManager, services } = cached;
       const result = await createAgentSessionFromServices({
         services,
         sessionManager: input.sessionManager,
@@ -677,10 +711,15 @@ export class PiHost {
       .filter((entry: any) => entry.type === "message" && entry.message?.role === "user");
     let userIndex = 0;
     return messages.map((message: any) => {
-      if (message?.role !== "user") return message;
+      if (message?.role !== "user") return clampToolOutput(message);
       const entry = userEntries[userIndex++];
-      return entry ? { ...message, entryId: entry.id } : message;
+      return entry ? clampToolOutput({ ...message, entryId: entry.id }) : clampToolOutput(message);
     });
+  }
+  async getToolOutput(toolCallId: string): Promise<{ content: string; truncated: boolean }> {
+    const file = this.runtime.session.sessionFile;
+    if (!file) throw new Error("No session file for the active session");
+    return readToolOutput(file, toolCallId);
   }
   async getStats(): Promise<any> {
     await this.ensureSession();
@@ -982,22 +1021,59 @@ export class PiHost {
   }
 
   async controlThread(action: "steer" | "follow-up" | "stop", threadId: string, message?: string): Promise<any> {
-    await this.ensureSession();
-    const session = this.runtime.session;
-    const toolName = action === "stop" ? "close_thread" : "send_input";
-    const tool = session.getToolDefinition(toolName);
-    if (!tool) throw new Error("Threads extension is not available in this session");
-    const result = await tool.execute(
-      `babylon-thread-${randomUUID()}`,
+    return this.threads.control(this.cwd, action, threadId, message);
+  }
+
+  async promoteThread(threadId: string): Promise<{ sessionFile: string; cwd: string; parentSessionFile: string | null }> {
+    return this.threads.promote(this.cwd, threadId);
+  }
+
+  private async notifyThreadParent(
+    thread: { threadId: string; name: string | null; parentSessionId: string | null },
+    action: "steer" | "follow-up" | "stop",
+    message?: string
+  ): Promise<void> {
+    if (!thread.parentSessionId || thread.parentSessionId !== this.runtime.session.sessionId) return;
+    const label = thread.name ?? thread.threadId.slice(0, 8);
+    const content =
       action === "stop"
-        ? { threadId, reason: "stopped from Babylon" }
-        : { threadId, message: message!.trim(), delivery: action === "steer" ? "steer" : "follow_up" },
-      undefined,
-      undefined,
-      session.extensionRunner.createContext()
-    );
-    if ((result as any)?.isError) throw new Error((result as any)?.content?.[0]?.text ?? "Thread control failed");
-    return result;
+        ? `[Babylon Thread Activity]\nThread ${label} was stopped from Activity.`
+        : `[Babylon Thread Activity]\nThe user sent this ${action === "steer" ? "steering message" : "follow-up"} to thread ${label}:\n\n${message}`;
+    await this.runtime.session.sendCustomMessage({
+      customType: "babylon_thread_activity",
+      content,
+      display: true,
+      details: { threadId: thread.threadId, action, message },
+    });
+  }
+
+  /** Milestone-watching notifications: the main agent learns when a thread
+   *  reaches a checkpoint, blocks, or finishes — without polling. */
+  async notifyThreadEvent(thread: { threadId: string; name: string | null; parentSessionId?: string | null }, event: any): Promise<void> {
+    if (!thread.parentSessionId || thread.parentSessionId !== this.runtime.session.sessionId) return;
+    const label = thread.name ?? thread.threadId.slice(0, 8);
+    let content: string;
+    if (event?.type === "milestone") {
+      const name = event.milestone?.name ?? "checkpoint";
+      content = `[Babylon Thread Activity]\nThread ${label} reached a milestone — ${name}${event.milestone?.note ? `: ${event.milestone.note}` : ""}`;
+    } else if (event?.type === "blocked") {
+      content = `[Babylon Thread Activity]\nThread ${label} is blocked${event.blocker ? `: ${event.blocker}` : ""}.`;
+    } else {
+      const done = event?.status === "failed" ? "failed" : event?.status === "stopped" ? "was stopped" : "completed";
+      content = `[Babylon Thread Activity]\nThread ${label} ${done}.`;
+    }
+    await this.runtime.session.sendCustomMessage({
+      customType: "babylon_thread_activity",
+      content,
+      display: true,
+      details: { threadId: thread.threadId, ...event },
+    });
+    // Custom messages emit no renderer event on their own; deliver a
+    // message_start so the line appears in the visible chat immediately.
+    this.opts.onEvent({
+      type: "message_start",
+      message: { role: "custom", customType: "babylon_thread_activity", content, display: true },
+    });
   }
 
   private async notifySubagentParent(record: ManagedSubagentRecord, action: SubagentParentEvent, message?: string): Promise<void> {
@@ -1013,6 +1089,11 @@ export class PiHost {
       content,
       display: true,
       details: { runId: record.runId, action, message },
+    });
+    // Surface custom messages in the visible chat (they emit no renderer event).
+    this.opts.onEvent({
+      type: "message_start",
+      message: { role: "custom", customType: "babylon_subagent_activity", content, display: true },
     });
   }
 

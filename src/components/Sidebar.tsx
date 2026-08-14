@@ -1,4 +1,4 @@
-import { memo, useMemo, useState } from "react";
+import { memo, useMemo, useRef, useState } from "react";
 import type { ProjectGroup, SessionMeta } from "../bridge";
 import { ChevronIcon, FlaskIcon, LayersIcon, PiMark, SearchIcon } from "./icons";
 
@@ -23,7 +23,8 @@ interface Props {
   activityOpen: boolean;
   treeOpen: boolean;
   canOpenTree: boolean;
-  onOpen(path: string | undefined, cwd: string): void;
+  onOpen(path: string | undefined, cwd: string, name?: string): void;
+  onPrefetch?(path: string): void;
   onNew(): void;
   onOpenActivity(): void;
   onOpenTree(): void;
@@ -144,16 +145,36 @@ const SessionRow = memo(function SessionRow({
   cwd,
   active,
   onOpen,
+  onPrefetch,
 }: {
   session: SessionMeta;
   cwd: string;
   active: boolean;
-  onOpen(path: string | undefined, cwd: string): void;
+  onOpen(path: string | undefined, cwd: string, name?: string): void;
+  onPrefetch?(path: string): void;
 }) {
   const title = session.name ?? session.firstUserText ?? session.id.slice(0, 8);
+  // Hover intent: after 150ms of dwelling, warm the transcript into the cache
+  // so a click is a synchronous swap with no serial fetch.
+  const hoverTimer = useRef(0);
+  const cancelPrefetch = () => {
+    if (hoverTimer.current) {
+      window.clearTimeout(hoverTimer.current);
+      hoverTimer.current = 0;
+    }
+  };
   return (
     <button
-      onClick={() => onOpen(session.path, cwd)}
+      onClick={() => onOpen(session.path, cwd, title)}
+      onMouseEnter={() => {
+        if (!onPrefetch || active) return;
+        cancelPrefetch();
+        hoverTimer.current = window.setTimeout(() => onPrefetch(session.path), 150);
+      }}
+      onMouseLeave={cancelPrefetch}
+      onFocus={() => {
+        if (onPrefetch && !active) onPrefetch(session.path);
+      }}
       className={`sidebar-session ${active ? "is-active" : ""}`}
       title={`${title}\n${session.path}`}
     >
