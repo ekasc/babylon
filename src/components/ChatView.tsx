@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { ChatItem } from "../store";
 import type { HistoryTurn } from "../bridge";
-import { UserMessage, AssistantMessage, ToolCard, SystemLine } from "./items";
+import { UserMessage, AssistantMessage, ToolCard, SystemLine, RecapLine } from "./items";
 
 interface Props {
   items: ChatItem[];
@@ -110,6 +110,8 @@ export default function ChatView({
               <AssistantMessage item={item} />
             ) : item.kind === "tool" ? (
               <ToolCard item={item} />
+            ) : item.kind === "recap" ? (
+              <RecapLine text={item.text} />
             ) : (
               <SystemLine text={item.text} />
             )}

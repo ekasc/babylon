@@ -18,7 +18,9 @@ import { projectHistory } from "./session-history";
 import { ActiveRollback, RollbackStore, entryDigest, type TurnCheckpoint } from "./rollback-store";
 import { SnapshotStore, type RestoreChange, type SnapshotCapture } from "./snapshot-store";
 import { toPiImages } from "./prompt-images";
-import { clampToolOutput, readToolOutput } from "./sessions";
+import { clampToolOutput, readSessionTail, readToolOutput } from "./sessions";
+import { RecapStore } from "./recap-store";
+import { buildRecapPrompt, normalizeRecapText, pickRecapDelta, recapDue, recapWorthy, RECAP_INTERVAL_MS, type Recap } from "./recap";
 import { ManagedSubagents, type ManagedSubagentRecord, type SubagentControlAction, type SubagentParentEvent } from "./subagents";
 import { ThreadManager } from "./threads";
 import {
@@ -87,6 +89,12 @@ export class PiHost {
   private _cwd: string;
   private readonly snapshots: SnapshotStore;
   private readonly rollbacks: RollbackStore;
+  private readonly recaps: RecapStore;
+  private readonly recapping = new Set<string>();
+  /** Session file → last observed message timestamp (ms). Event-driven, so the
+   *  sweep never reads the session file unless a recap might be due. */
+  private readonly lastMessageAt = new Map<string, number>();
+  private recapTimer: ReturnType<typeof setInterval> | null = null;
   /** The session file the host currently owns (null when none is open). */
   get activeSessionFile(): string | null {
     return this.runtime?.session?.sessionFile ?? null;
@@ -115,6 +123,17 @@ export class PiHost {
     const stateDir = opts.stateDir ?? join(opts.agentDir ?? getAgentDir(), "pideck-state");
     this.snapshots = new SnapshotStore(join(stateDir, "snapshots"));
     this.rollbacks = new RollbackStore(join(stateDir, "rollbacks"));
+    this.recaps = new RecapStore(join(stateDir, "recaps"));
+    // Auto-recap: after a quiet period in the active chat, summarize the
+    // stretch since the previous recap with a cheap model. The tick is bounded
+    // by the recap interval (min 2s) so PIDECK_RECAP_MS fast-forward works for
+    // verification.
+    const intervalMs = Number(process.env.PIDECK_RECAP_MS) || RECAP_INTERVAL_MS;
+    this.recapTimer = setInterval(
+      () => void this.sweepRecap(),
+      Math.min(30_000, Math.max(2_000, Math.round(intervalMs / 2)))
+    );
+    this.recapTimer.unref?.();
   }
 
   get session(): AgentSession {
@@ -350,6 +369,13 @@ export class PiHost {
       if (event.type === "message_end" && event.message?.role === "user" && !session.sessionManager.getSessionName()) {
         void this.suggestSessionName(session);
       }
+      if (event.type === "message_end" && event.message) {
+        const ts = event.message.timestamp;
+        this.lastMessageAt.set(
+          session.sessionFile ?? session.sessionId,
+          typeof ts === "number" ? ts : Date.parse(ts ?? "") || Date.now()
+        );
+      }
     });
   }
 
@@ -363,10 +389,14 @@ export class PiHost {
     if (this.sessionNaming.has(sessionId)) return;
     this.sessionNaming.add(sessionId);
     try {
-      const entries = session.sessionManager.getEntries();
-      const userTexts = entries
-        .filter((entry: any) => entry.type === "message" && entry.message?.role === "user")
-        .map((entry: any) => messageText(entry.message.content));
+      // Under pi >= 0.84.2 the in-memory manager keeps message content out of
+      // getEntries(), so the sample is read from the append-only file.
+      const file = session.sessionFile ?? session.sessionManager.getSessionFile();
+      const { messages } = file ? await readSessionTail(file) : { messages: [] as any[] };
+      const userTexts = messages
+        .filter((m: any) => m.role === "user")
+        .map((m: any) => messageText(m))
+        .filter((t: string) => t.trim().length > 0);
       const sample = userTexts.slice(-4).join("\n").slice(0, 1500);
       if (!sample.trim()) return;
       const title = await this.generateSessionTitle(sample);
@@ -381,24 +411,99 @@ export class PiHost {
   }
 
   private async generateSessionTitle(sample: string): Promise<string | null> {
+    const prompt =
+      "You are naming a coding-agent conversation. Reply with ONLY a short title (3-6 words, no quotes, no period) that captures the intent of this conversation:\n\n" +
+      sample;
+    const text = await this.askCheap(prompt, 200);
+    if (!text) return null;
+    return text.replace(/^["'“”]+|["'“”]+$/g, "").slice(0, 60);
+  }
+
+  /** One cheap, low-reasoning model call shared by naming and recaps. */
+  private async askCheap(prompt: string, maxTokens: number): Promise<string | null> {
     const model =
       this.modelRuntime.getModel("opencode-go", "deepseek-v4-flash") ??
       this.runtime.session.model;
     if (!model) return null;
-    const prompt =
-      "You are naming a coding-agent conversation. Reply with ONLY a short title (3-6 words, no quotes, no period) that captures the intent of this conversation:\n\n" +
-      sample;
-    const response = await this.modelRuntime.completeSimple(
-      model,
-      { messages: [{ role: "user", content: prompt }] } as any,
-      { reasoning: "low", maxTokens: 200 }
-    );
-    const text = (response?.content ?? [])
-      .map((block: any) => (block?.type === "text" ? block.text ?? "" : ""))
-      .join("")
-      .trim();
-    if (!text) return null;
-    return text.replace(/^["']+|["']+$/g, "").slice(0, 60);
+    try {
+      const response = await this.modelRuntime.completeSimple(
+        model,
+        { messages: [{ role: "user", content: prompt }] } as any,
+        { reasoning: "low", maxTokens }
+      );
+      return (response?.content ?? [])
+        .map((block: any) => (block?.type === "text" ? block.text ?? "" : ""))
+        .join("")
+        .trim();
+    } catch {
+      return null;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Auto-recap: after a quiet period in a chat, summarize the stretch since
+  // the last recap with the same cheap model. The recap is a Babylon-owned
+  // annotation (never written into the append-only session file) rendered as a
+  // "Recap: …" system line; getRecaps merges it into transcript windows.
+  // -------------------------------------------------------------------------
+
+  async getRecaps(sessionFile: string): Promise<Recap[]> {
+    return this.recaps.recapsFor(sessionFile);
+  }
+
+  private async sweepRecap(): Promise<void> {
+    const session = this.runtime?.session;
+    const file = session?.sessionFile;
+    if (!file || !session.sessionManager) return;
+    const intervalMs = Number(process.env.PIDECK_RECAP_MS) || RECAP_INTERVAL_MS;
+    const cached = this.lastMessageAt.get(file);
+    if (!cached || Date.now() - cached < intervalMs) return;
+    await this.maybeRecap(session, file);
+  }
+
+  private async maybeRecap(session: AgentSession, file: string): Promise<void> {
+    if (this.recapping.has(file)) return;
+    this.recapping.add(file);
+    try {
+      // The in-memory session manager keeps message content out of getEntries()
+      // for large sessions, so the delta is read from the append-only file —
+      // the same projection the transcript uses, with entryIds attached.
+      const { messages } = await readSessionTail(file);
+      if (!messages.length) return;
+      const lastMessageAt = messages.reduce(
+        (max, m) => Math.max(max, typeof m?.timestamp === "number" ? m.timestamp : 0),
+        0
+      );
+      if (!lastMessageAt) return;
+      const recaps = await this.recaps.recapsFor(file);
+      const lastRecapAt = recaps.reduce((max, r) => Math.max(max, Date.parse(r.at) || 0), 0) || null;
+      const intervalMs = Number(process.env.PIDECK_RECAP_MS) || RECAP_INTERVAL_MS;
+      if (!recapDue(lastMessageAt, lastRecapAt, Date.now(), intervalMs)) return;
+      const delta = pickRecapDelta(messages, recaps[recaps.length - 1]?.coveredEntryId ?? null);
+      if (!recapWorthy(delta.messages) || !delta.coveredEntryId) return;
+      const deltaText = delta.messages.map((m) => messageText(m)).join("\n").slice(0, 8000);
+      const text = await this.askCheap(buildRecapPrompt(deltaText), 320);
+      const line = normalizeRecapText(text ?? "");
+      if (!line) return;
+      const recap: Recap = {
+        id: randomUUID(),
+        at: new Date().toISOString(),
+        coveredEntryId: delta.coveredEntryId,
+        text: line,
+      };
+      await this.recaps.append(file, recap);
+      this.opts.onEvent({
+        type: "babylon_recap",
+        sessionId: session.sessionId,
+        sessionFile: file,
+        recap,
+      });
+      this.opts.onEvent({ type: "pideck_sessions_changed" });
+    } catch {
+      // Recaps are best-effort; a failed model call must never surface.
+    } finally {
+      this.recapping.delete(file);
+    }
   }
 
   private async relayPromotedSubagentReply(session: AgentSession, text: string): Promise<void> {
@@ -501,6 +606,7 @@ export class PiHost {
     this._cwd = opts.cwd;
     await this.restoreActiveRollbackLeaf();
     const state = await this.getState();
+    this.lastMessageAt.set(state.sessionFile ?? opts.path ?? opts.cwd, Date.now());
     this.opts.onStatus({ status: "ready", cwd: opts.cwd, sessionPath: state.sessionFile ?? opts.path, requestId: opts.requestId, state });
     return state;
     });

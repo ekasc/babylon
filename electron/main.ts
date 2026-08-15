@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { ActivityBridge, type ActivityUpdate } from "./activity";
 import { AgentEventBuffer } from "./event-buffer";
 import { PiHost } from "./pi-host";
+import { mergeRecaps } from "./recap";
 import { SessionIndex, readSessionRange, readSessionTail, readToolOutput } from "./sessions";
 import { resolveParentSessionFile } from "./threads";
 import { WorkflowsBridge, type WorkflowControlAction, type WorkflowsUpdate } from "./workflows";
@@ -342,15 +343,17 @@ function registerIpc(): void {
   };
 
   handle("pideck:list-sessions", () => sessionIndex.list());
-  handle("pideck:get-session-messages", (_e, path: string) => {
+  handle("pideck:get-session-messages", async (_e, path: string) => {
     const target = validateSessionPath(path);
-    return readSessionTail(target);
+    const window = await readSessionTail(target);
+    return { ...window, messages: mergeRecaps(window.messages, await getHost().getRecaps(target)) };
   });
 
-  handle("pideck:get-session-window", (_e, path: string, endOffset: number, countBytes?: number) => {
+  handle("pideck:get-session-window", async (_e, path: string, endOffset: number, countBytes?: number) => {
     const target = validateSessionPath(path);
     const maxBytes = Math.min(Math.max(countBytes ?? 2 * 1024 * 1024, 256 * 1024), 16 * 1024 * 1024);
-    return readSessionRange(target, endOffset, maxBytes);
+    const window = await readSessionRange(target, endOffset, maxBytes);
+    return { ...window, messages: mergeRecaps(window.messages, await getHost().getRecaps(target)) };
   });
 
   handle("pideck:get-tool-output", async (_e, toolCallId: string) => {

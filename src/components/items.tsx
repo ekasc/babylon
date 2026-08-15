@@ -82,6 +82,17 @@ export const SystemLine = memo(function SystemLine({ text }: { text: string }) {
   return <p className="conversation-system-in my-4 border-l-2 border-line py-1 pl-3 text-[13px] text-dim">{text}</p>;
 });
 
+/** Auto-recap annotation: a distinct, slightly raised card so a summary is
+ *  easy to spot in a long transcript without leaving the instrument register. */
+export const RecapLine = memo(function RecapLine({ text }: { text: string }) {
+  return (
+    <div className="conversation-system-in my-5 rounded-lg border border-line bg-inset/60 px-4 py-3">
+      <p className="text-[11px] font-semibold uppercase tracking-wider text-accent">Recap</p>
+      <p className="mt-1.5 whitespace-pre-wrap text-[14px] leading-6">{text}</p>
+    </div>
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Tool calls
 // ---------------------------------------------------------------------------

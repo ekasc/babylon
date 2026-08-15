@@ -32,7 +32,8 @@ export type ChatItem =
       /** Output was clamped at the wire; a "show full" fetch is available. */
       truncated?: boolean;
     }
-  | { kind: "system"; key: string; text: string };
+  | { kind: "system"; key: string; text: string }
+  | { kind: "recap"; key: string; text: string; at: number };
 
 export type DialogMethod = "select" | "confirm" | "input" | "editor";
 
@@ -227,7 +228,9 @@ export function messagesToItems(messages: any[]): ChatItem[] {
         break;
       }
       case "custom": {
-        if (m.display && (m.customType === "babylon_subagent_activity" || m.customType === "babylon_thread_activity")) {
+        if (m.display && m.customType === "babylon_recap") {
+          items.push({ kind: "recap", key: msgKey("c", m, messageIndex), text: textOf(m.content), at: typeof m.timestamp === "number" ? m.timestamp : 0 });
+        } else if (m.display && (m.customType === "babylon_subagent_activity" || m.customType === "babylon_thread_activity")) {
           items.push({ kind: "system", key: msgKey("c", m, messageIndex), text: textOf(m.content) });
         }
         break;
@@ -285,6 +288,15 @@ function applyEvent(state: State, ev: any): State {
 
     case "agent_settled":
       return { ...state, streaming: false, settledNonce: state.settledNonce + 1 };
+
+    case "babylon_recap": {
+      const text = ev.recap?.text;
+      if (!text) return state;
+      return {
+        ...state,
+        items: [...state.items, { kind: "recap", key: nextKey("c"), text, at: Date.parse(ev.recap?.at ?? "") || Date.now() }],
+      };
+    }
 
     case "pideck_history_changed":
       return { ...state, settledNonce: state.settledNonce + 1 };
@@ -516,7 +528,9 @@ function sameItem(a: ChatItem, b: ChatItem): boolean {
       cheapSig(a.details) === cheapSig(b.details)
     );
   }
-  return a.kind === "system" && b.kind === "system" && a.text === b.text;
+  if (a.kind === "system" && b.kind === "system") return a.text === b.text;
+  if (a.kind === "recap" && b.kind === "recap") return a.text === b.text && a.at === b.at;
+  return false;
 }
 
 /** O(keys) structural signature for tool args/details. Large strings are
