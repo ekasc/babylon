@@ -27,8 +27,7 @@ import {
 
 interface Props {
   onClose(): void;
-  onOpenSession?(path: string, cwd?: string, parentPath?: string): void;
-  toast(type: "info" | "warning" | "error", text: string): void;
+  onOpenSession?(path: string, cwd?: string, parentPath?: string): void;  toast(type: "info" | "warning" | "error", text: string): void;
 }
 
 type ActivityTab = "workflows" | "agents";
@@ -789,6 +788,42 @@ function AgentsView({ threads, subagents, onOpen }: { threads: ThreadActivity[];
   })}</div>;
 }
 
+/** Mini chat transcript: the agent's conversation rendered like a real chat
+ *  (user bubbles, assistant replies, status pills) instead of a flat log. */
+function MiniChat({ messages }: { messages: Array<{ at: string; role: string; text: string }> }) {
+  return (
+    <div className="space-y-3">
+      {messages.map((m, index) => {
+        const key = `${m.at}-${index}`;
+        const stamp = new Date(m.at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+        if (m.role === "user") {
+          return (
+            <div key={key} className="flex justify-end">
+              <div title={stamp} className="max-w-[85%] whitespace-pre-wrap rounded-lg rounded-br-sm border border-line bg-inset px-3 py-2 text-[13px] leading-5">
+                {m.text}
+              </div>
+            </div>
+          );
+        }
+        if (m.role === "assistant") {
+          return (
+            <div key={key} title={stamp} className="max-w-[94%] whitespace-pre-wrap text-[13.5px] leading-6">
+              {m.text}
+            </div>
+          );
+        }
+        return (
+          <div key={key} className="flex justify-center">
+            <span title={stamp} className="max-w-[94%] truncate rounded-full bg-inset px-2.5 py-0.5 text-[11px] text-dim">
+              {m.text}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function AgentDetail({ item, toast, onOpenSession, onUpdate }: { item: AgentItem; toast(type: "info" | "warning" | "error", text: string): void; onOpenSession?(path: string, cwd?: string, parentPath?: string): void; onUpdate(item: AgentItem): void }) {
   const thread = item.kind === "thread" ? item.thread : null;
   const run = item.kind === "subagent" ? item.run : null;
@@ -806,6 +841,11 @@ function AgentDetail({ item, toast, onOpenSession, onUpdate }: { item: AgentItem
   const recent = thread ? thread.recentMessages : run!.recentMessages;
   const controllable = thread ? live : run!.controllable === true;
   const sessionFile = thread ? thread.sessionFile : run!.sessionFile;
+  const scrollRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [recent?.length]);
 
   const control = async (action: "steer" | "follow-up" | "stop") => {
     const message = action === "stop" ? undefined : window.prompt(action === "steer" ? "Interrupt and redirect this agent" : "Send a follow-up") ?? undefined;
@@ -839,12 +879,12 @@ function AgentDetail({ item, toast, onOpenSession, onUpdate }: { item: AgentItem
   return <div className="px-2">
     <div className="border-b border-line pb-4">
       <div className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full ${live ? "bg-accent" : status === "failed" || status === "routing_mismatch" ? "bg-err" : status === "blocked" ? "bg-warn" : status === "completed" || status === "idle" ? "bg-ok" : "bg-dim"}`} /><h2 className="min-w-0 flex-1 truncate text-[16px] font-semibold">{name}</h2><span className="shrink-0 rounded bg-inset px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-dim">{badge}</span><span className="text-[13px] text-dim">{status.replace("_", " ")}</span></div>
-      {description ? <p className="mt-2 text-[14px] leading-6 text-dim">{description}</p> : null}
+      {!recent?.length && description ? <p className="mt-2 text-[14px] leading-6 text-dim">{description}</p> : null}
       <p className="mt-2 text-[12px] text-dim">{model} · {profile ?? "—"} · {id.slice(0, 8)}</p>
       {milestones?.length ? <div className="mt-3 rounded-lg border border-line bg-inset/40 px-3 py-2"><span className="text-[11px] font-semibold uppercase tracking-wide text-dim">Milestones</span><ul className="mt-1 space-y-1">{milestones.map((m, index) => <li key={`${m.at}-${index}`} className="flex items-start gap-2 text-[13px]"><span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-ok" /><span className="min-w-0"><span className="font-medium">{m.name}</span>{m.note ? <span className="text-dim"> — {m.note}</span> : null}<span className="ml-1 text-[11px] text-dim">{new Date(m.at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</span></span></li>)}</ul></div> : null}
     </div>
-    <div className="max-h-[46vh] overflow-y-auto py-4">
-      {recent?.length ? recent.map((message, index) => <div key={`${message.at}-${index}`} className="border-l border-line py-2 pl-3"><span className="text-[12px] font-medium text-dim">{message.role}</span><p className="mt-1 whitespace-pre-wrap text-[14px] leading-6">{message.text}</p></div>) : run?.output ? <Markdown text={clampText(run.output, 10000)} /> : thread?.latestSummary ? <Markdown text={thread.latestSummary} /> : <p className="text-[14px] text-dim">No transcript messages available yet.</p>}
+    <div ref={scrollRef} className="max-h-[46vh] overflow-y-auto py-4">
+      {recent?.length ? <MiniChat messages={recent} /> : run?.output ? <Markdown text={clampText(run.output, 10000)} /> : thread?.latestSummary ? <Markdown text={thread.latestSummary} /> : <p className="text-[14px] text-dim">No transcript messages available yet.</p>}
     </div>
     {run?.stderr ? <pre className="max-h-48 overflow-auto border-t border-line py-3 font-mono text-[12px] text-warn">{clampText(run.stderr, 3000)}</pre> : null}
     <div className="flex flex-wrap gap-2 border-t border-line pt-3">{sessionFile && onOpenSession ? <button onClick={() => void promote()} disabled={live} title={live ? "Stop or wait for the active turn first" : "Move this conversation into the main workspace"} className="context-button disabled:opacity-50">Open as session</button> : null}{controllable ? <><button onClick={() => void control("steer")} className="context-button is-primary">Steer</button><button onClick={() => void control("follow-up")} className="context-button">Follow up</button><button onClick={() => void control("stop")} className="context-button text-err">Stop</button></> : <span className="text-[13px] text-dim">This agent is read-only.</span>}</div>
