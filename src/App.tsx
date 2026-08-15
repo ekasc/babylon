@@ -60,6 +60,7 @@ export default function App() {
     const stored = Number(localStorage.getItem("pideck:context-width"));
     return Number.isFinite(stored) && stored >= 360 && stored <= 760 ? stored : 520;
   });
+  const [sidebarMinimized, setSidebarMinimized] = useState(() => localStorage.getItem("pideck:sidebar-minimized") === "1");
   const [draftRequest, setDraftRequest] = useState<{ id: number; text: string } | null>(null);
   const [promotedParent, setPromotedParent] = useState<{ path: string; cwd: string } | null>(null);
   // Optimistic active session: set synchronously on click so the sidebar row
@@ -151,6 +152,12 @@ export default function App() {
       if (command && event.key.toLowerCase() === "k") {
         event.preventDefault();
         setShowCommandPalette((open) => !open);
+      } else if (command && !event.altKey && event.key.toLowerCase() === "b") {
+        event.preventDefault();
+        setSidebarMinimized((minimized) => {
+          localStorage.setItem("pideck:sidebar-minimized", minimized ? "0" : "1");
+          return !minimized;
+        });
       } else if (command && event.altKey && event.key.toLowerCase() === "b") {
         event.preventDefault();
         setShowWorkflowsPanel((open) => !open);
@@ -795,6 +802,13 @@ export default function App() {
         activeCwd={status.cwd}
         treeOpen={showBranchPanel}
         canOpenTree={ready && hasSession}
+        minimized={sidebarMinimized}
+        onToggleMinimize={() =>
+          setSidebarMinimized((minimized) => {
+            localStorage.setItem("pideck:sidebar-minimized", minimized ? "0" : "1");
+            return !minimized;
+          })
+        }
         onPrefetch={prefetchSession}
         onOpen={(path, cwd, name) => {
           setPromotedParent(null);

@@ -21,6 +21,8 @@ interface Props {
   activeCwd?: string;
   treeOpen: boolean;
   canOpenTree: boolean;
+  minimized: boolean;
+  onToggleMinimize(): void;
   onOpen(path: string | undefined, cwd: string, name?: string): void;
   onPrefetch?(path: string): void;
   onNew(): void;
@@ -37,6 +39,8 @@ export default function Sidebar({
   activeCwd,
   treeOpen,
   canOpenTree,
+  minimized,
+  onToggleMinimize,
   onOpen,
   onNew,
   onNewSessionIn,
@@ -47,6 +51,7 @@ export default function Sidebar({
   onPrefetch,
 }: Props) {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+
   const orderedGroups = useMemo(
     () => groups.slice().sort((a, b) => {
       if (a.cwd === activeCwd) return -1;
@@ -55,6 +60,21 @@ export default function Sidebar({
     }),
     [groups, activeCwd]
   );
+
+  // Minimized: no rail at all — the workspace takes the full width and a
+  // small floating button (top-left, clear of the window controls) expands it.
+  if (minimized) {
+    return (
+      <button
+        onClick={onToggleMinimize}
+        title="Show sidebar (⌘B)"
+        aria-label="Show sidebar"
+        className="sidebar-expand fixed left-2 top-10 z-50"
+      >
+        <ChevronIcon size={16} strokeWidth={2} />
+      </button>
+    );
+  }
 
   const toggleProject = (cwd: string) => {
     setCollapsed((current) => {
@@ -70,6 +90,9 @@ export default function Sidebar({
       <div className="titlebar flex h-16 shrink-0 items-center gap-2.5 px-4 pl-[76px]">
         <PiMark size={20} className="shrink-0 text-fg" />
         <span className="text-[16px] font-semibold tracking-[-0.02em]">Babylon</span>
+        <button onClick={onToggleMinimize} title="Minimize sidebar (⌘B)" aria-label="Minimize sidebar" className="sidebar-toggle ml-auto">
+          <ChevronIcon size={14} className="rotate-180" />
+        </button>
       </div>
 
       <nav aria-label="Workspace" className="px-2.5">
