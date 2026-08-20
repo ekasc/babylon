@@ -13,9 +13,9 @@ import {
   type WatchEvent,
 } from "./automation";
 
-const NOW = new Date(2024, 5, 1, 9, 5, 0).getTime();
-const TODAY_INSTANT = new Date(2024, 5, 1, 9, 0, 0).getTime();
-const YESTERDAY_INSTANT = new Date(2024, 5, 0, 9, 0, 0).getTime();
+const NOW = Date.UTC(2024, 5, 1, 9, 5, 0);
+const TODAY_INSTANT = Date.UTC(2024, 5, 1, 9, 0, 0);
+const YESTERDAY_INSTANT = Date.UTC(2024, 5, 0, 9, 0, 0);
 
 function task(over: Partial<ScheduledTask> = {}): ScheduledTask {
   return { id: "s1", name: "Dep check", enabled: true, trigger: { kind: "interval", intervalMs: 1000 }, runCount: 0, ...over };
@@ -38,8 +38,9 @@ describe("automation triggers", () => {
     expect(evaluateTrigger(t, undefined, NOW)).toBe(true); // never run, time passed
     expect(evaluateTrigger(t, TODAY_INSTANT, NOW)).toBe(false); // already ran today
     expect(evaluateTrigger(t, YESTERDAY_INSTANT, NOW)).toBe(true); // ran yesterday
-    expect(evaluateTrigger(t, NOW, new Date(2024, 5, 1, 8, 55, 0).getTime())).toBe(false); // too early
+    expect(evaluateTrigger(t, NOW, Date.UTC(2024, 5, 1, 8, 55, 0))).toBe(false); // too early
     expect(evaluateTrigger({ kind: "daily", hour: 25, minute: 0 }, undefined, NOW)).toBe(false);
+    expect(evaluateTrigger({ kind: "daily", hour: 9.5, minute: 0 }, undefined, NOW)).toBe(false); // non-integer
   });
 
   it("file_watch fires on a matching change event", () => {
@@ -51,6 +52,8 @@ describe("automation triggers", () => {
     expect(evaluateTrigger(t, undefined, NOW, miss)).toBe(false);
     expect(evaluateTrigger(t, undefined, NOW, branch)).toBe(false);
     expect(evaluateTrigger({ kind: "file_watch" }, undefined, NOW, hit)).toBe(true); // any file
+    expect(evaluateTrigger({ kind: "file_watch", path: "/src/" }, undefined, NOW, hit)).toBe(true); // trailing slash
+    expect(evaluateTrigger({ kind: "file_watch", path: "/" }, undefined, NOW, { type: "file_change", path: "/foo" })).toBe(true); // root watch
   });
 
   it("branch_watch fires on a matching branch event", () => {
@@ -68,6 +71,13 @@ describe("scheduled task registry", () => {
     expect(r.tasks.s1.enabled).toBe(true);
     r = registerScheduledTask(r, task({ enabled: false }));
     expect(r.tasks.s1.enabled).toBe(true);
+  });
+
+  it("isolates the caller's trigger on register", () => {
+    const original = task();
+    const r = registerScheduledTask(createScheduledTaskRegistry(), original);
+    original.trigger.intervalMs = 999999;
+    expect(r.tasks.s1.trigger.intervalMs).toBe(1000);
   });
 
   it("toggles enabled and is a no-op on match", () => {

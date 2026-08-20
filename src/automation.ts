@@ -51,7 +51,9 @@ export function registerScheduledTask(
   task: ScheduledTask
 ): ScheduledTaskRegistry {
   if (registry.tasks[task.id]) return registry; // no clobber
-  return { tasks: { ...registry.tasks, [task.id]: { ...task } } };
+  // Copy the trigger so a later mutation of the caller's object cannot change
+  // the stored schedule.
+  return { tasks: { ...registry.tasks, [task.id]: { ...task, trigger: { ...task.trigger } } } };
 }
 
 export function setScheduledTaskEnabled(
@@ -61,7 +63,7 @@ export function setScheduledTaskEnabled(
 ): ScheduledTaskRegistry {
   const existing = registry.tasks[id];
   if (!existing || existing.enabled === enabled) return registry;
-  return { tasks: { ...registry.tasks, [id]: { ...existing, enabled } } };
+  return { tasks: { ...registry.tasks, [id]: { ...existing, trigger: { ...existing.trigger }, enabled } } };
 }
 
 export function removeScheduledTask(registry: ScheduledTaskRegistry, id: string): ScheduledTaskRegistry {
@@ -75,24 +77,18 @@ export function recordRun(registry: ScheduledTaskRegistry, id: string, at: numbe
   const existing = registry.tasks[id];
   if (!existing) return registry;
   return {
-    tasks: { ...registry.tasks, [id]: { ...existing, lastRunAt: at, runCount: existing.runCount + 1 } },
+    tasks: {
+      ...registry.tasks,
+      [id]: { ...existing, trigger: { ...existing.trigger }, lastRunAt: at, runCount: existing.runCount + 1 },
+    },
   };
 }
 
-function sameLocalDay(a: number, b: number): boolean {
-  const da = new Date(a);
-  const db = new Date(b);
-  return (
-    da.getFullYear() === db.getFullYear() &&
-    da.getMonth() === db.getMonth() &&
-    da.getDate() === db.getDate()
-  );
-}
-
 function dailyInstant(now: number, hour: number, minute: number): number {
+  // Resolve the daily time in UTC so scheduling is timezone-stable: the hour and
+  // minute are interpreted in UTC, not the host's local zone.
   const d = new Date(now);
-  d.setHours(hour, minute, 0, 0);
-  return d.getTime();
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), hour, minute, 0, 0);
 }
 
 /**
@@ -116,26 +112,39 @@ export function evaluateTrigger(
     case "daily": {
       const h = trigger.hour;
       const m = trigger.minute;
-      if (h === undefined || m === undefined || h < 0 || h > 23 || m < 0 || m > 59) return false;
+      if (
+        h === undefined ||
+        m === undefined ||
+        !Number.isInteger(h) ||
+        !Number.isInteger(m) ||
+        h < 0 ||
+        h > 23 ||
+        m < 0 ||
+        m > 59
+      )
+        return false;
       const instant = dailyInstant(now, h, m);
-      if (now < instant) return false; // not time yet today
+      if (now < instant) return false; // not time yet today (UTC)
       if (lastRunAt === undefined) return true;
-      // Due only if it has not already run at/after today's instant.
-      return lastRunAt < instant && !sameLocalDay(lastRunAt, instant);
+      // Due when it has not already run at/after today's instant.
+      return lastRunAt < instant;
     }
     case "file_watch": {
       if (!event || event.type !== "file_change") return false;
       if (trigger.path === undefined) return true; // watch any file
-      return (
-        event.path !== undefined &&
-        (event.path === trigger.path || event.path.startsWith(trigger.path + "/"))
-      );
+      if (event.path === undefined) return false;
+      const watchRoot = trigger.path.endsWith("/") ? trigger.path.slice(0, -1) : trigger.path;
+      // Exact file match, or any change at or under the watched directory
+      // (including a trailing-slash or root path).
+      return event.path === trigger.path || event.path.startsWith(watchRoot + "/");
     }
     case "branch_watch": {
       if (!event || event.type !== "branch_change") return false;
       if (trigger.branch === undefined) return true; // watch any branch
       return event.branch === trigger.branch;
     }
+    default:
+      return false;
   }
 }
 
