@@ -32,6 +32,8 @@ export interface PairedDevice {
   lastSeenAt: number;
   scope: DeviceScope[];
   revoked: boolean;
+  /** SHA-256 hex of the device's pairing token; absent for legacy grants. */
+  tokenHash?: string;
 }
 
 export interface DeviceRegistry {
@@ -71,4 +73,39 @@ export function listDevices(registry: DeviceRegistry): PairedDevice[] {
   // Return copies so a caller cannot mutate a returned device to defeat
   // revocation or escalate scope.
   return Object.values(registry.devices).map((d) => ({ ...d, scope: [...d.scope] }));
+}
+
+/**
+ * Pair a new device with a token hash (never the token itself) and an explicit
+ * scope. Refuses to clobber an existing id, and refuses empty scope so a
+ * pairing mistake cannot default to broad access.
+ */
+export function pairDevice(
+  registry: DeviceRegistry,
+  params: {
+    id: string;
+    name: string;
+    scope: DeviceScope[];
+    tokenHash: string;
+    now: number;
+  }
+): DeviceRegistry | string {
+  if (!params.id.trim()) return "device id must not be empty";
+  if (!params.name.trim()) return "device name must not be empty";
+  if (registry.devices[params.id]) return `device ${params.id} is already paired`;
+  if (params.scope.length === 0) return "a paired device needs at least one scope";
+  const known = new Set<string>(ALL_DEVICE_SCOPES);
+  for (const s of params.scope) {
+    if (!known.has(s)) return `unknown device scope ${String(s)}`;
+  }
+  if (!params.tokenHash.trim()) return "tokenHash must not be empty";
+  return registerDevice(registry, {
+    id: params.id,
+    name: params.name,
+    createdAt: params.now,
+    lastSeenAt: params.now,
+    scope: params.scope,
+    revoked: false,
+    tokenHash: params.tokenHash,
+  });
 }
