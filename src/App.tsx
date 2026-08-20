@@ -15,7 +15,9 @@ import { WorktreeBanner, WorktreeModal, type WorktreeInfo } from "./components/W
 import { ApprovalGate } from "./components/ApprovalGate";
 import { PermissionsPanel } from "./components/PermissionsPanel";
 import { PlansPanel } from "./components/PlansPanel";
+import { ProcessPanel } from "./components/ProcessPanel";
 import type { Plan } from "./plans";
+import type { ProcessRegistry } from "./process-model";
 import { FlaskIcon, FolderIcon, LayersIcon, MoreIcon, PiMark, ShieldIcon } from "./components/icons";
 
 const BranchPanel = lazy(() => import("./components/BranchPanel"));
@@ -146,6 +148,8 @@ export default function App() {
   const [showPermissions, setShowPermissions] = useState(false);
   const [showPlans, setShowPlans] = useState(false);
   const [plans, setPlans] = useState<Record<string, Plan>>({});
+  const [showProcesses, setShowProcesses] = useState(false);
+  const [processRegistry, setProcessRegistry] = useState<ProcessRegistry>({ processes: {} });
   const [history, setHistory] = useState<HistoryProjection>({ turns: [], leafId: null, hasBranches: false });
   const [historyRevision, setHistoryRevision] = useState(0);
   const [rollbackPlan, setRollbackPlan] = useState<RollbackPlan | null>(null);
@@ -1114,6 +1118,14 @@ export default function App() {
               >
                 Plans
               </button>
+              <button
+                onClick={() => setShowProcesses((open) => !open)}
+                title="Tracked processes"
+                aria-pressed={showProcesses}
+                className={`thread-action ${showProcesses ? "is-active" : ""}`}
+              >
+                Term
+              </button>
               <button onClick={() => setShowCommandPalette(true)} title="Search and commands (⌘K)" className="thread-action">
                 <FolderIcon size={16} />
               </button>
@@ -1210,6 +1222,13 @@ export default function App() {
       {showPermissions ? <PermissionsPanel onClose={() => setShowPermissions(false)} /> : null}
       {showPlans ? (
         <PlansPanel plans={plans} setPlans={setPlans} onClose={() => setShowPlans(false)} />
+      ) : null}
+      {showProcesses ? (
+        <ProcessPanel
+          registry={processRegistry}
+          setRegistry={setProcessRegistry}
+          onClose={() => setShowProcesses(false)}
+        />
       ) : null}
       <ApprovalGate />
       {rollbackPlan ? (
