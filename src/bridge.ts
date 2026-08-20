@@ -30,6 +30,76 @@ export interface SessionsUpdate {
   source?: "filesystem" | "host";
 }
 
+export interface GitFileChange {
+  path: string;
+  status: string;
+}
+
+export interface GitStatusResult {
+  isRepo: boolean;
+  root?: string;
+  branch?: string;
+  isWorktree?: boolean;
+  dirty: GitFileChange[];
+  ahead: number;
+  behind: number;
+}
+
+export interface GitChangedFile {
+  path: string;
+  insertions: number;
+  deletions: number;
+}
+
+export interface GitStatusDetails {
+  isRepo: boolean;
+  root?: string;
+  branch: string | null;
+  upstreamRef: string | null;
+  hasUpstream: boolean;
+  defaultBranch: string | null;
+  isDefaultBranch: boolean;
+  hasOriginRemote: boolean;
+  isLinkedWorktree: boolean;
+  ahead: number;
+  behind: number;
+  aheadOfDefault: number;
+  hasChanges: boolean;
+  files: GitChangedFile[];
+  insertions: number;
+  deletions: number;
+}
+
+export interface GitBranchInfo {
+  name: string;
+  current: boolean;
+  committedAt: number;
+}
+
+export interface GitPrSummary {
+  number: number;
+  title: string;
+  url: string;
+  baseRef: string;
+  headRef: string;
+  state: "open" | "closed" | "merged";
+}
+
+export interface GitPrContext {
+  provider: "github" | "gitlab" | "unknown";
+  tool: { command: "gh" | "glab"; installed: boolean; authenticated: boolean } | null;
+  openPr: GitPrSummary | null;
+}
+
+export interface GitPrCreateResult {
+  status: "created" | "opened_existing";
+  number?: number;
+  url?: string;
+  title: string;
+  baseBranch: string;
+  headBranch: string;
+}
+
 export interface SessionStatus {
   status: "idle" | "starting" | "ready" | "exited" | "error";
   cwd?: string;
@@ -215,6 +285,7 @@ export interface HistoryTurn {
   onActivePath: boolean;
   current: boolean;
   branchCount: number;
+  changedCount: number;
   checkpointAvailable: boolean;
   rollbackAvailable: boolean;
   rollbackReason?: string;
@@ -233,6 +304,25 @@ export interface HistoryProjection {
     undoAvailable: boolean;
     undoReason?: string;
   };
+}
+
+export interface TurnFileChange {
+  path: string;
+  kind: "added" | "modified" | "deleted";
+  additions: number;
+  deletions: number;
+}
+
+export interface TurnChanges {
+  userEntryId: string;
+  files: TurnFileChange[];
+  totals: { files: number; additions: number; deletions: number };
+  exclusions: string[];
+}
+
+export interface TurnFileDiff {
+  diff: string;
+  truncated: boolean;
 }
 
 export interface RollbackPlan {
@@ -278,6 +368,17 @@ export interface Bridge {
   getMessages(): Promise<any[]>;
   getState(): Promise<any>;
   getStats(): Promise<any>;
+  gitStatus(cwd: string): Promise<GitStatusResult | null>;
+  gitStatusDetails(cwd: string): Promise<GitStatusDetails>;
+  gitBranches(cwd: string): Promise<{ branches: GitBranchInfo[]; current: string | null }>;
+  gitBranchCreate(cwd: string, name: string, switchTo: boolean): Promise<{ branch: string }>;
+  gitBranchSwitch(cwd: string, name: string): Promise<{ branch: string | null }>;
+  gitCommit(cwd: string, message: string): Promise<{ commitSha: string; subject: string }>;
+  gitPush(cwd: string): Promise<{ status: "pushed" | "skipped_up_to_date"; branch: string; upstreamBranch?: string }>;
+  gitPull(cwd: string): Promise<{ status: "pulled" | "skipped_up_to_date"; branch: string; upstreamRef: string | null }>;
+  gitPrContext(cwd: string): Promise<GitPrContext>;
+  gitPrSuggest(cwd: string): Promise<{ title: string; body: string; baseBranch: string; headBranch: string }>;
+  gitPrCreate(cwd: string, input: { title: string; body?: string }): Promise<GitPrCreateResult>;
   getModels(): Promise<any[]>;
   getCommands(): Promise<CommandInfo[]>;
   setModel(provider: string, modelId: string): Promise<any>;
@@ -288,6 +389,8 @@ export interface Bridge {
 
   getTree(): Promise<{ rows: SessionTreeRow[]; leafId: string | null }>;
   getHistory(): Promise<HistoryProjection>;
+  getTurnChanges(entryId: string): Promise<TurnChanges>;
+  getTurnFileDiff(entryId: string, path: string): Promise<TurnFileDiff>;
   prepareRollback(entryId: string): Promise<RollbackPlan>;
   commitRollback(planId: string): Promise<{ editorText: string; history: HistoryProjection }>;
   undoRollback(): Promise<{ history: HistoryProjection }>;
@@ -369,6 +472,17 @@ export const bridge: Bridge = window.pideck ?? {
   getMessages: () => Promise.resolve([]),
   getState: () => Promise.resolve(null),
   getStats: () => Promise.resolve(null),
+  gitStatus: () => Promise.resolve(null),
+  gitStatusDetails: () => Promise.resolve({ isRepo: false } as GitStatusDetails),
+  gitBranches: () => Promise.resolve({ branches: [], current: null }),
+  gitBranchCreate: () => Promise.reject(new Error("bridge unavailable")),
+  gitBranchSwitch: () => Promise.reject(new Error("bridge unavailable")),
+  gitCommit: () => Promise.reject(new Error("bridge unavailable")),
+  gitPush: () => Promise.reject(new Error("bridge unavailable")),
+  gitPull: () => Promise.reject(new Error("bridge unavailable")),
+  gitPrContext: () => Promise.resolve({ provider: "unknown", tool: null, openPr: null }),
+  gitPrSuggest: () => Promise.reject(new Error("bridge unavailable")),
+  gitPrCreate: () => Promise.reject(new Error("bridge unavailable")),
   getModels: () => Promise.resolve([]),
   getCommands: () => Promise.resolve([]),
   setModel: () => Promise.resolve(),
@@ -379,6 +493,8 @@ export const bridge: Bridge = window.pideck ?? {
 
   getTree: () => Promise.resolve({ rows: [], leafId: null }),
   getHistory: () => Promise.resolve({ turns: [], leafId: null, hasBranches: false }),
+  getTurnChanges: () => Promise.reject(new Error("bridge unavailable")),
+  getTurnFileDiff: () => Promise.reject(new Error("bridge unavailable")),
   prepareRollback: () => Promise.reject(new Error("bridge unavailable")),
   commitRollback: () => Promise.reject(new Error("bridge unavailable")),
   undoRollback: () => Promise.reject(new Error("bridge unavailable")),

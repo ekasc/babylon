@@ -1,5 +1,5 @@
-import { lazy, Suspense, useCallback, useEffect, useReducer, useRef, useState } from "react";
-import { bridge, bridgeAvailable, type ActivityUpdate, type CommandInfo, type HistoryProjection, type ProjectGroup, type RollbackPlan, type SessionStatus, type SessionWindow, type WorkflowRunSummary } from "./bridge";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { bridge, bridgeAvailable, type ActivityUpdate, type CommandInfo, type GitStatusResult, type HistoryProjection, type ProjectGroup, type RollbackPlan, type SessionMeta, type SessionStatus, type SessionWindow, type WorkflowRunSummary } from "./bridge";
 import { initialState, mergeLiveMessages, reducer } from "./store";
 import { shouldAcceptEvent } from "./sessionLifecycle";
 import { insertCommand } from "./commands";
@@ -41,10 +41,96 @@ function StatusDot({ status, working }: { status: string; working: boolean }) {
 export default function App() {
   const [state, dispatch] = useReducer(reducer, initialState);
   const [groups, setGroups] = useState<ProjectGroup[]>([]);
+
+  // t3code-style sidebar state (client-persisted): pinned order, snoozed
+  // (path -> wake timestamp), settled, archived, unread.
+  const [pinnedOrder, setPinnedOrder] = useState<string[]>(() =>
+    JSON.parse(localStorage.getItem("babylon:pinned") ?? "[]")
+  );
+  const [snoozed, setSnoozed] = useState<Record<string, number>>(() =>
+    JSON.parse(localStorage.getItem("babylon:snoozed") ?? "{}")
+  );
+  const [settled, setSettled] = useState<string[]>(() =>
+    JSON.parse(localStorage.getItem("babylon:settled") ?? "[]")
+  );
+  // Explicitly woken threads: override the stale-timer auto-settle.
+  const [unsettled, setUnsettled] = useState<string[]>(() =>
+    JSON.parse(localStorage.getItem("babylon:unsettled") ?? "[]")
+  );
+  useEffect(() => { localStorage.setItem("babylon:unsettled", JSON.stringify(unsettled)); }, [unsettled]);
+  useEffect(() => { localStorage.setItem("babylon:settled", JSON.stringify(settled)); }, [settled]);
+  // Threads are settled only after being idle this long (not the instant a run ends).
+  const STALE_SETTLE_MS = 30 * 60 * 1000;
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNowTick(Date.now()), 60_000);
+    return () => window.clearInterval(id);
+  }, []);
+  const [archived, setArchived] = useState<string[]>(() =>
+    JSON.parse(localStorage.getItem("babylon:archived") ?? "[]")
+  );
+  const [unread, setUnread] = useState<string[]>(() =>
+    JSON.parse(localStorage.getItem("babylon:unread") ?? "[]")
+  );
+  const [showArchived, setShowArchived] = useState(false);
+
+  const toggleStringArray =
+    (key: string, setter: React.Dispatch<React.SetStateAction<string[]>>) => (path: string) =>
+      setter((prev) => {
+        const next = prev.includes(path) ? prev.filter((p) => p !== path) : [...prev, path];
+        localStorage.setItem(key, JSON.stringify(next));
+        return next;
+      });
+  const togglePin = useCallback((path: string) => {
+    setPinnedOrder((prev) => {
+      const next = prev.includes(path) ? prev.filter((p) => p !== path) : [...prev, path];
+      localStorage.setItem("babylon:pinned", JSON.stringify(next));
+      return next;
+    });
+  }, []);
+  const reorderPinned = useCallback((order: string[]) => {
+    setPinnedOrder(order);
+    localStorage.setItem("babylon:pinned", JSON.stringify(order));
+  }, []);
+  const toggleSnooze = useCallback((path: string, until?: number) => {
+    setSnoozed((prev) => {
+      const next = { ...prev };
+      if (until == null || Number.isNaN(until)) delete next[path];
+      else next[path] = until;
+      localStorage.setItem("babylon:snoozed", JSON.stringify(next));
+      return next;
+    });
+  }, []);
+  const toggleUnread = useCallback(toggleStringArray("babylon:unread", setUnread), []);
+  const toggleArchive = useCallback(
+    (path: string) => {
+      setArchived((prev) => {
+        const next = prev.includes(path) ? prev.filter((p) => p !== path) : [...prev, path];
+        localStorage.setItem("babylon:archived", JSON.stringify(next));
+        return next;
+      });
+      // Archiving also drops the pin so it doesn't linger in the Pinned section.
+      setPinnedOrder((prev) => {
+        if (!prev.includes(path)) return prev;
+        const next = prev.filter((p) => p !== path);
+        localStorage.setItem("babylon:pinned", JSON.stringify(next));
+        return next;
+      });
+    },
+    []
+  );
+  const toggleShowArchived = useCallback(() => setShowArchived((v) => !v), []);
+  const copySession = useCallback((kind: "path" | "id" | "branch", session: SessionMeta) => {
+    const value =
+      kind === "path" ? session.path : kind === "id" ? session.id : session.cwd;
+    void navigator.clipboard?.writeText(value);
+    toast("info", `Copied ${kind}`);
+  }, []);
   const [status, setStatus] = useState<SessionStatus>({ status: "idle" });
   const [models, setModels] = useState<any[]>([]);
   const [commands, setCommands] = useState<CommandInfo[]>([]);
   const [agentState, setAgentState] = useState<any>(null);
+  const [gitStatuses, setGitStatuses] = useState<Record<string, GitStatusResult>>({});
   const [stats, setStats] = useState<any>(null);
   const [thinkingLevels, setThinkingLevels] = useState<string[]>([]);
   const [worktreeInfo, setWorktreeInfo] = useState<WorktreeInfo | null>(null);
@@ -66,6 +152,49 @@ export default function App() {
   // Optimistic active session: set synchronously on click so the sidebar row
   // highlights instantly; the host's status confirm later keeps it exact.
   const [activeSessionPath, setActiveSessionPath] = useState<string | null>(null);
+
+  // Settled view = explicit settles ∪ stale idle threads (not the open thread).
+  // Explicit wakes override the stale timer; the active thread is never auto-settled.
+  const settledView = useMemo(() => {
+    const activePath = activeSessionPath ?? status.sessionPath;
+    const pinnedSet = new Set(pinnedOrder);
+    const archivedSet = new Set(archived);
+    const out = new Set<string>();
+    for (const g of groups) {
+      for (const s of g.sessions) {
+        const p = s.path;
+        if (p === activePath) continue;
+        if (pinnedSet.has(p)) continue;
+        if (snoozed[p] != null) continue;
+        if (archivedSet.has(p)) continue;
+        if (unsettled.includes(p)) continue;
+        if (settled.includes(p)) { out.add(p); continue; }
+        if (nowTick - (s.mtime ?? 0) > STALE_SETTLE_MS) out.add(p);
+      }
+    }
+    return [...out];
+  }, [groups, activeSessionPath, status.sessionPath, pinnedOrder, snoozed, archived, settled, unsettled, nowTick]);
+
+  const toggleSettle = useCallback((path: string) => {
+    const isSettled = settledView.includes(path);
+    if (isSettled) {
+      setSettled((prev) => prev.filter((p) => p !== path));
+      setUnsettled((prev) => (prev.includes(path) ? prev : [...prev, path]));
+    } else {
+      setUnsettled((prev) => prev.filter((p) => p !== path));
+      setSettled((prev) => (prev.includes(path) ? prev : [...prev, path]));
+    }
+  }, [settledView]);
+
+  const renameSession = (path: string) => {
+    const name = window.prompt("Rename chat");
+    if (!name) return;
+    if (path === activeSessionPath) {
+      void bridge.setSessionName(name);
+      return;
+    }
+    toast("info", "Open the chat to rename it");
+  };
   // Optimistic header title: shown instantly from the clicked row, replaced by
   // the host's sessionName when it hydrates.
   const [headerName, setHeaderName] = useState<string | null>(null);
@@ -248,9 +377,21 @@ export default function App() {
           activeSessionId: activeSessionIdRef.current,
           switching: switchingRef.current,
         };
+        let stateChanged = false;
         for (const event of events) {
           if (shouldAcceptEvent(event, context)) dispatch({ type: "event", event });
+          if (
+            event?.type === "agent_settled" ||
+            event?.type === "agent_end" ||
+            event?.type === "session_info_changed"
+          ) {
+            stateChanged = true;
+          }
         }
+        // Reflect engine-side state changes (model/thinking toggles, /fast,
+        // session renames) in the status bar without waiting for the next
+        // model/thinking/compact round-trip.
+        if (stateChanged) bridge.getState().then(setAgentState).catch(() => {});
       }),
     []
   );
@@ -368,6 +509,35 @@ export default function App() {
       }),
     [hydrate, toast]
   );
+
+  // Git status keyed by project cwd, so every non-settled thread can show its
+  // branch (and full status on hover). Refreshed when the session list or
+  // active project changes, on a light timer, and on row hover.
+  const refreshGitStatuses = useCallback(() => {
+    const cwds = Array.from(new Set(groups.map((g) => g.cwd).filter(Boolean))) as string[];
+    if (!cwds.length) return;
+    Promise.all(
+      cwds.map((c) => bridge.gitStatus(c).then((s) => [c, s] as const).catch(() => [c, null] as const))
+    )
+      .then((results) => {
+        setGitStatuses((prev) => {
+          const next = { ...prev };
+          for (const [c, s] of results) if (s) next[c] = s;
+          return next;
+        });
+      })
+      .catch(() => undefined);
+  }, [groups]);
+
+  const refreshGitStatusForCwd = useCallback((cwd: string) => {
+    bridge.gitStatus(cwd).then((s) => { if (s) setGitStatuses((prev) => ({ ...prev, [cwd]: s })); }).catch(() => {});
+  }, []);
+
+  useEffect(() => { refreshGitStatuses(); }, [refreshGitStatuses]);
+  useEffect(() => {
+    const id = window.setInterval(refreshGitStatuses, 30_000);
+    return () => window.clearInterval(id);
+  }, [refreshGitStatuses]);
 
   // Predictive fetch (kills the serial IPC from the click path): hovering a
   // sidebar row warms its tail into the LRU cache, so a click is a fully
@@ -761,6 +931,17 @@ export default function App() {
   }, [hydrate, refreshSessions, toast]);
 
   const ready = status.status === "ready";
+  const liveAgentState: "running" | "blocked" | "needs-input" | "done" = state.streaming
+    ? "running"
+    : activity.threads.some((t) => t.status === "interrupted") ||
+        activity.subagents.some((s) => s.status === "interrupted")
+      ? "blocked"
+      : workflowRuns.some((r) => r.status === "paused")
+        ? "needs-input"
+        : "done";
+  const activeBranch: string | undefined =
+    (agentState?.gitWorktree?.branch as string | undefined) ??
+    (agentState?.git?.branch as string | undefined);
   const bannerVisible = hasSession && liveReady && !!worktreeInfo?.isWorktree;
   const liveActivityCount =
     workflowRuns.filter((run) => run.status === "pending" || run.status === "running" || run.status === "paused").length +
@@ -832,6 +1013,26 @@ export default function App() {
           setShowWorkflowsPanel(false);
         }}
         onSearch={() => setShowCommandPalette(true)}
+        pinnedOrder={pinnedOrder}
+        snoozed={snoozed}
+        settled={settledView}
+        archived={archived}
+        unread={unread}
+        showArchived={showArchived}
+        activeStreaming={hasSession && state.streaming}
+        agentState={liveAgentState}
+        activeBranch={activeBranch}
+        gitStatuses={gitStatuses}
+        onRefreshGitStatus={refreshGitStatusForCwd}
+        onReorderPinned={reorderPinned}
+        onTogglePin={togglePin}
+        onToggleSnooze={toggleSnooze}
+        onToggleSettle={toggleSettle}
+        onToggleUnread={toggleUnread}
+        onToggleArchive={toggleArchive}
+        onRename={renameSession}
+        onCopy={copySession}
+        onToggleShowArchived={toggleShowArchived}
       />
 
       <div className="flex min-w-0 flex-1">
@@ -915,6 +1116,10 @@ export default function App() {
                 models={models}
                 thinkingLevels={thinkingLevels}
                 draftRequest={draftRequest}
+                cwd={status.cwd}
+                gitStatus={status.cwd ? gitStatuses[status.cwd] ?? null : null}
+                onGitChanged={refreshGitStatuses}
+                toast={toast}
                 onSend={send}
                 onAbort={abort}
                 onSetModel={setModel}

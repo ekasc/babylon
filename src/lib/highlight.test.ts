@@ -46,4 +46,13 @@ describe("highlight render cache", () => {
     const js = await highlight(code, "javascript");
     expect(py).not.toBe(js);
   });
+
+  it("distinguishes equal-length blocks that differ after the first 4096 characters", async () => {
+    const prefix = "x".repeat(4096);
+    const first = `${prefix}first`;
+    const second = `${prefix}other`;
+    const firstHtml = await highlight(first, "text");
+    expect(cachedHighlight(second, "text")).toBeNull();
+    expect(await highlight(second, "text")).not.toBe(firstHtml);
+  });
 });

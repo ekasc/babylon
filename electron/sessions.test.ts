@@ -97,6 +97,13 @@ describe("tail-first session reads", () => {
     expect(older.startOffset).toBeGreaterThan(0);
   });
 
+  it("clamps an oversized end offset to the file size", async () => {
+    const message = { type: "message", id: "m1", message: { role: "user", content: "safe" } };
+    const { file } = await fixture([{ type: "session", id: "s1", cwd: "/project" }, message]);
+    const result = await readSessionRange(file, Number.MAX_SAFE_INTEGER, 1024);
+    expect(result.messages.map((m: any) => m.content)).toEqual(["safe"]);
+  });
+
   it("fetches a full tool output on demand", async () => {
     const big = "y".repeat(50_000);
     const tool = { type: "message", id: "m1", message: { role: "toolResult", toolCallId: "t1", content: [{ type: "text", text: big }] } };

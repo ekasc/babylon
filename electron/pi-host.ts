@@ -973,6 +973,36 @@ export class PiHost {
     });
   }
 
+  async getTurnChanges(entryId: string): Promise<any> {
+    await this.ensureSession();
+    const session = this.runtime.session;
+    const ledger = await this.rollbacks.load(session.sessionId).catch(() => ({ version: 1 as const, checkpoints: [], active: undefined }));
+    const checkpoint = ledger.checkpoints.find((item) => item.userEntryId === entryId);
+    if (!checkpoint) throw new Error("No filesystem checkpoint was recorded for this turn");
+    if (!checkpoint.complete) throw new Error("This filesystem checkpoint is incomplete");
+    const files = await this.snapshots.turnChanges(this.cwd, checkpoint.beforeTree, checkpoint.afterTree);
+    const totals = files.reduce(
+      (acc, file) => {
+        acc.files += 1;
+        acc.additions += file.additions;
+        acc.deletions += file.deletions;
+        return acc;
+      },
+      { files: 0, additions: 0, deletions: 0 }
+    );
+    return { userEntryId: entryId, files, totals, exclusions: checkpoint.exclusions };
+  }
+
+  async getTurnFileDiff(entryId: string, path: string): Promise<any> {
+    await this.ensureSession();
+    const session = this.runtime.session;
+    const ledger = await this.rollbacks.load(session.sessionId).catch(() => ({ version: 1 as const, checkpoints: [], active: undefined }));
+    const checkpoint = ledger.checkpoints.find((item) => item.userEntryId === entryId);
+    if (!checkpoint) throw new Error("No filesystem checkpoint was recorded for this turn");
+    if (!checkpoint.complete) throw new Error("This filesystem checkpoint is incomplete");
+    return this.snapshots.fileDiff(this.cwd, checkpoint.beforeTree, checkpoint.afterTree, path);
+  }
+
   async prepareRollback(userEntryId: string): Promise<any> {
     await this.ensureSession();
     const session = this.runtime.session;

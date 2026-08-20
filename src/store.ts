@@ -533,14 +533,14 @@ function sameItem(a: ChatItem, b: ChatItem): boolean {
   return false;
 }
 
-/** O(keys) structural signature for tool args/details. Large strings are
- *  compared by length + head/tail instead of byte-for-byte; any change flips
- *  the signature, which is all sameItem needs (rebuilds stop comparing
- *  megabytes of patch/diff text). */
+/** Structural signature for tool args/details. Every string byte contributes so
+ *  middle-only changes cannot leave a stale memoized tool row. */
 function cheapSig(value: any): string {
   if (value == null) return "n";
   if (typeof value === "string") {
-    return value.length > 128 ? `s${value.length}:${value.slice(0, 32)}:${value.slice(-32)}` : `s${value.length}:${value}`;
+    let hash = 5381;
+    for (let i = 0; i < value.length; i++) hash = ((hash << 5) + hash + value.charCodeAt(i)) >>> 0;
+    return `s${value.length}:${hash}`;
   }
   if (typeof value === "number") return `n${value}`;
   if (typeof value === "boolean") return `b${value}`;

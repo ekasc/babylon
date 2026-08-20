@@ -21,6 +21,20 @@ const api = {
   getMessages: (): Promise<any[]> => ipcRenderer.invoke("pideck:get-messages"),
   getState: (): Promise<any> => ipcRenderer.invoke("pideck:get-state"),
   getStats: (): Promise<any> => ipcRenderer.invoke("pideck:get-stats"),
+  gitStatus: (cwd: string): Promise<any> => ipcRenderer.invoke("pideck:git-status", cwd),
+  gitStatusDetails: (cwd: string): Promise<any> => ipcRenderer.invoke("pideck:git-status-details", cwd),
+  gitBranches: (cwd: string): Promise<any> => ipcRenderer.invoke("pideck:git-branches", cwd),
+  gitBranchCreate: (cwd: string, name: string, switchTo: boolean): Promise<any> =>
+    ipcRenderer.invoke("pideck:git-branch-create", cwd, name, switchTo),
+  gitBranchSwitch: (cwd: string, name: string): Promise<any> =>
+    ipcRenderer.invoke("pideck:git-branch-switch", cwd, name),
+  gitCommit: (cwd: string, message: string): Promise<any> => ipcRenderer.invoke("pideck:git-commit", cwd, message),
+  gitPush: (cwd: string): Promise<any> => ipcRenderer.invoke("pideck:git-push", cwd),
+  gitPull: (cwd: string): Promise<any> => ipcRenderer.invoke("pideck:git-pull", cwd),
+  gitPrContext: (cwd: string): Promise<any> => ipcRenderer.invoke("pideck:git-pr-context", cwd),
+  gitPrSuggest: (cwd: string): Promise<any> => ipcRenderer.invoke("pideck:git-pr-suggest", cwd),
+  gitPrCreate: (cwd: string, input: { title: string; body?: string }): Promise<any> =>
+    ipcRenderer.invoke("pideck:git-pr-create", cwd, input),
   getModels: (): Promise<any[]> => ipcRenderer.invoke("pideck:get-models"),
   getCommands: (): Promise<any[]> => ipcRenderer.invoke("pideck:get-commands"),
   setModel: (provider: string, modelId: string): Promise<any> =>
@@ -33,6 +47,9 @@ const api = {
   // Branching / worktrees
   getTree: (): Promise<any> => ipcRenderer.invoke("pideck:get-tree"),
   getHistory: (): Promise<any> => ipcRenderer.invoke("pideck:get-history"),
+  getTurnChanges: (entryId: string): Promise<any> => ipcRenderer.invoke("pideck:turn-changes", entryId),
+  getTurnFileDiff: (entryId: string, path: string): Promise<any> =>
+    ipcRenderer.invoke("pideck:turn-file-diff", entryId, path),
   prepareRollback: (entryId: string): Promise<any> => ipcRenderer.invoke("pideck:rollback:prepare", entryId),
   commitRollback: (planId: string): Promise<any> => ipcRenderer.invoke("pideck:rollback:commit", planId),
   undoRollback: (): Promise<any> => ipcRenderer.invoke("pideck:rollback:undo"),

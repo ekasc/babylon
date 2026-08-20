@@ -48,6 +48,19 @@ export default function StatusBar({ agentState, stats, models, onSetModel, onSet
         onSelect={onSetThinking}
       />
 
+      <div className="flex items-center gap-1.5">
+        {agentState?.fastModeEnabled && (
+          <span className="rounded-full bg-accent/15 px-2 py-0.5 text-[10.5px] font-medium text-accent">
+            Fast
+          </span>
+        )}
+        {agentState?.autoCompactionEnabled && (
+          <span className="rounded-full bg-white/5 px-2 py-0.5 text-[10.5px] font-medium text-dim">
+            Auto-compact
+          </span>
+        )}
+      </div>
+
       <div className="ml-auto flex items-center gap-1.5">
         {agentState?.isStreaming && (
           <span className="flex items-center gap-1 text-accent">

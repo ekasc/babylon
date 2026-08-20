@@ -11,6 +11,7 @@ export interface HistoryTurn {
   onActivePath: boolean;
   current: boolean;
   branchCount: number;
+  changedCount: number;
   checkpointAvailable: boolean;
   rollbackAvailable: boolean;
   rollbackReason?: string;
@@ -99,6 +100,7 @@ export function projectHistory(input: {
       onActivePath,
       current: current?.id === row.id,
       branchCount: children.get(row.id) ?? 0,
+      changedCount: checkpoint?.complete ? checkpoint.changedPaths.length : 0,
       checkpointAvailable: !!checkpoint?.complete,
       rollbackAvailable: !rollbackReason,
       rollbackReason,
