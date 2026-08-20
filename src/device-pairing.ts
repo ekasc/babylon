@@ -44,19 +44,21 @@ export function createDeviceRegistry(): DeviceRegistry {
 
 export function registerDevice(registry: DeviceRegistry, device: PairedDevice): DeviceRegistry {
   if (registry.devices[device.id]) return registry; // no clobber
-  return { devices: { ...registry.devices, [device.id]: { ...device } } };
+  // Copy the scope array so a later mutation of the caller's object cannot
+  // change the stored grant (privilege escalation).
+  return { devices: { ...registry.devices, [device.id]: { ...device, scope: [...device.scope] } } };
 }
 
 export function revokeDevice(registry: DeviceRegistry, id: string): DeviceRegistry {
   const existing = registry.devices[id];
   if (!existing || existing.revoked) return registry;
-  return { devices: { ...registry.devices, [id]: { ...existing, revoked: true } } };
+  return { devices: { ...registry.devices, [id]: { ...existing, scope: [...existing.scope], revoked: true } } };
 }
 
 export function touchDevice(registry: DeviceRegistry, id: string, at: number): DeviceRegistry {
   const existing = registry.devices[id];
   if (!existing) return registry;
-  return { devices: { ...registry.devices, [id]: { ...existing, lastSeenAt: at } } };
+  return { devices: { ...registry.devices, [id]: { ...existing, scope: [...existing.scope], lastSeenAt: at } } };
 }
 
 export function isAuthorized(registry: DeviceRegistry, id: string, action: DeviceScope): boolean {
@@ -66,5 +68,7 @@ export function isAuthorized(registry: DeviceRegistry, id: string, action: Devic
 }
 
 export function listDevices(registry: DeviceRegistry): PairedDevice[] {
-  return Object.values(registry.devices);
+  // Return copies so a caller cannot mutate a returned device to defeat
+  // revocation or escalate scope.
+  return Object.values(registry.devices).map((d) => ({ ...d, scope: [...d.scope] }));
 }

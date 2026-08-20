@@ -68,4 +68,22 @@ describe("device pairing", () => {
     r = registerDevice(r, device({ id: "b" }));
     expect(listDevices(r).map((d) => d.id).sort()).toEqual(["a", "b"]);
   });
+
+  it("isolates the caller's scope array on register", () => {
+    const original = device();
+    const r = registerDevice(createDeviceRegistry(), original);
+    original.scope.push("stop_resume");
+    expect(isAuthorized(r, "d1", "stop_resume")).toBe(false);
+  });
+
+  it("returns copies from listDevices so revocation cannot be defeated", () => {
+    let r = registerDevice(createDeviceRegistry(), device());
+    const listed = listDevices(r).find((d) => d.id === "d1");
+    if (listed) listed.revoked = false;
+    expect(isAuthorized(r, "d1", "view_tasks")).toBe(true); // still authorized pre-revoke
+    r = revokeDevice(r, "d1");
+    const after = listDevices(r).find((d) => d.id === "d1");
+    if (after) after.revoked = false; // attempt to defeat revocation via copy
+    expect(isAuthorized(r, "d1", "view_tasks")).toBe(false); // registry unchanged
+  });
 });
