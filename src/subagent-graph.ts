@@ -53,8 +53,8 @@ export function createNode(params: {
     result: null,
     summary: null,
     worktreeId: params.worktreeId ?? null,
-    createdAt: params.createdAt ?? 0,
-    updatedAt: params.createdAt ?? 0,
+    createdAt: params.createdAt ?? Date.now(),
+    updatedAt: params.createdAt ?? Date.now(),
   };
 }
 
@@ -76,10 +76,9 @@ export function updateNode(
   const existing = graph.nodes[id];
   if (!existing) return graph;
   if ((patch as { parentId?: unknown }).parentId !== undefined) return graph;
+  if (Object.keys(patch).length === 0) return graph;
   const next: SubagentNode = { ...existing, ...patch, id: existing.id, parentId: existing.parentId, createdAt: existing.createdAt };
-  if (patch.status !== undefined || patch.result !== undefined || patch.summary !== undefined) {
-    next.updatedAt = Date.now();
-  }
+  next.updatedAt = Date.now();
   return { nodes: { ...graph.nodes, [id]: next } };
 }
 

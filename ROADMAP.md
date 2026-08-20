@@ -1,6 +1,6 @@
 # Babylon Roadmap
 
-> Last updated: 2026-05-13 · 14 of 16 features have a tested model on `main` (287 tests, `tsc` clean). Subagent graph model is on branch `phase/4-subagent-graph` and not yet merged.
+> Last updated: 2026-05-13 · 11 of 16 features done, 5 partial. 287 tests on `main` (`tsc` clean). Subagent graph model is on branch `phase/4-subagent-graph` and not yet merged.
 
 Babylon is a secure desktop workspace for the Pi coding agent. The next phase should focus on execution infrastructure rather than adding more chat surface area.
 
@@ -17,7 +17,7 @@ The goal is to make Babylon capable of safely running long-lived, parallel softw
 | 3 · Runtime Workspace | 5. Agent-aware terminal | **Done** | `src/process-model.ts` · PR #4 |
 |  | 6. Browser preview | **Done** | `src/preview-model.ts` · PR #4 |
 | 4 · Parallel Work | 7. Task-owned worktrees | **Done** | `src/tasks.ts` · PR #5 |
-|  | 8. Structured subagent graph | **In progress** | `src/subagent-graph.ts` on `phase/4-subagent-graph` (not yet merged, tests pending) |
+|  | 8. Structured subagent graph | **In progress** | `src/subagent-graph.ts` on `phase/4-subagent-graph` (not yet merged, tests written) |
 |  | 9. Model roles | **Done** | `src/model-roles.ts` · PR #5 |
 | 5 · Attention and Completion | 10. Attention inbox | **Done** | `src/attention.ts` + `src/components/AttentionPanel.tsx` wired to approvals · PR #6, #13 |
 |  | 11. Completion contracts | **Done** | `src/completion-contracts.ts` · PR #6 |
