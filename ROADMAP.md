@@ -1,870 +1,227 @@
-Babylon Roadmap
+# Babylon Roadmap
+
+> Last updated: 2026-05-13 · 11 of 16 features done, 5 partial. 287 tests on `main` (`tsc` clean). Subagent graph model is on branch `phase/4-subagent-graph` and not yet merged.
 
 Babylon is a secure desktop workspace for the Pi coding agent. The next phase should focus on execution infrastructure rather than adding more chat surface area.
 
 The goal is to make Babylon capable of safely running long-lived, parallel software-engineering work with strong visibility, isolation, recovery, and user control.
 
-Guiding Principles
+## Progress at a glance
 
-Pi remains the agent engine. Babylon should orchestrate, observe, constrain, and extend it rather than reimplementing the core agent loop.
+| Phase | Feature | Status | Evidence |
+|-------|---------|--------|----------|
+| 1 · Execution Control | 1. Agent permission system | **Done** | `electron/permissions.ts` + `permission-agent.ts` + `permission-hook.ts` · PR #2 |
+|  | 2. Automatic risk review | **Done** | `classifyRisk` / heuristic reviewer in `permissions.ts`, wired through `permission-hook.ts` · PR #2 |
+| 2 · Coding Intelligence | 3. LSP integration | **Done** | `electron/lsp.ts` wire protocol · PR #3 |
+|  | 4. Structured plans | **Done** | `src/plans.ts` · PR #3 |
+| 3 · Runtime Workspace | 5. Agent-aware terminal | **Done** | `src/process-model.ts` · PR #4 |
+|  | 6. Browser preview | **Done** | `src/preview-model.ts` · PR #4 |
+| 4 · Parallel Work | 7. Task-owned worktrees | **Done** | `src/tasks.ts` · PR #5 |
+|  | 8. Structured subagent graph | **In progress** | `src/subagent-graph.ts` on `phase/4-subagent-graph` (not yet merged, tests written) |
+|  | 9. Model roles | **Done** | `src/model-roles.ts` · PR #5 |
+| 5 · Attention and Completion | 10. Attention inbox | **Done** | `src/attention.ts` + `src/components/AttentionPanel.tsx` wired to approvals · PR #6, #13 |
+|  | 11. Completion contracts | **Done** | `src/completion-contracts.ts` · PR #6 |
+|  | 12. Hook system | **Done** | `src/hooks.ts` · PR #7 |
+| 6 · Control Plane | 13. Extract runtime into Babylon daemon | **Partial** | `src/runtime.ts` (#8), `src/daemon-protocol.ts` (#9), `src/daemon-host.ts` (#14); real daemon process/transport still to do |
+|  | 14. Background execution policies | **Partial** | `src/background-policy.ts` (#8), `src/scheduler.ts` (#12); scheduler loop + daemon wiring still to do |
+| 7 · Remote Control | 15. Remote and mobile control | **Partial** | `src/device-pairing.ts` (#10); transport + actions + pairing UI still to do |
+| 8 · Automation | 16. Scheduled and conditional tasks | **Partial** | `src/automation.ts` (#11), `src/scheduler.ts` (#12); executor + UI still to do |
+| Cross-cutting | Event model / stable ownership / observability | **Partial** | Stable ids and `makeId`, protocol envelopes with stable ids; full event sourcing and diagnostics surface still to do |
 
-Agent state must be truthful. Never infer progress from animation or text when a concrete runtime state exists.
+Check the box when the feature has a pure, tested model merged to `main` and, where the roadmap requires it, a desktop surface. Partial means the model exists but the daemon/process/transport/UI wiring is still open.
 
-Every long-running task should be resumable, inspectable, and interruptible.
+---
 
-Parallel work should be isolated by default.
+## Guiding principles
 
-The user should only be interrupted when their input is genuinely required.
+- Pi remains the agent engine. Babylon should orchestrate, observe, constrain, and extend it rather than reimplementing the core agent loop.
+- Agent state must be truthful. Never infer progress from animation or text when a concrete runtime state exists.
+- Every long-running task should be resumable, inspectable, and interruptible.
+- Parallel work should be isolated by default.
+- The user should only be interrupted when their input is genuinely required.
+- Security should be expressed as explicit execution policy, not vague warnings.
+- New infrastructure must preserve Babylon's existing session history, rollback, worktree, extension, skill, and project-trust behavior.
+- Keep the main interface dense, fast, keyboard-first, and free of unnecessary chrome.
 
-Security should be expressed as explicit execution policy, not vague warnings.
+---
 
-New infrastructure must preserve Babylon's existing session history, rollback, worktree, extension, skill, and project-trust behavior.
+## Phase 1: Execution Control
 
-Keep the main interface dense, fast, keyboard-first, and free of unnecessary chrome.
+- [x] **1. Agent permission system** — Babylon-owned permission layer around agent actions. Modes `supervised` / `auto` / `full_access`; per-category policies; persistent + session rules; approval UI with allow once / session / always / deny. Done in `electron/permissions.ts`, `permission-agent.ts`, `permission-hook.ts`, `ApprovalGate.tsx`, PR #2.
 
-Phase 1: Execution Control
+  Execution modes
 
-1. Agent Permission System
+  - Supervised: ask before commands, writes, external access, and other consequential actions.
+  - Auto: routine actions run automatically, risky or uncertain actions require approval.
+  - Full Access: run without interactive approval prompts.
 
-Add a Babylon-owned permission layer around agent actions.
+  Approval actions — each request supports allow once, allow for session, always allow matching actions, deny.
 
-Execution modes
+  Policy categories — file reads, file writes inside/outside workspace, shell commands, destructive shell commands, network access, git commit, git push, package installation, process spawning, privileged commands.
 
-Supervised: ask before commands, writes, external access, and other consequential actions.
+  Requirements — policies are evaluated before execution; persistent rules are stored outside Pi session files; session-only rules disappear with the session; approval state is visible in the transcript and Activity surfaces; rules are editable in Settings; Full Access is visibly distinct from safer modes.
 
-Auto: routine actions run automatically, risky or uncertain actions require approval.
+- [x] **2. Automatic risk review** — secondary review when no static rule matches. Done as `classifyRisk` heuristic in `permissions.ts` wired through `permission-hook.ts`, PR #2. Explicit deny is never overridden.
 
-Full Access: run without interactive approval prompts.
+  Flow: agent action → static policy → clearly allowed? yes → execute / no → risk review → low risk → execute / high or uncertain risk → ask user.
 
-Approval actions
+  Reviewer considers command intent, affected paths, destructive flags, external network access, privilege escalation, repository state, current project boundary.
 
-Each approval request should support:
+## Phase 2: Coding Intelligence
 
-Allow once
+- [x] **3. LSP integration** — language intelligence service Babylon can expose to Pi. Done in `electron/lsp.ts` (header parsing, `encodeLspMessage` / `decodeLspMessages`, `mapDiagnostics`), PR #3.
 
-Allow for this session
+  Initial capabilities: diagnostics, go to definition, find references, hover, rename, code actions. Agent feedback loop: after file edit → language server runs diagnostics → new errors/warnings collected → relevant diagnostics returned to active agent → agent can fix without waiting for user.
 
-Always allow matching actions
+  Requirements: diagnostics diff-aware where possible; avoid flooding agent with unchanged diagnostics; language servers project-scoped; server crashes must not destabilize main session; surface current diagnostics in workspace UI.
 
-Deny
+- [x] **4. Structured plans** — plans as first-class Babylon state rather than plain Markdown. Done in `src/plans.ts` (monotonic `nextStepSeq`, `reconcile`, `deriveStatus`), PR #3.
 
-Policy categories
+  A plan contains ordered steps, step status, optional dependencies, affected areas/files when known, approval state, execution progress. Actions: edit, approve, reject, reorder, add/remove steps, execute one, execute all, pause after current step. States: proposed, approved, running, paused, blocked, completed, cancelled. Agent can propose a plan and stop before implementation when approval is required.
 
-At minimum, policies should distinguish:
+## Phase 3: Runtime Workspace
 
-File reads
+- [x] **5. Agent-aware terminal** — first-class terminal and process manager. Done in `src/process-model.ts` + `ProcessPanel.tsx`, PR #4.
 
-File writes inside the workspace
+  Each tracked process includes command, cwd, owning session/agent, PID, start time, exit status, detected ports, current state. Example `TERMINALS` list with dev server :5173, tests, shell. Requirements: interactive PTY support, multiple terminals per task, kill/restart, agent-created processes appear automatically, exited processes remain in history, output can be referenced by agent, ownership explicit.
 
-File writes outside the workspace
+- [x] **6. Browser preview** — integrated preview surface for local web apps. Done in `src/preview-model.ts` (`detectServerFromCommand`) + `PreviewPanel.tsx`, PR #4.
 
-Shell commands
+  Automatic behavior: `pnpm dev` → `localhost:5173` detected → preview available. Capabilities: navigate, reload, open externally, inspect console output, capture screenshot, select elements, report page errors, basic agent-driven interaction. Agent tools: `preview_open`, `preview_navigate`, `preview_click`, `preview_type`, `preview_screenshot`, `preview_console`, `preview_inspect`.
 
-Destructive shell commands
+## Phase 4: Parallel Work
 
-Network access
+- [x] **7. Task-owned worktrees** — worktrees as task execution primitive. Done in `src/tasks.ts` (addTask refuses overwrite, `isRemovable` guards dirty worktrees), PR #5.
 
-Git commit
+  A task may own Pi session, git branch, git worktree, terminals, preview, diff, checkpoints. Behavior: parallel task can auto-create worktree; worktree/branch names deterministic but editable; removing a task must not silently destroy uncommitted changes; task state survives restart; completed work can be promoted/merged.
 
-Git push
+- [ ] **8. Structured subagent graph** — clearer hierarchy of work. Model drafted in `src/subagent-graph.ts` on branch `phase/4-subagent-graph`; not yet merged or audited.
 
-Package installation
+  Example:
 
-Process spawning
+  ```
+  Main Agent
+  Research
+  ├── ✓ Database scout
+  ├── ✓ API scout
+  └── ● Test scout
+  Implementation
+  ├── ● Backend worker
+  └── ○ Frontend worker
+  Review
+  └── ○ Reviewer
+  ```
 
-Privileged commands
+  Requirements: parent/child relationships explicit; each agent has goal, state, model, owner, and result; subagent output defaults to summaries rather than flooding parent transcript; full transcripts remain inspectable; agents may run in isolated worktrees; bounded and persistent agents remain distinct concepts.
 
-Requirements
+- [x] **9. Model roles** — explicit roles for cheaper background work. Done in `src/model-roles.ts` (`mergeRoleConfig` filters explicit undefined, `setRole` merges), PR #5.
 
-Policies are evaluated before execution.
+  Suggested roles: primary, planner, scout, reviewer, recap, title. Each role can configure provider/model, reasoning level, token budget, fallback model. Requirements: roles optional; primary session model remains independent; background roles must not silently consume expensive models; show which model performed summaries/reviews/plans.
 
-Persistent rules are stored outside Pi session files.
+## Phase 5: Attention and Completion
 
-Session-only rules disappear with the session.
+- [x] **10. Attention inbox** — one global place for everything that genuinely needs the user. Done in `src/attention.ts` (add no-overwrite, `removeAttention` hard delete, list unresolved newest-first) + `src/components/AttentionPanel.tsx` wired to approval events (PR #6, #13).
 
-Approval state is visible in the transcript and Activity surfaces.
+  Attention types: permission request, agent question, failed task, blocked task, merge conflict, missing credential, environment failure, review requested. Requirements: works across projects/sessions; items disappear when resolved; user can jump to originating context; background agents do not require the user to keep their chat open.
 
-Rules are editable in Settings.
+- [x] **11. Completion contracts** — define what must be true before Babylon considers a task complete. Done in `src/completion-contracts.ts` (required vs optional checks, `addCheck` dedupe, `removeCheck` no-op safe), PR #6.
 
-Full Access must be visibly distinct from safer modes.
+  Example definition of done: typecheck, unit tests, lint, no new diagnostics, browser smoke test, diff reviewed. Checks: command exits successfully, tests pass, typecheck passes, lint passes, no new LSP errors, no unresolved TODO markers, working tree state matches policy, browser smoke test passes, review agent approves. Behavior: distinguish agent finished from completion contract passed; the second is the trustworthy state.
 
-2. Automatic Risk Review
+- [x] **12. Hook system** — small, stable Babylon hook lifecycle. Done in `src/hooks.ts` (pre/post_tool_use, before_stop, attention_required, copy-on-insert, stable order array, `timeoutMs` validation), PR #7.
 
-Add a secondary review step for actions that are not clearly allowed or denied by static policy.
+  Examples: `pre_tool_use` can block, rewrite args, require approval, attach metadata; `post_tool_use` runs diagnostics, updates process/git state; `before_stop` verifies contract, requires tests, requests repair pass; `attention_required` creates inbox item or notifies remote client. Hooks must have strict timeouts and must not deadlock the agent runtime.
 
-Flow:
+## Phase 6: Control Plane
 
-Agent action
-    ↓
-Static policy
-    ↓
-Clearly allowed? ── yes → execute
-    ↓ no
-Risk review
-    ↓
-Low risk → execute
-High/uncertain risk → ask user
+- [ ] **13. Extract the runtime into a Babylon daemon** — move long-lived orchestration out of the Electron application process. Partially done: `src/runtime.ts` aggregates registries outside React with versioned `snapshotRuntime`/`restoreRuntime` (#8), `src/daemon-protocol.ts` typed envelopes (#9), `src/daemon-host.ts` pure dispatch core (#14). Remaining: real daemon process, typed transport/socket, reconnection, wiring live subsystems.
 
-The reviewer should consider:
+  Target architecture: Babylon Daemon owns Pi host lifecycle, session/task/approval/terminal/worktree/attention/background execution/persistence; desktop owns rendering, keyboard interaction, dialogs, notifications, previews, user input; they talk over a typed local protocol. Requirements: closing GUI must not kill background agents unless configured; reopening reconnects; protocol events carry stable task/session/tool ids; runtime state remains authoritative outside React. Do not perform extraction until execution/task APIs above have stabilized — that boundary is now justified.
 
-command intent
+- [ ] **14. Background execution policies** — explicit policies for background work once the daemon exists. Partially done: `src/background-policy.ts` (never / while_plugged_in / always + pauseOnBattery/pauseOnSleep/maxConcurrent/maxCost/perProject, `canRunInBackground` tolerates missing signals) (#8) and `src/scheduler.ts` decision engine (#12). Remaining: scheduler loop, policy enforcement in daemon.
 
-affected paths
+  Examples: background execution never / while plugged in / always; additional controls pause on battery, pause on sleep, resume after wake, maximum concurrent agents, maximum background model cost, per-project background permission.
 
-destructive flags
+## Phase 7: Remote Control
 
-external network access
+- [ ] **15. Remote and mobile control** — inspect and control active Babylon tasks from another trusted device. Partially done: `src/device-pairing.ts` (`PairedDevice` with scope/createdAt/lastSeenAt/revoked, `DeviceRegistry` no-clobber) (#10). Remaining: remote transport, remote actions, pairing UI.
 
-privilege escalation
+  Initial remote scope intentionally small: view active tasks, view current agent state, receive attention notifications, approve/deny actions, answer agent questions, stop/pause/resume tasks, view concise diffs and completion state. Do not recreate the entire desktop workspace on mobile. Pairing uses explicit device pairing with revocable grants; each device has identity, authorization scope, creation time, last-seen time, revoke control.
 
-repository state
+## Phase 8: Automation
 
-current project boundary
+- [ ] **16. Scheduled and conditional tasks** — allow Babylon tasks to run without an open foreground session after background execution is reliable. Partially done: `src/automation.ts` trigger model (interval/daily/file_watch/branch_watch, `evaluateTrigger`, UTC daily, trailing-slash handling) (#11) plus `src/scheduler.ts` due-task evaluation (#12). Remaining: scheduler loop, executor, automation UI.
 
-The reviewer must never override an explicit deny rule.
+  Examples: run dependency checks every morning, review new CI failures, watch for file or branch change, periodically run repository health check, notify when long-running task finishes. Requirements: reuse same permission system and completion contracts; every automation run creates inspectable history; automation failures enter Attention Inbox; no hidden background agents.
 
-Phase 2: Coding Intelligence
+---
 
-3. LSP Integration
+## Cross-cutting infrastructure
 
-Add a language intelligence service that Babylon can expose to Pi.
+- [ ] **Event model** — normalize significant runtime activity into stable events. Partially done: `makeId` (timestamp + monotonic counter + `crypto.randomUUID`) and `ProtocolEnvelope` with stable ids on daemon boundary. Remaining: full event catalog (`message.sent`, `turn.started`, `turn.completed`, `tool.started`, `tool.completed`, `approval.requested`, `approval.resolved`, `process.started`, `process.exited`, `checkpoint.created`, `plan.proposed`, `plan.approved`, `task.blocked`, `task.completed`, `attention.created`, `attention.resolved`) and replay/projection.
 
-Initial capabilities
+- [ ] **Stable ownership** — every long-lived resource should identify its owner (`projectId`, `taskId`, `sessionId`, `agentId`, `turnId`, `toolRunId`, `processId`, `worktreeId`). Partially done via `ownerSession`, `sessionId`, `agentId` fields on tasks/processes/plans. Remaining: enforce at every subsystem boundary and avoid deriving ownership from whichever UI panel happens to be open.
 
-Diagnostics
+- [ ] **Observability** — developer-facing runtime diagnostics surface covering Pi runtime state, model availability, project resources, language servers, active processes, worktrees, permission engine, background tasks, event queue health; plus a single diagnostic export without prompts/tool output/secrets/source. Not yet started.
 
-Go to definition
+---
 
-Find references
-
-Hover information
-
-Rename
-
-Code actions
-
-Agent feedback loop
-
-After a file edit:
-
-Agent edits file
-    ↓
-Language server runs diagnostics
-    ↓
-New errors/warnings are collected
-    ↓
-Relevant diagnostics are returned to the active agent
-    ↓
-Agent can fix them without waiting for the user
-
-Requirements
-
-Diagnostics should be diff-aware where possible.
-
-Avoid flooding the agent with unchanged diagnostics.
-
-Language servers should be project-scoped.
-
-Server crashes must not destabilize the main agent session.
-
-Surface current diagnostics in the workspace UI.
-
-4. Structured Plans
-
-Plans should become first-class Babylon state rather than plain assistant Markdown.
-
-A plan contains:
-
-ordered steps
-
-step status
-
-optional dependencies
-
-affected areas/files when known
-
-approval state
-
-execution progress
-
-Plan actions
-
-Edit
-
-Approve
-
-Reject
-
-Reorder steps
-
-Add/remove steps
-
-Execute one step
-
-Execute all
-
-Pause after current step
-
-States
-
-Proposed
-Approved
-Running
-Paused
-Blocked
-Completed
-Cancelled
-
-The agent should be able to propose a plan and stop before implementation when plan approval is required.
-
-Phase 3: Runtime Workspace
-
-5. Agent-Aware Terminal
-
-Add a first-class terminal and process manager.
-
-Babylon should track processes rather than treating every terminal as an opaque shell.
-
-Process metadata
-
-Each tracked process should include:
-
-command
-
-cwd
-
-owning session/agent
-
-PID
-
-start time
-
-exit status
-
-detected ports
-
-current state
-
-Example
-
-TERMINALS
-
-● dev server       pnpm dev       :5173
-● tests            vitest
-○ shell            zsh
-
-Created by: Main Agent
-
-Requirements
-
-Interactive PTY support
-
-Multiple terminals per task
-
-Kill/restart controls
-
-Agent-created processes appear automatically
-
-Exited processes remain visible in history
-
-Output can be referenced by the agent
-
-Terminal ownership is explicit
-
-6. Browser Preview
-
-Add an integrated preview surface for local web applications.
-
-Automatic behavior
-
-When Babylon detects a local HTTP server:
-
-pnpm dev
-    ↓
-localhost:5173 detected
-    ↓
-Preview available
-
-Preview capabilities
-
-Navigate
-
-Reload
-
-Open current URL externally
-
-Inspect console output
-
-Capture screenshot
-
-Select elements
-
-Report page errors
-
-Basic agent-driven interaction
-
-Agent tools
-
-Expose Babylon-owned preview capabilities back to Pi, such as:
-
-preview_open
-preview_navigate
-preview_click
-preview_type
-preview_screenshot
-preview_console
-preview_inspect
-
-The agent should be able to validate UI changes without requiring the user to manually describe the result.
-
-Phase 4: Parallel Work
-
-7. Task-Owned Worktrees
-
-Upgrade worktrees from a standalone feature into a task execution primitive.
-
-A task may own:
-
-Task
-├── Pi session
-├── Git branch
-├── Git worktree
-├── terminals
-├── preview
-├── diff
-└── checkpoints
-
-Behavior
-
-Creating a parallel implementation task can automatically create a worktree.
-
-Worktree and branch names are generated deterministically but editable.
-
-Removing a task must not silently destroy uncommitted changes.
-
-Task state survives Babylon restart.
-
-The user can promote or merge completed work back into the primary workspace.
-
-8. Structured Subagent Graph
-
-Expand the current agent system into a clearer hierarchy of work.
-
-Example:
-
-Main Agent
-
-Research
-├── ✓ Database scout
-├── ✓ API scout
-└── ● Test scout
-
-Implementation
-├── ● Backend worker
-└── ○ Frontend worker
-
-Review
-└── ○ Reviewer
-
-Requirements
-
-Parent/child relationships are explicit.
-
-Each agent has a goal, state, model, owner, and result.
-
-Subagent output defaults to summaries rather than flooding the parent transcript.
-
-Full transcripts remain inspectable.
-
-Agents may run in isolated worktrees.
-
-Bounded and persistent agents remain distinct concepts.
-
-9. Model Roles
-
-Generalize Babylon's existing use of cheaper models for background work into explicit roles.
-
-Suggested roles:
-
-Primary
-Planner
-Scout
-Reviewer
-Recap
-Title
-
-Each role can configure:
-
-provider/model
-
-reasoning level
-
-token budget
-
-fallback model
-
-Requirements
-
-Roles are optional.
-
-The primary session model remains independent.
-
-Background roles must not silently consume expensive models.
-
-Show which model performed generated summaries, reviews, or plans.
-
-Phase 5: Attention and Completion
-
-10. Attention Inbox
-
-Create one global place for everything that genuinely needs the user.
-
-Attention types
-
-Permission request
-
-Agent question
-
-Failed task
-
-Blocked task
-
-Merge conflict
-
-Missing credential
-
-Environment failure
-
-Review requested
-
-Example
-
-NEEDS YOU
-
-! Auth refactor
-  Permission required: git push
-
-! Search redesign
-  Agent needs a product decision
-
-! CI fix
-  Tests failed after 3 repair attempts
-
-Requirements
-
-Works across projects and sessions.
-
-Items disappear when resolved.
-
-User can jump directly to the originating context.
-
-Background agents should not require the user to keep their chat open.
-
-11. Completion Contracts
-
-Allow users or projects to define what must be true before Babylon considers a task complete.
-
-Example:
-
-Definition of Done
-
-✓ Typecheck
-✓ Unit tests
-✓ Lint
-✓ No new diagnostics
-○ Browser smoke test
-✓ Diff reviewed
-
-Possible checks
-
-command exits successfully
-
-tests pass
-
-typecheck passes
-
-lint passes
-
-no new LSP errors
-
-no unresolved TODO markers introduced
-
-working tree state matches policy
-
-browser smoke test passes
-
-review agent approves
-
-Behavior
-
-An agent may say it believes the task is finished, but Babylon should distinguish:
-
-Agent finished
-
-from:
-
-Completion contract passed
-
-The second one is the trustworthy state.
-
-12. Hook System
-
-Add a small, stable Babylon hook lifecycle.
-
-Start with:
-
-pre_tool_use
-post_tool_use
-before_stop
-attention_required
-
-Examples
-
-pre_tool_use
-
-block a command
-
-rewrite safe arguments
-
-require approval
-
-attach metadata
-
-post_tool_use
-
-run diagnostics after edits
-
-update process state
-
-update Git state
-
-before_stop
-
-verify completion contract
-
-require tests before final completion
-
-request one more repair pass
-
-attention_required
-
-create an Attention Inbox item
-
-notify a remote client later
-
-Hooks must have strict timeouts and must not be allowed to deadlock the agent runtime.
-
-Phase 6: Control Plane
-
-13. Extract the Runtime into a Babylon Daemon
-
-Move long-lived orchestration out of the Electron application process.
-
-Target architecture:
-
-                 Babylon Daemon
-                       │
-        ┌──────────────┼──────────────┐
-        │              │              │
-       Pi          Task State     Processes
-        │              │              │
-     Sessions       Worktrees       Terminals
-        │              │              │
-        └──────────────┼──────────────┘
-                       │
-              Typed local protocol
-                       │
-             ┌─────────┴─────────┐
-          Desktop             Future clients
-
-Daemon responsibilities
-
-Pi host lifecycle
-
-session state
-
-task state
-
-approvals
-
-terminals/processes
-
-worktrees
-
-attention state
-
-background execution
-
-persistence
-
-Desktop responsibilities
-
-rendering
-
-keyboard interaction
-
-dialogs
-
-local notifications
-
-previews
-
-user input
-
-Requirements
-
-Closing the GUI must not kill background agents unless configured to do so.
-
-Reopening Babylon reconnects to existing tasks.
-
-Protocol events carry stable task/session/tool IDs.
-
-Runtime state remains authoritative outside React.
-
-Do not perform this extraction until the execution/task APIs above have stabilized enough to justify the boundary.
-
-14. Background Execution Policies
-
-Once the daemon exists, support explicit policies for background work.
-
-Examples:
-
-Background execution
-
-○ Never
-● While plugged in
-○ Always
-
-Additional controls:
-
-Pause on battery
-
-Pause on sleep
-
-Resume after wake
-
-Maximum concurrent agents
-
-Maximum background model cost
-
-Per-project background permission
-
-Phase 7: Remote Control
-
-15. Remote and Mobile Control
-
-Allow the user to inspect and control active Babylon tasks from another trusted device.
-
-Initial remote scope should be intentionally small:
-
-View active tasks
-
-View current agent state
-
-Receive attention notifications
-
-Approve/deny actions
-
-Answer agent questions
-
-Stop/pause/resume tasks
-
-View concise diffs and completion state
-
-Do not attempt to recreate the entire desktop workspace on mobile.
-
-Pairing
-
-Use explicit device pairing with revocable grants.
-
-Each device should have:
-
-device identity
-
-authorization scope
-
-creation time
-
-last-seen time
-
-revoke control
-
-Phase 8: Automation
-
-16. Scheduled and Conditional Tasks
-
-After background execution is reliable, allow Babylon tasks to run without an open foreground session.
-
-Examples:
-
-Run dependency checks every morning
-
-Review new CI failures
-
-Watch for a file or branch change
-
-Periodically run a repository health check
-
-Notify when a long-running task finishes
-
-Requirements
-
-Reuse the same permission system.
-
-Reuse completion contracts.
-
-Every automation run creates inspectable history.
-
-Automation failures enter the Attention Inbox.
-
-No hidden background agents.
-
-Cross-Cutting Infrastructure
-
-Event Model
-
-As Babylon gains more asynchronous systems, normalize significant runtime activity into stable events.
-
-Examples:
-
-message.sent
-turn.started
-turn.completed
-tool.started
-tool.completed
-approval.requested
-approval.resolved
-process.started
-process.exited
-checkpoint.created
-plan.proposed
-plan.approved
-task.blocked
-task.completed
-attention.created
-attention.resolved
-
-This does not require immediately converting all existing state to full event sourcing. Start by defining stable IDs and event contracts at subsystem boundaries so the future daemon can replay and project reliable state.
-
-Stable Ownership
-
-Every long-lived resource should identify its owner.
-
-projectId
-taskId
-sessionId
-agentId
-turnId
-toolRunId
-processId
-worktreeId
-
-Avoid deriving ownership from whichever UI panel happens to be open.
-
-Observability
-
-Add a developer-facing runtime diagnostics surface covering:
-
-Pi runtime state
-
-model availability
-
-project resources
-
-language servers
-
-active processes
-
-worktrees
-
-permission engine
-
-background tasks
-
-event queue health
-
-Provide a single diagnostic export that contains system state without silently including user prompts, tool output, secrets, or source code.
-
-Recommended Shipping Order
+## Recommended shipping order
 
 Next
 
-Agent permission system
-
-Automatic risk review
-
-LSP diagnostics feedback loop
-
-Agent-aware terminal/process manager
-
-Browser preview
+- Agent permission system
+- Automatic risk review
+- LSP diagnostics feedback loop
+- Agent-aware terminal/process manager
+- Browser preview
 
 After that
 
-Structured plans
-
-Attention Inbox
-
-Completion contracts
-
-Task-owned worktrees
-
-Structured subagent graph
-
-Hook system
-
-Model roles
+- Structured plans
+- Attention inbox
+- Completion contracts
+- Task-owned worktrees
+- Structured subagent graph
+- Hook system
+- Model roles
 
 Later
 
-Babylon daemon
+- Babylon daemon
+- Background execution policies
+- Remote/mobile control
+- Scheduled and conditional tasks
 
-Background execution policies
+---
 
-Remote/mobile control
-
-Scheduled and conditional tasks
-
-Explicit Non-Goals for Now
+## Explicit non-goals for now
 
 Do not prioritize these ahead of the roadmap above:
 
-More decorative chat UI
+- More decorative chat UI
+- Replacing Pi's agent loop
+- Replacing Pi's session format
+- A built-in source-code editor competing with existing editors
+- Cloud synchronization before the local control plane is robust
+- Generic plugin marketplace infrastructure
+- Multi-user collaboration
+- Enterprise RBAC
+- Container or Kubernetes orchestration
+- Arbitrary provider abstraction before Babylon's Pi experience is complete
 
-Replacing Pi's agent loop
+---
 
-Replacing Pi's session format
-
-A built-in source-code editor competing with existing editors
-
-Cloud synchronization before the local control plane is robust
-
-Generic plugin marketplace infrastructure
-
-Multi-user collaboration
-
-Enterprise RBAC
-
-Container or Kubernetes orchestration
-
-Arbitrary provider abstraction before Babylon's Pi experience is complete
-
-North Star
+## North Star
 
 Babylon should become the place where the user controls software-engineering agents, not another place where they manually manipulate code.
 
 The desktop experience should eventually make it possible to:
 
-Describe a task.
-
-Approve or edit the plan when necessary.
-
-Let isolated agents execute in parallel.
-
-Only be interrupted for real decisions or consequential actions.
-
-Review precise diffs, diagnostics, runtime state, and completion checks.
-
-Roll back, branch, merge, or continue from any meaningful point.
-
-Leave the app and trust that Babylon still knows exactly what every agent is doing.
+- Describe a task.
+- Approve or edit the plan when necessary.
+- Let isolated agents execute in parallel.
+- Only be interrupted for real decisions or consequential actions.
+- Review precise diffs, diagnostics, runtime state, and completion checks.
+- Roll back, branch, merge, or continue from any meaningful point.
+- Leave the app and trust that Babylon still knows exactly what every agent is doing.
