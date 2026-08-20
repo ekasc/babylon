@@ -14,6 +14,8 @@ import { RollbackConfirm, RollbackDock } from "./components/Rollback";
 import { WorktreeBanner, WorktreeModal, type WorktreeInfo } from "./components/Worktree";
 import { ApprovalGate } from "./components/ApprovalGate";
 import { PermissionsPanel } from "./components/PermissionsPanel";
+import { PlansPanel } from "./components/PlansPanel";
+import type { Plan } from "./plans";
 import { FlaskIcon, FolderIcon, LayersIcon, MoreIcon, PiMark, ShieldIcon } from "./components/icons";
 
 const BranchPanel = lazy(() => import("./components/BranchPanel"));
@@ -142,6 +144,8 @@ export default function App() {
   const [showWorkflowsPanel, setShowWorkflowsPanel] = useState(false);
   const [showCommandPalette, setShowCommandPalette] = useState(false);
   const [showPermissions, setShowPermissions] = useState(false);
+  const [showPlans, setShowPlans] = useState(false);
+  const [plans, setPlans] = useState<Record<string, Plan>>({});
   const [history, setHistory] = useState<HistoryProjection>({ turns: [], leafId: null, hasBranches: false });
   const [historyRevision, setHistoryRevision] = useState(0);
   const [rollbackPlan, setRollbackPlan] = useState<RollbackPlan | null>(null);
@@ -1102,6 +1106,14 @@ export default function App() {
               >
                 <ShieldIcon size={16} />
               </button>
+              <button
+                onClick={() => setShowPlans((open) => !open)}
+                title="Structured plans"
+                aria-pressed={showPlans}
+                className={`thread-action ${showPlans ? "is-active" : ""}`}
+              >
+                Plans
+              </button>
               <button onClick={() => setShowCommandPalette(true)} title="Search and commands (⌘K)" className="thread-action">
                 <FolderIcon size={16} />
               </button>
@@ -1196,6 +1208,9 @@ export default function App() {
         <WorktreeModal info={worktreeInfo} onClose={() => setShowWorktreeModal(false)} toast={toast} />
       )}
       {showPermissions ? <PermissionsPanel onClose={() => setShowPermissions(false)} /> : null}
+      {showPlans ? (
+        <PlansPanel plans={plans} setPlans={setPlans} onClose={() => setShowPlans(false)} />
+      ) : null}
       <ApprovalGate />
       {rollbackPlan ? (
         <RollbackConfirm
