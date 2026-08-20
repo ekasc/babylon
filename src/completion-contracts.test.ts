@@ -57,4 +57,25 @@ describe("completion contracts", () => {
   it("passes an empty contract", () => {
     expect(evaluateContract(createContract({ id: "x", title: "t" }), []).passed).toBe(true);
   });
+
+  it("reports a failed optional check as not satisfied but passes overall", () => {
+    const results: CheckResult[] = [
+      { kind: "typecheck", passed: true },
+      { kind: "tests", passed: true },
+      { kind: "lint", passed: false }, // optional
+    ];
+    const e = evaluateContract(base(), results);
+    expect(e.passed).toBe(true);
+    expect(e.checks.find((c) => c.check.kind === "lint")?.satisfied).toBe(false);
+  });
+
+  it("fails closed when a required check has a failing then passing result", () => {
+    const results: CheckResult[] = [
+      { kind: "typecheck", passed: false },
+      { kind: "typecheck", passed: true },
+      { kind: "tests", passed: true },
+    ];
+    const e = evaluateContract(base(), results);
+    expect(e.passed).toBe(false);
+  });
 });

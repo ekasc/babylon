@@ -38,7 +38,13 @@ export interface CheckResult {
 export interface EvaluatedCheck {
   check: ContractCheck;
   result?: CheckResult;
-  /** True when the check is satisfied (passed, or optional and not failed). */
+  /**
+   * True when the check is satisfied. A required check needs a passing result
+   * (a missing or failing result is not satisfied). An optional check is
+   * satisfied only when it has a passing result; a failed optional check is NOT
+   * satisfied, but optional failures do not block overall completion (see
+   * evaluateContract's `passed`).
+   */
   satisfied: boolean;
 }
 
@@ -61,26 +67,42 @@ export function addCheck(contract: CompletionContract, check: ContractCheck): Co
 }
 
 export function removeCheck(contract: CompletionContract, kind: CheckKind): CompletionContract {
+  if (!contract.checks.some((c) => c.kind === kind)) return contract;
   return { ...contract, checks: contract.checks.filter((c) => c.kind !== kind) };
 }
 
 /**
- * Evaluate a contract against observed results. A required check is satisfied
- * only when a matching result exists and passed; an optional check is satisfied
- * when it did not actively fail. The contract passes only when every required
- * check is satisfied.
+ * Evaluate a contract against observed results. All results for a given kind are
+ * considered: a required check is satisfied only when every matching result
+ * passed (a missing or failing result is not satisfied, so a duplicate failing
+ * result can never be masked by a later passing one). An optional check is
+ * satisfied only when it has a passing result, but optional failures do not
+ * block overall completion (the contract passes only when every REQUIRED check
+ * is satisfied).
  */
 export function evaluateContract(
   contract: CompletionContract,
   results: CheckResult[]
 ): ContractEvaluation {
-  const byKind = new Map(results.map((r) => [r.kind, r]));
+  const byKind = new Map<CheckKind, CheckResult[]>();
+  for (const r of results) {
+    const arr = byKind.get(r.kind);
+    if (arr) arr.push(r);
+    else byKind.set(r.kind, [r]);
+  }
   const checks: EvaluatedCheck[] = contract.checks.map((check) => {
-    const result = byKind.get(check.kind);
-    // Required checks must have a passing result; optional checks never block
-    // completion even when they fail.
-    const satisfied = check.required ? Boolean(result?.passed) : true;
-    return { check, result, satisfied };
+    const resultsForKind = byKind.get(check.kind) ?? [];
+    const satisfied = check.required
+      ? resultsForKind.length > 0 && resultsForKind.every((r) => r.passed)
+      : resultsForKind.length > 0
+        ? resultsForKind.every((r) => r.passed)
+        : true;
+    return {
+      check,
+      result: resultsForKind[resultsForKind.length - 1],
+      satisfied,
+    };
   });
-  return { passed: checks.every((c) => c.satisfied), checks };
+  const passed = checks.filter((c) => c.check.required).every((c) => c.satisfied);
+  return { passed, checks };
 }
