@@ -278,3 +278,22 @@ button:not(:disabled){transition:background-color 130ms ease,color 130ms ease,bo
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important;scroll-behavior:auto!important}.operator-popover,.command-palette,.modal-surface,.toast{filter:none!important;transform:none!important}}
 @media(prefers-reduced-transparency:reduce){.app-sidebar,.thread-header,.composer-surface,.context-workspace,.context-header,.operator-popover,.command-palette,.modal-surface,.toast{background:var(--raised)!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important}.context-workspace{background:var(--context)!important}}
 @media(prefers-contrast:more){.app-sidebar,.thread-header,.composer-surface,.context-workspace,.operator-popover,.command-palette,.modal-surface{border-color:var(--fg)!important;background:var(--raised)!important}.sidebar-session.is-active,.sidebar-action.is-active{outline:1px solid var(--fg)}}
+
+/* Structured Plans */
+.plans-panel{position:absolute;inset:auto 12px 12px auto;z-index:20;width:min(420px,92vw);max-height:70vh;overflow:auto;border:1px solid var(--line);border-radius:14px;background:var(--popover);box-shadow:0 14px 40px rgba(0,0,0,.18);backdrop-filter:blur(18px);padding:12px}
+.panel-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.panel-title{font-size:14px;font-weight:650}
+.plans-composer{display:flex;flex-direction:column;gap:8px;margin-bottom:12px}
+.text-input{width:100%;border:1px solid var(--line);border-radius:8px;background:var(--raised);color:var(--fg);padding:7px 9px;font-size:13px;font-family:inherit}
+.text-input:focus{outline:0;border-color:var(--focus);box-shadow:0 0 0 3px color-mix(in srgb,var(--focus) 14%,transparent)}
+.plan-card{border:1px solid var(--hairline);border-radius:10px;background:var(--raised);padding:10px;margin-bottom:10px}
+.plan-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.plan-title{font-weight:600;font-size:13px}
+.plan-status{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:.04em}
+.plan-steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.plan-step{display:flex;align-items:center;gap:8px;font-size:13px}
+.step-index{display:grid;width:20px;height:20px;place-items:center;border-radius:50%;background:var(--inset);color:var(--dim);font-size:11px;font-weight:650;flex-shrink:0}
+.step-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.step-status{font-size:11px;color:var(--dim)}
+.step-actions{display:flex;gap:4px;flex-shrink:0}
+.step-actions .thread-action{width:auto;height:26px;padding:0 8px;border-radius:6px;font-size:11px}
