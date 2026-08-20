@@ -16,8 +16,10 @@ import { ApprovalGate } from "./components/ApprovalGate";
 import { PermissionsPanel } from "./components/PermissionsPanel";
 import { PlansPanel } from "./components/PlansPanel";
 import { ProcessPanel } from "./components/ProcessPanel";
+import { PreviewPanel } from "./components/PreviewPanel";
 import type { Plan } from "./plans";
 import type { ProcessRegistry } from "./process-model";
+import type { PreviewRegistry } from "./preview-model";
 import { FlaskIcon, FolderIcon, LayersIcon, MoreIcon, PiMark, ShieldIcon } from "./components/icons";
 
 const BranchPanel = lazy(() => import("./components/BranchPanel"));
@@ -150,6 +152,8 @@ export default function App() {
   const [plans, setPlans] = useState<Record<string, Plan>>({});
   const [showProcesses, setShowProcesses] = useState(false);
   const [processRegistry, setProcessRegistry] = useState<ProcessRegistry>({ processes: {} });
+  const [showPreview, setShowPreview] = useState(false);
+  const [previewRegistry, setPreviewRegistry] = useState<PreviewRegistry>({ servers: {} });
   const [history, setHistory] = useState<HistoryProjection>({ turns: [], leafId: null, hasBranches: false });
   const [historyRevision, setHistoryRevision] = useState(0);
   const [rollbackPlan, setRollbackPlan] = useState<RollbackPlan | null>(null);
@@ -1126,6 +1130,14 @@ export default function App() {
               >
                 Term
               </button>
+              <button
+                onClick={() => setShowPreview((open) => !open)}
+                title="Browser preview"
+                aria-pressed={showPreview}
+                className={`thread-action ${showPreview ? "is-active" : ""}`}
+              >
+                Preview
+              </button>
               <button onClick={() => setShowCommandPalette(true)} title="Search and commands (⌘K)" className="thread-action">
                 <FolderIcon size={16} />
               </button>
@@ -1228,6 +1240,13 @@ export default function App() {
           registry={processRegistry}
           setRegistry={setProcessRegistry}
           onClose={() => setShowProcesses(false)}
+        />
+      ) : null}
+      {showPreview ? (
+        <PreviewPanel
+          registry={previewRegistry}
+          setRegistry={setPreviewRegistry}
+          onClose={() => setShowPreview(false)}
         />
       ) : null}
       <ApprovalGate />
