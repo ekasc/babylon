@@ -98,4 +98,9 @@ describe("background execution policies", () => {
     const d = canRunInBackground(defaultPolicy(), "p", signals({ currentCost: NaN }));
     expect(d.allowed).toBe(false);
   });
+
+  it("reports unknown instead of Infinity for a corrupt signal", () => {
+    const d = canRunInBackground(defaultPolicy(), "p", signals({ currentCost: NaN }));
+    expect(d.reasons.join()).toMatch(/unknown/);
+  });
 });
