@@ -102,7 +102,7 @@ describe("rule matching", () => {
     expect(matchRule(rule, { ...fileWriteWs, paths: ["/project/test.txt"] })).toBe(false);
   });
 
-  it("matches command substrings", () => {
+  it("matches commands on word boundaries, not substrings", () => {
     const rule: PermissionRule = {
       id: "r2",
       category: "shell_command",
@@ -113,12 +113,21 @@ describe("rule matching", () => {
     };
     expect(matchRule(rule, shellRisky)).toBe(true);
     expect(matchRule(rule, { ...shellRisky, command: "ls" })).toBe(false);
+    // "rm" must not match "charm", and "git push" matches the real token.
+    const rmRule: PermissionRule = { ...rule, match: { commandPattern: "rm" } };
+    expect(matchRule(rmRule, { category: "shell_command", command: "charm file" })).toBe(false);
+    expect(matchRule(rmRule, { category: "shell_command", command: "rm -rf x" })).toBe(true);
   });
 
-  it("pathMatchesGlob handles absolute and relative forms", () => {
-    expect(pathMatchesGlob("**/*.ts", "/project/src/app.ts")).toBe(true);
-    expect(pathMatchesGlob("src/*", "/project/src/app.ts")).toBe(true);
-    expect(pathMatchesGlob("**/*.js", "/project/src/app.ts")).toBe(false);
+  it("pathMatchesGlob treats spaces as literal and ? as a single segment", () => {
+    // A space in the glob must stay literal, not become a wildcard.
+    expect(pathMatchesGlob("src/a b.ts", "/project/src/a b.ts")).toBe(true);
+    expect(pathMatchesGlob("src/a b.ts", "/project/src/axb.ts")).toBe(false);
+    // `?` matches exactly one non-slash character, not a whole name.
+    expect(pathMatchesGlob("**/a?.ts", "/project/src/a1.ts")).toBe(true);
+    expect(pathMatchesGlob("**/a?.ts", "/project/src/a12.ts")).toBe(false);
+    // `**` crosses directory boundaries.
+    expect(pathMatchesGlob("**/deep.ts", "/project/src/x/y/deep.ts")).toBe(true);
   });
 });
 
@@ -235,6 +244,14 @@ describe("PermissionEngine persistence + scope", () => {
     const reloaded = new PermissionEngine({ dir: tmp });
     await reloaded.load();
     expect(reloaded.listRules()).toHaveLength(0);
+  });
+
+  it("removeRule returns true for session-only rules too", async () => {
+    const engine = new PermissionEngine({ dir: tmp });
+    await engine.load();
+    const session = engine.addRule({ category: "git_push", decision: "allow", scope: "session" });
+    expect(engine.removeRule(session.id)).toBe(true);
+    expect(engine.listRules()).toHaveLength(0);
   });
 });
 

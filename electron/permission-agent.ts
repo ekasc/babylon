@@ -6,15 +6,40 @@
 // evaluate static policy and risk. This module is pure and dependency-free so
 // it can be unit-tested without Electron or a running agent.
 
-import { isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
 import { categorizeShellCommand, type AgentAction } from "./permissions";
 
-/** True when `path` resolves inside the workspace root `cwd`. */
+/** Canonicalize `path` through symlinks so a workspace symlink pointing outside
+ *  the project can't downgrade an out-of-workspace write to a workspace write. */
+function canonicalize(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    // The target may not exist yet (a write target). Canonicalize the deepest
+    // existing ancestor, then re-append the unresolved tail.
+    let parent = path;
+    while (parent && parent !== dirname(parent) && !existsSync(parent)) parent = dirname(parent);
+    if (!parent || !existsSync(parent)) return path;
+    try {
+      const real = realpathSync(parent);
+      return path === parent ? real : join(real, path.slice(parent.length));
+    } catch {
+      return path;
+    }
+  }
+}
+
+/** True when `path` resolves inside the workspace root `cwd` (after symlinks). */
 export function resolveInsideWorkspace(path: string, cwd: string): boolean {
-  const abs = isAbsolute(path) ? path : resolve(cwd, path);
+  // Canonicalize both sides so a symlinked prefix (e.g. macOS /var ->
+  // /private/var) doesn't break the prefix check, and a workspace symlink
+  // pointing outside the project can't downgrade an out-of-workspace write.
+  const abs = canonicalize(isAbsolute(path) ? path : resolve(cwd, path));
   const norm = abs.endsWith("/") ? abs : `${abs}/`;
-  const base = cwd.endsWith("/") ? cwd : `${cwd}/`;
-  return norm.startsWith(base);
+  const base = canonicalize(cwd);
+  const baseNorm = base.endsWith("/") ? base : `${base}/`;
+  return norm.startsWith(baseNorm);
 }
 
 /**

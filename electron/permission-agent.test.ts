@@ -1,3 +1,6 @@
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { mapToolToAction, resolveInsideWorkspace } from "./permission-agent";
 
@@ -9,6 +12,26 @@ describe("resolveInsideWorkspace", () => {
     expect(resolveInsideWorkspace("src/a.ts", CWD)).toBe(true);
     expect(resolveInsideWorkspace("/other/a.ts", CWD)).toBe(false);
     expect(resolveInsideWorkspace("/project../a.ts", CWD)).toBe(false);
+  });
+
+  it("resolves symlinks so a workspace link cannot downgrade an OOW write", () => {
+    const base = mkdtempSync(join(tmpdir(), "babylon-sym-"));
+    try {
+      // /workspace is a real dir; /outside is a real dir OUTSIDE it.
+      const workspace = join(base, "workspace");
+      const outside = join(base, "outside");
+      mkdirSync(workspace);
+      mkdirSync(outside);
+      // Simulate a symlink at workspace/escape -> ../outside.
+      const escapeLink = join(workspace, "escape");
+      symlinkSync(outside, escapeLink);
+      // Writing through the symlink must be treated as OUTSIDE the workspace.
+      expect(resolveInsideWorkspace(join(escapeLink, "secret"), workspace)).toBe(false);
+      // The real workspace path is still inside.
+      expect(resolveInsideWorkspace(join(workspace, "a.ts"), workspace)).toBe(true);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 });
 

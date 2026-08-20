@@ -23,18 +23,9 @@ import { RecapStore } from "./recap-store";
 import { getSettings, saveSettings, type PiSettings } from "./app-settings";
 import { buildRecapPrompt, normalizeRecapText, pickRecapDelta, recapDue, recapWorthy, RECAP_INTERVAL_MS, type Recap } from "./recap";
 import { ManagedSubagents, type ManagedSubagentRecord, type SubagentControlAction, type SubagentParentEvent } from "./subagents";
+import { installPermissionHook } from "./permission-hook";
 import { mapToolToAction } from "./permission-agent";
-import type { AgentAction, EvalResult, Risk } from "./permissions";
-
-/** Babylon-owned hook used to gate agent tool calls before they execute. */
-export interface BabylonPermissionController {
-  /** Evaluate an action against static policy + the active execution mode. */
-  evaluate(action: AgentAction): EvalResult;
-  /** Request interactive approval; resolves true to allow, false to deny. */
-  requestApproval(action: AgentAction, risk: Risk): Promise<boolean>;
-  /** Drop session-only rules (called when the active session is replaced). */
-  clearSessionRules(): void;
-}
+import type { BabylonPermissionController } from "./permissions";
 import { ThreadManager } from "./threads";
 import {
   AgentSessionRuntime,
@@ -168,10 +159,26 @@ export class PiHost {
       modelRuntime: this.modelRuntime,
       onUpdate: () => this.opts.onEvent({ type: "pideck_subagents_changed" }),
       onParentMessage: (record, action, message) => this.notifySubagentParent(record, action, message),
+      permission: this.opts.permission,
     });
     this.threads = new ThreadManager({
-      runTool: (toolName, args) => {
+      runTool: async (toolName, args) => {
         const session = this.runtime.session;
+        // Threads execute tools directly (bypassing the agent loop's
+        // beforeToolCall hook), so gate them here against the same policy.
+        if (this.opts.permission) {
+          const action = mapToolToAction(toolName, args, this.cwd);
+          if (action) {
+            const result = this.opts.permission.evaluate(action);
+            if (result.decision === "deny") {
+              throw new Error(result.reason ?? "Blocked by Babylon permission policy");
+            }
+            if (result.decision === "ask") {
+              const allowed = await this.opts.permission.requestApproval(action, result.risk ?? "uncertain");
+              if (!allowed) throw new Error("Denied by user approval");
+            }
+          }
+        }
         const tool = session.getToolDefinition(toolName);
         if (!tool) throw new Error("Threads extension is not available in this session");
         return tool.execute(
@@ -377,27 +384,11 @@ export class PiHost {
     });
     this.unsubscribeEvents?.();
     // Babylon permission system: intercept every agent tool call before it
-    // runs. We wrap the SDK-installed beforeToolCall hook so managed-subagent
-    // and other extension tool_call handlers keep working underneath us.
+    // runs. installPermissionHook wraps the SDK's hook so extensions like
+    // managed-subagents keep working underneath us.
     if (this.opts.permission) {
-      const controller = this.opts.permission;
-      const agent = session.agent as any;
-      const originalBefore = agent.beforeToolCall?.bind(agent);
-      controller.clearSessionRules();
-      agent.beforeToolCall = async (ctx: any, signal: any) => {
-        const action = mapToolToAction(ctx?.toolCall?.name ?? "", ctx?.args, this.cwd);
-        if (action) {
-          const result = controller.evaluate(action);
-          if (result.decision === "deny") {
-            return { block: true, reason: result.reason ?? "Blocked by Babylon permission policy" };
-          }
-          if (result.decision === "ask") {
-            const allowed = await controller.requestApproval(action, result.risk ?? "uncertain");
-            if (!allowed) return { block: true, reason: "Denied by user approval" };
-          }
-        }
-        return originalBefore ? originalBefore(ctx, signal) : undefined;
-      };
+      this.opts.permission.clearSessionRules();
+      installPermissionHook(session.agent as any, this.opts.permission, this.cwd);
     }
 
     this.unsubscribeEvents = session.subscribe((event) => {
