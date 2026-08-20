@@ -30,7 +30,9 @@ export function selectRunnableTasks(
   const runnable: ScheduledTask[] = [];
   const blocked: { task: ScheduledTask; reasons: string[] }[] = [];
   for (const task of due) {
-    const project = task.project ?? defaultProject;
+    // Treat a blank project as unset so a cleared input does not silently run
+    // the task outside the intended per-project gating.
+    const project = task.project && task.project.trim() ? task.project : defaultProject;
     const decision = canRunInBackground(policy, project, env);
     if (decision.allowed) runnable.push(task);
     else blocked.push({ task, reasons: decision.reasons });

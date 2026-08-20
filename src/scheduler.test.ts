@@ -66,4 +66,32 @@ describe("scheduler decision engine", () => {
     const sel = selectRunnableTasks(r, defaultPolicy(), "p", signals(), NOW);
     expect(sel.runnable.map((t) => t.id)).toEqual(["a"]);
   });
+
+  it("falls back to the default project for a blank task project", () => {
+    let r = createScheduledTaskRegistry();
+    r = registerScheduledTask(r, task({ id: "a", project: "" }));
+    const policy: BackgroundPolicy = { ...defaultPolicy(), perProjectPermission: { p: false } };
+    const sel = selectRunnableTasks(r, policy, "p", signals(), NOW);
+    expect(sel.runnable).toHaveLength(0);
+    expect(sel.blocked[0].task.id).toBe("a");
+  });
+
+  it("separates runnable and blocked tasks in one call", () => {
+    let r = createScheduledTaskRegistry();
+    r = registerScheduledTask(r, task({ id: "a" }));
+    r = registerScheduledTask(r, task({ id: "b", project: "denied" }));
+    const policy: BackgroundPolicy = { ...defaultPolicy(), perProjectPermission: { denied: false } };
+    const sel = selectRunnableTasks(r, policy, "p", signals(), NOW);
+    expect(sel.runnable.map((t) => t.id)).toEqual(["a"]);
+    expect(sel.blocked.map((b) => b.task.id)).toEqual(["b"]);
+  });
+
+  it("blocks always-mode tasks when pause-on-battery is on and on battery", () => {
+    let r = createScheduledTaskRegistry();
+    r = registerScheduledTask(r, task({ id: "a" }));
+    const policy: BackgroundPolicy = { ...defaultPolicy(), mode: "always", pauseOnBattery: true };
+    const sel = selectRunnableTasks(r, policy, "p", signals({ onBattery: true }), NOW);
+    expect(sel.runnable).toHaveLength(0);
+    expect(sel.blocked).toHaveLength(1);
+  });
 });

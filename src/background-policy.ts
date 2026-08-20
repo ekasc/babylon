@@ -78,12 +78,12 @@ export function canRunInBackground(
   const currentCost = Number.isFinite(env.currentCost) ? env.currentCost : Infinity;
   if (activeAgents >= policy.maxConcurrentAgents) {
     reasons.push(
-      `Active agents (${env.activeAgents}) reached the limit (${policy.maxConcurrentAgents})`
+      `Active agents (${Number.isFinite(activeAgents) ? activeAgents : "unknown"}) reached the limit (${policy.maxConcurrentAgents})`
     );
   }
   if (currentCost >= policy.maxBackgroundCost) {
     reasons.push(
-      `Background cost (${env.currentCost}) reached the limit (${policy.maxBackgroundCost})`
+      `Background cost (${Number.isFinite(currentCost) ? currentCost : "unknown"}) reached the limit (${policy.maxBackgroundCost})`
     );
   }
   if (policy.perProjectPermission?.[project] === false) {
