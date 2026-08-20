@@ -289,6 +289,13 @@ export const BlockedIcon = (props: IconProps) => (
   </svg>
 );
 
+export const ShieldIcon = (props: IconProps) => (
+  <svg {...base(props)}>
+    <path d="M12 3l7 3v5c0 4.4-3 7.7-7 9-4-1.3-7-4.6-7-9V6l7-3z" />
+    <path d="M9 12l2 2 4-4" />
+  </svg>
+);
+
 export const InputIcon = (props: IconProps) => (
   <svg {...base(props)}>
     <path d="M20 13a8 8 0 0 1-11.5 7.2L4 20l1-4.3A8 8 0 1 1 20 13z" />
