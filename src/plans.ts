@@ -45,6 +45,8 @@ export interface Plan {
   status: PlanStatus;
   createdAt: number;
   createdBy?: string;
+  /** Monotonic step counter so ids never collide after removals. */
+  nextStepSeq: number;
 }
 
 export interface PlanDraftStep {
@@ -54,9 +56,9 @@ export interface PlanDraftStep {
   affectedFiles?: string[];
 }
 
-function step(id: string, draft: PlanDraftStep): PlanStep {
+function makeStep(planId: string, seq: number, draft: PlanDraftStep): PlanStep {
   return {
-    id,
+    id: `${planId}-s${seq}`,
     title: draft.title,
     description: draft.description,
     status: "proposed",
@@ -73,19 +75,22 @@ export function createPlan(params: {
   createdAt?: number;
   createdBy?: string;
 }): Plan {
+  let seq = 0;
+  const steps = (params.steps ?? []).map((s) => makeStep(params.id, ++seq, s));
   return {
     id: params.id,
     title: params.title,
-    steps: (params.steps ?? []).map((s, i) => step(`${params.id}-s${i + 1}`, s)),
+    steps,
     status: "proposed",
     createdAt: params.createdAt ?? 0,
     createdBy: params.createdBy,
+    nextStepSeq: seq + 1,
   };
 }
 
 export function addStep(plan: Plan, draft: PlanDraftStep): Plan {
-  const id = `${plan.id}-s${plan.steps.length + 1}`;
-  return { ...plan, steps: [...plan.steps, step(id, draft)] };
+  const seq = plan.nextStepSeq ?? plan.steps.length + 1;
+  return { ...plan, steps: [...plan.steps, makeStep(plan.id, seq, draft)], nextStepSeq: seq + 1 };
 }
 
 export function removeStep(plan: Plan, stepId: string): Plan {
@@ -115,7 +120,13 @@ function withStep(plan: Plan, stepId: string, patch: Partial<PlanStep>): Plan {
 }
 
 export function setStepStatus(plan: Plan, stepId: string, status: PlanStepStatus): Plan {
-  return withStep(plan, stepId, { status, progress: status === "completed" ? 1 : undefined });
+  // Completing snaps progress to 1; every other status preserves any existing
+  // progress (so a partially-done running step keeps its value).
+  return withStep(
+    plan,
+    stepId,
+    status === "completed" ? { status, progress: 1 } : { status }
+  );
 }
 
 export function approveStep(plan: Plan, stepId: string): Plan {
@@ -135,12 +146,18 @@ export function canRunStep(plan: Plan, stepId: string): boolean {
 }
 
 function deriveStatus(plan: Plan): PlanStatus {
-  if (plan.steps.length === 0) return plan.status === "cancelled" ? "cancelled" : "proposed";
+  // Explicit terminal lifecycle states are authoritative; the step view below
+  // can only narrow towards them, never override them.
+  if (plan.status === "cancelled" || plan.status === "completed") return plan.status;
+  if (plan.steps.length === 0) return "proposed";
   if (plan.steps.some((s) => s.status === "running")) return "running";
   if (plan.steps.some((s) => s.status === "blocked")) return "blocked";
   if (plan.steps.every((s) => s.status === "completed")) return "completed";
   if (plan.steps.every((s) => s.status === "approved" || s.status === "completed")) return "approved";
   if (plan.steps.some((s) => s.status === "paused")) return "paused";
+  // Some work has started (a step finished) but nothing is actively running,
+  // blocked, or paused: still reflect in-progress rather than "proposed".
+  if (plan.steps.some((s) => s.status === "completed")) return "running";
   return "proposed";
 }
 

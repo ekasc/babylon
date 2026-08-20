@@ -14,8 +14,6 @@ export interface LspMessage {
   error?: unknown;
 }
 
-const HEADER_RE = /^Content-Length: (\d+)\r\n(?:Content-Type: [^\r\n]*\r\n)?\r\n/;
-
 /** Encode a single LSP message as a Buffers-ready string with header. */
 export function encodeLspMessage(message: LspMessage): Buffer {
   const body = JSON.stringify(message);
@@ -25,24 +23,37 @@ export function encodeLspMessage(message: LspMessage): Buffer {
 
 export interface DecodeResult {
   messages: LspMessage[];
-  /** Trailing bytes that did not yet form a complete message. */
+  /** Trailing bytes that did not yet form a complete message (detached copy). */
   rest: Buffer;
 }
 
 /**
  * Parse zero or more LSP messages from a buffer, returning complete messages
- * and any incomplete tail. Safe to call repeatedly as streamed chunks arrive.
+ * and any incomplete tail. Header order and extra headers are tolerated (the
+ * base protocol only requires Content-Length to be present). Safe to call
+ * repeatedly as streamed chunks arrive.
  */
 export function decodeLspMessages(buffer: Buffer): DecodeResult {
   const messages: LspMessage[] = [];
   let cursor = buffer;
   for (;;) {
-    const text = cursor.toString("utf8");
-    const match = HEADER_RE.exec(text);
-    if (!match) break;
-    const length = Number(match[1]);
-    const headerEnd = match[0].length;
-    const bodyStart = headerEnd;
+    const headerEnd = cursor.indexOf("\r\n\r\n");
+    if (headerEnd === -1) break; // no complete header yet
+    const headerText = cursor.toString("utf8", 0, headerEnd);
+    let length: number | undefined;
+    for (const line of headerText.split("\r\n")) {
+      const m = /^content-length:\s*(\d+)$/i.exec(line);
+      if (m) {
+        length = Number(m[1]);
+        break;
+      }
+    }
+    if (length === undefined) {
+      // Complete header block with no Content-Length: skip past it.
+      cursor = cursor.subarray(headerEnd + 4);
+      continue;
+    }
+    const bodyStart = headerEnd + 4;
     const bodyEnd = bodyStart + length;
     if (cursor.length < bodyEnd) break; // wait for the full body
     const body = cursor.toString("utf8", bodyStart, bodyEnd);
@@ -53,7 +64,8 @@ export function decodeLspMessages(buffer: Buffer): DecodeResult {
     }
     cursor = cursor.subarray(bodyEnd);
   }
-  return { messages, rest: cursor };
+  // Detach the tail so a reused/pooled input buffer cannot corrupt it.
+  return { messages, rest: Buffer.from(cursor) };
 }
 
 export type LspDiagnosticSeverity = 1 | 2 | 3 | 4; // Error, Warning, Info, Hint
@@ -102,14 +114,16 @@ export function mapDiagnostics(
   }));
 }
 
-/** True when two diagnostics describe the same location and message. */
+/** True when two diagnostics describe the same location, message, and source. */
 export function sameDiagnostic(a: NormalizedDiagnostic, b: NormalizedDiagnostic): boolean {
   return (
     a.file === b.file &&
     a.line === b.line &&
     a.character === b.character &&
     a.message === b.message &&
-    a.severity === b.severity
+    a.severity === b.severity &&
+    a.code === b.code &&
+    a.source === b.source
   );
 }
 

@@ -4,6 +4,7 @@ import {
   encodeLspMessage,
   mapDiagnostics,
   newDiagnostics,
+  sameDiagnostic,
   type LspMessage,
 } from "./lsp";
 
@@ -83,6 +84,51 @@ describe("mapDiagnostics", () => {
   it("defaults missing severity to error", () => {
     const out = mapDiagnostics("file:///a.ts", [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, message: "x" }]);
     expect(out[0].severity).toBe("error");
+  });
+});
+
+describe("header flexibility", () => {
+  it("parses when Content-Type precedes Content-Length", () => {
+    const body = JSON.stringify({ jsonrpc: "2.0", method: "a" });
+    const buf = Buffer.from(
+      `Content-Type: application/vscode-jsonrpc; charset=utf-8\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`
+    );
+    const { messages } = decodeLspMessages(buf);
+    expect(messages).toHaveLength(1);
+    expect(messages[0].method).toBe("a");
+  });
+
+  it("tolerates extra headers", () => {
+    const body = JSON.stringify({ jsonrpc: "2.0", method: "b" });
+    const buf = Buffer.from(
+      `Content-Length: ${Buffer.byteLength(body)}\r\nX-Foo: bar\r\n\r\n${body}`
+    );
+    const { messages } = decodeLspMessages(buf);
+    expect(messages).toHaveLength(1);
+    expect(messages[0].method).toBe("b");
+  });
+
+  it("returns a detached rest that still parses the next message", () => {
+    const a = encodeLspMessage({ jsonrpc: "2.0", method: "a" });
+    const b = encodeLspMessage({ jsonrpc: "2.0", method: "b" });
+    const partial = Buffer.concat([a, b]).subarray(0, a.length + 3);
+    const r1 = decodeLspMessages(partial);
+    expect(r1.messages).toHaveLength(1);
+    // The caller keeps rest and appends the *next* chunk, which is the portion
+    // of b not already consumed into rest.
+    const r2 = decodeLspMessages(Buffer.concat([r1.rest, b.subarray(3)]));
+    expect(r2.messages).toHaveLength(1);
+    expect(r2.messages[0].method).toBe("b");
+  });
+});
+
+describe("sameDiagnostic", () => {
+  const base = { file: "f", line: 1, character: 1, severity: "error" as const, message: "m" };
+  it("treats a different code as distinct", () => {
+    expect(sameDiagnostic({ ...base, code: "1" }, { ...base, code: "2" })).toBe(false);
+  });
+  it("treats a different source as distinct", () => {
+    expect(sameDiagnostic({ ...base, source: "ts" }, { ...base, source: "es" })).toBe(false);
   });
 });
 

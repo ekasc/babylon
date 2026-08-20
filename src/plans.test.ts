@@ -122,6 +122,27 @@ describe("reconcile / status derivation", () => {
   });
 });
 
+describe("audit fixes", () => {
+  it("addStep never collides with a remaining step after removal", () => {
+    let p = samplePlan(); // s1, s2, s3
+    p = removeStep(p, "p1-s2"); // s1, s3; nextStepSeq stays 4
+    p = addStep(p, { title: "Ship" }); // s4
+    expect(p.steps.map((s) => s.id)).toEqual(["p1-s1", "p1-s3", "p1-s4"]);
+    expect(new Set(p.steps.map((s) => s.id)).size).toBe(p.steps.length);
+  });
+
+  it("reconcile respects explicit cancelled/completed lifecycle status", () => {
+    expect(reconcile(cancelPlan(samplePlan())).status).toBe("cancelled");
+    expect(reconcile(completePlan(samplePlan())).status).toBe("completed");
+  });
+
+  it("reconcile reflects in-progress when a step completed but others remain", () => {
+    let p = samplePlan();
+    p = setStepStatus(p, "p1-s1", "completed");
+    expect(reconcile(p).status).toBe("running");
+  });
+});
+
 describe("plan lifecycle", () => {
   it("start, pause, complete, cancel", () => {
     let p = startPlan(samplePlan());

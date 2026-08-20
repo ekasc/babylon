@@ -51,7 +51,7 @@ export function PlansPanel({
       .filter(Boolean)
       .map((s) => ({ title: s }));
     const plan = createPlan({
-      id: `plan-${Date.now()}`,
+      id: `plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       title,
       steps,
       createdAt: Date.now(),
