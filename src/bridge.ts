@@ -491,6 +491,9 @@ export interface Bridge {
   permissionsRemoveRule(id: string): Promise<{ removed: boolean }>;
   permissionsResolveApproval(id: string, choice: ApprovalChoice): Promise<{ ok: boolean }>;
   onApprovalRequested(cb: (req: ApprovalRequest) => void): () => void;
+  /** Fires when an interactive approval is resolved (allowed/denied), so the
+   *  UI can drop the matching attention item. */
+  onApprovalResolved(cb: (payload: { id: string; choice: ApprovalChoice }) => void): () => void;
   onPermissionsChanged(cb: (state: PermissionState) => void): () => void;
 }
 
@@ -591,5 +594,6 @@ export const bridge: Bridge = window.pideck ?? {
   permissionsRemoveRule: () => Promise.resolve({ removed: false }),
   permissionsResolveApproval: () => Promise.resolve({ ok: false }),
   onApprovalRequested: () => () => {},
+  onApprovalResolved: () => () => {},
   onPermissionsChanged: () => () => {},
 };

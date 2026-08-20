@@ -122,6 +122,11 @@ const api = {
     ipcRenderer.on("pideck:approval-requested", listener);
     return () => ipcRenderer.removeListener("pideck:approval-requested", listener);
   },
+  onApprovalResolved: (cb: (payload: { id: string; choice: string }) => void): (() => void) => {
+    const listener = (_e: unknown, payload: any) => cb(payload);
+    ipcRenderer.on("pideck:approval-resolved", listener);
+    return () => ipcRenderer.removeListener("pideck:approval-resolved", listener);
+  },
   onPermissionsChanged: (cb: (state: any) => void): (() => void) => {
     const listener = (_e: unknown, state: any) => cb(state);
     ipcRenderer.on("pideck:permissions-changed", listener);

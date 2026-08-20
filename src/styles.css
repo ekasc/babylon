@@ -319,5 +319,19 @@ button:not(:disabled){transition:background-color 130ms ease,color 130ms ease,bo
 .preview-panel{position:absolute;inset:auto 12px 12px auto;z-index:20;width:min(440px,92vw);max-height:70vh;overflow:auto;border:1px solid var(--line);border-radius:14px;background:var(--popover);box-shadow:0 14px 40px rgba(0,0,0,.18);backdrop-filter:blur(18px);padding:12px}
 .preview-row{display:flex;align-items:center;gap:8px;padding:6px 0;border-top:1px solid var(--hairline);font-size:13px}
 .preview-row:first-of-type{border-top:0}
+
+/* Attention inbox */
+.attention-panel{position:absolute;inset:auto 12px 12px auto;z-index:20;width:min(440px,92vw);max-height:70vh;overflow:auto;border:1px solid var(--line);border-radius:14px;background:var(--popover);box-shadow:0 14px 40px rgba(0,0,0,.18);backdrop-filter:blur(18px);padding:12px}
+.attention-list{display:flex;flex-direction:column}
+.attention-row{display:flex;align-items:flex-start;gap:8px;padding:8px 0;border-top:1px solid var(--hairline);font-size:13px}
+.attention-row:first-of-type{border-top:0}
+.attention-dot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex-shrink:0;margin-top:5px}
+.attention-dot.is-failed_task,.attention-dot.is-environment_failure,.attention-dot.is-missing_credential{background:var(--err)}
+.attention-dot.is-blocked_task,.attention-dot.is-merge_conflict{background:var(--warn,#b8860b)}
+.attention-body{flex:1;min-width:0}
+.attention-title{font-weight:600;font-size:13px}
+.attention-detail{color:var(--dim);font-size:11.5px;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.attention-source{color:var(--dim);font-size:11px;margin-top:2px;font-family:"SFMono-Regular",Consolas,monospace}
+.attention-row .thread-action{width:auto;height:26px;padding:0 8px;border-radius:6px;font-size:11px;flex-shrink:0}
 .preview-url{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:"SFMono-Regular",Consolas,monospace;font-size:12px}
 .preview-row .thread-action{width:auto;height:26px;padding:0 8px;border-radius:6px;font-size:11px}

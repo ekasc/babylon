@@ -17,6 +17,8 @@ import { PermissionsPanel } from "./components/PermissionsPanel";
 import { PlansPanel } from "./components/PlansPanel";
 import { ProcessPanel } from "./components/ProcessPanel";
 import { PreviewPanel } from "./components/PreviewPanel";
+import { AttentionPanel } from "./components/AttentionPanel";
+import { addAttention, listAttention, removeAttention, type AttentionRegistry } from "./attention";
 import type { Plan } from "./plans";
 import type { ProcessRegistry } from "./process-model";
 import type { PreviewRegistry } from "./preview-model";
@@ -154,6 +156,8 @@ export default function App() {
   const [processRegistry, setProcessRegistry] = useState<ProcessRegistry>({ processes: {} });
   const [showPreview, setShowPreview] = useState(false);
   const [previewRegistry, setPreviewRegistry] = useState<PreviewRegistry>({ servers: {} });
+  const [showAttention, setShowAttention] = useState(false);
+  const [attention, setAttention] = useState<AttentionRegistry>({ items: {} });
   const [history, setHistory] = useState<HistoryProjection>({ turns: [], leafId: null, hasBranches: false });
   const [historyRevision, setHistoryRevision] = useState(0);
   const [rollbackPlan, setRollbackPlan] = useState<RollbackPlan | null>(null);
@@ -347,6 +351,33 @@ export default function App() {
       offActivity();
       offWorkflows();
     };
+  }, []);
+
+  // Attention Inbox: raise an item when the agent needs the user (here, a
+  // permission request). The id is keyed to the approval id so repeats of the
+  // same request do not create duplicates. The user dismisses from the inbox.
+  useEffect(() => {
+    return bridge.onApprovalRequested((req) => {
+      setAttention((prev) =>
+        addAttention(prev, {
+          id: `perm-${req.id}`,
+          type: "permission",
+          title: "Approval required",
+          detail: req.action.description ?? req.action.category,
+          source: activeSessionPath ?? status.sessionPath ?? undefined,
+          createdAt: Date.now(),
+          resolved: false,
+        })
+      );
+    });
+  }, [activeSessionPath, status.sessionPath]);
+
+  // Drop the matching attention item when the approval is actually resolved
+  // (allowed or denied), so the inbox stops over-reporting outstanding work.
+  useEffect(() => {
+    return bridge.onApprovalResolved((payload) => {
+      setAttention((prev) => removeAttention(prev, `perm-${payload.id}`));
+    });
   }, []);
 
   useEffect(() => {
@@ -964,6 +995,7 @@ export default function App() {
     activity.threads.filter((thread) => ["queued", "starting", "running", "interrupting"].includes(thread.status)).length +
     activity.subagents.filter((run) => run.status === "running").length;
   const contextOpen = showWorkflowsPanel || showBranchPanel;
+  const unresolvedAttention = listAttention(attention).length;
 
   // Preload/bridge missing (e.g. renderer opened outside Electron, or the
   // preload script failed to load). Previously `window.pideck` was accessed
@@ -1138,6 +1170,17 @@ export default function App() {
               >
                 Preview
               </button>
+              <button
+                onClick={() => setShowAttention((open) => !open)}
+                title="Attention inbox"
+                aria-pressed={showAttention}
+                className={`thread-action relative ${showAttention ? "is-active" : ""}`}
+              >
+                Attn
+                {unresolvedAttention > 0 ? (
+                  <span className="sidebar-count absolute -right-1 -top-1">{unresolvedAttention}</span>
+                ) : null}
+              </button>
               <button onClick={() => setShowCommandPalette(true)} title="Search and commands (⌘K)" className="thread-action">
                 <FolderIcon size={16} />
               </button>
@@ -1247,6 +1290,13 @@ export default function App() {
           registry={previewRegistry}
           setRegistry={setPreviewRegistry}
           onClose={() => setShowPreview(false)}
+        />
+      ) : null}
+      {showAttention ? (
+        <AttentionPanel
+          registry={attention}
+          setRegistry={setAttention}
+          onClose={() => setShowAttention(false)}
         />
       ) : null}
       <ApprovalGate />
