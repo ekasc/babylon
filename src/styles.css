@@ -307,6 +307,7 @@ button:not(:disabled){transition:background-color 130ms ease,color 130ms ease,bo
 .process-row:first-of-type{border-top:0}
 .process-dot{width:8px;height:8px;border-radius:50%;background:var(--dim);flex-shrink:0}
 .process-dot.is-running{background:var(--accent)}
+.process-dot.is-starting{background:color-mix(in srgb,var(--accent) 55%,var(--dim))}
 .process-dot.is-exited{background:var(--line-strong)}
 .process-dot.is-failed{background:var(--err)}
 .process-dot.is-killed{background:var(--warn, #b8860b)}

@@ -105,7 +105,7 @@ export function listActive(registry: ProcessRegistry): TrackedProcess[] {
 export function listHistory(registry: ProcessRegistry): TrackedProcess[] {
   return Object.values(registry.processes)
     .filter((p) => p.state === "exited" || p.state === "failed" || p.state === "killed")
-    .sort((a, b) => (b.exitedAt ?? 0) - (a.exitedAt ?? 0));
+    .sort((a, b) => (b.exitedAt ?? 0) - (a.exitedAt ?? 0) || a.id.localeCompare(b.id));
 }
 
 export function listByOwner(registry: ProcessRegistry, ownerSession: string): TrackedProcess[] {

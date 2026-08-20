@@ -7,6 +7,14 @@ import {
   type TrackedServer,
 } from "../preview-model";
 
+function uniqueId(prefix: string): string {
+  const rand =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID().slice(0, 8)
+      : Math.random().toString(36).slice(2, 10);
+  return `${prefix}-${Date.now()}-${rand}`;
+}
+
 /**
  * Browser Preview surface. Babylon offers an integrated preview when it detects
  * a local HTTP server. This panel lists detected servers and lets the user open
@@ -18,18 +26,18 @@ export function PreviewPanel({
   onClose,
 }: {
   registry: PreviewRegistry;
-  setRegistry: (next: PreviewRegistry) => void;
+  setRegistry: (next: PreviewRegistry | ((prev: PreviewRegistry) => PreviewRegistry)) => void;
   onClose: () => void;
 }) {
   const servers = Object.values(registry.servers);
 
-  const stop = (s: TrackedServer) => setRegistry(removeServer(registry, s.id));
+  const stop = (s: TrackedServer) => setRegistry((prev) => removeServer(prev, s.id));
 
   const simulate = () => {
     const detected = detectServerFromCommand("pnpm dev") ?? { port: 5173, framework: "vite" };
-    const id = `srv-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    setRegistry(
-      registerServer(registry, {
+    const id = uniqueId("srv");
+    setRegistry((prev) =>
+      registerServer(prev, {
         id,
         port: detected.port,
         framework: detected.framework,

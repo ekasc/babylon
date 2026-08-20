@@ -8,6 +8,14 @@ import {
   type TrackedProcess,
 } from "../process-model";
 
+function uniqueId(prefix: string): string {
+  const rand =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID().slice(0, 8)
+      : Math.random().toString(36).slice(2, 10);
+  return `${prefix}-${Date.now()}-${rand}`;
+}
+
 /**
  * Agent-Aware Terminal surface. Babylon tracks processes instead of treating
  * every terminal as an opaque shell: each tracked process shows command, cwd,
@@ -21,28 +29,30 @@ export function ProcessPanel({
   onClose,
 }: {
   registry: ProcessRegistry;
-  setRegistry: (next: ProcessRegistry) => void;
+  setRegistry: (next: ProcessRegistry | ((prev: ProcessRegistry) => ProcessRegistry)) => void;
   onClose: () => void;
 }) {
   const active = listActive(registry);
   const history = listHistory(registry);
 
   const kill = (proc: TrackedProcess) =>
-    setRegistry(terminateProcess(registry, proc.id, { state: "killed", exitCode: null as unknown as number }));
+    setRegistry((prev) => terminateProcess(prev, proc.id, { state: "killed" }));
 
   const simulate = () => {
-    const id = `proc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    let r = createProcess(registry, {
-      id,
-      command: "pnpm dev",
-      cwd: "/project",
-      owner: "Main Agent",
-      ownerSession: "main",
-      startedAt: Date.now(),
-      state: "running",
+    const id = uniqueId("proc");
+    setRegistry((prev) => {
+      let r = createProcess(prev, {
+        id,
+        command: "pnpm dev",
+        cwd: "/project",
+        owner: "Main Agent",
+        ownerSession: "main",
+        startedAt: Date.now(),
+        state: "running",
+      });
+      r = detectPorts(r, id, [5173]);
+      return r;
     });
-    r = detectPorts(r, id, [5173]);
-    setRegistry(r);
   };
 
   return (
