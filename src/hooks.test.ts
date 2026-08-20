@@ -46,4 +46,17 @@ describe("hook system", () => {
     expect(listHooks(r, "pre_tool_use").map((h) => h.id)).toEqual(["a"]);
     expect(listAllHooks(r)).toHaveLength(3);
   });
+
+  it("preserves registration order regardless of id shape", () => {
+    let r = createHookRegistry();
+    r = registerHook(r, hook({ id: "2", event: "post_tool_use" }));
+    r = registerHook(r, hook({ id: "1", event: "post_tool_use" }));
+    r = registerHook(r, hook({ id: "10", event: "post_tool_use" }));
+    expect(listHooks(r, "post_tool_use").map((h) => h.id)).toEqual(["2", "1", "10"]);
+  });
+
+  it("rejects a non-positive timeoutMs", () => {
+    expect(() => registerHook(createHookRegistry(), hook({ timeoutMs: 0 }))).toThrow();
+    expect(() => registerHook(createHookRegistry(), hook({ timeoutMs: -1 }))).toThrow();
+  });
 });

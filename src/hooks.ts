@@ -26,35 +26,51 @@ export interface HookDefinition {
 
 export interface HookRegistry {
   hooks: Record<string, HookDefinition>;
+  /** Insertion order of hook ids, so listing is stable regardless of id shape. */
+  order: string[];
+}
+
+function validateHook(hook: HookDefinition): void {
+  if (hook.timeoutMs != null && hook.timeoutMs <= 0) {
+    throw new Error(`Hook ${hook.id} has an invalid timeoutMs (${hook.timeoutMs}); it must be positive`);
+  }
 }
 
 export function createHookRegistry(): HookRegistry {
-  return { hooks: {} };
+  return { hooks: {}, order: [] };
 }
 
 export function registerHook(registry: HookRegistry, hook: HookDefinition): HookRegistry {
   if (registry.hooks[hook.id]) return registry; // no clobber
-  return { hooks: { ...registry.hooks, [hook.id]: hook } };
+  validateHook(hook);
+  // Store a copy so a later mutation of the caller's object does not change the
+  // registry's state (the registry is meant to be immutable per-mutation).
+  return {
+    hooks: { ...registry.hooks, [hook.id]: { ...hook } },
+    order: [...registry.order, hook.id],
+  };
 }
 
 export function setHookEnabled(registry: HookRegistry, id: string, enabled: boolean): HookRegistry {
   const existing = registry.hooks[id];
   if (!existing || existing.enabled === enabled) return registry;
-  return { hooks: { ...registry.hooks, [id]: { ...existing, enabled } } };
+  return { ...registry, hooks: { ...registry.hooks, [id]: { ...existing, enabled } } };
 }
 
 export function removeHook(registry: HookRegistry, id: string): HookRegistry {
   if (!registry.hooks[id]) return registry;
-  const next = { ...registry.hooks };
-  delete next[id];
-  return { hooks: next };
+  const hooks = { ...registry.hooks };
+  delete hooks[id];
+  return { hooks, order: registry.order.filter((o) => o !== id) };
 }
 
 /** Enabled hooks for an event, in registration order. */
 export function listHooks(registry: HookRegistry, event: HookEvent): HookDefinition[] {
-  return Object.values(registry.hooks).filter((h) => h.event === event && h.enabled);
+  return registry.order
+    .map((id) => registry.hooks[id])
+    .filter((h) => h.event === event && h.enabled);
 }
 
 export function listAllHooks(registry: HookRegistry): HookDefinition[] {
-  return Object.values(registry.hooks);
+  return registry.order.map((id) => registry.hooks[id]);
 }
