@@ -34,6 +34,8 @@ export interface ScheduledTask {
   name: string;
   enabled: boolean;
   trigger: Trigger;
+  /** Project this task runs against (for per-project background policy). */
+  project?: string;
   lastRunAt?: number;
   runCount: number;
 }
