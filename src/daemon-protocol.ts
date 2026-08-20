@@ -31,6 +31,7 @@ export const KNOWN_MESSAGE_TYPES = [
   "hook.fired",
   "ping",
   "pong",
+  "error",
 ] as const;
 
 export type ProtocolMessageType = (typeof KNOWN_MESSAGE_TYPES)[number];
