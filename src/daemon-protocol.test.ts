@@ -31,12 +31,12 @@ describe("babylon daemon protocol", () => {
   });
 
   it("rejects a missing or empty stable id", () => {
-    expect(() => parseEnvelope(JSON.stringify({ kind: "event", type: "ping", ts: 1 }))).toThrow(
-      /stable id/
-    );
+    expect(() =>
+      parseEnvelope(JSON.stringify({ kind: "event", type: "ping", ts: 1 }))
+    ).toThrow(/bad id type/);
     expect(() =>
       parseEnvelope(JSON.stringify({ id: "", kind: "event", type: "ping", ts: 1 }))
-    ).toThrow(/stable id/);
+    ).toThrow(/missing stable id/);
   });
 
   it("rejects a bad kind", () => {
@@ -65,7 +65,36 @@ describe("babylon daemon protocol", () => {
     ).toThrow(/inReplyTo/);
   });
 
-  it("knows all well-known message types", () => {
-    expect(KNOWN_MESSAGE_TYPES.length).toBeGreaterThanOrEqual(17);
+  it("rejects a whitespace-only stable id", () => {
+    expect(() =>
+      parseEnvelope(JSON.stringify({ id: "   ", kind: "event", type: "ping", ts: 1 }))
+    ).toThrow(/stable id/);
+  });
+
+  it("rejects malformed JSON with a wrapped error", () => {
+    expect(() => parseEnvelope("{")).toThrow(/malformed JSON/);
+  });
+
+  it("createEnvelope enforces the same contract as the parser", () => {
+    expect(() => createEnvelope("response", "pong", null, "")).toThrow(/inReplyTo/);
+    expect(() => createEnvelope("event", "task.created", undefined)).toThrow(/payload/);
+    expect(() => createEnvelope("event", "task.created", 5)).toThrow(/payload/);
+  });
+
+  it("allows ping/pong with a null payload", () => {
+    const e = createEnvelope("event", "ping", null);
+    expect(parseEnvelope(serializeEnvelope(e)).type).toBe("ping");
+  });
+
+  it("rejects a non-object payload for data-bearing types", () => {
+    expect(() =>
+      parseEnvelope(
+        JSON.stringify({ id: "m1", kind: "event", type: "task.created", payload: 5, ts: 1 })
+      )
+    ).toThrow(/payload/);
+  });
+
+  it("keeps the type union in sync with the known types list", () => {
+    expect(KNOWN_MESSAGE_TYPES.length).toBe(17);
   });
 });
