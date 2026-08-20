@@ -8,19 +8,25 @@ from `src/styles.css`, components, and product conventions).
 Light and dark, driven by CSS custom properties on `:root` and `html.dark`. Both themes
 use the same token names; only values change.
 
-- Light: near-white neutral background (`#f7f7f6`), white raised surfaces, ink text (`#171716`).
-- Dark: warm charcoal (`#191919` bg, `#242424` raised), near-white text, slightly muted dims.
+- Light: cool near-white (`oklch(0.976 0.005 260)`), near-white raised surfaces, ink text (`oklch(0.204 0.01 260)`).
+- Dark: **near-black** canvas with **neutral dark-grey** surfaces (zero-chroma greys, `oklch(0.072 0 0)` bg, `oklch(0.112 0 0)` raised), near-white text, slightly muted dims. No blue tint — the sidebar sits even deeper (`oklch(0.05 0 0)`, `#050505` in the t3code-style override) so content and the multi-hue project accents pop against it.
 
 Chrome (sidebar, nav, composer) uses translucent surfaces so content stays legible while
 scrolling; `prefers-reduced-transparency` removes the translucency.
 
 ## Color
 
-Restrained strategy: tinted neutrals plus a single blue accent used for primary actions,
-current selection, and state indicators only.
+Near-black canvas, **neutral dark-grey** surfaces, **colorful accents**. The chrome is pure
+grey (zero-chroma) so the surface reads as near-black; all color is carried by accents, not the
+chrome. A multi-hue palette (`src/lib/colors.ts`) assigns each project a stable, deterministic
+accent (violet / blue / cyan / emerald / amber / orange / rose / fuchsia) keyed by its cwd, so
+the same project always reads with the same color.
 
-- `--accent`: `#2563c7` (light) / `#72a7ff` (dark), with an `--accent-soft` tint for selected rows.
-- Semantic: `--ok` green, `--err` red, `--warn` amber; diff colors for added/removed lines.
+- `--accent`: `#2563c7` (light) / `#7aa2ff` (dark) — primary actions, selection, focus.
+- **Per-project accent** (`--pc`): drives the active session's left bar, the project dot in each
+  session row, and the unread indicator, so projects are visually distinguishable at a glance.
+- Semantic: `--ok` green (`#4ade80`), `--err` red (`#f87171`), `--warn` amber (`#fbbf24`) for
+  vibrant status pills (running / blocked / settled) and diff colors for added/removed lines.
 - Text ramp: `--fg` ink, `--dim` secondary. Borders: `--line`, `--line-strong`.
 
 ## Typography

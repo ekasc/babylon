@@ -77,8 +77,7 @@ const inflight = new Map<string, Promise<string>>();
 
 function cacheKey(code: string, lang: string | undefined): string {
   let hash = 5381;
-  const n = Math.min(code.length, 4096);
-  for (let i = 0; i < n; i++) hash = ((hash << 5) + hash + code.charCodeAt(i)) >>> 0;
+  for (let i = 0; i < code.length; i++) hash = ((hash << 5) + hash + code.charCodeAt(i)) >>> 0;
   return `${lang ?? ""}:${code.length}:${hash}`;
 }
 

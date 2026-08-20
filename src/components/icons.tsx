@@ -223,3 +223,80 @@ export const FilePlusIcon = (props: IconProps) => (
     <path d="M14 3v4h4M12 12v6M9 15h6" />
   </svg>
 );
+
+export const PlusIcon = (props: IconProps) => (
+  <svg {...base(props)}>
+    <path d="M12 5v14M5 12h14" />
+  </svg>
+);
+
+export const PinIcon = (props: IconProps) => (
+  <svg {...base(props)}>
+    <path d="M9 4h6l-1 7 3 3v2H7v-2l3-3-1-7z" />
+    <path d="M12 13v7" />
+  </svg>
+);
+
+export const ClockIcon = (props: IconProps) => (
+  <svg {...base(props)}>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M12 7v5l3 2" />
+  </svg>
+);
+
+export const ArchiveIcon = (props: IconProps) => (
+  <svg {...base(props)}>
+    <rect x="3" y="4" width="18" height="4" rx="1" />
+    <path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8M10 12h4" />
+  </svg>
+);
+
+export const ChatIcon = (props: IconProps) => (
+  <svg {...base(props)}>
+    <path d="M21 12a8 8 0 0 1-11.5 7.2L4 20l1-4.3A8 8 0 1 1 21 12z" />
+  </svg>
+);
+
+export const GearIcon = (props: IconProps) => (
+  <svg {...base(props)}>
+    <circle cx="12" cy="12" r="3" />
+    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+  </svg>
+);
+
+export const ArrowUpIcon = (props: IconProps) => (
+  <svg {...base(props)}>
+    <path d="M12 19V5M6 11l6-6 6 6" />
+  </svg>
+);
+
+export const ArrowDownIcon = (props: IconProps) => (
+  <svg {...base(props)}>
+    <path d="M12 5v14M6 13l6 6 6-6" />
+  </svg>
+);
+
+export const RunningIcon = (props: IconProps) => (
+  <svg {...base(props)}>
+    <path d="M3 12h4l2-6 4 12 2-6h6" />
+  </svg>
+);
+
+export const BlockedIcon = (props: IconProps) => (
+  <svg {...base(props)}>
+    <circle cx="12" cy="12" r="8.5" />
+    <path d="M6.5 6.5l11 11" />
+  </svg>
+);
+
+export const InputIcon = (props: IconProps) => (
+  <svg {...base(props)}>
+    <path d="M20 13a8 8 0 0 1-11.5 7.2L4 20l1-4.3A8 8 0 1 1 20 13z" />
+    <circle cx="9" cy="12.5" r="0.9" fill="currentColor" stroke="none" />
+    <circle cx="12.5" cy="12.5" r="0.9" fill="currentColor" stroke="none" />
+    <circle cx="16" cy="12.5" r="0.9" fill="currentColor" stroke="none" />
+  </svg>
+);
+
+
+

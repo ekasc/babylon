@@ -86,4 +86,59 @@ describe("SnapshotStore", () => {
     const store = new SnapshotStore(join(root, "state"));
     expect(await store.capture(join(root, "project"))).toBeNull();
   });
+
+  it("reports per-file kinds and line counts between two snapshots", async () => {
+    const base = await mkdtemp(join(tmpdir(), "pideck-turnchanges-"));
+    roots.push(base);
+    const root = join(base, "project");
+    await mkdir(root);
+    await git(root, ["init"]);
+    await git(root, ["config", "user.email", "test@example.com"]);
+    await git(root, ["config", "user.name", "Test"]);
+    await writeFile(join(root, "keep.txt"), "keep\n");
+    await writeFile(join(root, "removed.txt"), "bye\n");
+    await git(root, ["add", "keep.txt", "removed.txt"]);
+
+    const store = new SnapshotStore(join(base, "state"));
+    const before = await store.capture(root);
+    expect(before).not.toBeNull();
+
+    await writeFile(join(root, "keep.txt"), "keep\nmore\n");
+    await writeFile(join(root, "added.txt"), "one\ntwo\n");
+    await rm(join(root, "removed.txt"));
+    const after = await store.capture(root);
+    expect(after).not.toBeNull();
+
+    const changes = await store.turnChanges(root, before!.tree, after!.tree);
+    expect(changes).toEqual([
+      { path: "added.txt", kind: "added", additions: 2, deletions: 0 },
+      { path: "keep.txt", kind: "modified", additions: 1, deletions: 0 },
+      { path: "removed.txt", kind: "deleted", additions: 0, deletions: 1 },
+    ]);
+  });
+
+  it("returns a unified diff for a single changed file", async () => {
+    const base = await mkdtemp(join(tmpdir(), "pideck-filediff-"));
+    roots.push(base);
+    const root = join(base, "project");
+    await mkdir(root);
+    await git(root, ["init"]);
+    await git(root, ["config", "user.email", "test@example.com"]);
+    await git(root, ["config", "user.name", "Test"]);
+    await writeFile(join(root, "file.txt"), "one\ntwo\n");
+    await git(root, ["add", "file.txt"]);
+
+    const store = new SnapshotStore(join(base, "state"));
+    const before = await store.capture(root);
+    expect(before).not.toBeNull();
+
+    await writeFile(join(root, "file.txt"), "one\nthree\n");
+    const after = await store.capture(root);
+    expect(after).not.toBeNull();
+
+    const { diff, truncated } = await store.fileDiff(root, before!.tree, after!.tree, "file.txt");
+    expect(truncated).toBe(false);
+    expect(diff).toContain("-two");
+    expect(diff).toContain("+three");
+  });
 });

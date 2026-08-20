@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { initialState, mergeLiveMessages, messagesToItems, reducer } from "./store";
+import { initialState, mergeLiveMessages, messagesToItems, reconcileItems, reducer } from "./store";
 
 describe("subagent activity messages", () => {
   it("renders messages injected into the parent conversation", () => {
@@ -54,6 +54,14 @@ describe("live merge", () => {
     const loaded = [{ role: "user", content: "one", timestamp: 500 }];
     const merged = mergeLiveMessages(loaded, [{ role: "user", content: "older", timestamp: 100 }]);
     expect(merged).toBe(loaded);
+  });
+});
+
+describe("tool reconciliation", () => {
+  it("replaces a tool row when the middle of a large detail changes", () => {
+    const previous: any = { kind: "tool", key: "t:1", toolCallId: "call", name: "read", status: "done", details: `head${"a".repeat(200)}tail` };
+    const next: any = { ...previous, details: `head${"b".repeat(200)}tail` };
+    expect(reconcileItems([previous], [next])[0]).toBe(next);
   });
 });
 

@@ -14,7 +14,7 @@ const shared = {
   bundle: true,
   platform: "node",
   format: "esm",
-  external: ["electron", "@earendil-works/pi-coding-agent"],
+  external: ["electron"],
   sourcemap: true,
   logLevel: "silent",
 };

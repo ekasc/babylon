@@ -1,7 +1,8 @@
-import { useEffect, useRef } from "react";
+import { Fragment, useEffect, useRef } from "react";
 import type { ChatItem } from "../store";
 import type { HistoryTurn } from "../bridge";
 import { UserMessage, AssistantMessage, ToolCard, SystemLine, RecapLine } from "./items";
+import { TurnChanges } from "./TurnChanges";
 
 interface Props {
   items: ChatItem[];
@@ -79,6 +80,29 @@ export default function ChatView({
 
   const historyById = new Map(historyTurns.map((turn) => [turn.entryId, turn]));
 
+  // A turn spans from a user message up to (but not including) the next user
+  // message. Attach a "files changed" card after the last item of each turn
+  // that recorded a completed filesystem checkpoint.
+  const cards = new Map<number, HistoryTurn>();
+  let turnStart = -1;
+  for (let i = 0; i < shown.length; i++) {
+    const item = shown[i];
+    if (item.kind === "user") {
+      if (turnStart >= 0) {
+        const start = shown[turnStart];
+        const turn = start.kind === "user" && start.entryId ? historyById.get(start.entryId) : undefined;
+        if (turn && turn.changedCount > 0) cards.set(i - 1, turn);
+      }
+      turnStart = i;
+    }
+  }
+  if (turnStart >= 0) {
+    const start = shown[turnStart];
+    const turn = start.kind === "user" && start.entryId ? historyById.get(start.entryId) : undefined;
+    if (turn && turn.changedCount > 0) cards.set(shown.length - 1, turn);
+  }
+  const latestChanged = [...historyTurns].reverse().find((turn) => turn.changedCount > 0);
+
   return (
     <div
       ref={ref}
@@ -99,23 +123,27 @@ export default function ChatView({
             <p>{streaming ? "Preparing this session…" : "Describe the change, question, or outcome you want."}</p>
           </div>
         ) : null}
-        {shown.map((item) => (
-          <div
-            key={item.key}
-            className={items.length > 60 ? "chat-item chat-item-long" : "chat-item"}
-          >
-            {item.kind === "user" ? (
-              <UserMessage item={item} historyTurn={item.entryId ? historyById.get(item.entryId) : undefined} rollbackDisabled={streaming} onRollback={onRollback} />
-            ) : item.kind === "assistant" ? (
-              <AssistantMessage item={item} />
-            ) : item.kind === "tool" ? (
-              <ToolCard item={item} />
-            ) : item.kind === "recap" ? (
-              <RecapLine text={item.text} />
-            ) : (
-              <SystemLine text={item.text} />
-            )}
-          </div>
+        {shown.map((item, i) => (
+          <Fragment key={item.key}>
+            <div
+              className={items.length > 60 ? "chat-item chat-item-long" : "chat-item"}
+            >
+              {item.kind === "user" ? (
+                <UserMessage item={item} historyTurn={item.entryId ? historyById.get(item.entryId) : undefined} rollbackDisabled={streaming} onRollback={onRollback} />
+              ) : item.kind === "assistant" ? (
+                <AssistantMessage item={item} />
+              ) : item.kind === "tool" ? (
+                <ToolCard item={item} />
+              ) : item.kind === "recap" ? (
+                <RecapLine text={item.text} />
+              ) : (
+                <SystemLine text={item.text} />
+              )}
+            </div>
+            {cards.get(i) ? (
+              <TurnChanges turn={cards.get(i)!} isLatest={latestChanged?.entryId === cards.get(i)!.entryId} />
+            ) : null}
+          </Fragment>
         ))}
       </div>
     </div>

@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 
 const MAX_OUTPUT = 32 * 1024 * 1024;
 const MAX_UNTRACKED_BYTES = 2 * 1024 * 1024;
+const MAX_DIFF_BYTES = 200 * 1024;
 const GIT_TIMEOUT_MS = 120_000;
 
 export interface SnapshotCapture {
@@ -16,6 +17,13 @@ export interface SnapshotCapture {
 export interface RestoreChange {
   path: string;
   status: "added" | "modified" | "deleted";
+}
+
+export interface TurnFileChange {
+  path: string;
+  kind: "added" | "modified" | "deleted";
+  additions: number;
+  deletions: number;
 }
 
 interface Repository {
@@ -267,6 +275,57 @@ export class SnapshotStore {
     const result = await run("git", this.args(repo, ["diff", "--name-only", "-z", "--no-renames", safeTree(from), safeTree(to), "--", "."]), repo.root);
     if (result.code !== 0) throw new Error("failed to compare project snapshots");
     return splitNul(result.stdout).map((path) => safeRelative(repo.root, path));
+  }
+
+  async turnChanges(cwd: string, from: string, to: string): Promise<TurnFileChange[]> {
+    const repo = await this.repository(cwd);
+    if (!repo) throw new Error("rollback requires a Git project");
+    const [nameStatus, numstat] = await Promise.all([
+      run("git", this.args(repo, ["diff", "--name-status", "-z", "--no-renames", safeTree(from), safeTree(to), "--", "."]), repo.root),
+      run("git", this.args(repo, ["diff", "--numstat", "-z", "--no-renames", safeTree(from), safeTree(to), "--", "."]), repo.root),
+    ]);
+    if (nameStatus.code !== 0 || numstat.code !== 0) throw new Error("failed to compare project snapshots");
+    const kinds = new Map<string, TurnFileChange["kind"]>();
+    const statusParts = nameStatus.stdout.toString("utf8").split("\0");
+    for (let i = 0; i + 1 < statusParts.length; i += 2) {
+      const status = statusParts[i];
+      const path = statusParts[i + 1];
+      if (!status || !path) break;
+      kinds.set(safeRelative(repo.root, path), status.startsWith("A") ? "added" : status.startsWith("D") ? "deleted" : "modified");
+    }
+    const changes = new Map<string, TurnFileChange>();
+    const numstatParts = numstat.stdout.toString("utf8").split("\0");
+    for (const part of numstatParts) {
+      if (!part) continue;
+      const tab = part.lastIndexOf("\t");
+      if (tab < 0) continue;
+      const counts = part.slice(0, tab);
+      const path = part.slice(tab + 1);
+      const additions = parseInt(counts.split("\t")[0] ?? "0", 10);
+      const deletions = parseInt(counts.split("\t")[1] ?? "0", 10);
+      changes.set(path, {
+        path,
+        kind: kinds.get(path) ?? "modified",
+        additions: Number.isFinite(additions) ? additions : 0,
+        deletions: Number.isFinite(deletions) ? deletions : 0,
+      });
+    }
+    return [...changes.values()].sort((a, b) => a.path.localeCompare(b.path));
+  }
+
+  async fileDiff(cwd: string, from: string, to: string, input: string): Promise<{ diff: string; truncated: boolean }> {
+    const repo = await this.repository(cwd);
+    if (!repo) throw new Error("rollback requires a Git project");
+    const rel = safeRelative(repo.root, input);
+    const result = await run(
+      "git",
+      this.args(repo, ["diff", "--no-ext-diff", "--no-color", "--no-renames", "--patch", safeTree(from), safeTree(to), "--", `:(top,literal)${rel}`]),
+      repo.root
+    );
+    if (result.code !== 0) throw new Error(`failed to diff ${rel}`);
+    const raw = result.stdout.toString("utf8");
+    const truncated = raw.length > MAX_DIFF_BYTES;
+    return { diff: raw.slice(0, MAX_DIFF_BYTES), truncated };
   }
 
   private async objectAt(repo: Repository, tree: string, rel: string): Promise<string | null> {

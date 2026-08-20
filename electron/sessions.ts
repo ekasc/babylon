@@ -363,7 +363,7 @@ export async function readSessionTail(path: string, maxBytes = TAIL_BYTES): Prom
 export async function readSessionRange(path: string, endOffset: number | undefined, maxBytes: number): Promise<{ messages: any[]; startOffset: number }> {
   try {
     const { size } = await fs.stat(path);
-    const end = endOffset ?? size;
+    const end = Math.min(endOffset ?? size, size);
     let window = maxBytes;
     for (;;) {
       const start = Math.max(0, end - window);

@@ -2,27 +2,31 @@ import { app, BrowserWindow, dialog, ipcMain, shell, type IpcMainInvokeEvent } f
 import { execFile } from "node:child_process";
 import { existsSync, promises as fsp } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { basename, dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { ActivityBridge, type ActivityUpdate } from "./activity";
 import { AgentEventBuffer } from "./event-buffer";
+import * as gitOps from "./git";
 import { PiHost } from "./pi-host";
 import { mergeRecaps } from "./recap";
-import { SessionIndex, readSessionRange, readSessionTail, readToolOutput } from "./sessions";
-import { resolveParentSessionFile } from "./threads";
-import { WorkflowsBridge, type WorkflowControlAction, type WorkflowsUpdate } from "./workflows";
+import { isTrustedRendererUrl } from "./navigation";
+import { validateSessionPath } from "./session-path";
+import { SessionIndex, readSessionRange, readSessionTail } from "./sessions";
+
+// Pi engine session store (mirrors electron/threads.ts).
+const PI_SESSIONS_ROOT = join(homedir(), ".pi", "agent", "sessions");
 
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const RENDERER_ENTRY = pathToFileURL(join(__dirname, "../dist/index.html")).href;
 
 let win: BrowserWindow | null = null;
 let host: PiHost | null = null;
 let hostReady: Promise<void> | null = null;
 let activeCwd = "";
-let workflowsBridge: WorkflowsBridge | null = null;
-let activityBridge: ActivityBridge | null = null;
-const sessionIndex = new SessionIndex();
+let workflowsBridge: any = null;
+let activityBridge: any = null;
+const sessionIndex = new SessionIndex(PI_SESSIONS_ROOT);
 const agentEvents = new AgentEventBuffer((events) => {
   win?.webContents.send("pideck:agent-events", events);
 });
@@ -35,50 +39,16 @@ const agentEvents = new AgentEventBuffer((events) => {
 function applyCwd(cwd: string): void {
   if (!cwd) return;
   activeCwd = cwd;
-  updateWorkflowsBridge(cwd);
-  updateActivityBridge(cwd);
 }
 
-function updateActivityBridge(cwd: string): void {
-  if (!cwd || activityBridge?.cwd === cwd) return;
-  activityBridge?.dispose();
-  activityBridge = new ActivityBridge({
-    cwd,
-    onUpdate: (update: ActivityUpdate) => win?.webContents.send("pideck:activity-update", update),
-    resolveParentSessionFile: (sessionId) => resolveParentSessionFile(sessionId),
-    onThreadEvent: (thread, event) => getHost().notifyThreadEvent(thread, event),
-  });
-  activityBridge.start();
+function updateActivityBridge(_cwd: string): void {
+  // Threads/subagents activity lives inside PiHost's private ThreadManager /
+  // ManagedSubagents. PiHost must expose them (or an activity snapshot) before
+  // this bridge can be wired — follow-up to the OMP→PiHost swap.
 }
 
-function updateWorkflowsBridge(cwd: string): void {
-  if (!cwd) return;
-  if (workflowsBridge?.cwd === cwd) return;
-  workflowsBridge?.dispose();
-  const nextBridge = new WorkflowsBridge({
-    cwd,
-    runCommand: async (command: string) => {
-      // Extension commands execute synchronously via session.prompt("/…") — no
-      // chat-history pollution, no LLM call; the extension's own error/notify
-      // feedback arrives through the normal agent-event pipeline.
-      await getHost().session.prompt(command);
-    },
-    getSessionId: async () => {
-      try {
-        const state = await getHost().getState();
-        return state?.sessionId ?? null;
-      } catch {
-        return null;
-      }
-    },
-    onUpdate: (runs) => {
-      if (workflowsBridge !== nextBridge) return;
-      const payload: WorkflowsUpdate = { runs };
-      win?.webContents.send("pideck:workflows-update", payload);
-    },
-  });
-  workflowsBridge = nextBridge;
-  nextBridge.start();
+function updateWorkflowsBridge(_cwd: string): void {
+  // The pi-dynamic-workflows run-state bridge needs the same PiHost exposure.
 }
 
 // ---------------------------------------------------------------------------
@@ -110,8 +80,7 @@ function createWindow(): void {
   const devUrl = process.env.VITE_DEV_SERVER_URL;
   win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   win.webContents.on("will-navigate", (event, url) => {
-    const allowed = devUrl ? url.startsWith("http://127.0.0.1:5173/") : url.startsWith("file://");
-    if (!allowed) event.preventDefault();
+    if (!isTrustedRendererUrl(url, devUrl, RENDERER_ENTRY)) event.preventDefault();
   });
 
   if (devUrl) {
@@ -177,6 +146,54 @@ async function gitInfo(cwd: string): Promise<GitInfo> {
   } catch {
     return { isRepo: false };
   }
+}
+
+interface GitFileChange {
+  path: string;
+  status: string;
+}
+
+interface GitStatusResult {
+  isRepo: boolean;
+  root?: string;
+  branch?: string;
+  isWorktree?: boolean;
+  dirty: GitFileChange[];
+  ahead: number;
+  behind: number;
+}
+
+/** Computes the full working-tree git status for a directory. */
+async function gitStatus(cwd: string): Promise<GitStatusResult> {
+  const base = await gitInfo(cwd);
+  if (!base.isRepo) return { isRepo: false, dirty: [], ahead: 0, behind: 0 };
+  const result: GitStatusResult = {
+    isRepo: true,
+    root: base.root,
+    branch: base.branch,
+    isWorktree: base.isLinkedWorktree,
+    dirty: [],
+    ahead: 0,
+    behind: 0,
+  };
+  try {
+    const porcelain = await git(["status", "--porcelain"], cwd);
+    result.dirty = porcelain
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => ({ status: line.slice(0, 2).trim(), path: line.slice(3) }));
+  } catch {
+    /* not a repo or git unavailable */
+  }
+  try {
+    const counts = await git(["rev-list", "--left-right", "--count", "@{upstream}...HEAD"], cwd);
+    const [behind, ahead] = counts.split("\t").map((n) => parseInt(n, 10) || 0);
+    result.behind = behind;
+    result.ahead = ahead;
+  } catch {
+    /* no upstream configured */
+  }
+  return result;
 }
 
 async function readSessionHeader(file: string): Promise<any> {
@@ -252,57 +269,21 @@ async function startHost(): Promise<void> {
     activeCwd = cwd;
     host = new PiHost({
       cwd,
-      stateDir: join(app.getPath("userData"), "rollback-state"),
       onEvent: (ev) => {
         agentEvents.push(ev);
-        activityBridge?.observeAgentEvent(ev);
         if (ev?.type === "message_end" || ev?.type === "agent_settled" || ev?.type === "session_info_changed") {
           sessionIndex.touch();
         }
       },
-      onStatus: (s) => {
-        // The session cwd is the source of truth for the workflows bridge —
-        // re-create it whenever the host reports a new cwd.
-        if (s.cwd) applyCwd(s.cwd);
+      onStatus: (s: any) => {
+        if (s?.cwd) applyCwd(s.cwd);
         sendStatus(s.status, { state: s.state, sessionPath: s.sessionPath });
-      },
-      onProjectTrust: async (cwd: string) => {
-        const result = await dialog.showMessageBox(win!, {
-          type: "warning",
-          title: "Trust project resources?",
-          message: `Trust project folder?\n\n${cwd}`,
-          detail:
-            "Trusting allows this project to load its .pi settings, extensions, skills, prompts, packages, and system instructions.",
-          buttons: ["Trust once", "Trust & remember", "Don't trust"],
-          defaultId: 0,
-          cancelId: 2,
-        });
-        return { trusted: result.response !== 2, remember: result.response === 1 };
-      },
-      onMissingCwd: async (sessionFile: string, storedCwd: string) => {
-        // The session's project folder no longer exists. Ask where it should
-        // run now, mirroring pi's interactive-mode prompt.
-        const r = await dialog.showMessageBox(win!, {
-          type: "warning",
-          title: "Session folder is gone",
-          message: `This session's folder no longer exists:\n\n${storedCwd}`,
-          detail: `Continue this session in a new location? The session history stays intact.`,
-          buttons: ["Choose new folder…", "Cancel"],
-          defaultId: 0,
-          cancelId: 1,
-        });
-        if (r.response !== 0) return null;
-        const pick = await dialog.showOpenDialog(win!, {
-          title: "Choose where this session should run",
-          properties: ["openDirectory", "createDirectory"],
-        });
-        return pick.canceled ? null : pick.filePaths[0];
       },
     });
     await host.start();
     applyCwd(activeCwd);
     // Warm but invisible — the user hasn't opened a session yet.
-    console.log("[pideck] pi host ready in-process (shared services loaded once)");
+    console.log("[pideck] pi host ready (in-process)");
   } catch (err) {
     host = null;
     sendStatus("error", { message: (err as Error).message });
@@ -316,19 +297,8 @@ async function startHost(): Promise<void> {
 function assertTrustedSender(event: IpcMainInvokeEvent): void {
   const url = event.senderFrame?.url ?? event.sender.getURL();
   const devOrigin = process.env.VITE_DEV_SERVER_URL;
-  const trusted = devOrigin ? url.startsWith(`${new URL(devOrigin).origin}/`) : url.startsWith("file://");
+  const trusted = isTrustedRendererUrl(url, devOrigin, RENDERER_ENTRY);
   if (!trusted || event.sender !== win?.webContents) throw new Error("untrusted IPC sender");
-}
-
-/** Resolves a session path and enforces it stays inside the pi sessions dir. */
-function validateSessionPath(path: string): string {
-  const root = resolve(homedir(), ".pi", "agent", "sessions");
-  const target = resolve(path);
-  const rel = relative(root, target);
-  if (!rel || rel.startsWith("..") || isAbsolute(rel) || !target.endsWith(".jsonl")) {
-    throw new Error("session path is outside the pi sessions directory");
-  }
-  return target;
 }
 
 function registerIpc(): void {
@@ -344,13 +314,14 @@ function registerIpc(): void {
 
   handle("pideck:list-sessions", () => sessionIndex.list());
   handle("pideck:get-session-messages", async (_e, path: string) => {
-    const target = validateSessionPath(path);
+    const target = await validateSessionPath(PI_SESSIONS_ROOT, path);
     const window = await readSessionTail(target);
     return { ...window, messages: mergeRecaps(window.messages, await getHost().getRecaps(target)) };
   });
 
   handle("pideck:get-session-window", async (_e, path: string, endOffset: number, countBytes?: number) => {
-    const target = validateSessionPath(path);
+    const target = await validateSessionPath(PI_SESSIONS_ROOT, path);
+    if (!Number.isSafeInteger(endOffset) || endOffset < 0) throw new Error("invalid session window offset");
     const maxBytes = Math.min(Math.max(countBytes ?? 2 * 1024 * 1024, 256 * 1024), 16 * 1024 * 1024);
     const window = await readSessionRange(target, endOffset, maxBytes);
     return { ...window, messages: mergeRecaps(window.messages, await getHost().getRecaps(target)) };
@@ -362,7 +333,7 @@ function registerIpc(): void {
   });
 
   handle("pideck:delete-session", async (_e, path: string) => {
-    const target = validateSessionPath(path);
+    const target = await validateSessionPath(PI_SESSIONS_ROOT, path);
     if (getHost().activeSessionFile === target) {
       throw new Error("Close this chat before deleting it");
     }
@@ -381,8 +352,10 @@ function registerIpc(): void {
   handle(
     "pideck:open-session",
     async (_e, opts: { path?: string; cwd: string; requestId?: number }) => {
+      if (!opts || typeof opts.cwd !== "string" || opts.cwd.length > 4096) throw new Error("invalid session options");
       if (hostReady) await hostReady;
-      return getHost().open(opts);
+      const path = opts.path === undefined ? undefined : await validateSessionPath(PI_SESSIONS_ROOT, opts.path);
+      return getHost().open({ ...opts, path });
     }
   );
 
@@ -405,10 +378,57 @@ function registerIpc(): void {
     return getHost().prompt(message, images, streamingBehavior as any);
   });
   handle("pideck:abort", () => getHost().abort());
-  handle("pideck:refresh-session", (_e, path: string) => getHost().refreshFromDisk(path));
+  handle("pideck:refresh-session", async (_e, path: string) =>
+    getHost().refreshFromDisk(await validateSessionPath(PI_SESSIONS_ROOT, path))
+  );
   handle("pideck:get-messages", () => getHost().getMessages());
   handle("pideck:get-state", () => getHost().getState());
   handle("pideck:get-stats", () => getHost().getStats());
+  handle("pideck:git-status", async (_e, cwd: unknown) => {
+    if (typeof cwd !== "string" || cwd.length > 4096) throw new Error("invalid cwd");
+    try {
+      return await gitStatus(cwd);
+    } catch {
+      return { isRepo: false, dirty: [], ahead: 0, behind: 0 };
+    }
+  });
+  // Git integration (status, commit/push/pull, branches, pull requests)
+  const requireCwd = (cwd: unknown): string => {
+    if (typeof cwd !== "string" || cwd.length === 0 || cwd.length > 4096) throw new Error("invalid cwd");
+    return cwd;
+  };
+  handle("pideck:git-status-details", async (_e, cwd: unknown) => {
+    try {
+      return await gitOps.statusDetails(requireCwd(cwd));
+    } catch {
+      return { isRepo: false };
+    }
+  });
+  handle("pideck:git-branches", (_e, cwd: unknown) => gitOps.listBranches(requireCwd(cwd)));
+  handle("pideck:git-branch-create", (_e, cwd: unknown, name: unknown, switchTo: unknown) => {
+    if (typeof name !== "string" || name.length > 200) throw new Error("invalid branch name");
+    return gitOps.createBranch(requireCwd(cwd), name, switchTo === true);
+  });
+  handle("pideck:git-branch-switch", (_e, cwd: unknown, name: unknown) => {
+    if (typeof name !== "string" || name.length > 200) throw new Error("invalid branch name");
+    return gitOps.switchBranch(requireCwd(cwd), name);
+  });
+  handle("pideck:git-commit", (_e, cwd: unknown, message: unknown) => {
+    if (typeof message !== "string" || message.length > 20_000) throw new Error("invalid commit message");
+    return gitOps.commitAll(requireCwd(cwd), message);
+  });
+  handle("pideck:git-push", (_e, cwd: unknown) => gitOps.pushCurrentBranch(requireCwd(cwd)));
+  handle("pideck:git-pull", (_e, cwd: unknown) => gitOps.pullCurrentBranch(requireCwd(cwd)));
+  handle("pideck:git-pr-context", (_e, cwd: unknown) => gitOps.prContext(requireCwd(cwd)));
+  handle("pideck:git-pr-suggest", (_e, cwd: unknown) => gitOps.suggestPrContent(requireCwd(cwd)));
+  handle("pideck:git-pr-create", (_e, cwd: unknown, input: unknown) => {
+    const title = (input as any)?.title;
+    const body = (input as any)?.body;
+    if (typeof title !== "string" || title.length > 500) throw new Error("invalid PR title");
+    if (body !== undefined && (typeof body !== "string" || body.length > 100_000)) throw new Error("invalid PR body");
+    return gitOps.createPr(requireCwd(cwd), { title, body: typeof body === "string" ? body : "" });
+  });
+
   handle("pideck:get-models", () => getHost().getModels());
   handle("pideck:get-commands", () => getHost().getCommands());
   handle("pideck:set-model", (_e, provider: string, modelId: string) =>
@@ -425,6 +445,15 @@ function registerIpc(): void {
   // Branching / worktrees
   handle("pideck:get-tree", () => getHost().getTree());
   handle("pideck:get-history", () => getHost().getHistory());
+  handle("pideck:turn-changes", (_e, entryId: unknown) => {
+    if (typeof entryId !== "string" || entryId.length < 1 || entryId.length > 200) throw new Error("invalid history entry ID");
+    return getHost().getTurnChanges(entryId);
+  });
+  handle("pideck:turn-file-diff", (_e, entryId: unknown, path: unknown) => {
+    if (typeof entryId !== "string" || entryId.length < 1 || entryId.length > 200) throw new Error("invalid history entry ID");
+    if (typeof path !== "string" || path.length < 1 || path.length > 4096) throw new Error("invalid file path");
+    return getHost().getTurnFileDiff(entryId, path);
+  });
   handle("pideck:rollback:prepare", (_e, entryId: string) => {
     if (typeof entryId !== "string" || entryId.length < 1 || entryId.length > 200) throw new Error("invalid history entry ID");
     return getHost().prepareRollback(entryId);
@@ -649,7 +678,7 @@ function registerIpc(): void {
   );
   handle(
     "pideck:workflows:control",
-    (_e, opts: { action: WorkflowControlAction; runId: string }) => {
+    (_e, opts: { action: string; runId: string }) => {
       if (!workflowsBridge) throw new Error("workflows bridge not ready");
       return workflowsBridge.control(opts.action, opts.runId);
     }

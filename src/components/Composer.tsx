@@ -1,7 +1,8 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import type { CommandInfo } from "../bridge";
+import type { CommandInfo, GitStatusResult } from "../bridge";
 import { commandTokenAtStart, insertCommand, rankCommands } from "../commands";
 import CommandMenu from "./CommandMenu";
+import GitPanel from "./GitPanel";
 import ModelPicker from "./ModelPicker";
 import ThinkingPicker from "./ThinkingPicker";
 import StatsPopover from "./StatsPopover";
@@ -26,6 +27,10 @@ interface Props {
   models: any[];
   thinkingLevels: string[];
   draftRequest?: { id: number; text: string } | null;
+  cwd?: string;
+  gitStatus?: GitStatusResult | null;
+  onGitChanged(): void;
+  toast(kind: "info" | "warning" | "error", text: string): void;
   onSend(text: string, images: Attachment[] | undefined, streamingBehavior?: "steer" | "followUp"): Promise<boolean>;
   onAbort(): void;
   onSetModel(provider: string, modelId: string): void;
@@ -81,7 +86,7 @@ async function prepareImage(file: File): Promise<{ blob: Blob; mimeType: string 
   }
 }
 
-const Composer = memo(function Composer({ streaming, steering, followUp, commands, agentState, stats, models, thinkingLevels, draftRequest, onSend, onAbort, onSetModel, onSetThinking, onCompact }: Props) {
+const Composer = memo(function Composer({ streaming, steering, followUp, commands, agentState, stats, models, thinkingLevels, draftRequest, cwd, gitStatus, onGitChanged, toast, onSend, onAbort, onSetModel, onSetThinking, onCompact }: Props) {
   const [text, setText] = useState("");
   const [mode, setMode] = useState<"steer" | "followUp">("steer");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -355,6 +360,7 @@ const Composer = memo(function Composer({ streaming, steering, followUp, command
               <ModelPicker models={models} current={agentState?.model ?? null} disabled={!models.length} onSelect={onSetModel} />
               <ThinkingPicker current={agentState?.thinkingLevel ?? "off"} available={thinkingLevels.length ? thinkingLevels : undefined} disabled={!agentState} onSelect={onSetThinking} />
               <StatsPopover stats={stats} hasSession={!!agentState} onCompact={onCompact} />
+              <GitPanel cwd={cwd} sidebarStatus={gitStatus} onChanged={onGitChanged} toast={toast} />
             </div>
             <span className="ml-auto text-[12px] text-dim">Enter to send · Shift+Enter for newline</span>
           </div>
