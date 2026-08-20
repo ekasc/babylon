@@ -35,20 +35,33 @@ export function createModelRolesState(): ModelRolesState {
   return { roles: {} };
 }
 
-/** Shallow-merge an override onto a base config (override wins, never undefined). */
+/**
+ * Shallow-merge an override onto a base config. The override wins, and an
+ * explicit `undefined` in the override is ignored (so base values survive),
+ * matching the "never undefined" contract.
+ */
 export function mergeRoleConfig(
   base: ModelRoleConfig | undefined,
   override: ModelRoleConfig | undefined
 ): ModelRoleConfig {
-  return { ...base, ...override };
+  const o = override ?? {};
+  const cleaned = Object.fromEntries(
+    Object.entries(o).filter(([, v]) => v !== undefined)
+  );
+  return { ...base, ...cleaned };
 }
 
+/**
+ * Set (or incrementally update) a role. The config is merged onto any existing
+ * role config, so partial updates do not drop other fields. To clear a role,
+ * use clearRole.
+ */
 export function setRole(
   state: ModelRolesState,
   name: RoleName,
   config: ModelRoleConfig
 ): ModelRolesState {
-  return { roles: { ...state.roles, [name]: config } };
+  return { roles: { ...state.roles, [name]: mergeRoleConfig(state.roles[name], config) } };
 }
 
 export function clearRole(state: ModelRolesState, name: RoleName): ModelRolesState {

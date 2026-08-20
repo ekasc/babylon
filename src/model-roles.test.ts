@@ -21,6 +21,20 @@ describe("model roles", () => {
     expect(mergeRoleConfig(undefined, { model: "x" })).toEqual({ model: "x" });
   });
 
+  it("ignores an explicit undefined in the override", () => {
+    expect(mergeRoleConfig({ model: "big", tokenBudget: 100 }, { model: undefined })).toEqual({
+      model: "big",
+      tokenBudget: 100,
+    });
+  });
+
+  it("merges setRole calls so fields accumulate", () => {
+    let s = createModelRolesState();
+    s = setRole(s, "scout", { model: "haiku" });
+    s = setRole(s, "scout", { tokenBudget: 500 });
+    expect(s.roles.scout).toEqual({ model: "haiku", tokenBudget: 500 });
+  });
+
   it("sets and clears roles immutably", () => {
     let s: ModelRolesState = createModelRolesState();
     s = setRole(s, "scout", { model: "haiku", tokenBudget: 1000 });

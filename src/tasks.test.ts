@@ -7,9 +7,11 @@ import {
   associateWorktree,
   createTask,
   createTaskRegistry,
+  isRemovable,
   listByOwner,
   listTasks,
   removeTask,
+  removeTerminal,
   updateTask,
   type TaskRegistry,
 } from "./tasks";
@@ -56,6 +58,38 @@ describe("task-owned worktrees", () => {
   it("removes a task from the registry", () => {
     const r = removeTask(withTask(), "t1");
     expect(r.tasks.t1).toBeUndefined();
+  });
+
+  it("refuses to overwrite an existing task id", () => {
+    const r = withTask();
+    const dup = createTask({ id: "t1", title: "Other" });
+    expect(addTask(r, dup)).toBe(r);
+    expect(r.tasks.t1.title).toBe("Refactor auth");
+  });
+
+  it("returns clones from listTasks so the registry is not mutated", () => {
+    const r = withTask();
+    const listed = listTasks(r);
+    listed[0].status = "completed";
+    listed[0].terminalIds.push("x");
+    expect(r.tasks.t1.status).toBe("proposed");
+    expect(r.tasks.t1.terminalIds).toEqual([]);
+  });
+
+  it("removeTask is a no-op reference when the id is absent", () => {
+    const r = withTask();
+    expect(removeTask(r, "missing")).toBe(r);
+  });
+
+  it("removeTerminal is a no-op reference when the terminal is absent", () => {
+    const r = withTask();
+    expect(removeTerminal(r, "t1", "nope")).toBe(r);
+  });
+
+  it("isRemovable reflects the dirty flag", () => {
+    const dirty = updateTask(withTask(), "t1", { dirty: true });
+    expect(isRemovable(dirty.tasks.t1)).toBe(false);
+    expect(isRemovable(withTask().tasks.t1)).toBe(true);
   });
 
   it("lists all and by owner", () => {
