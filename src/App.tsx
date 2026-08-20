@@ -18,7 +18,7 @@ import { PlansPanel } from "./components/PlansPanel";
 import { ProcessPanel } from "./components/ProcessPanel";
 import { PreviewPanel } from "./components/PreviewPanel";
 import { AttentionPanel } from "./components/AttentionPanel";
-import { addAttention, listAttention, type AttentionRegistry } from "./attention";
+import { addAttention, listAttention, removeAttention, type AttentionRegistry } from "./attention";
 import type { Plan } from "./plans";
 import type { ProcessRegistry } from "./process-model";
 import type { PreviewRegistry } from "./preview-model";
@@ -371,6 +371,14 @@ export default function App() {
       );
     });
   }, [activeSessionPath, status.sessionPath]);
+
+  // Drop the matching attention item when the approval is actually resolved
+  // (allowed or denied), so the inbox stops over-reporting outstanding work.
+  useEffect(() => {
+    return bridge.onApprovalResolved((payload) => {
+      setAttention((prev) => removeAttention(prev, `perm-${payload.id}`));
+    });
+  }, []);
 
   useEffect(() => {
     if (status.status !== "ready") return;

@@ -1,4 +1,4 @@
-import { listAttention, resolveAttention, type AttentionItem, type AttentionRegistry } from "../attention";
+import { listAttention, removeAttention, type AttentionItem, type AttentionRegistry } from "../attention";
 
 /**
  * Attention Inbox surface (Phase 5). One global place for everything that needs
@@ -18,13 +18,13 @@ export function AttentionPanel({
 }) {
   const items = listAttention(registry);
 
-  const dismiss = (item: AttentionItem) => setRegistry((prev) => resolveAttention(prev, item.id));
+  const dismiss = (item: AttentionItem) => setRegistry((prev) => removeAttention(prev, item.id));
 
-  const clearAll = () => {
-    let next = registry;
-    for (const item of items) next = resolveAttention(next, item.id);
-    setRegistry(next);
-  };
+  const clearAll = () => setRegistry((prev) => {
+    let next = prev;
+    for (const item of listAttention(prev)) next = removeAttention(next, item.id);
+    return next;
+  });
 
   return (
     <div className="attention-panel">

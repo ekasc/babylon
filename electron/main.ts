@@ -92,6 +92,8 @@ function resolveApproval(id: string, choice: "allow_once" | "allow_session" | "a
     pending.resolve(true);
   }
   notifyPermissionsChanged();
+  // Let the renderer drop the matching attention-inbox item.
+  win?.webContents.send("pideck:approval-resolved", { id, choice });
 }
 let workflowsBridge: any = null;
 let activityBridge: any = null;
