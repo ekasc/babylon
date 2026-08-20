@@ -31,6 +31,24 @@ describe("babylon runtime authority", () => {
     expect(() => restoreRuntime(bad)).toThrow(/version/);
   });
 
+  it("refuses to restore null or non-object JSON", () => {
+    expect(() => restoreRuntime("null")).toThrow(/not a runtime object/);
+    expect(() => restoreRuntime("[]")).toThrow(/not a runtime object/);
+  });
+
+  it("falls back to empty registries for malformed fields", () => {
+    const bad = JSON.stringify({ version: RUNTIME_VERSION, tasks: {} });
+    const r = restoreRuntime(bad);
+    expect(r.tasks.tasks).toEqual({});
+    expect(r.version).toBe(RUNTIME_VERSION);
+  });
+
+  it("drops unknown/tampered keys on restore", () => {
+    const json = JSON.stringify({ version: RUNTIME_VERSION, foo: "bar" });
+    const r = restoreRuntime(json);
+    expect((r as unknown as Record<string, unknown>).foo).toBeUndefined();
+  });
+
   it("refuses to snapshot an unexpected version", () => {
     const r = { ...createRuntime(), version: 2 };
     expect(() => snapshotRuntime(r)).toThrow(/version/);

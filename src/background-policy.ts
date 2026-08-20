@@ -48,6 +48,8 @@ export function defaultPolicy(): BackgroundPolicy {
  * battery, sleep, concurrency, cost, per-project) all block; `resumeAfterWake`
  * only affects scheduling on wake and is not a gate here.
  */
+const KNOWN_MODES: BackgroundMode[] = ["never", "while_plugged_in", "always"];
+
 export function canRunInBackground(
   policy: BackgroundPolicy,
   project: string,
@@ -55,6 +57,9 @@ export function canRunInBackground(
 ): PolicyDecision {
   const reasons: string[] = [];
 
+  if (!KNOWN_MODES.includes(policy.mode)) {
+    reasons.push(`Unknown background mode ${String(policy.mode)}`);
+  }
   if (policy.mode === "never") {
     reasons.push("Background mode is set to never");
   }
@@ -67,17 +72,21 @@ export function canRunInBackground(
   if (policy.pauseOnSleep && env.asleep) {
     reasons.push("Pause-on-sleep is enabled and the device is asleep");
   }
-  if (env.activeAgents >= policy.maxConcurrentAgents) {
+  // Treat non-finite signals as exceeding the limit: a corrupt or missing
+  // signal must never read as "under limit".
+  const activeAgents = Number.isFinite(env.activeAgents) ? env.activeAgents : Infinity;
+  const currentCost = Number.isFinite(env.currentCost) ? env.currentCost : Infinity;
+  if (activeAgents >= policy.maxConcurrentAgents) {
     reasons.push(
       `Active agents (${env.activeAgents}) reached the limit (${policy.maxConcurrentAgents})`
     );
   }
-  if (env.currentCost >= policy.maxBackgroundCost) {
+  if (currentCost >= policy.maxBackgroundCost) {
     reasons.push(
       `Background cost (${env.currentCost}) reached the limit (${policy.maxBackgroundCost})`
     );
   }
-  if (policy.perProjectPermission[project] === false) {
+  if (policy.perProjectPermission?.[project] === false) {
     reasons.push(`Background work is denied for project ${project}`);
   }
 

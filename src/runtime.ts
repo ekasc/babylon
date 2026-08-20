@@ -36,9 +36,17 @@ export function createRuntime(): RuntimeState {
   };
 }
 
-/** Mint a stable, collision-resistant id for a protocol entity. */
+/**
+ * Mint a stable id for a protocol entity. Uniqueness within a running runtime is
+ * guaranteed by a timestamp plus a monotonic counter plus random bytes; it is
+ * not a global unique identifier across processes, but it is stable and safe to
+ * use as a protocol key inside one Babylon instance.
+ */
+let idCounter = 0;
 export function makeId(prefix: string): string {
-  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  const rand =
+    globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2, 12);
+  return `${prefix}-${Date.now().toString(36)}-${(idCounter++).toString(36)}-${rand}`;
 }
 
 export function snapshotRuntime(state: RuntimeState): string {
@@ -48,19 +56,45 @@ export function snapshotRuntime(state: RuntimeState): string {
   return JSON.stringify(state);
 }
 
+function validTasks(v: unknown): v is TaskRegistry {
+  return !!v && typeof v === "object" && (v as TaskRegistry).tasks != null && typeof (v as TaskRegistry).tasks === "object";
+}
+function validAttention(v: unknown): v is AttentionRegistry {
+  return !!v && typeof v === "object" && (v as AttentionRegistry).items != null && typeof (v as AttentionRegistry).items === "object";
+}
+function validHooks(v: unknown): v is HookRegistry {
+  return (
+    !!v &&
+    typeof v === "object" &&
+    (v as HookRegistry).hooks != null &&
+    Array.isArray((v as HookRegistry).order)
+  );
+}
+function validRoles(v: unknown): v is ModelRolesState {
+  return !!v && typeof v === "object" && (v as ModelRolesState).roles != null && typeof (v as ModelRolesState).roles === "object";
+}
+function validContracts(v: unknown): v is Record<string, CompletionContract> {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
 export function restoreRuntime(json: string): RuntimeState {
   const parsed = JSON.parse(json) as Partial<RuntimeState>;
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Cannot restore runtime: input is not a runtime object");
+  }
   if (parsed.version !== RUNTIME_VERSION) {
     throw new Error(`Cannot restore runtime version ${parsed.version}; expected ${RUNTIME_VERSION}`);
   }
   const base = createRuntime();
+  // Build from an explicit allow-list so unknown/tampered keys cannot leak onto
+  // the runtime, and validate each registry's shape so a corrupt snapshot is
+  // rejected cleanly instead of failing deep inside a later caller.
   return {
-    ...base,
-    ...parsed,
-    tasks: parsed.tasks ?? base.tasks,
-    attention: parsed.attention ?? base.attention,
-    hooks: parsed.hooks ?? base.hooks,
-    roles: parsed.roles ?? base.roles,
-    contracts: parsed.contracts ?? base.contracts,
+    version: RUNTIME_VERSION,
+    tasks: validTasks(parsed.tasks) ? parsed.tasks : base.tasks,
+    attention: validAttention(parsed.attention) ? parsed.attention : base.attention,
+    hooks: validHooks(parsed.hooks) ? parsed.hooks : base.hooks,
+    roles: validRoles(parsed.roles) ? parsed.roles : base.roles,
+    contracts: validContracts(parsed.contracts) ? parsed.contracts : base.contracts,
   };
 }

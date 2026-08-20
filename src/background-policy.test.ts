@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { canRunInBackground, defaultPolicy, type EnvironmentSignals } from "./background-policy";
+import {
+  canRunInBackground,
+  defaultPolicy,
+  type BackgroundMode,
+  type EnvironmentSignals,
+} from "./background-policy";
 
 function signals(over: Partial<EnvironmentSignals> = {}): EnvironmentSignals {
   return { onBattery: false, asleep: false, activeAgents: 0, currentCost: 0, ...over };
@@ -68,6 +73,29 @@ describe("background execution policies", () => {
       "p",
       signals()
     );
+    expect(d.allowed).toBe(false);
+  });
+
+  it("does not throw when perProjectPermission is absent or empty", () => {
+    const withEmpty = { ...defaultPolicy(), perProjectPermission: {} };
+    expect(canRunInBackground(withEmpty, "p", signals()).allowed).toBe(true);
+    const without = defaultPolicy() as unknown as Record<string, unknown>;
+    delete without.perProjectPermission;
+    expect(canRunInBackground(without as never, "p", signals()).allowed).toBe(true);
+  });
+
+  it("denies an unknown background mode", () => {
+    const d = canRunInBackground(
+      { ...defaultPolicy(), mode: "alwaysX" as BackgroundMode },
+      "p",
+      signals({ onBattery: true })
+    );
+    expect(d.allowed).toBe(false);
+    expect(d.reasons.join()).toMatch(/Unknown/);
+  });
+
+  it("denies when a signal is NaN", () => {
+    const d = canRunInBackground(defaultPolicy(), "p", signals({ currentCost: NaN }));
     expect(d.allowed).toBe(false);
   });
 });
