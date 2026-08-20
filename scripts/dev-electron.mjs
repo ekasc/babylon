@@ -10,6 +10,15 @@ const { context: createContext } = esbuild;
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const devUrl = process.env.VITE_DEV_SERVER_URL ?? "http://127.0.0.1:5173";
 
+// ESM output can't do dynamic `require()` (esbuild shims it and throws
+// "Dynamic require of … is not supported"). A transitive CJS dep (cross-spawn,
+// via the pi-coding-agent) calls require("child_process") at runtime, so we
+// re-expose a real `require` backed by createRequire. CJS output (preload)
+// already has a native require and must NOT get this banner.
+const requireBanner = {
+  js: `import { createRequire as topLevelCreateRequire } from "module"; const require = topLevelCreateRequire(import.meta.url);`,
+};
+
 const shared = {
   bundle: true,
   platform: "node",
@@ -38,17 +47,20 @@ function startElectron() {
 }
 
 function scheduleRestart() {
-  if (!builtOnce || restarting) return;
+  // `!electron` guards the initial-build double-fire (main + preload both emit
+  // onEnd before Electron has started): nothing to restart yet, so skip instead
+  // of scheduling a spurious restart that would kill the freshly launched app.
+  if (!builtOnce || restarting || !electron) return;
   clearTimeout(restartTimer);
   restartTimer = setTimeout(() => {
     console.log("\n[pideck] electron/ changed — restarting Electron…");
     restarting = true;
     const old = electron;
-    old?.once("exit", () => {
+    old.once("exit", () => {
       restarting = false;
       startElectron();
     });
-    old?.kill("SIGTERM");
+    old.kill("SIGTERM");
   }, 500);
 }
 
@@ -86,6 +98,7 @@ const restartPlugin = {
 
 const mainCtx = await createContext({
   ...shared,
+  banner: requireBanner,
   entryPoints: [path.join(root, "electron/main.ts")],
   outfile: path.join(root, "dist-electron/main.mjs"),
   plugins: [restartPlugin],

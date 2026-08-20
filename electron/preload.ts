@@ -43,6 +43,8 @@ const api = {
   getThinkingLevels: (): Promise<string[]> => ipcRenderer.invoke("pideck:get-thinking-levels"),
   setSessionName: (name: string): Promise<any> => ipcRenderer.invoke("pideck:set-session-name", name),
   compact: (): Promise<any> => ipcRenderer.invoke("pideck:compact"),
+  getSettings: (): Promise<any> => ipcRenderer.invoke("pideck:get-settings"),
+  setSettings: (patch: any): Promise<any> => ipcRenderer.invoke("pideck:set-settings", patch),
 
   // Branching / worktrees
   getTree: (): Promise<any> => ipcRenderer.invoke("pideck:get-tree"),
@@ -108,6 +110,24 @@ const api = {
     ipcRenderer.on("pideck:agent-event", listener);
     return () => ipcRenderer.removeListener("pideck:agent-event", listener);
   },
+
+  permissionsGet: (): Promise<any> => ipcRenderer.invoke("pideck:permissions:get"),
+  permissionsSetMode: (mode: string): Promise<any> => ipcRenderer.invoke("pideck:permissions:set-mode", mode),
+  permissionsAddRule: (input: any): Promise<any> => ipcRenderer.invoke("pideck:permissions:add-rule", input),
+  permissionsRemoveRule: (id: string): Promise<any> => ipcRenderer.invoke("pideck:permissions:remove-rule", id),
+  permissionsResolveApproval: (id: string, choice: string): Promise<any> =>
+    ipcRenderer.invoke("pideck:permissions:resolve-approval", { id, choice }),
+  onApprovalRequested: (cb: (req: any) => void): (() => void) => {
+    const listener = (_e: unknown, req: any) => cb(req);
+    ipcRenderer.on("pideck:approval-requested", listener);
+    return () => ipcRenderer.removeListener("pideck:approval-requested", listener);
+  },
+  onPermissionsChanged: (cb: (state: any) => void): (() => void) => {
+    const listener = (_e: unknown, state: any) => cb(state);
+    ipcRenderer.on("pideck:permissions-changed", listener);
+    return () => ipcRenderer.removeListener("pideck:permissions-changed", listener);
+  },
+
   onStatus: (cb: (status: any) => void): (() => void) => {
     const listener = (_e: unknown, s: any) => cb(s);
     ipcRenderer.on("pideck:session-status", listener);

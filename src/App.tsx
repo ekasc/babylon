@@ -12,7 +12,9 @@ import Hero from "./components/Hero";
 import WorkspacePane from "./components/WorkspacePane";
 import { RollbackConfirm, RollbackDock } from "./components/Rollback";
 import { WorktreeBanner, WorktreeModal, type WorktreeInfo } from "./components/Worktree";
-import { FlaskIcon, FolderIcon, LayersIcon, MoreIcon, PiMark } from "./components/icons";
+import { ApprovalGate } from "./components/ApprovalGate";
+import { PermissionsPanel } from "./components/PermissionsPanel";
+import { FlaskIcon, FolderIcon, LayersIcon, MoreIcon, PiMark, ShieldIcon } from "./components/icons";
 
 const BranchPanel = lazy(() => import("./components/BranchPanel"));
 const WorkflowsPanel = lazy(() => import("./components/WorkflowsPanel"));
@@ -127,6 +129,7 @@ export default function App() {
     toast("info", `Copied ${kind}`);
   }, []);
   const [status, setStatus] = useState<SessionStatus>({ status: "idle" });
+  const [projectFilter, setProjectFilter] = useState("all");
   const [models, setModels] = useState<any[]>([]);
   const [commands, setCommands] = useState<CommandInfo[]>([]);
   const [agentState, setAgentState] = useState<any>(null);
@@ -138,6 +141,7 @@ export default function App() {
   const [showBranchPanel, setShowBranchPanel] = useState(false);
   const [showWorkflowsPanel, setShowWorkflowsPanel] = useState(false);
   const [showCommandPalette, setShowCommandPalette] = useState(false);
+  const [showPermissions, setShowPermissions] = useState(false);
   const [history, setHistory] = useState<HistoryProjection>({ turns: [], leafId: null, hasBranches: false });
   const [historyRevision, setHistoryRevision] = useState(0);
   const [rollbackPlan, setRollbackPlan] = useState<RollbackPlan | null>(null);
@@ -730,14 +734,14 @@ export default function App() {
   // Codex-style: with a project open, "new session" starts a chat in it — no
   // folder dialog. Only prompt for a folder when no project is open yet.
   const newSession = useCallback(async () => {
-    const activeCwd = status.cwd;
-    if (activeCwd) {
-      await openSession(undefined, activeCwd);
+    const target = projectFilter !== "all" ? projectFilter : status.cwd;
+    if (target) {
+      await openSession(undefined, target);
       return;
     }
     const cwd = await bridge.pickFolder();
     if (cwd) await openSession(undefined, cwd);
-  }, [openSession, status.cwd]);
+  }, [openSession, status.cwd, projectFilter]);
 
   // New chat inside a specific listed project.
   const newSessionIn = useCallback(
@@ -997,6 +1001,8 @@ export default function App() {
         }}
         onNew={newSession}
         onNewSessionIn={newSessionIn}
+        projectFilter={projectFilter}
+        onProjectFilterChange={setProjectFilter}
         onDeleteSession={async (path, name) => {
           if (!window.confirm(`Delete chat “${name}”? This cannot be undone.`)) return;
           try {
@@ -1088,6 +1094,14 @@ export default function App() {
                   <MoreIcon size={16} />
                 </button>
               ) : null}
+              <button
+                onClick={() => setShowPermissions((open) => !open)}
+                title="Agent permissions"
+                aria-pressed={showPermissions}
+                className={`thread-action ${showPermissions ? "is-active" : ""}`}
+              >
+                <ShieldIcon size={16} />
+              </button>
               <button onClick={() => setShowCommandPalette(true)} title="Search and commands (⌘K)" className="thread-action">
                 <FolderIcon size={16} />
               </button>
@@ -1181,6 +1195,8 @@ export default function App() {
       {ready && showWorktreeModal && worktreeInfo && (
         <WorktreeModal info={worktreeInfo} onClose={() => setShowWorktreeModal(false)} toast={toast} />
       )}
+      {showPermissions ? <PermissionsPanel onClose={() => setShowPermissions(false)} /> : null}
+      <ApprovalGate />
       {rollbackPlan ? (
         <RollbackConfirm
           plan={rollbackPlan}

@@ -449,6 +449,8 @@ interface Props {
   onPrefetch?: (path: string) => void;
   onNew(): void;
   onNewSessionIn?(cwd: string): void;
+  projectFilter: string;
+  onProjectFilterChange(filter: string): void;
   onDeleteSession?(path: string, name: string): void;
   onOpenFolder(): void;
   onOpenTree(): void;
@@ -484,6 +486,7 @@ export default function Sidebar(props: Props) {
     treeOpen, canOpenTree, minimized, onToggleMinimize,
     onOpen, onPrefetch, onNew, onNewSessionIn, onDeleteSession,
     onOpenFolder, onOpenTree, onSearch,
+    projectFilter, onProjectFilterChange,
     pinnedOrder, snoozed, settled, archived, unread,
     onReorderPinned, onTogglePin, onToggleSnooze, onToggleSettle, onToggleUnread, onToggleArchive, onRename, onCopy,
     agentState, activeBranch, gitStatuses, onRefreshGitStatus,
@@ -493,7 +496,6 @@ export default function Sidebar(props: Props) {
   const [snoozedExpanded, setSnoozedExpanded] = useState(true);
   const [settledExpanded, setSettledExpanded] = useState(true);
   const [settledVisible, setSettledVisible] = useState(SETTLED_INITIAL);
-  const [projectFilter, setProjectFilter] = useState("all");
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [overIndex, setOverIndex] = useState<number | null>(null);
 
@@ -673,7 +675,7 @@ export default function Sidebar(props: Props) {
           <ProjectFilter
             projects={projectCwds.map((c) => ({ cwd: c, name: projectName(c) }))}
             value={projectFilter}
-            onChange={setProjectFilter}
+            onChange={onProjectFilterChange}
           />
         </div>
       )}
