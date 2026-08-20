@@ -13,6 +13,7 @@
 
 import * as net from "node:net";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { unlinkSync } from "node:fs";
 import { dirname } from "node:path";
 import {
   createEnvelope,
@@ -286,6 +287,13 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     if ("socketPath" in options.listen) {
+      // A previous daemon that exited without cleanup leaves the socket file
+      // behind; bind would fail with EADDRINUSE until it is removed.
+      try {
+        unlinkSync(options.listen.socketPath);
+      } catch {
+        // No stale socket, nothing to clean.
+      }
       server.listen(options.listen.socketPath, resolve);
     } else {
       server.listen(options.listen.port, options.listen.host ?? "127.0.0.1", resolve);

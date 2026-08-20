@@ -29,6 +29,8 @@ export const KNOWN_MESSAGE_TYPES = [
   "attention.raised",
   "attention.resolved",
   "hook.fired",
+  "automation.registered",
+  "automation.removed",
   "automation.ran",
   "policy.updated",
   "state.get",
