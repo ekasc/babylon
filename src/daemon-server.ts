@@ -13,7 +13,7 @@
 
 import * as net from "node:net";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { mkdirSync, unlinkSync } from "node:fs";
+import { chmodSync, mkdirSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
 import {
   createEnvelope,
@@ -142,6 +142,31 @@ export function validatePolicyUpdate(payload: unknown): BackgroundPolicy | strin
   };
 }
 
+const TRIGGER_KINDS = ["interval", "daily", "file_watch", "branch_watch"] as const;
+
+/**
+ * Validate an automation task arriving over the protocol. Malformed tasks are
+ * rejected here so they cannot be persisted into snapshots or broadcast to
+ * clients as if they were real schedules.
+ */
+export function validateScheduledTask(payload: unknown): ScheduledTask | string {
+  if (!isPlainObject(payload)) return "automation.registered requires a task object";
+  if (typeof payload.id !== "string" || payload.id.trim().length === 0) {
+    return "automation.registered requires a non-empty string id";
+  }
+  if (typeof payload.name !== "string") return "automation.registered requires a string name";
+  if (typeof payload.enabled !== "boolean") return "automation.registered requires a boolean enabled";
+  if (typeof payload.runCount !== "number" || !Number.isFinite(payload.runCount)) {
+    return "automation.registered requires a finite number runCount";
+  }
+  const trigger = payload.trigger;
+  if (!isPlainObject(trigger)) return "automation.registered requires a trigger object";
+  if (!TRIGGER_KINDS.includes(trigger.kind as (typeof TRIGGER_KINDS)[number])) {
+    return `automation.registered requires trigger.kind to be one of ${TRIGGER_KINDS.join(", ")}`;
+  }
+  return payload as unknown as ScheduledTask;
+}
+
 function emptyState(): DaemonState {
   return {
     runtime: createRuntime(),
@@ -210,13 +235,9 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
     }
 
     if (request.type === "automation.registered") {
-      const task = request.payload as ScheduledTask;
-      if (
-        !isPlainObject(task) ||
-        typeof task.id !== "string" ||
-        !isPlainObject(task.trigger)
-      ) {
-        send(socket, createEnvelope("response", "error", { error: "automation.registered requires a task object with an id and trigger" }, request.id));
+      const task = validateScheduledTask(request.payload);
+      if (typeof task === "string") {
+        send(socket, createEnvelope("response", "error", { error: task }, request.id));
         return;
       }
       const after = registerScheduledTask(state.schedule, task);
@@ -287,19 +308,45 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     if ("socketPath" in options.listen) {
-      // A previous daemon that exited without cleanup leaves the socket file
-      // behind; bind would fail with EADDRINUSE until it is removed.
-      try {
-        unlinkSync(options.listen.socketPath);
-      } catch {
-        // No stale socket, nothing to clean.
-      }
-      mkdirSync(dirname(options.listen.socketPath), { recursive: true });
-      server.listen(options.listen.socketPath, resolve);
+      const socketPath = options.listen.socketPath;
+      // Refuse to start when another daemon is alive on this path. Unlinking
+      // a live socket would orphan the running daemon and let two processes
+      // write the same snapshot with divergent in-memory state.
+      void new Promise<boolean>((probeResolve) => {
+        const probe = net.connect(socketPath);
+        probe.once("connect", () => {
+          probe.destroy();
+          probeResolve(true);
+        });
+        probe.once("error", () => probeResolve(false));
+      }).then((alive) => {
+        if (alive) {
+          reject(new Error(`another daemon is already listening on ${socketPath}`));
+          return;
+        }
+        // Stale file from a daemon that exited without cleanup; bind would
+        // fail with EADDRINUSE until it is removed.
+        try {
+          unlinkSync(socketPath);
+        } catch {
+          // No stale socket, nothing to clean.
+        }
+        mkdirSync(dirname(socketPath), { recursive: true });
+        server.listen(socketPath, resolve);
+      });
     } else {
       server.listen(options.listen.port, options.listen.host ?? "127.0.0.1", resolve);
     }
   });
+  if ("socketPath" in options.listen) {
+    // The protocol has no authentication; restrict the socket to the owner
+    // so only the same user can drive the daemon.
+    try {
+      chmodSync(options.listen.socketPath, 0o600);
+    } catch {
+      // Platforms without posix permissions.
+    }
+  }
 
   const tick = async (now = Date.now()): Promise<void> => {
     const out = runBackgroundTick({
@@ -335,8 +382,16 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
   const policyTickMs = options.policyTickMs ?? 30_000;
   let timer: NodeJS.Timeout | null = null;
   if (policyTickMs > 0) {
-    timer = setInterval(() => void tick(), policyTickMs);
-    timer.unref();
+    if (options.runAutomation) {
+      // The catch keeps an unexpected tick error from becoming an unhandled
+      // rejection that could take the daemon down.
+      timer = setInterval(() => {
+        tick().catch((err) => log(`background tick failed: ${err instanceof Error ? err.message : String(err)}`));
+      }, policyTickMs);
+      timer.unref();
+    } else {
+      log("background policy loop disabled: no automation executor configured");
+    }
   }
 
   return {
@@ -375,7 +430,9 @@ function serializeState(state: DaemonState) {
 
 async function writeAtomically(path: string, json: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}`;
+  // Random suffix so concurrent writers from different processes can never
+  // target the same temp file.
+  const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
   await writeFile(tmp, json, "utf8");
   await rename(tmp, path);
 }

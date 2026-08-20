@@ -41,6 +41,14 @@ function drain(socket: net.Socket): void {
   socket.on("data", () => {});
 }
 
+function connectSocketPath(socketPath: string): Promise<net.Socket> {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(socketPath);
+    socket.once("error", reject);
+    socket.once("connect", () => resolve(socket));
+  });
+}
+
 /** Collect frames from a socket; resolves each wait for a matching type. */
 function reader(socket: net.Socket) {
   const queue: ReturnType<typeof parseEnvelope>[] = [];
@@ -187,6 +195,39 @@ describe("babylon daemon server", () => {
     socket.write(big + "\n");
     await new Promise<void>((resolve) => socket.once("close", resolve));
     expect(socket.destroyed).toBe(true);
+  });
+
+  it("refuses to start a second daemon on a live socket path", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "babylon-daemon-"));
+    const socketPath = join(dir, "live.sock");
+    const first = await startDaemonServer({ listen: { socketPath }, policyTickMs: 0 });
+    servers.push(first);
+    await expect(startDaemonServer({ listen: { socketPath }, policyTickMs: 0 })).rejects.toThrow(
+      /already listening/
+    );
+    // The first daemon still answers after the refused start.
+    const socket = await connectSocketPath(socketPath);
+    drain(socket);
+    socket.write(encodeFrame(serializeEnvelope(createEnvelope("request", "ping", null))));
+    socket.end();
+    await new Promise<void>((resolve) => socket.once("close", resolve));
+  });
+
+  it("rejects malformed automation.registered payloads", async () => {
+    const server = await start();
+    const port = (server.address() as { port: number }).port;
+    const socket = await connect(port);
+    const r = reader(socket);
+    for (const bad of [
+      { id: "s9" }, // missing name/enabled/runCount/trigger
+      { id: "s9", name: "x", enabled: true, runCount: 0, trigger: { kind: "hourly" } },
+      { id: "s9", name: "x", enabled: "yes", runCount: 0, trigger: { kind: "interval" } },
+      { id: "", name: "x", enabled: true, runCount: 0, trigger: { kind: "interval" } },
+    ]) {
+      await request(socket, "automation.registered", bad);
+      await expect(r.next("error")).resolves.toMatchObject({ kind: "response" });
+    }
+    expect(Object.keys(server.state().schedule.tasks)).toHaveLength(0);
   });
 
   it("returns an error response for unsupported request types", async () => {

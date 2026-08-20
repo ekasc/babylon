@@ -202,6 +202,9 @@ export function connectDaemonClient(options: DaemonClientOptions): DaemonClient 
     async request(type, payload, timeoutMs = requestTimeoutMs): Promise<ProtocolEnvelope> {
       if (closed) throw new DaemonRequestError("client is closed");
       const conn = await waitForConnection(timeoutMs);
+      // The connection can drop while this call waited its turn; writing to
+      // the dead socket would hang until timeout instead of failing now.
+      if (live !== conn) throw new DaemonRequestError("daemon connection lost");
       const envelope = createEnvelope("request", type, payload);
       return await new Promise<ProtocolEnvelope>((resolve, reject) => {
         const timer = setTimeout(() => {

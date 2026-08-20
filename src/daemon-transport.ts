@@ -30,14 +30,17 @@ export function createFrameDecoder(maxFrameBytes: number = DEFAULT_MAX_FRAME_BYT
         if (nl === -1) break;
         const line = buffer.slice(0, nl);
         buffer = buffer.slice(nl + 1);
-        if (line.length > maxFrameBytes) {
+        // Measure real UTF-8 bytes, not code units: a peer streaming
+        // multi-byte characters must not slip past a byte budget that char
+        // counting would under-report.
+        if (Buffer.byteLength(line, "utf8") > maxFrameBytes) {
           throw new Error(`frame exceeds ${maxFrameBytes} bytes`);
         }
         if (line.trim().length > 0) frames.push(line);
       }
       // An unterminated partial frame is bounded too, so a peer that streams
       // bytes without ever sending a newline cannot grow memory unbounded.
-      if (buffer.length > maxFrameBytes) {
+      if (Buffer.byteLength(buffer, "utf8") > maxFrameBytes) {
         throw new Error(`frame exceeds ${maxFrameBytes} bytes`);
       }
       return frames;

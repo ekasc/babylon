@@ -34,6 +34,14 @@ describe("daemon transport framing", () => {
     expect(() => d.push("123456789\n")).toThrow(/exceeds 8 bytes/);
   });
 
+  it("counts multi-byte characters against the byte limit", () => {
+    // "éééé" is 4 code units but 8 UTF-8 bytes; the char count would pass a
+    // byte budget of 8 only if measured wrongly.
+    const d = createFrameDecoder(8);
+    expect(() => d.push("é".repeat(5) + "\n")).toThrow(/exceeds 8 bytes/);
+    expect(d.push("é".repeat(4) + "\n")).toEqual(["é".repeat(4)]);
+  });
+
   it("throws when an unterminated partial frame exceeds the limit", () => {
     const d = createFrameDecoder(8);
     expect(() => d.push("123456789")).toThrow(/exceeds 8 bytes/);
