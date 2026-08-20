@@ -1,6 +1,6 @@
 # Babylon Roadmap
 
-> Last updated: 2026-05-13 · 12 of 16 features done, 4 partial. 307 tests on `main` (`tsc` clean).
+> Last updated: 2026-08-20 · 14 of 16 features done, 2 partial. 332 tests on `main` (`tsc` clean).
 
 Babylon is a secure desktop workspace for the Pi coding agent. The next phase should focus on execution infrastructure rather than adding more chat surface area.
 
@@ -22,8 +22,8 @@ The goal is to make Babylon capable of safely running long-lived, parallel softw
 | 5 · Attention and Completion | 10. Attention inbox | **Done** | `src/attention.ts` + `src/components/AttentionPanel.tsx` wired to approvals · PR #6, #13 |
 |  | 11. Completion contracts | **Done** | `src/completion-contracts.ts` · PR #6 |
 |  | 12. Hook system | **Done** | `src/hooks.ts` · PR #7 |
-| 6 · Control Plane | 13. Extract runtime into Babylon daemon | **Partial** | `src/runtime.ts` (#8), `src/daemon-protocol.ts` (#9), `src/daemon-host.ts` (#14); real daemon process/transport still to do |
-|  | 14. Background execution policies | **Partial** | `src/background-policy.ts` (#8), `src/scheduler.ts` (#12); scheduler loop + daemon wiring still to do |
+| 6 · Control Plane | 13. Extract runtime into Babylon daemon | **Done** | `src/daemon-transport.ts` + `daemon-server.ts` + `daemon-client.ts` + `daemon/main.ts` (framed socket transport, persistence, reconnect, standalone process) · Phase 6 PR |
+|  | 14. Background execution policies | **Done** | `src/background-policy.ts` + `src/scheduler.ts` + `src/background-controller.ts` enforced by the daemon tick loop · Phase 6 PR |
 | 7 · Remote Control | 15. Remote and mobile control | **Partial** | `src/device-pairing.ts` (#10); transport + actions + pairing UI still to do |
 | 8 · Automation | 16. Scheduled and conditional tasks | **Partial** | `src/automation.ts` (#11), `src/scheduler.ts` (#12), `src/automation-runner.ts` (#16); automation UI still to do |
 | Cross-cutting | Event model / stable ownership / observability | **Partial** | Stable ids and `makeId`, protocol envelopes with stable ids; full event sourcing and diagnostics surface still to do |
@@ -134,11 +134,11 @@ Check the box when the feature has a pure, tested model merged to `main` and, wh
 
 ## Phase 6: Control Plane
 
-- [ ] **13. Extract the runtime into a Babylon daemon** — move long-lived orchestration out of the Electron application process. Partially done: `src/runtime.ts` aggregates registries outside React with versioned `snapshotRuntime`/`restoreRuntime` (#8), `src/daemon-protocol.ts` typed envelopes (#9), `src/daemon-host.ts` pure dispatch core (#14). Remaining: real daemon process, typed transport/socket, reconnection, wiring live subsystems.
+- [x] **13. Extract the runtime into a Babylon daemon** — move long-lived orchestration out of the Electron application process. Done: `src/daemon-transport.ts` (newline frame codec), `src/daemon-server.ts` (socket server owning runtime + schedule + history + policy, atomic snapshot persistence, event broadcast, policy tick loop), `src/daemon-client.ts` (typed request/response, event subscription, reconnect with capped backoff, queued requests), `daemon/main.ts` standalone entry built to `dist-daemon/main.mjs`, and settings-gated detached spawn in `electron/main.ts` (`daemon.enabled`). Phase 6 PR.
 
-  Target architecture: Babylon Daemon owns Pi host lifecycle, session/task/approval/terminal/worktree/attention/background execution/persistence; desktop owns rendering, keyboard interaction, dialogs, notifications, previews, user input; they talk over a typed local protocol. Requirements: closing GUI must not kill background agents unless configured; reopening reconnects; protocol events carry stable task/session/tool ids; runtime state remains authoritative outside React. Do not perform extraction until execution/task APIs above have stabilized — that boundary is now justified.
+  Target architecture: Babylon Daemon owns Pi host lifecycle, session/task/approval/terminal/worktree/attention/background execution/persistence; desktop owns rendering, keyboard interaction, dialogs, notifications, previews, user input; they talk over a typed local protocol. Requirements: closing GUI must not kill background agents unless configured (detached child, never killed on quit); reopening reconnects (client auto-reconnect); protocol events carry stable task/session/tool ids (versioned envelopes); runtime state remains authoritative outside React.
 
-- [ ] **14. Background execution policies** — explicit policies for background work once the daemon exists. Partially done: `src/background-policy.ts` (never / while_plugged_in / always + pauseOnBattery/pauseOnSleep/maxConcurrent/maxCost/perProject, `canRunInBackground` tolerates missing signals) (#8) and `src/scheduler.ts` decision engine (#12). Remaining: scheduler loop, policy enforcement in daemon.
+- [x] **14. Background execution policies** — explicit policies for background work once the daemon exists. Done: `src/background-policy.ts` (never / while_plugged_in / always + pauseOnBattery/pauseOnSleep/maxConcurrent/maxCost/perProject) gated through `src/scheduler.ts`, composed into the pure `src/background-controller.ts` tick, and enforced by the daemon server's policy loop (`policyTickMs`, `envSignals`, `runAutomation` injectable; `policy.updated` over the protocol). Blocked tasks are reported with reasons.
 
   Examples: background execution never / while plugged in / always; additional controls pause on battery, pause on sleep, resume after wake, maximum concurrent agents, maximum background model cost, per-project background permission.
 
