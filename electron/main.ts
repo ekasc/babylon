@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, shell, type IpcMainInvokeEvent } from "electron";
 import { randomUUID } from "node:crypto";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import * as net from "node:net";
 import { existsSync, promises as fsp } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -8,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { AgentEventBuffer } from "./event-buffer";
 import * as gitOps from "./git";
+import { getSettings } from "./app-settings";
 import { PiHost } from "./pi-host";
 import { PermissionEngine, type AgentAction, type Risk } from "./permissions";
 import { mergeRecaps } from "./recap";
@@ -821,6 +823,47 @@ function registerIpc(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Babylon daemon (Phase 6)
+// ---------------------------------------------------------------------------
+
+/**
+ * Spawn the standalone daemon when the user enabled it. The daemon outlives
+ * the GUI: it is detached and never killed on quit, so background execution
+ * keeps running after the window closes. A daemon that already answers on the
+ * socket is reused rather than replaced.
+ */
+async function ensureDaemon(): Promise<void> {
+  if (!getSettings().daemon?.enabled) return;
+  const socketPath = join(app.getPath("userData"), "daemon.sock");
+  const snapshotPath = join(app.getPath("userData"), "daemon-state.json");
+  const alive = await new Promise<boolean>((resolve) => {
+    const probe = net.connect(socketPath);
+    probe.once("connect", () => {
+      probe.destroy();
+      resolve(true);
+    });
+    probe.once("error", () => resolve(false));
+  });
+  if (alive) return;
+  const entry = join(__dirname, "..", "dist-daemon", "main.mjs");
+  if (!existsSync(entry)) {
+    console.warn("daemon.enabled is set but dist-daemon/main.mjs is missing; run pnpm build:daemon");
+    return;
+  }
+  const child = spawn(process.execPath, [entry], {
+    env: {
+      ...process.env,
+      ELECTRON_RUN_AS_NODE: "1",
+      BABYLON_DAEMON_SOCKET: socketPath,
+      BABYLON_DAEMON_SNAPSHOT: snapshotPath,
+    },
+    detached: true,
+    stdio: "ignore",
+  });
+  child.unref();
+}
+
+// ---------------------------------------------------------------------------
 // App lifecycle
 // ---------------------------------------------------------------------------
 
@@ -832,6 +875,7 @@ app.whenReady().then(() => {
   // the first session open is instant. Runs in the background; the user just
   // sees sessions open with no "starting" phase.
   hostReady = startHost();
+  void ensureDaemon();
   // Smoke-test hook: PIDECK_SMOKE=<ms> auto-quits after a delay.
   if (process.env.PIDECK_SMOKE) {
     setTimeout(() => app.quit(), Number(process.env.PIDECK_SMOKE)).unref();

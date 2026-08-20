@@ -26,6 +26,14 @@ export interface PiSettings {
    * Only present when the user has customized a model's window.
    */
   contextWindowOverrides?: Record<string, number>;
+  /**
+   * Babylon daemon (Phase 6). When enabled, the desktop spawns the standalone
+   * daemon process at startup and leaves it running after the GUI closes, so
+   * background execution survives the window.
+   */
+  daemon?: {
+    enabled?: boolean;
+  };
 }
 
 const EMPTY: PiSettings = { contextWindowOverrides: {} };

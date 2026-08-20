@@ -24,3 +24,4 @@ coverage/
 
 # Local screenshots
 ui-shot-*.png
+dist-daemon/
