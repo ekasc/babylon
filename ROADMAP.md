@@ -1,6 +1,6 @@
 # Babylon Roadmap
 
-> Last updated: 2026-05-13 · 11 of 16 features done, 5 partial. 287 tests on `main` (`tsc` clean). Subagent graph model is on branch `phase/4-subagent-graph` and not yet merged.
+> Last updated: 2026-05-13 · 12 of 16 features done, 4 partial. 307 tests on `main` (`tsc` clean).
 
 Babylon is a secure desktop workspace for the Pi coding agent. The next phase should focus on execution infrastructure rather than adding more chat surface area.
 
@@ -17,7 +17,7 @@ The goal is to make Babylon capable of safely running long-lived, parallel softw
 | 3 · Runtime Workspace | 5. Agent-aware terminal | **Done** | `src/process-model.ts` · PR #4 |
 |  | 6. Browser preview | **Done** | `src/preview-model.ts` · PR #4 |
 | 4 · Parallel Work | 7. Task-owned worktrees | **Done** | `src/tasks.ts` · PR #5 |
-|  | 8. Structured subagent graph | **In progress** | `src/subagent-graph.ts` on `phase/4-subagent-graph` (not yet merged, tests written) |
+|  | 8. Structured subagent graph | **Done** | `src/subagent-graph.ts` · PR #15 |
 |  | 9. Model roles | **Done** | `src/model-roles.ts` · PR #5 |
 | 5 · Attention and Completion | 10. Attention inbox | **Done** | `src/attention.ts` + `src/components/AttentionPanel.tsx` wired to approvals · PR #6, #13 |
 |  | 11. Completion contracts | **Done** | `src/completion-contracts.ts` · PR #6 |
@@ -25,7 +25,7 @@ The goal is to make Babylon capable of safely running long-lived, parallel softw
 | 6 · Control Plane | 13. Extract runtime into Babylon daemon | **Partial** | `src/runtime.ts` (#8), `src/daemon-protocol.ts` (#9), `src/daemon-host.ts` (#14); real daemon process/transport still to do |
 |  | 14. Background execution policies | **Partial** | `src/background-policy.ts` (#8), `src/scheduler.ts` (#12); scheduler loop + daemon wiring still to do |
 | 7 · Remote Control | 15. Remote and mobile control | **Partial** | `src/device-pairing.ts` (#10); transport + actions + pairing UI still to do |
-| 8 · Automation | 16. Scheduled and conditional tasks | **Partial** | `src/automation.ts` (#11), `src/scheduler.ts` (#12); executor + UI still to do |
+| 8 · Automation | 16. Scheduled and conditional tasks | **Partial** | `src/automation.ts` (#11), `src/scheduler.ts` (#12), `src/automation-runner.ts` (#16); automation UI still to do |
 | Cross-cutting | Event model / stable ownership / observability | **Partial** | Stable ids and `makeId`, protocol envelopes with stable ids; full event sourcing and diagnostics surface still to do |
 
 Check the box when the feature has a pure, tested model merged to `main` and, where the roadmap requires it, a desktop surface. Partial means the model exists but the daemon/process/transport/UI wiring is still open.
@@ -95,7 +95,7 @@ Check the box when the feature has a pure, tested model merged to `main` and, wh
 
   A task may own Pi session, git branch, git worktree, terminals, preview, diff, checkpoints. Behavior: parallel task can auto-create worktree; worktree/branch names deterministic but editable; removing a task must not silently destroy uncommitted changes; task state survives restart; completed work can be promoted/merged.
 
-- [ ] **8. Structured subagent graph** — clearer hierarchy of work. Model drafted in `src/subagent-graph.ts` on branch `phase/4-subagent-graph`; not yet merged or audited.
+- [x] **8. Structured subagent graph** — clearer hierarchy of work. Done in `src/subagent-graph.ts` (PR #15).
 
   Example:
 
@@ -150,7 +150,7 @@ Check the box when the feature has a pure, tested model merged to `main` and, wh
 
 ## Phase 8: Automation
 
-- [ ] **16. Scheduled and conditional tasks** — allow Babylon tasks to run without an open foreground session after background execution is reliable. Partially done: `src/automation.ts` trigger model (interval/daily/file_watch/branch_watch, `evaluateTrigger`, UTC daily, trailing-slash handling) (#11) plus `src/scheduler.ts` due-task evaluation (#12). Remaining: scheduler loop, executor, automation UI.
+- [ ] **16. Scheduled and conditional tasks** — allow Babylon tasks to run without an open foreground session after background execution is reliable. Partially done: `src/automation.ts` trigger model (#11), `src/scheduler.ts` due-task evaluation (#12), and `src/automation-runner.ts` executor with history and inbox (#16). Remaining: scheduler loop and automation UI.
 
   Examples: run dependency checks every morning, review new CI failures, watch for file or branch change, periodically run repository health check, notify when long-running task finishes. Requirements: reuse same permission system and completion contracts; every automation run creates inspectable history; automation failures enter Attention Inbox; no hidden background agents.
 
