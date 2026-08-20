@@ -65,21 +65,28 @@ export function executeDueTasks(input: ExecutionInput): ExecutionOutput {
 
   for (const task of input.runnable) {
     const startedAt = input.now;
-    const result = input.run(task);
+    let result: RunnerResult;
+    try {
+      result = input.run(task);
+    } catch (e) {
+      result = { success: false, error: e instanceof Error ? e.message : String(e) };
+    }
     let status: AutomationRunStatus = result.success ? "succeeded" : "failed";
     let error = result.error;
     let contractPassed: boolean | undefined;
 
     const contract = input.contracts?.[task.id];
-    if (contract && result.checkResults) {
+    if (contract && result.checkResults?.length) {
       const evaluation = evaluateContract(contract, result.checkResults);
       contractPassed = evaluation.passed;
       if (!evaluation.passed) {
         status = "failed";
-        const failed = evaluation.checks.filter((c) => !c.satisfied).map((c) => c.check.label);
+        const failed = evaluation.checks
+          .filter((c) => c.check.required && !c.satisfied)
+          .map((c) => c.check.label);
         error = failed.length ? `contract failed: ${failed.join(", ")}` : "contract failed";
       }
-    } else if (contract && !result.checkResults && result.success) {
+    } else if (contract && !result.checkResults?.length && result.success) {
       // No check results supplied for a contracted task — treat as not satisfied
       // so the trustworthy state remains contract passed, not agent finished.
       contractPassed = false;

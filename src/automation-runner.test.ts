@@ -102,6 +102,52 @@ describe("automation executor", () => {
     expect(out.history.runs).toHaveLength(0);
   });
 
+  it("fails a contracted task when no check results are supplied", () => {
+    const registry = registerScheduledTask(createScheduledTaskRegistry(), task("t1", "x"));
+    const contract = createContract({
+      id: "t1",
+      title: "done",
+      checks: [{ kind: "typecheck", label: "typecheck", required: true }],
+    });
+    const out = executeDueTasks({
+      registry,
+      runnable: [task("t1", "x")],
+      history: createAutomationHistory(),
+      attention: createAttentionRegistry(),
+      contracts: { t1: contract },
+      now: 5000,
+      run: () => ({ success: true }),
+    });
+    expect(out.history.runs[0].status).toBe("failed");
+    expect(out.history.runs[0].contractPassed).toBe(false);
+    expect(out.history.runs[0].error).toBe("contract failed: missing check results");
+    expect(listAttention(out.attention)).toHaveLength(1);
+  });
+
+  it("isolates a throwing runner so other tasks still run", () => {
+    const r1 = task("t1", "one");
+    const r2 = task("t2", "two");
+    const registry = registerScheduledTask(
+      registerScheduledTask(createScheduledTaskRegistry(), r1),
+      r2,
+    );
+    const out = executeDueTasks({
+      registry,
+      runnable: [r1, r2],
+      history: createAutomationHistory(),
+      attention: createAttentionRegistry(),
+      now: 6000,
+      run: (t) => {
+        if (t.id === "t1") throw new Error("boom");
+        return { success: true };
+      },
+    });
+    expect(out.history.runs).toHaveLength(2);
+    expect(out.history.runs[0].status).toBe("failed");
+    expect(out.history.runs[0].error).toBe("boom");
+    expect(out.history.runs[1].status).toBe("succeeded");
+  });
+
   it("does not mutate input registries", () => {
     const registry = registerScheduledTask(createScheduledTaskRegistry(), task("t1", "x"));
     const history = createAutomationHistory();
