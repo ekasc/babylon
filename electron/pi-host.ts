@@ -20,8 +20,21 @@ import { SnapshotStore, type RestoreChange, type SnapshotCapture } from "./snaps
 import { toPiImages } from "./prompt-images";
 import { clampToolOutput, readSessionTail, readToolOutput } from "./sessions";
 import { RecapStore } from "./recap-store";
+import { getSettings, saveSettings, type PiSettings } from "./app-settings";
 import { buildRecapPrompt, normalizeRecapText, pickRecapDelta, recapDue, recapWorthy, RECAP_INTERVAL_MS, type Recap } from "./recap";
 import { ManagedSubagents, type ManagedSubagentRecord, type SubagentControlAction, type SubagentParentEvent } from "./subagents";
+import { mapToolToAction } from "./permission-agent";
+import type { AgentAction, EvalResult, Risk } from "./permissions";
+
+/** Babylon-owned hook used to gate agent tool calls before they execute. */
+export interface BabylonPermissionController {
+  /** Evaluate an action against static policy + the active execution mode. */
+  evaluate(action: AgentAction): EvalResult;
+  /** Request interactive approval; resolves true to allow, false to deny. */
+  requestApproval(action: AgentAction, risk: Risk): Promise<boolean>;
+  /** Drop session-only rules (called when the active session is replaced). */
+  clearSessionRules(): void;
+}
 import { ThreadManager } from "./threads";
 import {
   AgentSessionRuntime,
@@ -77,6 +90,8 @@ export interface HostOptions {
   onMissingCwd?: (sessionFile: string, storedCwd: string) => Promise<string | null | undefined>;
   /** Resolve project-local settings/extensions/skills before entering a cwd. */
   onProjectTrust?: (cwd: string) => Promise<{ trusted: boolean; remember?: boolean }>;
+  /** Babylon permission system controller, if enabled. */
+  permission?: BabylonPermissionController;
 }
 
 export class PiHost {
@@ -361,6 +376,30 @@ export class PiHost {
       },
     });
     this.unsubscribeEvents?.();
+    // Babylon permission system: intercept every agent tool call before it
+    // runs. We wrap the SDK-installed beforeToolCall hook so managed-subagent
+    // and other extension tool_call handlers keep working underneath us.
+    if (this.opts.permission) {
+      const controller = this.opts.permission;
+      const agent = session.agent as any;
+      const originalBefore = agent.beforeToolCall?.bind(agent);
+      controller.clearSessionRules();
+      agent.beforeToolCall = async (ctx: any, signal: any) => {
+        const action = mapToolToAction(ctx?.toolCall?.name ?? "", ctx?.args, this.cwd);
+        if (action) {
+          const result = controller.evaluate(action);
+          if (result.decision === "deny") {
+            return { block: true, reason: result.reason ?? "Blocked by Babylon permission policy" };
+          }
+          if (result.decision === "ask") {
+            const allowed = await controller.requestApproval(action, result.risk ?? "uncertain");
+            if (!allowed) return { block: true, reason: "Denied by user approval" };
+          }
+        }
+        return originalBefore ? originalBefore(ctx, signal) : undefined;
+      };
+    }
+
     this.unsubscribeEvents = session.subscribe((event) => {
       this.opts.onEvent({ ...event, sessionId: session.sessionId, sessionFile: session.sessionFile });
       if (event.type === "message_end" && event.message?.role === "assistant") {
@@ -419,17 +458,25 @@ export class PiHost {
     return text.replace(/^["'“”]+|["'“”]+$/g, "").slice(0, 60);
   }
 
-  /** One cheap, low-reasoning model call shared by naming and recaps. */
+  /** One cheap model call shared by naming and recaps. The model + reasoning
+   *  level are configurable (Settings → Pi → Title generation), falling back
+   *  to the previous hardcoded cheap model when unset. */
   private async askCheap(prompt: string, maxTokens: number): Promise<string | null> {
+    const settings = getSettings();
+    const titleModel = settings.titleModel
+      ? this.modelRuntime.getModel(settings.titleModel.provider, settings.titleModel.modelId)
+      : undefined;
     const model =
+      titleModel ??
       this.modelRuntime.getModel("opencode-go", "deepseek-v4-flash") ??
       this.runtime.session.model;
     if (!model) return null;
+    const reasoning = (settings.titleReasoning as any) || "low";
     try {
       const response = await this.modelRuntime.completeSimple(
         model,
         { messages: [{ role: "user", content: prompt }] } as any,
-        { reasoning: "low", maxTokens }
+        { reasoning, maxTokens }
       );
       return (response?.content ?? [])
         .map((block: any) => (block?.type === "text" ? block.text ?? "" : ""))
@@ -899,7 +946,12 @@ export class PiHost {
   async getModels(): Promise<any[]> {
     await this.ensureSession();
     const available = await this.runtime.services.modelRuntime.getAvailable();
-    return [...available] as any[];
+    const overrides = getSettings().contextWindowOverrides ?? {};
+    return [...available].map((m) => {
+      const key = `${m.provider}/${m.id}`;
+      const override = overrides[key];
+      return typeof override === "number" && override > 0 ? { ...m, contextWindow: override } : m;
+    }) as any[];
   }
   async setModel(provider: string, modelId: string): Promise<any> {
     return this.enqueueTransition(async () => {
@@ -918,6 +970,14 @@ export class PiHost {
       await this.commitActiveRollback();
       return {};
     });
+  }
+  /** Read the user's Babylon preferences (model + reasoning + overrides). */
+  async getSettings(): Promise<PiSettings> {
+    return getSettings();
+  }
+  /** Merge + persist a patch of the user's Babylon preferences. */
+  async setSettings(patch: Partial<PiSettings>): Promise<PiSettings> {
+    return saveSettings(patch);
   }
   async getThinkingLevels(): Promise<string[]> {
     await this.ensureSession();

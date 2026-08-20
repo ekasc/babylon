@@ -352,6 +352,51 @@ export interface SessionWindow {
   startOffset: number;
 }
 
+export type PermissionMode = "supervised" | "auto" | "full_access";
+export type PolicyCategory =
+  | "file_read"
+  | "file_write_workspace"
+  | "file_write_outside"
+  | "shell_command"
+  | "shell_destructive"
+  | "network_access"
+  | "git_commit"
+  | "git_push"
+  | "package_install"
+  | "process_spawn"
+  | "privileged";
+export type Risk = "low" | "high" | "uncertain";
+export type ApprovalChoice = "allow_once" | "allow_session" | "allow_always" | "deny";
+
+export interface PermissionRule {
+  id: string;
+  category: PolicyCategory;
+  match?: { pathGlob?: string; commandPattern?: string };
+  decision: "allow" | "deny";
+  scope: "always" | "session";
+  createdAt: number;
+  note?: string;
+}
+
+export interface AgentActionSummary {
+  category: PolicyCategory;
+  paths?: string[];
+  command?: string;
+  description?: string;
+  repoDirty?: boolean;
+}
+
+export interface ApprovalRequest {
+  id: string;
+  action: AgentActionSummary;
+  risk: Risk;
+}
+
+export interface PermissionState {
+  mode: PermissionMode;
+  rules: PermissionRule[];
+}
+
 export interface Bridge {
   listSessions(): Promise<ProjectGroup[]>;
   getSessionMessages(path: string): Promise<SessionWindow>;
@@ -437,6 +482,16 @@ export interface Bridge {
   onAgentEvents(cb: (events: any[]) => void): () => void;
   onAgentEvent(cb: (event: any) => void): () => void;
   onStatus(cb: (status: SessionStatus) => void): () => void;
+
+  permissionsGet(): Promise<PermissionState>;
+  permissionsSetMode(mode: PermissionMode): Promise<{ mode: PermissionMode }>;
+  permissionsAddRule(
+    input: Omit<PermissionRule, "id" | "createdAt"> & Partial<Pick<PermissionRule, "id" | "createdAt">>
+  ): Promise<PermissionRule>;
+  permissionsRemoveRule(id: string): Promise<{ removed: boolean }>;
+  permissionsResolveApproval(id: string, choice: ApprovalChoice): Promise<{ ok: boolean }>;
+  onApprovalRequested(cb: (req: ApprovalRequest) => void): () => void;
+  onPermissionsChanged(cb: (state: PermissionState) => void): () => void;
 }
 
 declare global {
@@ -529,4 +584,12 @@ export const bridge: Bridge = window.pideck ?? {
   onAgentEvents: () => () => {},
   onAgentEvent: () => () => {},
   onStatus: () => () => {},
+
+  permissionsGet: () => Promise.resolve({ mode: "auto", rules: [] }),
+  permissionsSetMode: () => Promise.resolve({ mode: "auto" }),
+  permissionsAddRule: () => Promise.reject(new Error("bridge unavailable")),
+  permissionsRemoveRule: () => Promise.resolve({ removed: false }),
+  permissionsResolveApproval: () => Promise.resolve({ ok: false }),
+  onApprovalRequested: () => () => {},
+  onPermissionsChanged: () => () => {},
 };

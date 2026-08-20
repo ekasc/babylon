@@ -1,4 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, shell, type IpcMainInvokeEvent } from "electron";
+import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { existsSync, promises as fsp } from "node:fs";
 import { homedir } from "node:os";
@@ -8,6 +9,7 @@ import { promisify } from "node:util";
 import { AgentEventBuffer } from "./event-buffer";
 import * as gitOps from "./git";
 import { PiHost } from "./pi-host";
+import { PermissionEngine, type AgentAction, type Risk } from "./permissions";
 import { mergeRecaps } from "./recap";
 import { isTrustedRendererUrl } from "./navigation";
 import { validateSessionPath } from "./session-path";
@@ -24,6 +26,73 @@ let win: BrowserWindow | null = null;
 let host: PiHost | null = null;
 let hostReady: Promise<void> | null = null;
 let activeCwd = "";
+
+// Babylon permission system (Phase 1).
+let permissionEngine: PermissionEngine | null = null;
+interface PendingApproval {
+  action: AgentAction;
+  risk: Risk;
+  resolve: (allowed: boolean) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+const pendingApprovals = new Map<string, PendingApproval>();
+
+function notifyPermissionsChanged(): void {
+  win?.webContents.send("pideck:permissions-changed", {
+    mode: permissionEngine?.getMode() ?? "auto",
+    rules: permissionEngine?.listRules() ?? [],
+  });
+}
+
+/** Ask the renderer for an interactive approval decision. Fails closed (deny)
+ *  if the user never responds. */
+function requestApproval(action: AgentAction, risk: Risk): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const id = randomUUID();
+    const timeoutMs = Number(process.env.PIDECK_APPROVAL_TIMEOUT_MS) || 15 * 60_000;
+    const timer = setTimeout(() => {
+      pendingApprovals.delete(id);
+      resolve(false);
+    }, timeoutMs);
+    pendingApprovals.set(id, { action, risk, resolve, timer });
+    win?.webContents.send("pideck:approval-requested", { id, action, risk });
+  });
+}
+
+function resolveApproval(id: string, choice: "allow_once" | "allow_session" | "allow_always" | "deny"): void {
+  const pending = pendingApprovals.get(id);
+  if (!pending) return;
+  clearTimeout(pending.timer);
+  pendingApprovals.delete(id);
+  if (choice === "allow_once") {
+    pending.resolve(true);
+  } else if (choice === "deny") {
+    permissionEngine?.addRule({
+      category: pending.action.category,
+      decision: "deny",
+      scope: "session",
+      match: pending.action.command
+        ? { commandPattern: pending.action.command }
+        : pending.action.paths
+          ? { pathGlob: pending.action.paths[0] }
+          : undefined,
+    });
+    pending.resolve(false);
+  } else {
+    permissionEngine?.addRule({
+      category: pending.action.category,
+      decision: "allow",
+      scope: choice === "allow_always" ? "always" : "session",
+      match: pending.action.command
+        ? { commandPattern: pending.action.command }
+        : pending.action.paths
+          ? { pathGlob: pending.action.paths[0] }
+          : undefined,
+    });
+    pending.resolve(true);
+  }
+  notifyPermissionsChanged();
+}
 let workflowsBridge: any = null;
 let activityBridge: any = null;
 const sessionIndex = new SessionIndex(PI_SESSIONS_ROOT);
@@ -267,8 +336,20 @@ async function startHost(): Promise<void> {
     const latest = groups.flatMap((g) => g.sessions).sort((a, b) => b.mtime - a.mtime)[0];
     const cwd = latest?.cwd ?? homedir();
     activeCwd = cwd;
+    // Babylon permission system: load persistent rules + mode once, outside any
+    // Pi session file, so policy survives restarts and is shared across projects.
+    const permissionDir = join(app.getPath("userData"), "pideck-state", "permissions");
+    permissionEngine = new PermissionEngine({ dir: permissionDir });
+    await permissionEngine.load();
     host = new PiHost({
       cwd,
+      permission: permissionEngine
+        ? {
+            evaluate: (action) => permissionEngine!.evaluate(action),
+            requestApproval,
+            clearSessionRules: () => permissionEngine!.clearSessionRules(),
+          }
+        : undefined,
       onEvent: (ev) => {
         agentEvents.push(ev);
         if (ev?.type === "message_end" || ev?.type === "agent_settled" || ev?.type === "session_info_changed") {
@@ -436,6 +517,8 @@ function registerIpc(): void {
   );
   handle("pideck:set-thinking", (_e, level: string) => getHost().setThinking(level));
   handle("pideck:get-thinking-levels", () => getHost().getThinkingLevels());
+  handle("pideck:get-settings", () => getHost().getSettings());
+  handle("pideck:set-settings", (_e, patch: any) => getHost().setSettings(patch));
   handle("pideck:set-session-name", (_e, name: string) => {
     if (typeof name !== "string" || name.length > 500) throw new Error("invalid session name");
     return getHost().setSessionName(name);
@@ -625,6 +708,56 @@ function registerIpc(): void {
       throw new Error(`blocked external URL protocol: ${parsed.protocol}`);
     }
     await shell.openExternal(parsed.toString());
+  });
+
+  // ---------------------------------------------------------------------------
+  // Permission system (Phase 1): modes, rules, and approval resolution.
+  // ---------------------------------------------------------------------------
+
+  handle("pideck:permissions:get", () => {
+    if (!permissionEngine) return { mode: "auto" as const, rules: [] };
+    return { mode: permissionEngine.getMode(), rules: permissionEngine.listRules() };
+  });
+  handle("pideck:permissions:set-mode", (_e, mode: string) => {
+    if (!permissionEngine) throw new Error("permission engine not ready");
+    if (mode !== "supervised" && mode !== "auto" && mode !== "full_access") {
+      throw new Error("invalid execution mode");
+    }
+    void permissionEngine.setModeAndPersist(mode as any);
+    notifyPermissionsChanged();
+    return { mode: permissionEngine.getMode() };
+  });
+  handle("pideck:permissions:add-rule", (_e, input: any) => {
+    if (!permissionEngine) throw new Error("permission engine not ready");
+    if (!input || typeof input.category !== "string" || (input.decision !== "allow" && input.decision !== "deny")) {
+      throw new Error("invalid rule");
+    }
+    if (input.scope !== "always" && input.scope !== "session") {
+      throw new Error("invalid rule scope");
+    }
+    const rule = permissionEngine.addRule({
+      category: input.category,
+      decision: input.decision,
+      scope: input.scope,
+      match: input.match,
+      note: input.note,
+    });
+    notifyPermissionsChanged();
+    return rule;
+  });
+  handle("pideck:permissions:remove-rule", (_e, id: string) => {
+    if (!permissionEngine) throw new Error("permission engine not ready");
+    if (typeof id !== "string" || id.length < 1 || id.length > 200) throw new Error("invalid rule id");
+    const removed = permissionEngine.removeRule(id);
+    notifyPermissionsChanged();
+    return { removed };
+  });
+  handle("pideck:permissions:resolve-approval", (_e, payload: { id: string; choice: string }) => {
+    if (!payload || typeof payload.id !== "string" || typeof payload.choice !== "string") {
+      throw new Error("invalid approval resolution");
+    }
+    resolveApproval(payload.id, payload.choice as any);
+    return { ok: true };
   });
 
   // Threads + subagents (project-local extension state)
