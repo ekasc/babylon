@@ -14,5 +14,5 @@
     "useDefineForClassFields": true,
     "types": ["node", "vite/client"]
   },
-  "include": ["src", "electron", "vite.config.ts"]
+  "include": ["src", "electron", "daemon", "vite.config.ts"]
 }

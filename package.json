@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "node scripts/ensure-electron.mjs && concurrently -k --success first -n vite,pideck \"vite\" \"node scripts/dev-electron.mjs\"",
     "build:electron": "node scripts/build-electron.mjs",
+    "build:daemon": "node scripts/build-daemon.mjs",
     "build": "npm run typecheck && vite build && npm run build:electron",
     "start": "node scripts/ensure-electron.mjs && electron .",
     "typecheck": "tsc --noEmit",

@@ -13,7 +13,7 @@
 
 import * as net from "node:net";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { unlinkSync } from "node:fs";
+import { mkdirSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
 import {
   createEnvelope,
@@ -294,6 +294,7 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
       } catch {
         // No stale socket, nothing to clean.
       }
+      mkdirSync(dirname(options.listen.socketPath), { recursive: true });
       server.listen(options.listen.socketPath, resolve);
     } else {
       server.listen(options.listen.port, options.listen.host ?? "127.0.0.1", resolve);
