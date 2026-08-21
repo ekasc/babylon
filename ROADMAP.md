@@ -1,40 +1,45 @@
 # Babylon Roadmap
 
-> Last updated: 2026-08-20 · All 16 features done, cross-cutting infrastructure done. 358 tests on `main` (`tsc` clean).
+> Audited 2026-08-20 against the actual runtime. 1 of 16 features is genuinely Done; 10 are Partial; 5 are Foundation. 358 tests pass, `tsc` clean. Previous status language overstated integration; this version states what actually works.
 
-Babylon is a secure desktop workspace for the Pi coding agent. The next phase should focus on execution infrastructure rather than adding more chat surface area.
+## Integration priority
 
-The goal is to make Babylon capable of safely running long-lived, parallel software-engineering work with strong visibility, isolation, recovery, and user control.
+The next milestone is not more feature breadth. Most foundations already exist as pure, tested models. The priority is turning them into one coherent runtime:
 
-## Progress at a glance
+1. Task/runtime ownership — make `src/tasks.ts` the object a real task executes through
+2. Real process manager — actual spawn/PTY/kill replacing the ProcessPanel demo
+3. Real LSP service — spawn, initialize, diagnose, restart, feed Pi
+4. Pi-driven structured plans — agent proposes/pauses/resumes instead of manual editing
+5. Completion contracts + hooks wired into the Pi lifecycle
+6. Daemon becomes the actual PiHost owner; desktop connects through `DaemonClient`
+7. Background executor governed by policies
+8. Remote control started by the daemon and pointed at real state
+9. Automation wired to the background executor
+10. Browser preview driven by real tracked processes
 
-| Phase | Feature | Status | Evidence |
-|-------|---------|--------|----------|
-| 1 · Execution Control | 1. Agent permission system | **Done** | `electron/permissions.ts` + `permission-agent.ts` + `permission-hook.ts` · PR #2 |
-|  | 2. Automatic risk review | **Done** | `classifyRisk` / heuristic reviewer in `permissions.ts`, wired through `permission-hook.ts` · PR #2 |
-| 2 · Coding Intelligence | 3. LSP integration | **Done** | `electron/lsp.ts` wire protocol · PR #3 |
-|  | 4. Structured plans | **Done** | `src/plans.ts` · PR #3 |
-| 3 · Runtime Workspace | 5. Agent-aware terminal | **Done** | `src/process-model.ts` · PR #4 |
-|  | 6. Browser preview | **Done** | `src/preview-model.ts` · PR #4 |
-| 4 · Parallel Work | 7. Task-owned worktrees | **Done** | `src/tasks.ts` · PR #5 |
-|  | 8. Structured subagent graph | **Done** | `src/subagent-graph.ts` · PR #15 |
-|  | 9. Model roles | **Done** | `src/model-roles.ts` · PR #5 |
-| 5 · Attention and Completion | 10. Attention inbox | **Done** | `src/attention.ts` + `src/components/AttentionPanel.tsx` wired to approvals · PR #6, #13 |
-|  | 11. Completion contracts | **Done** | `src/completion-contracts.ts` · PR #6 |
-|  | 12. Hook system | **Done** | `src/hooks.ts` · PR #7 |
-| 6 · Control Plane | 13. Extract runtime into Babylon daemon | **Done** | `src/daemon-transport.ts` + `daemon-server.ts` + `daemon-client.ts` + `daemon/main.ts` (framed socket transport, persistence, reconnect, standalone process) · Phase 6 PR |
-|  | 14. Background execution policies | **Done** | `src/background-policy.ts` + `src/scheduler.ts` + `src/background-controller.ts` enforced by the daemon tick loop · Phase 6 PR |
-| 7 · Remote Control | 15. Remote and mobile control | **Done** | `src/device-pairing.ts` + `src/remote-auth.ts` + `src/remote-actions.ts` + `src/remote-server.ts` (token auth, scoped actions, attention push) + `DevicesPanel.tsx` · Phase 7 PR |
-| 8 · Automation | 16. Scheduled and conditional tasks | **Done** | `src/automation.ts` + `src/scheduler.ts` + `src/automation-runner.ts` + `src/scheduler-loop.ts` (interval loop with error isolation) + `AutomationPanel.tsx` · Phase 8 PR |
-| Cross-cutting | Event model / stable ownership / observability | **Done** | `src/events.ts` + `src/event-projection.ts` (16-type catalog, replay), `src/ownership.ts`, `src/diagnostics.ts` + `DiagnosticsPanel.tsx` · Cross-cutting PR |
+Adjust this order where repository dependencies demand it; the dependency graph below argues for it.
 
-Check the box when the feature has a pure, tested model merged to `main` and, where the roadmap requires it, a desktop surface. Partial means the model exists but the daemon/process/transport/UI wiring is still open.
+## Definition of Done
+
+A feature is Done only when:
+
+1. The real Babylon runtime uses it.
+2. It is connected to Pi where the feature requires agent execution.
+3. The user can exercise the feature end-to-end through Babylon.
+4. No fake, simulated, demo-only, or placeholder execution path is required.
+5. UI state comes from the actual runtime, not manually constructed React state.
+6. Failure states are real and observable.
+7. Automated tests cover the integrated behavior, not just pure helpers.
+
+A pure model is not Done. A protocol implementation is not Done. A UI panel is not Done. A server nothing starts is not Done. A daemon that does not own the runtime it claims is not Done. A scheduler with no executor is not Done. A terminal panel with a Simulate button is not Done.
+
+Statuses: **DONE** (real, end-to-end, user-exercisable) · **PARTIAL** (meaningful working implementation exists; runtime wiring or major promised behavior remains) · **FOUNDATION** (model/protocol/helper infrastructure only) · **NOT STARTED**.
 
 ---
 
 ## Guiding principles
 
-- Pi remains the agent engine. Babylon should orchestrate, observe, constrain, and extend it rather than reimplementing the core agent loop.
+- Pi remains the agent engine. Babylon orchestrates, observes, constrains, and extends it rather than reimplementing the core agent loop.
 - Agent state must be truthful. Never infer progress from animation or text when a concrete runtime state exists.
 - Every long-running task should be resumable, inspectable, and interruptible.
 - Parallel work should be isolated by default.
@@ -47,151 +52,108 @@ Check the box when the feature has a pure, tested model merged to `main` and, wh
 
 ## Phase 1: Execution Control
 
-- [x] **1. Agent permission system** — Babylon-owned permission layer around agent actions. Modes `supervised` / `auto` / `full_access`; per-category policies; persistent + session rules; approval UI with allow once / session / always / deny. Done in `electron/permissions.ts`, `permission-agent.ts`, `permission-hook.ts`, `ApprovalGate.tsx`, PR #2.
+- [x] **DONE · 1. Agent permission system** — the one feature that is genuinely end-to-end. `electron/main.ts` creates a persisted `PermissionEngine` (rules on disk under userData, outside Pi session files); `electron/pi-host.ts` installs `installPermissionHook` so every Pi tool call is evaluated before execution, and `ManagedSubagents` routes spawns/follow-ups through the same controller. Modes supervised/auto/full_access with Full Access styled as dangerous in `PermissionsPanel`; allow once/session/always/deny flow through `ApprovalGate` and raise real attention items keyed to approval ids.
 
-  Execution modes
-
-  - Supervised: ask before commands, writes, external access, and other consequential actions.
-  - Auto: routine actions run automatically, risky or uncertain actions require approval.
-  - Full Access: run without interactive approval prompts.
-
-  Approval actions — each request supports allow once, allow for session, always allow matching actions, deny.
-
-  Policy categories — file reads, file writes inside/outside workspace, shell commands, destructive shell commands, network access, git commit, git push, package installation, process spawning, privileged commands.
-
-  Requirements — policies are evaluated before execution; persistent rules are stored outside Pi session files; session-only rules disappear with the session; approval state is visible in the transcript and Activity surfaces; rules are editable in Settings; Full Access is visibly distinct from safer modes.
-
-- [x] **2. Automatic risk review** — secondary review when no static rule matches. Done as `classifyRisk` heuristic in `permissions.ts` wired through `permission-hook.ts`, PR #2. Explicit deny is never overridden.
-
-  Flow: agent action → static policy → clearly allowed? yes → execute / no → risk review → low risk → execute / high or uncertain risk → ask user.
-
-  Reviewer considers command intent, affected paths, destructive flags, external network access, privilege escalation, repository state, current project boundary.
+  Remaining polish, not gaps: risk classification (`classifyRisk`) is heuristic and could use adversarial tests; subagent gating covers managed subagents but not arbitrary extension-spawned processes.
 
 ## Phase 2: Coding Intelligence
 
-- [x] **3. LSP integration** — language intelligence service Babylon can expose to Pi. Done in `electron/lsp.ts` (header parsing, `encodeLspMessage` / `decodeLspMessages`, `mapDiagnostics`), PR #3.
+- [ ] **FOUNDATION · 2. LSP integration** — `electron/lsp.ts` implements Content-Length framing, `encodeLspMessage`/`decodeLspMessages`, and diagnostic mapping, with tests. Nothing imports it. No server is ever spawned, initialized, or restarted; no document sync; no project association; no diagnostics in the UI; no feedback loop to Pi.
 
-  Initial capabilities: diagnostics, go to definition, find references, hover, rename, code actions. Agent feedback loop: after file edit → language server runs diagnostics → new errors/warnings collected → relevant diagnostics returned to active agent → agent can fix without waiting for user.
-
-  Requirements: diagnostics diff-aware where possible; avoid flooding agent with unchanged diagnostics; language servers project-scoped; server crashes must not destabilize main session; surface current diagnostics in workspace UI.
-
-- [x] **4. Structured plans** — plans as first-class Babylon state rather than plain Markdown. Done in `src/plans.ts` (monotonic `nextStepSeq`, `reconcile`, `deriveStatus`), PR #3.
-
-  A plan contains ordered steps, step status, optional dependencies, affected areas/files when known, approval state, execution progress. Actions: edit, approve, reject, reorder, add/remove steps, execute one, execute all, pause after current step. States: proposed, approved, running, paused, blocked, completed, cancelled. Agent can propose a plan and stop before implementation when approval is required.
+  Missing integration: a project-scoped LSP service in the main process (spawn → initialize → didOpen/didChange/didSave → publishDiagnostics → crash restart), a workspace diagnostics surface, and a post-edit hook that returns new relevant diagnostics to the active Pi session. Narrow the promised capabilities (hover/rename/code actions) until each has a live server behind it.
 
 ## Phase 3: Runtime Workspace
 
-- [x] **5. Agent-aware terminal** — first-class terminal and process manager. Done in `src/process-model.ts` + `ProcessPanel.tsx`, PR #4.
+- [ ] **FOUNDATION · 3. Structured plans** — `src/plans.ts` is a complete pure model (steps, deps, approve/reject/reorder, monotonic seq, derived status) and `PlansPanel.tsx` lets the user create plans and manually flip step states. Pi neither proposes plans nor pauses for approval; step status never moves from execution; plan decisions never reach the agent.
 
-  Each tracked process includes command, cwd, owning session/agent, PID, start time, exit status, detected ports, current state. Example `TERMINALS` list with dev server :5173, tests, shell. Requirements: interactive PTY support, multiple terminals per task, kill/restart, agent-created processes appear automatically, exited processes remain in history, output can be referenced by agent, ownership explicit.
+  Missing integration: a Pi tool or convention for plan proposal, an approval gate that pauses the agent, decision delivery back to the session, and automatic step-status updates from tool activity.
 
-- [x] **6. Browser preview** — integrated preview surface for local web apps. Done in `src/preview-model.ts` (`detectServerFromCommand`) + `PreviewPanel.tsx`, PR #4.
+- [ ] **FOUNDATION · 4. Agent-aware terminal** — `ProcessPanel.tsx` has a button labeled "Simulate a dev server (demo)" that fabricates a running process with port 5173; Kill only flips registry state; nothing is ever spawned. No PTY, no stdout/stderr capture, no real PID/cwd/exit status, no port probing, no output reference for Pi. `src/process-model.ts` (the data shape) is fine and reused by diagnostics.
 
-  Automatic behavior: `pnpm dev` → `localhost:5173` detected → preview available. Capabilities: navigate, reload, open externally, inspect console output, capture screenshot, select elements, report page errors, basic agent-driven interaction. Agent tools: `preview_open`, `preview_navigate`, `preview_click`, `preview_type`, `preview_screenshot`, `preview_console`, `preview_inspect`.
+  Missing integration: a main-process process manager (spawn, PTY where interactive, output buffers, kill/restart, exit codes, port detection from listening sockets or output), renderer views over that manager, and agent-created process registration.
+
+- [ ] **FOUNDATION · 5. Browser preview** — `PreviewPanel.tsx` calls `detectServerFromCommand("pnpm dev")`, a hardcoded string-to-port guess; there is no network probing, no console/page-error capture, no screenshot, no element inspection, and none of the promised `preview_*` agent tools exist anywhere.
+
+  Missing integration: detection from real tracked processes (depends on Feature 4), an embedded webview with navigation/reload/console capture, and Pi tools backed by that webview.
 
 ## Phase 4: Parallel Work
 
-- [x] **7. Task-owned worktrees** — worktrees as task execution primitive. Done in `src/tasks.ts` (addTask refuses overwrite, `isRemovable` guards dirty worktrees), PR #5.
+- [ ] **PARTIAL · 6. Task-owned worktrees** — real Git worktrees exist and are user-exercisable (`pideck:worktree-create/info`, BranchPanel, WorktreeBanner in `electron/main.ts`). What does not exist: the Task primitive. `src/tasks.ts` is imported by nothing outside its own tests and the never-connected `runtime.ts`; no execution path creates a task, links a session/branch/worktree to it, or promotes/merges through it.
 
-  A task may own Pi session, git branch, git worktree, terminals, preview, diff, checkpoints. Behavior: parallel task can auto-create worktree; worktree/branch names deterministic but editable; removing a task must not silently destroy uncommitted changes; task state survives restart; completed work can be promoted/merged.
+  Missing integration: make the task the unit of execution — creating a task provisions session + branch + worktree, its terminals/preview/diff/checkpoints hang off the task id, and removal guards dirty worktrees at the runtime layer, not just in the pure model.
 
-- [x] **8. Structured subagent graph** — clearer hierarchy of work. Done in `src/subagent-graph.ts` (PR #15).
+- [ ] **PARTIAL · 7. Structured subagent graph** — real subagents exist and work: `ManagedSubagents` spawns bounded and persistent agents, gates them through permissions, relays parent messages, and surfaces activity in the transcript. `src/subagent-graph.ts` (parent/child tree, goals, results, summaries) is imported by nothing and represents none of those real agents.
 
-  Example:
+  Missing integration: project live `ManagedSubagentRecord`s into the graph (or replace the model with a view over the real records), keep parent/child/status/model/result truthful from runtime events, and render the tree.
 
-  ```
-  Main Agent
-  Research
-  ├── ✓ Database scout
-  ├── ✓ API scout
-  └── ● Test scout
-  Implementation
-  ├── ● Backend worker
-  └── ○ Frontend worker
-  Review
-  └── ○ Reviewer
-  ```
+- [ ] **PARTIAL · 8. Model roles** — the title role is real: `pi-host.ts` resolves `settings.titleModel`/`titleReasoning` and generates session titles with the cheap model. Recaps merge stored recaps. `src/model-roles.ts` (planner/scout/reviewer/recap/title resolution, budgets, fallbacks) is imported only by the never-connected `runtime.ts`; roles other than title influence nothing.
 
-  Requirements: parent/child relationships explicit; each agent has goal, state, model, owner, and result; subagent output defaults to summaries rather than flooding parent transcript; full transcripts remain inspectable; agents may run in isolated worktrees; bounded and persistent agents remain distinct concepts.
-
-- [x] **9. Model roles** — explicit roles for cheaper background work. Done in `src/model-roles.ts` (`mergeRoleConfig` filters explicit undefined, `setRole` merges), PR #5.
-
-  Suggested roles: primary, planner, scout, reviewer, recap, title. Each role can configure provider/model, reasoning level, token budget, fallback model. Requirements: roles optional; primary session model remains independent; background roles must not silently consume expensive models; show which model performed summaries/reviews/plans.
+  Missing integration: route recap/review/scout-style calls through role resolution, enforce budgets/fallback in the real invocation path, and show which model produced each artifact.
 
 ## Phase 5: Attention and Completion
 
-- [x] **10. Attention inbox** — one global place for everything that genuinely needs the user. Done in `src/attention.ts` (add no-overwrite, `removeAttention` hard delete, list unresolved newest-first) + `src/components/AttentionPanel.tsx` wired to approval events (PR #6, #13).
+- [ ] **PARTIAL · 9. Attention inbox** — real source: permission requests (raised on `onApprovalRequested`, cleared when the approval resolves). Synthetic source: automation failures from the placeholder executor. None of the other promised sources exist: no agent questions, blocked tasks, merge conflicts, missing credentials, environment failures, or review requests feed it.
 
-  Attention types: permission request, agent question, failed task, blocked task, merge conflict, missing credential, environment failure, review requested. Requirements: works across projects/sessions; items disappear when resolved; user can jump to originating context; background agents do not require the user to keep their chat open.
+  Missing integration: emit attention from real conditions — workflow/worktree conflicts, failed sessions, contract failures once contracts gate real work, review requests — and resolve them when the condition clears.
 
-- [x] **11. Completion contracts** — define what must be true before Babylon considers a task complete. Done in `src/completion-contracts.ts` (required vs optional checks, `addCheck` dedupe, `removeCheck` no-op safe), PR #6.
+- [ ] **FOUNDATION · 10. Completion contracts** — `src/completion-contracts.ts` evaluates required vs optional checks; `automation-runner` applies it, but only to the placeholder executor's synthetic runs. No real task or agent lifecycle consults a contract; "agent finished" and "contract passed" are never distinguished in a real flow.
 
-  Example definition of done: typecheck, unit tests, lint, no new diagnostics, browser smoke test, diff reviewed. Checks: command exits successfully, tests pass, typecheck passes, lint passes, no new LSP errors, no unresolved TODO markers, working tree state matches policy, browser smoke test passes, review agent approves. Behavior: distinguish agent finished from completion contract passed; the second is the trustworthy state.
+  Missing integration: hook contract evaluation into before_stop/task completion (depends on Features 11 and 6), surface unsatisfied checks, and drive repair passes.
 
-- [x] **12. Hook system** — small, stable Babylon hook lifecycle. Done in `src/hooks.ts` (pre/post_tool_use, before_stop, attention_required, copy-on-insert, stable order array, `timeoutMs` validation), PR #7.
+- [ ] **FOUNDATION · 11. Hook system** — `src/hooks.ts` is a registry (pre/post_tool_use, before_stop, attention_required slots, ordering, timeout fields) with copy-on-insert semantics. There is no dispatcher: nothing executes hooks, enforces timeouts, isolates failures, or can block/rewrite a tool call. Pi's real pre-tool interception exists separately inside the permission hook.
 
-  Examples: `pre_tool_use` can block, rewrite args, require approval, attach metadata; `post_tool_use` runs diagnostics, updates process/git state; `before_stop` verifies contract, requires tests, requests repair pass; `attention_required` creates inbox item or notifies remote client. Hooks must have strict timeouts and must not deadlock the agent runtime.
+  Missing integration: a hook runner with timeouts and error isolation, wired to the same lifecycle points the permission hook uses, plus before_stop tied to completion contracts.
 
 ## Phase 6: Control Plane
 
-- [x] **13. Extract the runtime into a Babylon daemon** — move long-lived orchestration out of the Electron application process. Done: `src/daemon-transport.ts` (newline frame codec), `src/daemon-server.ts` (socket server owning runtime + schedule + history + policy, atomic snapshot persistence, event broadcast, policy tick loop), `src/daemon-client.ts` (typed request/response, event subscription, reconnect with capped backoff, queued requests), `daemon/main.ts` standalone entry built to `dist-daemon/main.mjs`, and settings-gated detached spawn in `electron/main.ts` (`daemon.enabled`). Phase 6 PR.
+- [ ] **PARTIAL · 12. Babylon daemon** — the transport story is real and tested: framed protocol, `daemon-server.ts` (multi-client, atomic persistence, event broadcast, policy ticks), `daemon-client.ts` (correlated requests, reconnect, queued calls), `daemon/main.ts` standalone entry, and Electron can spawn it when `daemon.enabled` is set. The extraction itself has not happened: Electron still creates and owns `PiHost` directly; the daemon holds an empty parallel `RuntimeState`; nothing ever connects a `DaemonClient`; closing the app still takes agent work down with it.
 
-  Target architecture: Babylon Daemon owns Pi host lifecycle, session/task/approval/terminal/worktree/attention/background execution/persistence; desktop owns rendering, keyboard interaction, dialogs, notifications, previews, user input; they talk over a typed local protocol. Requirements: closing GUI must not kill background agents unless configured (detached child, never killed on quit); reopening reconnects (client auto-reconnect); protocol events carry stable task/session/tool ids (versioned envelopes); runtime state remains authoritative outside React.
+  Missing integration: move PiHost/session/approval/process ownership into the daemon, make the desktop a thin client over `DaemonClient`, prove close-and-reopen reconnects to live state, and delete the competing in-app sources of truth.
 
-- [x] **14. Background execution policies** — explicit policies for background work once the daemon exists. Done: `src/background-policy.ts` (never / while_plugged_in / always + pauseOnBattery/pauseOnSleep/maxConcurrent/maxCost/perProject) gated through `src/scheduler.ts`, composed into the pure `src/background-controller.ts` tick, and enforced by the daemon server's policy loop (`policyTickMs`, `envSignals`, `runAutomation` injectable; `policy.updated` over the protocol). Blocked tasks are reported with reasons.
+- [ ] **PARTIAL · 13. Background execution policies** — `canRunInBackground` gating is real wherever the tick runs (daemon timer, App scheduler loop): mode/battery/sleep/concurrency/cost/per-project checks produce truthful block reasons. What the policies govern is not: the only schedulable work is the placeholder executor that always fails. No real background agent execution exists to pause or resume.
 
-  Examples: background execution never / while plugged in / always; additional controls pause on battery, pause on sleep, resume after wake, maximum concurrent agents, maximum background model cost, per-project background permission.
+  Missing integration: depends on Feature 12 — background agent tasks owned by the daemon, concurrency enforced against real agents, battery/sleep signals from the OS, resume-after-wake.
 
 ## Phase 7: Remote Control
 
-- [x] **15. Remote and mobile control** — inspect and control active Babylon tasks from another trusted device. Done: `src/device-pairing.ts` (token-hash grants, `pairDevice` validation), `src/remote-auth.ts` (sha256 hashing, timing-safe verify), `src/remote-actions.ts` (one action, one scope), `src/remote-server.ts` (token auth over the framed transport, per-request scope checks, mid-session revocation, attention push to `receive_attention` devices, last-seen tracking), and the `DevicesPanel` pairing surface (token shown once, scope picker, revoke). Phase 7 PR.
+- [ ] **PARTIAL · 14. Remote and mobile control** — `remote-server.ts` is a complete, socket-tested implementation: token auth (timing-safe, constant-time fallback), per-request scope enforcement, mid-session revocation, scoped attention push, injected handlers. It is never started by any process. `DevicesPanel.tsx` pairs devices into local React state that no server reads. No remote client exists.
 
-  Initial remote scope intentionally small: view active tasks, view current agent state, receive attention notifications, approve/deny actions, answer agent questions, stop/pause/resume tasks, view concise diffs and completion state. Do not recreate the entire desktop workspace on mobile. Pairing uses explicit device pairing with revocable grants; each device has identity, authorization scope, creation time, last-seen time, revoke control.
+  Missing integration: the daemon starts the remote server over its real state (depends on Feature 12), pairing persists beyond React, and at least one real client exercises view/approve/stop end-to-end.
 
 ## Phase 8: Automation
 
-- [x] **16. Scheduled and conditional tasks** — allow Babylon tasks to run without an open foreground session after background execution is reliable. Done: `src/scheduler-loop.ts` (interval-driven loop over the pure tick, getter/setter state boundaries, per-tick error isolation) and the `AutomationPanel` surface (create interval/daily/file-watch/branch-watch tasks, enable/disable, remove, run history with contract outcomes). Reuses the permission system via the background policy gate and completion contracts via the executor; every run creates history; failures enter the Attention Inbox. Phase 8 PR.
+- [ ] **PARTIAL · 15. Scheduled and conditional tasks** — the machinery is real: trigger evaluation (interval/daily/file/branch watch), policy-gated selection, history recording, attention on failure, a scheduler loop running in App on a 30s interval, and a full creation/toggle/history UI. The executor is not: `run: () => ({ success: false, error: "no automation executor configured in this build" })`. Every run is a recorded synthetic failure.
 
-  Examples: run dependency checks every morning, review new CI failures, watch for file or branch change, periodically run repository health check, notify when long-running task finishes. Requirements: reuse same permission system and completion contracts; every automation run creates inspectable history; automation failures enter Attention Inbox; no hidden background agents.
-
----
+  Missing integration: an executor that starts a real Babylon/Pi task (depends on Features 12/13), permission rules applied to it, completion contracts applied to it, and independence from the desktop window.
 
 ## Cross-cutting infrastructure
 
-- [x] **Event model** — normalize significant runtime activity into stable events. Done: `src/events.ts` defines the full sixteen-type catalog (`message.sent` through `attention.resolved`) with stable event ids, timestamps, explicit ownership references, and append-only storage that rejects duplicate ids and malformed events. `src/event-projection.ts` rebuilds task, attention, process, and plan views deterministically from the stream regardless of replay order, and reports ownership coverage. Cross-cutting PR.
+- [ ] **PARTIAL · Event model / stable ownership / observability** — the catalog, log, projection, ownership stamps, and aggregate diagnostics are implemented and tested. Real runtime coverage is a subset: `turn.started/completed` and `tool.started/completed` are mapped from genuine Pi agent events in App; the other twelve event types are defined but never emitted by anything. Diagnostics reports ownership/event coverage honestly rather than hiding the gap.
 
-- [x] **Stable ownership** — every long-lived resource should identify its owner (`projectId`, `taskId`, `sessionId`, `agentId`, `turnId`, `toolRunId`, `processId`, `worktreeId`). Done: every event names its owners through a validated `OwnershipRef`; `src/ownership.ts` gives boundaries one vocabulary — stamps drop blank values, `requireOwners` throws listing missing ids instead of guessing, and coverage reporting shows which events name which kind of owner. Existing registries keep their explicit `ownerSession`/`sessionId`/`agentId` fields. Cross-cutting PR.
-
-- [x] **Observability** — developer-facing runtime diagnostics surface plus a single diagnostic export without prompts/tool output/secrets/source. Done: `src/diagnostics.ts` aggregates attention, processes, automation, background policy limits, paired devices, and event-stream health (counts by type, time window, ownership coverage) into one snapshot; the export is aggregates only by construction with sorted, diffable keys, proven by test. Surfaced in `DiagnosticsPanel.tsx` with one-click export copy. Cross-cutting PR.
+  Missing integration: emit the remaining types from real subsystem boundaries as features land (approvals, processes, plans, tasks, attention, checkpoints), and keep the coverage report truthful in the meantime.
 
 ---
 
-## Recommended shipping order
+## Dependencies
 
-Next
+- Process manager (4) unlocks browser preview (5) and gives tasks something to own (6).
+- Task primitive (6) is the unit that plans (3), contracts (10), hooks (11), and automation (15) should attach to.
+- Daemon ownership (12) is the prerequisite for true background execution (13), remote control (14), and window-independent automation (15).
+- Hooks (11) + contracts (10) need the task/agent lifecycle from (6)/(12) to gate anything real.
+- LSP (2) is independent and can proceed in parallel once a service home (main process or daemon) is chosen.
 
-- Agent permission system
-- Automatic risk review
-- LSP diagnostics feedback loop
-- Agent-aware terminal/process manager
-- Browser preview
+## Recommended order
 
-After that
-
-- Structured plans
-- Attention inbox
-- Completion contracts
-- Task-owned worktrees
-- Structured subagent graph
-- Hook system
-- Model roles
-
-Later
-
-- Babylon daemon
-- Background execution policies
-- Remote/mobile control
-- Scheduled and conditional tasks
+1. Real process manager (main-process spawn/PTY/kill/output) — replaces the demo, feeds preview and tasks.
+2. Task primitive owning session + worktree + processes — the execution unit everything else attaches to.
+3. LSP service with the Pi diagnostics feedback loop.
+4. Pi-driven structured plans with approval pausing.
+5. Hook runner + completion contracts gating the task lifecycle.
+6. Daemon becomes PiHost owner; desktop becomes a client.
+7. Background executor under policies; automation points at it.
+8. Remote server started by the daemon against real state.
+9. Browser preview driven by tracked processes and exposed to Pi.
+10. Emit remaining event types as each subsystem lands.
 
 ---
 
