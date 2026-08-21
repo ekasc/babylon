@@ -20,11 +20,31 @@ import { PreviewPanel } from "./components/PreviewPanel";
 import { AttentionPanel } from "./components/AttentionPanel";
 import { DevicesPanel } from "./components/DevicesPanel";
 import { AutomationPanel } from "./components/AutomationPanel";
+import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
+import { collectDiagnostics } from "./diagnostics";
 import { createDeviceRegistry, type DeviceRegistry } from "./device-pairing";
 import { createScheduledTaskRegistry, type ScheduledTaskRegistry } from "./automation";
 import { createAutomationHistory, type AutomationHistory } from "./automation-runner";
 import { createSchedulerLoop } from "./scheduler-loop";
 import { defaultPolicy as defaultBackgroundPolicy } from "./background-policy";
+import { appendEvent, createEventLog, newEventId, type BabylonEventType, type EventLog } from "./events";
+import { stampOwnership } from "./ownership";
+
+/** Map pi engine events onto the Babylon event catalog (diagnostics only). */
+function mapAgentEventType(type: unknown): BabylonEventType | null {
+  switch (type) {
+    case "agent_start":
+      return "turn.started";
+    case "agent_end":
+      return "turn.completed";
+    case "tool_execution_start":
+      return "tool.started";
+    case "tool_execution_end":
+      return "tool.completed";
+    default:
+      return null;
+  }
+}
 import { addAttention, listAttention, removeAttention, type AttentionRegistry } from "./attention";
 import type { Plan } from "./plans";
 import type { ProcessRegistry } from "./process-model";
@@ -170,6 +190,8 @@ export default function App() {
   const [showAutomation, setShowAutomation] = useState(false);
   const [schedule, setSchedule] = useState<ScheduledTaskRegistry>(createScheduledTaskRegistry);
   const [automationHistory, setAutomationHistory] = useState<AutomationHistory>(createAutomationHistory);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [eventLog, setEventLog] = useState<EventLog>(createEventLog);
 
   // Scheduler loop (Phase 8): drives due automation tasks on an interval.
   // Refs give the loop a stable read of the latest committed state without
@@ -466,8 +488,22 @@ export default function App() {
           switching: switchingRef.current,
         };
         let stateChanged = false;
+        const mapped: Parameters<typeof appendEvent>[1][] = [];
         for (const event of events) {
           if (shouldAcceptEvent(event, context)) dispatch({ type: "event", event });
+          const babylonType = mapAgentEventType(event?.type);
+          if (babylonType) {
+            mapped.push({
+              id: newEventId(),
+              type: babylonType,
+              ts: Date.now(),
+              owner: stampOwnership({
+                sessionId: activeSessionIdRef.current ?? undefined,
+                ...(event?.id !== undefined ? { toolRunId: String(event.id) } : {}),
+              }),
+              payload: {},
+            });
+          }
           if (
             event?.type === "agent_settled" ||
             event?.type === "agent_end" ||
@@ -475,6 +511,17 @@ export default function App() {
           ) {
             stateChanged = true;
           }
+        }
+        if (mapped.length > 0) {
+          setEventLog((prev) => {
+            let next = prev;
+            for (const e of mapped) {
+              const out = appendEvent(next, e);
+              if (typeof out !== "string") next = out;
+            }
+            // Bound the log so a long session cannot grow it without limit.
+            return next.events.length > 500 ? { events: next.events.slice(-500) } : next;
+          });
         }
         // Reflect engine-side state changes (model/thinking toggles, /fast,
         // session renames) in the status bar without waiting for the next
@@ -1238,6 +1285,14 @@ export default function App() {
               >
                 Auto
               </button>
+              <button
+                onClick={() => setShowDiagnostics((open) => !open)}
+                title="Runtime diagnostics"
+                aria-pressed={showDiagnostics}
+                className={`thread-action ${showDiagnostics ? "is-active" : ""}`}
+              >
+                Diag
+              </button>
               <button onClick={() => setShowCommandPalette(true)} title="Search and commands (⌘K)" className="thread-action">
                 <FolderIcon size={16} />
               </button>
@@ -1381,6 +1436,21 @@ export default function App() {
           setSchedule={setSchedule}
           history={automationHistory}
           onClose={() => setShowAutomation(false)}
+        />
+      ) : null}
+      {showDiagnostics ? (
+        <DiagnosticsPanel
+          snapshot={collectDiagnostics({
+            now: Date.now(),
+            attention,
+            processes: processRegistry,
+            schedule,
+            history: automationHistory,
+            policy: defaultBackgroundPolicy(),
+            devices,
+            events: eventLog,
+          })}
+          onClose={() => setShowDiagnostics(false)}
         />
       ) : null}
       <ApprovalGate />

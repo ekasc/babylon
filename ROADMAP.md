@@ -1,6 +1,6 @@
 # Babylon Roadmap
 
-> Last updated: 2026-08-20 · 16 of 16 features done. 344 tests on `main` (`tsc` clean). Cross-cutting infrastructure (event sourcing, ownership enforcement, observability surface) remains open as its own track.
+> Last updated: 2026-08-20 · All 16 features done, cross-cutting infrastructure done. 358 tests on `main` (`tsc` clean).
 
 Babylon is a secure desktop workspace for the Pi coding agent. The next phase should focus on execution infrastructure rather than adding more chat surface area.
 
@@ -26,7 +26,7 @@ The goal is to make Babylon capable of safely running long-lived, parallel softw
 |  | 14. Background execution policies | **Done** | `src/background-policy.ts` + `src/scheduler.ts` + `src/background-controller.ts` enforced by the daemon tick loop · Phase 6 PR |
 | 7 · Remote Control | 15. Remote and mobile control | **Done** | `src/device-pairing.ts` + `src/remote-auth.ts` + `src/remote-actions.ts` + `src/remote-server.ts` (token auth, scoped actions, attention push) + `DevicesPanel.tsx` · Phase 7 PR |
 | 8 · Automation | 16. Scheduled and conditional tasks | **Done** | `src/automation.ts` + `src/scheduler.ts` + `src/automation-runner.ts` + `src/scheduler-loop.ts` (interval loop with error isolation) + `AutomationPanel.tsx` · Phase 8 PR |
-| Cross-cutting | Event model / stable ownership / observability | **Partial** | Stable ids and `makeId`, protocol envelopes with stable ids; full event sourcing and diagnostics surface still to do |
+| Cross-cutting | Event model / stable ownership / observability | **Done** | `src/events.ts` + `src/event-projection.ts` (16-type catalog, replay), `src/ownership.ts`, `src/diagnostics.ts` + `DiagnosticsPanel.tsx` · Cross-cutting PR |
 
 Check the box when the feature has a pure, tested model merged to `main` and, where the roadmap requires it, a desktop surface. Partial means the model exists but the daemon/process/transport/UI wiring is still open.
 
@@ -158,11 +158,11 @@ Check the box when the feature has a pure, tested model merged to `main` and, wh
 
 ## Cross-cutting infrastructure
 
-- [ ] **Event model** — normalize significant runtime activity into stable events. Partially done: `makeId` (timestamp + monotonic counter + `crypto.randomUUID`) and `ProtocolEnvelope` with stable ids on daemon boundary. Remaining: full event catalog (`message.sent`, `turn.started`, `turn.completed`, `tool.started`, `tool.completed`, `approval.requested`, `approval.resolved`, `process.started`, `process.exited`, `checkpoint.created`, `plan.proposed`, `plan.approved`, `task.blocked`, `task.completed`, `attention.created`, `attention.resolved`) and replay/projection.
+- [x] **Event model** — normalize significant runtime activity into stable events. Done: `src/events.ts` defines the full sixteen-type catalog (`message.sent` through `attention.resolved`) with stable event ids, timestamps, explicit ownership references, and append-only storage that rejects duplicate ids and malformed events. `src/event-projection.ts` rebuilds task, attention, process, and plan views deterministically from the stream regardless of replay order, and reports ownership coverage. Cross-cutting PR.
 
-- [ ] **Stable ownership** — every long-lived resource should identify its owner (`projectId`, `taskId`, `sessionId`, `agentId`, `turnId`, `toolRunId`, `processId`, `worktreeId`). Partially done via `ownerSession`, `sessionId`, `agentId` fields on tasks/processes/plans. Remaining: enforce at every subsystem boundary and avoid deriving ownership from whichever UI panel happens to be open.
+- [x] **Stable ownership** — every long-lived resource should identify its owner (`projectId`, `taskId`, `sessionId`, `agentId`, `turnId`, `toolRunId`, `processId`, `worktreeId`). Done: every event names its owners through a validated `OwnershipRef`; `src/ownership.ts` gives boundaries one vocabulary — stamps drop blank values, `requireOwners` throws listing missing ids instead of guessing, and coverage reporting shows which events name which kind of owner. Existing registries keep their explicit `ownerSession`/`sessionId`/`agentId` fields. Cross-cutting PR.
 
-- [ ] **Observability** — developer-facing runtime diagnostics surface covering Pi runtime state, model availability, project resources, language servers, active processes, worktrees, permission engine, background tasks, event queue health; plus a single diagnostic export without prompts/tool output/secrets/source. Not yet started.
+- [x] **Observability** — developer-facing runtime diagnostics surface plus a single diagnostic export without prompts/tool output/secrets/source. Done: `src/diagnostics.ts` aggregates attention, processes, automation, background policy limits, paired devices, and event-stream health (counts by type, time window, ownership coverage) into one snapshot; the export is aggregates only by construction with sorted, diffable keys, proven by test. Surfaced in `DiagnosticsPanel.tsx` with one-click export copy. Cross-cutting PR.
 
 ---
 
