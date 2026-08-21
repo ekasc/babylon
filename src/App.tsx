@@ -20,6 +20,8 @@ import { PreviewPanel } from "./components/PreviewPanel";
 import { AttentionPanel } from "./components/AttentionPanel";
 import { DevicesPanel } from "./components/DevicesPanel";
 import { AutomationPanel } from "./components/AutomationPanel";
+import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
+import { collectDiagnostics } from "./diagnostics";
 import { createDeviceRegistry, type DeviceRegistry } from "./device-pairing";
 import { createScheduledTaskRegistry, type ScheduledTaskRegistry } from "./automation";
 import { createAutomationHistory, type AutomationHistory } from "./automation-runner";
@@ -170,6 +172,7 @@ export default function App() {
   const [showAutomation, setShowAutomation] = useState(false);
   const [schedule, setSchedule] = useState<ScheduledTaskRegistry>(createScheduledTaskRegistry);
   const [automationHistory, setAutomationHistory] = useState<AutomationHistory>(createAutomationHistory);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
 
   // Scheduler loop (Phase 8): drives due automation tasks on an interval.
   // Refs give the loop a stable read of the latest committed state without
@@ -1238,6 +1241,14 @@ export default function App() {
               >
                 Auto
               </button>
+              <button
+                onClick={() => setShowDiagnostics((open) => !open)}
+                title="Runtime diagnostics"
+                aria-pressed={showDiagnostics}
+                className={`thread-action ${showDiagnostics ? "is-active" : ""}`}
+              >
+                Diag
+              </button>
               <button onClick={() => setShowCommandPalette(true)} title="Search and commands (⌘K)" className="thread-action">
                 <FolderIcon size={16} />
               </button>
@@ -1381,6 +1392,19 @@ export default function App() {
           setSchedule={setSchedule}
           history={automationHistory}
           onClose={() => setShowAutomation(false)}
+        />
+      ) : null}
+      {showDiagnostics ? (
+        <DiagnosticsPanel
+          snapshot={collectDiagnostics({
+            now: Date.now(),
+            attention,
+            processes: processRegistry,
+            schedule,
+            history: automationHistory,
+            devices,
+          })}
+          onClose={() => setShowDiagnostics(false)}
         />
       ) : null}
       <ApprovalGate />
