@@ -17,7 +17,7 @@ function describeTrigger(trigger: Trigger): string {
       if (ms <= 0) return "invalid interval";
       if (ms % 3_600_000 === 0) return `every ${ms / 3_600_000}h`;
       if (ms % 60_000 === 0) return `every ${ms / 60_000}m`;
-      return `every ${(ms / 1000).toFixed(0)}s`;
+      return `every ${Math.floor(ms / 1000)}s`;
     }
     case "daily":
       return `daily at ${String(trigger.hour ?? 0).padStart(2, "0")}:${String(trigger.minute ?? 0).padStart(2, "0")} UTC`;
@@ -50,9 +50,10 @@ export function AutomationPanel({
   const [name, setName] = useState("");
   const [project, setProject] = useState("");
   const [kind, setKind] = useState<Trigger["kind"]>("interval");
-  const [intervalMinutes, setIntervalMinutes] = useState(30);
-  const [hour, setHour] = useState(9);
-  const [minute, setMinute] = useState(0);
+  // Numeric fields stay as raw strings so the inputs can be cleared while typing.
+  const [intervalMinutes, setIntervalMinutes] = useState("30");
+  const [hour, setHour] = useState("9");
+  const [minute, setMinute] = useState("0");
   const [path, setPath] = useState("");
   const [branch, setBranch] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -65,20 +66,34 @@ export function AutomationPanel({
     }
     let trigger: Trigger;
     switch (kind) {
-      case "interval":
-        if (!Number.isFinite(intervalMinutes) || intervalMinutes <= 0) {
+      case "interval": {
+        const minutes = Number(intervalMinutes);
+        if (!intervalMinutes.trim() || !Number.isFinite(minutes) || minutes <= 0) {
           setError("Interval must be a positive number of minutes.");
           return;
         }
-        trigger = { kind: "interval", intervalMs: Math.round(intervalMinutes * 60_000) };
+        trigger = { kind: "interval", intervalMs: Math.round(minutes * 60_000) };
         break;
-      case "daily":
-        if (!Number.isInteger(hour) || hour < 0 || hour > 23 || !Number.isInteger(minute) || minute < 0 || minute > 59) {
+      }
+      case "daily": {
+        const h = Number(hour);
+        const m = Number(minute);
+        if (
+          !hour.trim() ||
+          !minute.trim() ||
+          !Number.isInteger(h) ||
+          h < 0 ||
+          h > 23 ||
+          !Number.isInteger(m) ||
+          m < 0 ||
+          m > 59
+        ) {
           setError("Daily time must be a valid UTC hour and minute.");
           return;
         }
-        trigger = { kind: "daily", hour, minute };
+        trigger = { kind: "daily", hour: h, minute: m };
         break;
+      }
       case "file_watch":
         if (!path.trim()) {
           setError("File watch needs a path prefix.");
@@ -188,8 +203,8 @@ export function AutomationPanel({
             <input
               type="number"
               min={1}
-              value={Number.isFinite(intervalMinutes) ? intervalMinutes : ""}
-              onChange={(e) => setIntervalMinutes(Number(e.target.value))}
+              value={intervalMinutes}
+              onChange={(e) => setIntervalMinutes(e.target.value)}
               placeholder="Every N minutes"
               className="mt-2 w-full rounded-lg border border-line bg-bg px-2.5 py-1.5 text-[12.5px] outline-none focus:border-accent"
             />
@@ -201,7 +216,7 @@ export function AutomationPanel({
                 min={0}
                 max={23}
                 value={hour}
-                onChange={(e) => setHour(Number(e.target.value))}
+                onChange={(e) => setHour(e.target.value)}
                 placeholder="UTC hour"
                 className="w-full rounded-lg border border-line bg-bg px-2.5 py-1.5 text-[12.5px] outline-none focus:border-accent"
               />
@@ -210,7 +225,7 @@ export function AutomationPanel({
                 min={0}
                 max={59}
                 value={minute}
-                onChange={(e) => setMinute(Number(e.target.value))}
+                onChange={(e) => setMinute(e.target.value)}
                 placeholder="Minute"
                 className="w-full rounded-lg border border-line bg-bg px-2.5 py-1.5 text-[12.5px] outline-none focus:border-accent"
               />

@@ -48,9 +48,12 @@ export interface SchedulerLoop {
 }
 
 export function createSchedulerLoop(input: SchedulerLoopInput): SchedulerLoop {
-  let timer: NodeJS.Timeout | null = null;
+  // ReturnType works in both Node (Timeout) and the renderer (number).
+  let timer: ReturnType<typeof setInterval> | null = null;
 
   const tick = (now = Date.now()): void => {
+    // The whole tick is synchronous: nothing can interleave between
+    // getState and setState, so callers get a consistent read-commit cycle.
     try {
       const state = input.getState();
       const selection = selectRunnableTasks(
@@ -84,7 +87,11 @@ export function createSchedulerLoop(input: SchedulerLoopInput): SchedulerLoop {
     start() {
       if (timer) return;
       timer = setInterval(() => tick(), input.intervalMs ?? DEFAULT_TICK_INTERVAL_MS);
-      timer.unref();
+      // Node-only: keeps the timer from holding the process open. The
+      // renderer's interval handle is a number with no unref.
+      if (typeof (timer as { unref?: unknown }).unref === "function") {
+        (timer as { unref: () => void }).unref();
+      }
     },
     stop() {
       if (!timer) return;

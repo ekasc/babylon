@@ -109,6 +109,22 @@ describe("scheduler loop", () => {
     expect(Object.keys(ctx.state.attention.items)).toHaveLength(1);
   });
 
+  it("tolerates timers without unref, as in the browser renderer", () => {
+    const ctx = input();
+    const original = globalThis.setInterval;
+    // Simulate a renderer: setInterval returns a bare handle with no unref.
+    (globalThis as { setInterval: unknown }).setInterval = (fn: () => void) => original(fn, 1000);
+    try {
+      const loop = createSchedulerLoop(ctx);
+      expect(() => loop.start()).not.toThrow();
+      expect(loop.running()).toBe(true);
+      loop.stop();
+      expect(loop.running()).toBe(false);
+    } finally {
+      (globalThis as { setInterval: unknown }).setInterval = original;
+    }
+  });
+
   it("respects the background policy gate", () => {
     const ctx = input({ policy: () => ({ ...defaultPolicy(), mode: "never" }) });
     ctx.state.schedule = registerScheduledTask(ctx.state.schedule, task("s1"));
