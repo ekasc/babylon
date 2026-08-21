@@ -19,7 +19,12 @@ import { ProcessPanel } from "./components/ProcessPanel";
 import { PreviewPanel } from "./components/PreviewPanel";
 import { AttentionPanel } from "./components/AttentionPanel";
 import { DevicesPanel } from "./components/DevicesPanel";
+import { AutomationPanel } from "./components/AutomationPanel";
 import { createDeviceRegistry, type DeviceRegistry } from "./device-pairing";
+import { createScheduledTaskRegistry, type ScheduledTaskRegistry } from "./automation";
+import { createAutomationHistory, type AutomationHistory } from "./automation-runner";
+import { createSchedulerLoop } from "./scheduler-loop";
+import { defaultPolicy as defaultBackgroundPolicy } from "./background-policy";
 import { addAttention, listAttention, removeAttention, type AttentionRegistry } from "./attention";
 import type { Plan } from "./plans";
 import type { ProcessRegistry } from "./process-model";
@@ -162,7 +167,39 @@ export default function App() {
   const [attention, setAttention] = useState<AttentionRegistry>({ items: {} });
   const [showDevices, setShowDevices] = useState(false);
   const [devices, setDevices] = useState<DeviceRegistry>(() => createDeviceRegistry());
-  const [history, setHistory] = useState<HistoryProjection>({ turns: [], leafId: null, hasBranches: false });
+  const [showAutomation, setShowAutomation] = useState(false);
+  const [schedule, setSchedule] = useState<ScheduledTaskRegistry>(createScheduledTaskRegistry);
+  const [automationHistory, setAutomationHistory] = useState<AutomationHistory>(createAutomationHistory);
+
+  // Scheduler loop (Phase 8): drives due automation tasks on an interval.
+  // Refs give the loop a stable read of the latest committed state without
+  // re-creating it on every render.
+  const scheduleRef = useRef(schedule);
+  scheduleRef.current = schedule;
+  const automationHistoryRef = useRef(automationHistory);
+  automationHistoryRef.current = automationHistory;
+  const attentionRef = useRef(attention);
+  attentionRef.current = attention;
+  useEffect(() => {
+    const loop = createSchedulerLoop({
+      getState: () => ({
+        schedule: scheduleRef.current,
+        history: automationHistoryRef.current,
+        attention: attentionRef.current,
+      }),
+      setState: (next) => {
+        setSchedule(next.schedule);
+        setAutomationHistory(next.history);
+        setAttention(next.attention);
+      },
+      policy: () => defaultBackgroundPolicy(),
+      run: () => ({ success: false, error: "no automation executor configured in this build" }),
+      onError: (err) => console.error("scheduler tick failed:", err),
+    });
+    loop.start();
+    return () => loop.stop();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);  const [history, setHistory] = useState<HistoryProjection>({ turns: [], leafId: null, hasBranches: false });
   const [historyRevision, setHistoryRevision] = useState(0);
   const [rollbackPlan, setRollbackPlan] = useState<RollbackPlan | null>(null);
   const [rollbackBusy, setRollbackBusy] = useState(false);
@@ -1193,6 +1230,14 @@ export default function App() {
               >
                 Devices
               </button>
+              <button
+                onClick={() => setShowAutomation((open) => !open)}
+                title="Scheduled tasks"
+                aria-pressed={showAutomation}
+                className={`thread-action ${showAutomation ? "is-active" : ""}`}
+              >
+                Auto
+              </button>
               <button onClick={() => setShowCommandPalette(true)} title="Search and commands (⌘K)" className="thread-action">
                 <FolderIcon size={16} />
               </button>
@@ -1328,6 +1373,14 @@ export default function App() {
                 .join("");
             },
           }}
+        />
+      ) : null}
+      {showAutomation ? (
+        <AutomationPanel
+          schedule={schedule}
+          setSchedule={setSchedule}
+          history={automationHistory}
+          onClose={() => setShowAutomation(false)}
         />
       ) : null}
       <ApprovalGate />

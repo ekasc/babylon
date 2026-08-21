@@ -1,6 +1,6 @@
 # Babylon Roadmap
 
-> Last updated: 2026-08-20 · 15 of 16 features done, 1 partial. 338 tests on `main` (`tsc` clean).
+> Last updated: 2026-08-20 · 16 of 16 features done. 344 tests on `main` (`tsc` clean). Cross-cutting infrastructure (event sourcing, ownership enforcement, observability surface) remains open as its own track.
 
 Babylon is a secure desktop workspace for the Pi coding agent. The next phase should focus on execution infrastructure rather than adding more chat surface area.
 
@@ -25,7 +25,7 @@ The goal is to make Babylon capable of safely running long-lived, parallel softw
 | 6 · Control Plane | 13. Extract runtime into Babylon daemon | **Done** | `src/daemon-transport.ts` + `daemon-server.ts` + `daemon-client.ts` + `daemon/main.ts` (framed socket transport, persistence, reconnect, standalone process) · Phase 6 PR |
 |  | 14. Background execution policies | **Done** | `src/background-policy.ts` + `src/scheduler.ts` + `src/background-controller.ts` enforced by the daemon tick loop · Phase 6 PR |
 | 7 · Remote Control | 15. Remote and mobile control | **Done** | `src/device-pairing.ts` + `src/remote-auth.ts` + `src/remote-actions.ts` + `src/remote-server.ts` (token auth, scoped actions, attention push) + `DevicesPanel.tsx` · Phase 7 PR |
-| 8 · Automation | 16. Scheduled and conditional tasks | **Partial** | `src/automation.ts` (#11), `src/scheduler.ts` (#12), `src/automation-runner.ts` (#16); automation UI still to do |
+| 8 · Automation | 16. Scheduled and conditional tasks | **Done** | `src/automation.ts` + `src/scheduler.ts` + `src/automation-runner.ts` + `src/scheduler-loop.ts` (interval loop with error isolation) + `AutomationPanel.tsx` · Phase 8 PR |
 | Cross-cutting | Event model / stable ownership / observability | **Partial** | Stable ids and `makeId`, protocol envelopes with stable ids; full event sourcing and diagnostics surface still to do |
 
 Check the box when the feature has a pure, tested model merged to `main` and, where the roadmap requires it, a desktop surface. Partial means the model exists but the daemon/process/transport/UI wiring is still open.
@@ -150,7 +150,7 @@ Check the box when the feature has a pure, tested model merged to `main` and, wh
 
 ## Phase 8: Automation
 
-- [ ] **16. Scheduled and conditional tasks** — allow Babylon tasks to run without an open foreground session after background execution is reliable. Partially done: `src/automation.ts` trigger model (#11), `src/scheduler.ts` due-task evaluation (#12), and `src/automation-runner.ts` executor with history and inbox (#16). Remaining: scheduler loop and automation UI.
+- [x] **16. Scheduled and conditional tasks** — allow Babylon tasks to run without an open foreground session after background execution is reliable. Done: `src/scheduler-loop.ts` (interval-driven loop over the pure tick, getter/setter state boundaries, per-tick error isolation) and the `AutomationPanel` surface (create interval/daily/file-watch/branch-watch tasks, enable/disable, remove, run history with contract outcomes). Reuses the permission system via the background policy gate and completion contracts via the executor; every run creates history; failures enter the Attention Inbox. Phase 8 PR.
 
   Examples: run dependency checks every morning, review new CI failures, watch for file or branch change, periodically run repository health check, notify when long-running task finishes. Requirements: reuse same permission system and completion contracts; every automation run creates inspectable history; automation failures enter Attention Inbox; no hidden background agents.
 
