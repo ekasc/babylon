@@ -18,7 +18,7 @@ import {
   type ProtocolEnvelope,
 } from "./daemon-protocol";
 import { createFrameDecoder, encodeFrame } from "./daemon-transport";
-import { touchDevice, type DeviceRegistry } from "./device-pairing";
+import { touchDevice, isAuthorized, type DeviceRegistry } from "./device-pairing";
 import { verifyToken } from "./remote-auth";
 import { authorizeAction, REMOTE_ACTION_KINDS, type RemoteActionKind } from "./remote-actions";
 
@@ -61,6 +61,9 @@ interface RemoteSession {
   deviceId: string | null;
 }
 
+/** Hash of an unusable token; compared against when the device is unknown. */
+const DUMMY_TOKEN_HASH = "0000000000000000000000000000000000000000000000000000000000000000";
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -93,16 +96,26 @@ export async function startRemoteServer(options: RemoteServerOptions): Promise<R
       const payload = request.payload as { deviceId?: unknown; token?: unknown };
       const deviceId = typeof payload?.deviceId === "string" ? payload.deviceId : "";
       const token = typeof payload?.token === "string" ? payload.token : "";
+      if (session.deviceId) {
+        // One socket, one identity: switching devices mid-session would let a
+        // compromised low-scope client trade up to another grant.
+        send(socket, createEnvelope("response", "error", { error: "socket is already authenticated" }, request.id));
+        return;
+      }
+      // Always run one hash comparison so response timing does not reveal
+      // whether a device id exists, is revoked, or has no token set.
       const device = currentRegistry().devices[deviceId];
-      if (!device || device.revoked || !device.tokenHash || !verifyToken(token, device.tokenHash)) {
-        // One generic reason: do not tell an unauthenticated peer which part failed.
+      const expectedHash =
+        device && !device.revoked && device.tokenHash ? device.tokenHash : DUMMY_TOKEN_HASH;
+      if (!verifyToken(token, expectedHash) || !device || device.revoked || !device.tokenHash) {
         send(socket, createEnvelope("response", "error", { error: "authentication failed" }, request.id));
         return;
       }
       session.deviceId = deviceId;
       sessions.set(socket, session);
-      const touched = touchDevice(currentRegistry(), deviceId, now());
-      if (touched !== currentRegistry()) {
+      const reg = currentRegistry();
+      const touched = touchDevice(reg, deviceId, now());
+      if (touched !== reg) {
         options.onRegistryChange?.(touched);
       }
       send(socket, createEnvelope("response", "remote.auth", { deviceId, ok: true }, request.id));
@@ -241,8 +254,7 @@ export async function startRemoteServer(options: RemoteServerOptions): Promise<R
       const event = createEnvelope("event", "attention.raised", item);
       for (const [socket, session] of sessions) {
         if (!session.deviceId) continue;
-        const device = currentRegistry().devices[session.deviceId];
-        if (!device || device.revoked || !device.scope.includes("receive_attention")) continue;
+        if (!isAuthorized(currentRegistry(), session.deviceId, "receive_attention")) continue;
         send(socket, event);
       }
     },

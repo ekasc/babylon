@@ -59,7 +59,7 @@ export function DevicesPanel({
     }
     const token = pairingCrypto.newToken();
     const tokenHash = await pairingCrypto.hash(token);
-    const id = `dev-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    const id = crypto.randomUUID();
     const result = pairDevice(registry, { id, name: name.trim(), scope, tokenHash, now: Date.now() });
     if (typeof result === "string") {
       setError(result);
