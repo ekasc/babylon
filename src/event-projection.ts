@@ -98,18 +98,27 @@ export function projectEvents(events: BabylonEvent[]): RuntimeProjection {
   return projection;
 }
 
+function payloadId(event: BabylonEvent): string | undefined {
+  const id = event.payload.id;
+  return typeof id === "string" && id.length > 0 ? id : undefined;
+}
+
 /**
- * The id an event is "about". Events carry their subject in the payload under
- * a conventional key matching the most specific ownership reference; tasks use
- * taskId, attention uses its own item id, and so on.
+ * The id an event is "about", resolved per event type so a generically
+ * stamped owner (e.g. a sessionId on an attention event) cannot hijack the
+ * subject. Attention and plan events carry their item id in payload.id.
  */
 function subjectOf(event: BabylonEvent): string {
-  for (const key of ["taskId", "processId", "sessionId"] as const) {
-    const value = event.owner[key];
-    if (value) return value;
+  switch (event.type) {
+    case "task.blocked":
+    case "task.completed":
+      return event.owner.taskId ?? payloadId(event) ?? `${event.type}:${event.id}`;
+    case "process.started":
+    case "process.exited":
+      return event.owner.processId ?? payloadId(event) ?? `${event.type}:${event.id}`;
+    default:
+      return payloadId(event) ?? `${event.type}:${event.id}`;
   }
-  const payloadId = event.payload.id;
-  return typeof payloadId === "string" ? payloadId : `${event.type}:${event.id}`;
 }
 
 /** Ownership coverage: how many events name each kind of owner. */

@@ -1,5 +1,7 @@
 import type { DiagnosticsSnapshot } from "../diagnostics";
 
+import { exportDiagnostics } from "../diagnostics";
+
 function Row({ label, value }: { label: string; value: string | number }) {
   return (
     <div className="flex items-center justify-between gap-3 text-[12.5px]">
@@ -90,9 +92,8 @@ export function DiagnosticsPanel({
 
         <button
           onClick={() => {
-            void navigator.clipboard
-              .writeText(JSON.stringify(snapshot, null, 2))
-              .catch(() => undefined);
+            // Optional chaining: clipboard is undefined outside secure contexts.
+            navigator.clipboard?.writeText(exportDiagnostics(snapshot))?.catch(() => undefined);
           }}
           className="mt-4 w-full rounded-lg bg-accent px-3 py-1.5 text-[12.5px] font-semibold text-bg hover:opacity-90"
         >

@@ -81,6 +81,9 @@ export function validateEvent(event: unknown): string | null {
       if (typeof value !== "string" || value.length === 0) return `ownership ${key} must be a non-empty string`;
     }
   }
+  // Payloads are trusted internal data: they carry ids and counts, never
+  // prompt text or tool output (diagnostics depends on that guarantee).
+  // They are shape-checked here but their keys are not restricted.
   if (event.payload !== undefined && !isPlainObject(event.payload)) return "event payload must be an object";
   return null;
 }
@@ -88,13 +91,16 @@ export function validateEvent(event: unknown): string | null {
 /**
  * Append one event. The log is append-only: duplicate ids are rejected rather
  * than overwritten, and malformed events are refused so a bad producer cannot
- * poison replay.
+ * poison replay. Ids are trimmed before the duplicate check so "e1" and " e1 "
+ * cannot coexist. Duplicate detection is a linear scan; fine for the bounded
+ * diagnostics volumes this log holds.
  */
 export function appendEvent(log: EventLog, event: BabylonEvent): EventLog | string {
   const problem = validateEvent(event);
   if (problem) return problem;
-  if (log.events.some((e) => e.id === event.id)) return `event ${event.id} already exists`;
-  return { events: [...log.events, event] };
+  const normalized: BabylonEvent = { ...event, id: event.id.trim() };
+  if (log.events.some((e) => e.id === normalized.id)) return `event ${normalized.id} already exists`;
+  return { events: [...log.events, normalized] };
 }
 
 export function newEventId(): string {
