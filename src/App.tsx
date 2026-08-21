@@ -18,6 +18,8 @@ import { PlansPanel } from "./components/PlansPanel";
 import { ProcessPanel } from "./components/ProcessPanel";
 import { PreviewPanel } from "./components/PreviewPanel";
 import { AttentionPanel } from "./components/AttentionPanel";
+import { DevicesPanel } from "./components/DevicesPanel";
+import { createDeviceRegistry, type DeviceRegistry } from "./device-pairing";
 import { addAttention, listAttention, removeAttention, type AttentionRegistry } from "./attention";
 import type { Plan } from "./plans";
 import type { ProcessRegistry } from "./process-model";
@@ -158,6 +160,8 @@ export default function App() {
   const [previewRegistry, setPreviewRegistry] = useState<PreviewRegistry>({ servers: {} });
   const [showAttention, setShowAttention] = useState(false);
   const [attention, setAttention] = useState<AttentionRegistry>({ items: {} });
+  const [showDevices, setShowDevices] = useState(false);
+  const [devices, setDevices] = useState<DeviceRegistry>(() => createDeviceRegistry());
   const [history, setHistory] = useState<HistoryProjection>({ turns: [], leafId: null, hasBranches: false });
   const [historyRevision, setHistoryRevision] = useState(0);
   const [rollbackPlan, setRollbackPlan] = useState<RollbackPlan | null>(null);
@@ -1181,6 +1185,14 @@ export default function App() {
                   <span className="sidebar-count absolute -right-1 -top-1">{unresolvedAttention}</span>
                 ) : null}
               </button>
+              <button
+                onClick={() => setShowDevices((open) => !open)}
+                title="Paired devices"
+                aria-pressed={showDevices}
+                className={`thread-action ${showDevices ? "is-active" : ""}`}
+              >
+                Devices
+              </button>
               <button onClick={() => setShowCommandPalette(true)} title="Search and commands (⌘K)" className="thread-action">
                 <FolderIcon size={16} />
               </button>
@@ -1297,6 +1309,25 @@ export default function App() {
           registry={attention}
           setRegistry={setAttention}
           onClose={() => setShowAttention(false)}
+        />
+      ) : null}
+      {showDevices ? (
+        <DevicesPanel
+          registry={devices}
+          setRegistry={setDevices}
+          onClose={() => setShowDevices(false)}
+          pairingCrypto={{
+            newToken: () =>
+              Array.from(crypto.getRandomValues(new Uint8Array(16)))
+                .map((b) => b.toString(16).padStart(2, "0"))
+                .join(""),
+            hash: async (token) => {
+              const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+              return Array.from(new Uint8Array(bytes))
+                .map((b) => b.toString(16).padStart(2, "0"))
+                .join("");
+            },
+          }}
         />
       ) : null}
       <ApprovalGate />

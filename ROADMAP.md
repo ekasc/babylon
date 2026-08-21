@@ -1,6 +1,6 @@
 # Babylon Roadmap
 
-> Last updated: 2026-08-20 · 14 of 16 features done, 2 partial. 332 tests on `main` (`tsc` clean).
+> Last updated: 2026-08-20 · 15 of 16 features done, 1 partial. 338 tests on `main` (`tsc` clean).
 
 Babylon is a secure desktop workspace for the Pi coding agent. The next phase should focus on execution infrastructure rather than adding more chat surface area.
 
@@ -24,7 +24,7 @@ The goal is to make Babylon capable of safely running long-lived, parallel softw
 |  | 12. Hook system | **Done** | `src/hooks.ts` · PR #7 |
 | 6 · Control Plane | 13. Extract runtime into Babylon daemon | **Done** | `src/daemon-transport.ts` + `daemon-server.ts` + `daemon-client.ts` + `daemon/main.ts` (framed socket transport, persistence, reconnect, standalone process) · Phase 6 PR |
 |  | 14. Background execution policies | **Done** | `src/background-policy.ts` + `src/scheduler.ts` + `src/background-controller.ts` enforced by the daemon tick loop · Phase 6 PR |
-| 7 · Remote Control | 15. Remote and mobile control | **Partial** | `src/device-pairing.ts` (#10); transport + actions + pairing UI still to do |
+| 7 · Remote Control | 15. Remote and mobile control | **Done** | `src/device-pairing.ts` + `src/remote-auth.ts` + `src/remote-actions.ts` + `src/remote-server.ts` (token auth, scoped actions, attention push) + `DevicesPanel.tsx` · Phase 7 PR |
 | 8 · Automation | 16. Scheduled and conditional tasks | **Partial** | `src/automation.ts` (#11), `src/scheduler.ts` (#12), `src/automation-runner.ts` (#16); automation UI still to do |
 | Cross-cutting | Event model / stable ownership / observability | **Partial** | Stable ids and `makeId`, protocol envelopes with stable ids; full event sourcing and diagnostics surface still to do |
 
@@ -144,7 +144,7 @@ Check the box when the feature has a pure, tested model merged to `main` and, wh
 
 ## Phase 7: Remote Control
 
-- [ ] **15. Remote and mobile control** — inspect and control active Babylon tasks from another trusted device. Partially done: `src/device-pairing.ts` (`PairedDevice` with scope/createdAt/lastSeenAt/revoked, `DeviceRegistry` no-clobber) (#10). Remaining: remote transport, remote actions, pairing UI.
+- [x] **15. Remote and mobile control** — inspect and control active Babylon tasks from another trusted device. Done: `src/device-pairing.ts` (token-hash grants, `pairDevice` validation), `src/remote-auth.ts` (sha256 hashing, timing-safe verify), `src/remote-actions.ts` (one action, one scope), `src/remote-server.ts` (token auth over the framed transport, per-request scope checks, mid-session revocation, attention push to `receive_attention` devices, last-seen tracking), and the `DevicesPanel` pairing surface (token shown once, scope picker, revoke). Phase 7 PR.
 
   Initial remote scope intentionally small: view active tasks, view current agent state, receive attention notifications, approve/deny actions, answer agent questions, stop/pause/resume tasks, view concise diffs and completion state. Do not recreate the entire desktop workspace on mobile. Pairing uses explicit device pairing with revocable grants; each device has identity, authorization scope, creation time, last-seen time, revoke control.
 
