@@ -106,6 +106,61 @@ describe("runtime diagnostics", () => {
     expect(snapshot.events?.byType["task.blocked"]).toBe(1);
   });
 
+  it("reports observed vs unobserved event types as runtime visibility", () => {
+    let log = createEventLog();
+    const events: BabylonEvent[] = [
+      { id: "e1", type: "message.sent", ts: 10, owner: { sessionId: "s1" }, payload: {} },
+      { id: "e2", type: "turn.completed", ts: 20, owner: { sessionId: "s1" }, payload: {} },
+    ];
+    for (const e of events) {
+      const out = appendEvent(log, e);
+      if (typeof out === "string") throw new Error(out);
+      log = out;
+    }
+    const snapshot = collectDiagnostics({ now: 30, events: log });
+    expect(snapshot.events?.observedTypes).toEqual(["message.sent", "turn.completed"]);
+    // Every catalog type is accounted for exactly once across the two lists.
+    expect(snapshot.events?.unobservedTypes).toContain("process.started");
+    expect(snapshot.events?.unobservedTypes).not.toContain("message.sent");
+    expect(snapshot.events!.observedTypes.length + snapshot.events!.unobservedTypes.length).toBe(16);
+    // Unobserved is session visibility, not a defect claim: the label lives in
+    // the panel; here we only assert the data stays factual.
+    const exported = exportDiagnostics(snapshot);
+    expect(exported).toContain("unobservedTypes");
+  });
+
+  it("keeps the privacy guarantee intact under the typed payload contracts", () => {
+    let log = createEventLog();
+    const events: BabylonEvent[] = [
+      {
+        id: "e1",
+        type: "approval.resolved",
+        ts: 10,
+        owner: {},
+        payload: { id: "a1", decision: "deny" },
+      },
+      {
+        id: "e2",
+        type: "tool.completed",
+        ts: 20,
+        owner: { sessionId: "s1", toolRunId: "c1" },
+        payload: { toolCallId: "c1", isError: false },
+      },
+    ];
+    for (const e of events) {
+      const out = appendEvent(log, e);
+      if (typeof out === "string") throw new Error(out);
+      log = out;
+    }
+    const exported = exportDiagnostics(collectDiagnostics({ now: 30, events: log }));
+    // The export is aggregates only: no payload values (ids, decisions, flags)
+    // and never any content.
+    for (const forbidden of ["rm -rf", "token", "prompt text", "MUTATED", '"a1"', '"c1"', "deny"]) {
+      expect(exported).not.toContain(forbidden);
+    }
+    expect(exported).toContain('"approval.resolved": 1');
+  });
+
   it("produces stable, sorted exports", () => {
     const a = collectDiagnostics({ now: 1, policy: defaultPolicy() });
     const b = collectDiagnostics({ now: 1, policy: defaultPolicy() });

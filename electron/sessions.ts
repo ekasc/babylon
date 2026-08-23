@@ -334,7 +334,14 @@ function projectMessages(entries: any[]): any[] {
   const messages: any[] = [];
   for (const entry of entries) {
     if (entry?.type === "message" && entry.message) {
-      messages.push({ ...clampToolOutput(entry.message), entryId: entry.id });
+      const ts = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : NaN;
+      messages.push({
+        ...clampToolOutput(entry.message),
+        entryId: entry.id,
+        // Carry the entry's wall-clock time: recap merging interleaves by
+        // timestamp, and recap scheduling keys off the newest message time.
+        ...(Number.isFinite(ts) ? { timestamp: ts } : {}),
+      });
     } else if (entry?.type === "custom_message") {
       messages.push({
         role: "custom",

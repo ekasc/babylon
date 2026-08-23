@@ -23,11 +23,13 @@ const api = {
   getStats: (): Promise<any> => ipcRenderer.invoke("pideck:get-stats"),
   gitStatus: (cwd: string): Promise<any> => ipcRenderer.invoke("pideck:git-status", cwd),
   gitStatusDetails: (cwd: string): Promise<any> => ipcRenderer.invoke("pideck:git-status-details", cwd),
+  gitDiffFile: (cwd: string, file: string): Promise<string> => ipcRenderer.invoke("pideck:git-diff-file", cwd, file),
   gitBranches: (cwd: string): Promise<any> => ipcRenderer.invoke("pideck:git-branches", cwd),
   gitBranchCreate: (cwd: string, name: string, switchTo: boolean): Promise<any> =>
     ipcRenderer.invoke("pideck:git-branch-create", cwd, name, switchTo),
-  gitBranchSwitch: (cwd: string, name: string): Promise<any> =>
-    ipcRenderer.invoke("pideck:git-branch-switch", cwd, name),
+  gitBranchSwitch: (cwd: string, name: string, options?: { stash?: boolean }): Promise<any> =>
+    ipcRenderer.invoke("pideck:git-branch-switch", cwd, name, options),
+  gitStartCommitPush: (cwd: string): Promise<any> => ipcRenderer.invoke("pideck:git-start-commit-push", cwd),
   gitCommit: (cwd: string, message: string): Promise<any> => ipcRenderer.invoke("pideck:git-commit", cwd, message),
   gitPush: (cwd: string): Promise<any> => ipcRenderer.invoke("pideck:git-push", cwd),
   gitPull: (cwd: string): Promise<any> => ipcRenderer.invoke("pideck:git-pull", cwd),
@@ -121,6 +123,11 @@ const api = {
     const listener = (_e: unknown, req: any) => cb(req);
     ipcRenderer.on("pideck:approval-requested", listener);
     return () => ipcRenderer.removeListener("pideck:approval-requested", listener);
+  },
+  onApprovalCleared: (cb: (payload: { id: string }) => void): (() => void) => {
+    const listener = (_e: unknown, payload: any) => cb(payload);
+    ipcRenderer.on("pideck:approval-cleared", listener);
+    return () => ipcRenderer.removeListener("pideck:approval-cleared", listener);
   },
   onApprovalResolved: (cb: (payload: { id: string; choice: string }) => void): (() => void) => {
     const listener = (_e: unknown, payload: any) => cb(payload);

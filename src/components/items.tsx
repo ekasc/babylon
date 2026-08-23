@@ -113,6 +113,31 @@ function argSummary(name: string, args: any): string {
   }
 }
 
+/** Compact preview shown under a collapsed edit tool: hunk headers plus the
+ *  first few changed lines, so an edit is visible without expanding. */
+function miniPatch(patch: string, maxLines = 6): string {
+  const out: string[] = [];
+  let shown = 0;
+  let skipped = 0;
+  for (const line of patch.split("\n")) {
+    if (line.startsWith("@@")) {
+      out.push(line);
+      continue;
+    }
+    if (line.startsWith("+++") || line.startsWith("---")) continue;
+    if (line.startsWith("+") || line.startsWith("-")) {
+      if (shown < maxLines) {
+        out.push(line);
+        shown++;
+      } else {
+        skipped++;
+      }
+    }
+  }
+  if (skipped > 0) out.push(`… ${skipped} more changed line${skipped === 1 ? "" : "s"} — expand for full diff`);
+  return out.join("\n");
+}
+
 export const ToolCard = memo(function ToolCard({ item }: { item: Extract<ChatItem, { kind: "tool" }> }) {
   const [open, setOpen] = useState(false);
   const [fullOutput, setFullOutput] = useState<string | null>(null);
@@ -139,6 +164,11 @@ export const ToolCard = memo(function ToolCard({ item }: { item: Extract<ChatIte
           <ChevronIcon size={10} />
         </span>
       </button>
+      {!open && hasPatch ? (
+        <div className="ml-5 mt-1 border-l border-line pl-3">
+          <DiffView patch={miniPatch(patch)} />
+        </div>
+      ) : null}
       {open && (
         <div className="ml-5 mt-1 border-l border-line pl-3">
           {hasPatch ? (
@@ -178,6 +208,32 @@ function ToolStatusDot({ status }: { status: string }) {
   const color = status === "error" ? "bg-err" : status === "done" ? "bg-ok" : "bg-dim";
   return <span className={`inline-block h-2 w-2 rounded-full ${color}`} />;
 }
+
+/** Collapses a run of consecutive tool calls into one summary row. */
+export const ToolGroup = memo(function ToolGroup({ tools }: { tools: Array<Extract<ChatItem, { kind: "tool" }>> }) {
+  const [open, setOpen] = useState(false);
+  const anyRunning = tools.some((t) => t.status === "running" || t.status === "pending");
+  const anyError = tools.some((t) => t.status === "error");
+
+  return (
+    <div className="conversation-tool">
+      <button onClick={() => setOpen(!open)} className="flex w-full items-center gap-2 py-1.5 text-left">
+        <ToolStatusDot status={anyRunning ? "running" : anyError ? "error" : "done"} />
+        <span className="text-[13px] font-medium">{tools.length} tool calls made</span>
+        <span className={`shrink-0 text-dim transition-transform ${open ? "rotate-90" : ""}`}>
+          <ChevronIcon size={10} />
+        </span>
+      </button>
+      {open && (
+        <div className="ml-1 mt-0.5 border-l border-line pl-1">
+          {tools.map((t) => (
+            <ToolCard key={t.key} item={t} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+});
 
 // ---------------------------------------------------------------------------
 // Diffs (edit tool `details.patch`/`details.diff`)

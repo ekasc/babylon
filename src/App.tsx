@@ -4,6 +4,9 @@ import { initialState, mergeLiveMessages, reducer } from "./store";
 import { shouldAcceptEvent } from "./sessionLifecycle";
 import { insertCommand } from "./commands";
 import Sidebar from "./components/Sidebar";
+import SettingsPage from "./components/SettingsPage";
+import { applyTheme, loadThemePref, type ThemePref } from "./lib/theme";
+import ProjectFilter from "./components/ProjectFilter";
 import ChatView from "./components/ChatView";
 import Composer, { type Attachment } from "./components/Composer";
 import DialogHost from "./components/DialogHost";
@@ -13,21 +16,23 @@ import WorkspacePane from "./components/WorkspacePane";
 import { RollbackConfirm, RollbackDock } from "./components/Rollback";
 import { WorktreeBanner, WorktreeModal, type WorktreeInfo } from "./components/Worktree";
 import { ApprovalGate } from "./components/ApprovalGate";
-import { PermissionsPanel } from "./components/PermissionsPanel";
-import { PlansPanel } from "./components/PlansPanel";
-import { ProcessPanel } from "./components/ProcessPanel";
-import { PreviewPanel } from "./components/PreviewPanel";
-import { AttentionPanel } from "./components/AttentionPanel";
-import { DevicesPanel } from "./components/DevicesPanel";
-import { AutomationPanel } from "./components/AutomationPanel";
-import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
+import GitView from "./components/GitView";
+// Overlay panels are rarely needed at boot; lazy-load them so they stay out
+// of the startup bundle.
+const ProcessPanel = lazy(() => import("./components/ProcessPanel").then((m) => ({ default: m.ProcessPanel })));
+const PreviewPanel = lazy(() => import("./components/PreviewPanel").then((m) => ({ default: m.PreviewPanel })));
+const AttentionPanel = lazy(() => import("./components/AttentionPanel").then((m) => ({ default: m.AttentionPanel })));
+const DevicesPanel = lazy(() => import("./components/DevicesPanel").then((m) => ({ default: m.DevicesPanel })));
+const AutomationPanel = lazy(() => import("./components/AutomationPanel").then((m) => ({ default: m.AutomationPanel })));
+const DiagnosticsPanel = lazy(() => import("./components/DiagnosticsPanel").then((m) => ({ default: m.DiagnosticsPanel })));
 import { collectDiagnostics } from "./diagnostics";
+import { PromptHost, confirmAction, promptText } from "./lib/prompts";
 import { createDeviceRegistry, type DeviceRegistry } from "./device-pairing";
 import { createScheduledTaskRegistry, type ScheduledTaskRegistry } from "./automation";
 import { createAutomationHistory, type AutomationHistory } from "./automation-runner";
 import { createSchedulerLoop } from "./scheduler-loop";
 import { defaultPolicy as defaultBackgroundPolicy } from "./background-policy";
-import { appendEvent, createEventLog, newEventId, type BabylonEventType, type EventLog } from "./events";
+import { appendEvent, createBabylonEvent, createEventLog, type BabylonEvent, type BabylonEventType, type EventLog } from "./events";
 import { stampOwnership } from "./ownership";
 
 /** Map pi engine events onto the Babylon event catalog (diagnostics only). */
@@ -41,27 +46,53 @@ function mapAgentEventType(type: unknown): BabylonEventType | null {
       return "tool.started";
     case "tool_execution_end":
       return "tool.completed";
+    case "pideck_checkpoint_created":
+      return "checkpoint.created";
     default:
       return null;
   }
 }
+
+/**
+ * Build a Babylon event from a real Pi engine event. Ownership uses the
+ * runtime identity carried by the event itself (sessionId, toolCallId) — never
+ * whichever session happens to be open in the UI. Payloads stay flat ids and
+ * flags; no prompt text or tool output ever enters the log.
+ */
+function babylonEventFromAgentEvent(event: any): BabylonEvent | null {
+  const type = mapAgentEventType(event?.type);
+  if (!type) return null;
+  const sessionId =
+    typeof event.sessionId === "string" && event.sessionId ? event.sessionId : undefined;
+  const toolCallId =
+    typeof event.toolCallId === "string" && event.toolCallId ? event.toolCallId : undefined;
+  const owner = stampOwnership({
+    ...(sessionId ? { sessionId } : {}),
+    ...(toolCallId ? { toolRunId: toolCallId } : {}),
+  });
+  const payload: Record<string, string | number | boolean> = {};
+  if (toolCallId && (type === "tool.started" || type === "tool.completed")) {
+    payload.toolCallId = toolCallId;
+  }
+  if (type === "tool.completed" && typeof event.isError === "boolean") {
+    payload.isError = event.isError;
+  }
+  if (type === "checkpoint.created" && typeof event.userEntryId === "string" && event.userEntryId) {
+    payload.id = event.userEntryId;
+  }
+  return createBabylonEvent(type, { owner, payload });
+}
 import { addAttention, listAttention, removeAttention, type AttentionRegistry } from "./attention";
-import type { Plan } from "./plans";
 import type { ProcessRegistry } from "./process-model";
 import type { PreviewRegistry } from "./preview-model";
-import { FlaskIcon, FolderIcon, LayersIcon, MoreIcon, PiMark, ShieldIcon } from "./components/icons";
+import { ChevronIcon, FlaskIcon, FolderIcon, LayersIcon, MoreIcon, PiMark } from "./components/icons";
 
 const BranchPanel = lazy(() => import("./components/BranchPanel"));
 const WorkflowsPanel = lazy(() => import("./components/WorkflowsPanel"));
 const CommandPalette = lazy(() => import("./components/CommandPalette"));
 
-function shortPath(cwd?: string): string {
-  if (!cwd) return "Babylon";
-  const parts = cwd.split("/").filter(Boolean);
-  return parts.slice(-2).join("/") || cwd;
-}
-
 function StatusDot({ status, working }: { status: string; working: boolean }) {
+  const label = status === "ready" ? (working ? "Working" : "Ready") : status === "starting" ? "Starting" : status === "error" ? "Error" : status;
   const cls =
     status === "ready"
       ? working
@@ -72,7 +103,7 @@ function StatusDot({ status, working }: { status: string; working: boolean }) {
         : status === "error"
           ? "bg-err"
           : "bg-dim";
-  return <span className={`inline-block h-2 w-2 rounded-full ${cls}`} />;
+  return <span role="status" aria-label={`Agent status: ${label}`} title={label} className={`inline-block h-2 w-2 rounded-full ${cls}`} />;
 }
 
 export default function App() {
@@ -166,6 +197,8 @@ export default function App() {
   const [status, setStatus] = useState<SessionStatus>({ status: "idle" });
   const [projectFilter, setProjectFilter] = useState("all");
   const [models, setModels] = useState<any[]>([]);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [themePref, setThemePref] = useState<ThemePref>(loadThemePref);
   const [commands, setCommands] = useState<CommandInfo[]>([]);
   const [agentState, setAgentState] = useState<any>(null);
   const [gitStatuses, setGitStatuses] = useState<Record<string, GitStatusResult>>({});
@@ -174,11 +207,11 @@ export default function App() {
   const [worktreeInfo, setWorktreeInfo] = useState<WorktreeInfo | null>(null);
   const [showWorktreeModal, setShowWorktreeModal] = useState(false);
   const [showBranchPanel, setShowBranchPanel] = useState(false);
+  const [showGitView, setShowGitView] = useState(false);
   const [showWorkflowsPanel, setShowWorkflowsPanel] = useState(false);
   const [showCommandPalette, setShowCommandPalette] = useState(false);
-  const [showPermissions, setShowPermissions] = useState(false);
-  const [showPlans, setShowPlans] = useState(false);
-  const [plans, setPlans] = useState<Record<string, Plan>>({});
+
+  const [panelsMenuOpen, setPanelsMenuOpen] = useState(false);
   const [showProcesses, setShowProcesses] = useState(false);
   const [processRegistry, setProcessRegistry] = useState<ProcessRegistry>({ processes: {} });
   const [showPreview, setShowPreview] = useState(false);
@@ -192,6 +225,21 @@ export default function App() {
   const [automationHistory, setAutomationHistory] = useState<AutomationHistory>(createAutomationHistory);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [eventLog, setEventLog] = useState<EventLog>(createEventLog);
+
+  // Append a batch of Babylon events to the diagnostics log. Invalid events
+  // are skipped (appendEvent returns the reason); the log stays bounded so a
+  // long session cannot grow it without limit.
+  const appendEvents = useCallback((incoming: BabylonEvent[]) => {
+    if (incoming.length === 0) return;
+    setEventLog((prev) => {
+      let next = prev;
+      for (const e of incoming) {
+        const out = appendEvent(next, e);
+        if (typeof out !== "string") next = out;
+      }
+      return next.events.length > 500 ? { events: next.events.slice(-500) } : next;
+    });
+  }, []);
 
   // Scheduler loop (Phase 8): drives due automation tasks on an interval.
   // Refs give the loop a stable read of the latest committed state without
@@ -227,8 +275,15 @@ export default function App() {
   const [rollbackBusy, setRollbackBusy] = useState(false);
   const [contextWidth, setContextWidth] = useState(() => {
     const stored = Number(localStorage.getItem("pideck:context-width"));
-    return Number.isFinite(stored) && stored >= 360 && stored <= 760 ? stored : 520;
+    return Number.isFinite(stored) && stored >= 360 && stored <= 1100 ? stored : 520;
   });
+  // Give Git enough room on first open, then trust the user's resize exactly.
+  // This effect runs once per closed→open transition; it never fights dragging.
+  useEffect(() => {
+    if (!showGitView) return;
+    const initial = Math.min(760, Math.max(520, window.innerWidth - 560));
+    setContextWidth((width) => Math.max(width, initial));
+  }, [showGitView]);
   const [sidebarMinimized, setSidebarMinimized] = useState(() => localStorage.getItem("pideck:sidebar-minimized") === "1");
   const [draftRequest, setDraftRequest] = useState<{ id: number; text: string } | null>(null);
   const [promotedParent, setPromotedParent] = useState<{ path: string; cwd: string } | null>(null);
@@ -269,8 +324,8 @@ export default function App() {
     }
   }, [settledView]);
 
-  const renameSession = (path: string) => {
-    const name = window.prompt("Rename chat");
+  const renameSession = async (path: string) => {
+    const name = await promptText({ title: "Rename chat", prefill: headerName ?? undefined, placeholder: "Session name" });
     if (!name) return;
     if (path === activeSessionPath) {
       void bridge.setSessionName(name);
@@ -299,6 +354,18 @@ export default function App() {
   // once the in-process switch completes — no Hero flash, no blocking.
   const [hasSession, setHasSession] = useState(false);
   const [liveReady, setLiveReady] = useState(false);
+  // The transcript's bottom padding must track the real composer dock height
+  // (it changes with the meta row, rollback dock, streaming controls), or the
+  // last messages clip beneath the dock.
+  const composerDockRef = useRef<HTMLDivElement | null>(null);
+  const [composerHeight, setComposerHeight] = useState(176);
+  useEffect(() => {
+    const el = composerDockRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => setComposerHeight(el.offsetHeight));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [hasSession]);
 
   // Debounce the "Preparing…" indicator: show it only when the host has been
   // not-ready for >250ms (cold first-opens), so sub-100ms switches never flash it.
@@ -381,30 +448,39 @@ export default function App() {
   }, []);
 
   const beginContextResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
     event.preventDefault();
     const pointerId = event.pointerId;
     const startX = event.clientX;
-    const startWidth = contextWidth;
-    event.currentTarget.setPointerCapture(pointerId);
-    const target = event.currentTarget;
-    const onMove = (move: PointerEvent) => {
-      if (move.pointerId !== pointerId) return;
-      const next = Math.max(360, Math.min(760, startWidth + startX - move.clientX));
-      setContextWidth(next);
-    };
-    const onEnd = (end: PointerEvent) => {
-      if (end.pointerId !== pointerId) return;
-      target.removeEventListener("pointermove", onMove);
-      target.removeEventListener("pointerup", onEnd);
-      target.removeEventListener("pointercancel", onEnd);
+    // Start from what is actually on screen, not a stored width that CSS may
+    // have clamped for this viewport.
+    const startWidth = event.currentTarget.parentElement?.getBoundingClientRect().width ?? contextWidth;
+    const maxWidth = Math.max(360, Math.min(1100, window.innerWidth - 120));
+    document.documentElement.classList.add("is-context-resizing");
+
+    const finish = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onEnd);
+      window.removeEventListener("pointercancel", onEnd);
+      window.removeEventListener("blur", finish);
+      document.documentElement.classList.remove("is-context-resizing");
       setContextWidth((width) => {
         localStorage.setItem("pideck:context-width", String(width));
         return width;
       });
     };
-    target.addEventListener("pointermove", onMove);
-    target.addEventListener("pointerup", onEnd);
-    target.addEventListener("pointercancel", onEnd);
+    const onMove = (move: PointerEvent) => {
+      if (move.pointerId !== pointerId) return;
+      setContextWidth(Math.max(360, Math.min(maxWidth, startWidth + startX - move.clientX)));
+    };
+    const onEnd = (end: PointerEvent) => {
+      if (end.pointerId === pointerId) finish();
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onEnd);
+    window.addEventListener("pointercancel", onEnd);
+    window.addEventListener("blur", finish);
   }, [contextWidth]);
 
   useEffect(() => {
@@ -421,6 +497,7 @@ export default function App() {
   // same request do not create duplicates. The user dismisses from the inbox.
   useEffect(() => {
     return bridge.onApprovalRequested((req) => {
+      appendEvents([createBabylonEvent("approval.requested", { payload: { id: req.id } })]);
       setAttention((prev) =>
         addAttention(prev, {
           id: `perm-${req.id}`,
@@ -433,15 +510,39 @@ export default function App() {
         })
       );
     });
-  }, [activeSessionPath, status.sessionPath]);
+  }, [activeSessionPath, status.sessionPath, appendEvents]);
 
   // Drop the matching attention item when the approval is actually resolved
   // (allowed or denied), so the inbox stops over-reporting outstanding work.
   useEffect(() => {
     return bridge.onApprovalResolved((payload) => {
+      appendEvents([
+        createBabylonEvent("approval.resolved", {
+          payload: { id: payload.id, decision: payload.choice },
+        }),
+      ]);
       setAttention((prev) => removeAttention(prev, `perm-${payload.id}`));
     });
-  }, []);
+  }, [appendEvents]);
+
+  // Attention lifecycle events: diff committed registry state so every real
+  // transition (permission raises, automation failures, dismissals, clears)
+  // is observed exactly once, regardless of which surface caused it. The
+  // attention item id is the subject; no owner ids are fabricated.
+  const prevAttentionRef = useRef(attention);
+  useEffect(() => {
+    const prev = prevAttentionRef.current;
+    prevAttentionRef.current = attention;
+    if (prev === attention) return;
+    const events: BabylonEvent[] = [];
+    for (const id of Object.keys(attention.items)) {
+      if (!prev.items[id]) events.push(createBabylonEvent("attention.created", { payload: { id } }));
+    }
+    for (const id of Object.keys(prev.items)) {
+      if (!attention.items[id]) events.push(createBabylonEvent("attention.resolved", { payload: { id } }));
+    }
+    appendEvents(events);
+  }, [attention, appendEvents]);
 
   useEffect(() => {
     if (status.status !== "ready") return;
@@ -488,22 +589,11 @@ export default function App() {
           switching: switchingRef.current,
         };
         let stateChanged = false;
-        const mapped: Parameters<typeof appendEvent>[1][] = [];
+        const mapped: BabylonEvent[] = [];
         for (const event of events) {
           if (shouldAcceptEvent(event, context)) dispatch({ type: "event", event });
-          const babylonType = mapAgentEventType(event?.type);
-          if (babylonType) {
-            mapped.push({
-              id: newEventId(),
-              type: babylonType,
-              ts: Date.now(),
-              owner: stampOwnership({
-                sessionId: activeSessionIdRef.current ?? undefined,
-                ...(event?.id !== undefined ? { toolRunId: String(event.id) } : {}),
-              }),
-              payload: {},
-            });
-          }
+          const babylonEvent = babylonEventFromAgentEvent(event);
+          if (babylonEvent) mapped.push(babylonEvent);
           if (
             event?.type === "agent_settled" ||
             event?.type === "agent_end" ||
@@ -512,23 +602,13 @@ export default function App() {
             stateChanged = true;
           }
         }
-        if (mapped.length > 0) {
-          setEventLog((prev) => {
-            let next = prev;
-            for (const e of mapped) {
-              const out = appendEvent(next, e);
-              if (typeof out !== "string") next = out;
-            }
-            // Bound the log so a long session cannot grow it without limit.
-            return next.events.length > 500 ? { events: next.events.slice(-500) } : next;
-          });
-        }
+        appendEvents(mapped);
         // Reflect engine-side state changes (model/thinking toggles, /fast,
         // session renames) in the status bar without waiting for the next
         // model/thinking/compact round-trip.
         if (stateChanged) bridge.getState().then(setAgentState).catch(() => {});
       }),
-    []
+    [appendEvents]
   );
 
   // Chunked transcript rendering: the full transcript is projected once (a
@@ -929,6 +1009,15 @@ export default function App() {
           images?.map((a) => ({ type: "image", data: a.data, mimeType: a.mimeType })),
           streamingBehavior
         );
+        // Real transition: the host accepted the prompt. Ownership is the live
+        // session's runtime id; no message id is fabricated when absent.
+        appendEvents([
+          createBabylonEvent("message.sent", {
+            owner: stampOwnership(
+              activeSessionIdRef.current ? { sessionId: activeSessionIdRef.current } : {}
+            ),
+          }),
+        ]);
         if (history.activeRollback) await hydrate();
         return true;
       } catch (e: any) {
@@ -937,7 +1026,7 @@ export default function App() {
         return false;
       }
     },
-    [history.activeRollback, hydrate, toast]
+    [history.activeRollback, hydrate, toast, appendEvents]
   );
 
   const abort = useCallback(async () => {
@@ -972,6 +1061,11 @@ export default function App() {
     [toast]
   );
 
+  // Theme is owned here (Settings → Appearance) and applied on change.
+  useEffect(() => {
+    applyTheme(themePref);
+  }, [themePref]);
+
   const compact = useCallback(async () => {
     try {
       await bridge.compact();
@@ -984,9 +1078,13 @@ export default function App() {
     async (keep: boolean) => {
       if (
         !keep &&
-        !window.confirm(
-          "Discard this worktree?\n\nThe worktree session (and its git worktree + pideck/* branch, if one was created) will be deleted.\n\nYour original session is untouched."
-        )
+        !(await confirmAction({
+          title: "Discard this worktree?",
+          message:
+            "The worktree session (and its git worktree + pideck/* branch, if one was created) will be deleted.\n\nYour original session is untouched.",
+          confirmLabel: "Discard",
+          danger: true,
+        }))
       ) {
         return;
       }
@@ -1053,7 +1151,7 @@ export default function App() {
   }, [rollbackBusy, hydrate, toast]);
 
   const forkCurrent = useCallback(async () => {
-    if (!window.confirm("Fork the current session into a separate session?\n\nThe current session remains preserved.")) return;
+    if (!(await confirmAction({ title: "Fork the current session into a separate session?", message: "The current session remains preserved.", confirmLabel: "Fork" }))) return;
     try {
       const result = await bridge.clone();
       if (result.cancelled) return;
@@ -1082,8 +1180,28 @@ export default function App() {
     workflowRuns.filter((run) => run.status === "pending" || run.status === "running" || run.status === "paused").length +
     activity.threads.filter((thread) => ["queued", "starting", "running", "interrupting"].includes(thread.status)).length +
     activity.subagents.filter((run) => run.status === "running").length;
-  const contextOpen = showWorkflowsPanel || showBranchPanel;
+  const contextOpen = showWorkflowsPanel || showBranchPanel || showGitView;
+  const activeDirtyCount = status.cwd ? gitStatuses[status.cwd]?.dirty.length ?? 0 : 0;
   const unresolvedAttention = listAttention(attention).length;
+
+  // Diagnostics snapshot, recomputed only when an input to it actually
+  // changes — not on every unrelated render while the panel is open. The
+  // background policy input is a constant in this build, so it varies never.
+  const diagnosticsSnapshot = useMemo(
+    () =>
+      collectDiagnostics({
+        now: Date.now(),
+        attention,
+        processes: processRegistry,
+        schedule,
+        history: automationHistory,
+        policy: defaultBackgroundPolicy(),
+        devices,
+        events: eventLog,
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [showDiagnostics, attention, processRegistry, schedule, automationHistory, devices, eventLog]
+  );
 
   // Preload/bridge missing (e.g. renderer opened outside Electron, or the
   // preload script failed to load). Previously `window.pideck` was accessed
@@ -1112,7 +1230,19 @@ export default function App() {
   }
 
   return (
-    <div className="app-shell flex h-full">
+    settingsOpen ? (
+      <SettingsPage
+        models={models}
+        thinkingLevels={thinkingLevels}
+        agentState={agentState}
+        onSetModel={setModel}
+        onSetThinking={setThinking}
+        theme={themePref}
+        onThemeChange={setThemePref}
+        onClose={() => setSettingsOpen(false)}
+      />
+    ) : (
+    <div className="app-shell flex h-full" style={{ "--dock-bottom": `${composerHeight + 12}px` } as React.CSSProperties}>
       <Sidebar
         groups={groups}
         activePath={activeSessionPath ?? status.sessionPath}
@@ -1120,6 +1250,7 @@ export default function App() {
         treeOpen={showBranchPanel}
         canOpenTree={ready && hasSession}
         minimized={sidebarMinimized}
+        onOpenSettings={() => setSettingsOpen(true)}
         onToggleMinimize={() =>
           setSidebarMinimized((minimized) => {
             localStorage.setItem("pideck:sidebar-minimized", minimized ? "0" : "1");
@@ -1136,7 +1267,7 @@ export default function App() {
         projectFilter={projectFilter}
         onProjectFilterChange={setProjectFilter}
         onDeleteSession={async (path, name) => {
-          if (!window.confirm(`Delete chat “${name}”? This cannot be undone.`)) return;
+          if (!(await confirmAction({ title: `Delete chat “${name}”?`, message: "This cannot be undone.", confirmLabel: "Delete chat", danger: true }))) return;
           try {
             await bridge.deleteSession(path);
             toast("info", "Chat deleted");
@@ -1185,7 +1316,7 @@ export default function App() {
                 onNeedEarlier={() => void loadEarlier()}
                 streaming={state.streaming}
                 chromeTop={bannerVisible ? 110 : 72}
-                chromeBottom={history.activeRollback ? 226 : 156}
+                chromeBottom={composerHeight - 28}
                 historyTurns={history.turns}
                 onRollback={(entryId) => void prepareRollback(entryId)}
               />
@@ -1194,16 +1325,33 @@ export default function App() {
             )}
           </div>
 
-          <header className="thread-header titlebar absolute inset-x-0 top-0 z-10 flex h-16 items-center gap-3 px-5">
-            {promotedParent ? <button onClick={() => { const parent = promotedParent; setPromotedParent(null); void openSession(parent.path, parent.cwd); }} title="Back to parent session" className="thread-action px-2 text-[13px]">← Parent</button> : null}
+          <header className={`thread-header titlebar absolute inset-x-0 top-0 z-10 flex h-16 items-center gap-3 ${sidebarMinimized ? "pl-[88px] pr-5" : "px-5"}`}>
+            {sidebarMinimized ? (
+              <button
+                onClick={() => {
+                  localStorage.setItem("pideck:sidebar-minimized", "0");
+                  setSidebarMinimized(false);
+                }}
+                title="Show sidebar (⌘B)"
+                aria-label="Show sidebar"
+                className="sidebar-expand shrink-0"
+              >
+                <ChevronIcon size={16} strokeWidth={2} />
+              </button>
+            ) : null}
+            {sidebarMinimized && groups.length > 1 ? (
+              <div className="w-[180px] shrink-0">
+                <ProjectFilter
+                  projects={groups.map((g) => ({ cwd: g.cwd, name: g.cwd.split("/").filter(Boolean).pop() || g.cwd }))}
+                  value={projectFilter}
+                  onChange={setProjectFilter}
+                />
+              </div>
+            ) : null}
+            {promotedParent ? <button onClick={() => { const parent = promotedParent; setPromotedParent(null); void openSession(parent.path, parent.cwd); }} title="Back to parent session" className="thread-action thread-action-text">← Parent</button> : null}
             <StatusDot status={liveReady ? "ready" : status.status} working={state.streaming} />
-            <div className="min-w-0 flex items-baseline gap-2.5">
-              <div className="truncate text-[15px] font-semibold tracking-[-0.01em]">
-                {headerName ?? agentState?.sessionName ?? (hasSession ? "Untitled session" : "Babylon")}
-              </div>
-              <div className="truncate text-[13px] text-dim">
-                {hasSession && status.cwd ? shortPath(status.cwd) : "Choose a project to begin"}
-              </div>
+            <div className="min-w-0 max-w-[36ch] truncate text-[15px] font-semibold tracking-[-0.01em]">
+              {headerName ?? agentState?.sessionName ?? (hasSession ? "Untitled session" : "Babylon")}
             </div>
             <div className="ml-auto flex shrink-0 items-center gap-1.5">
               {hasSession && worktreeInfo?.isWorktree ? <span className="execution-context"><FlaskIcon size={13} /> Worktree</span> : null}
@@ -1221,78 +1369,38 @@ export default function App() {
                   {liveActivityCount > 0 ? <span className="sidebar-count absolute -right-1 -top-1">{liveActivityCount}</span> : null}
                 </button>
               ) : null}
-              {hasSession ? (
-                <button onClick={() => setShowWorktreeModal(true)} title="Session and worktree actions" className="thread-action">
-                  <MoreIcon size={16} />
-                </button>
-              ) : null}
               <button
-                onClick={() => setShowPermissions((open) => !open)}
-                title="Agent permissions"
-                aria-pressed={showPermissions}
-                className={`thread-action ${showPermissions ? "is-active" : ""}`}
+                onClick={() => {
+                  setShowGitView((open) => !open);
+                  setShowWorkflowsPanel(false);
+                  setShowBranchPanel(false);
+                }}
+                title="Git — changes and diffs"
+                aria-pressed={showGitView}
+                className={`thread-action thread-action-text ${showGitView ? "is-active" : ""}`}
               >
-                <ShieldIcon size={16} />
-              </button>
-              <button
-                onClick={() => setShowPlans((open) => !open)}
-                title="Structured plans"
-                aria-pressed={showPlans}
-                className={`thread-action ${showPlans ? "is-active" : ""}`}
-              >
-                Plans
-              </button>
-              <button
-                onClick={() => setShowProcesses((open) => !open)}
-                title="Tracked processes"
-                aria-pressed={showProcesses}
-                className={`thread-action ${showProcesses ? "is-active" : ""}`}
-              >
-                Term
+                Git{activeDirtyCount > 0 ? ` ${activeDirtyCount}` : ""}
               </button>
               <button
                 onClick={() => setShowPreview((open) => !open)}
                 title="Browser preview"
                 aria-pressed={showPreview}
-                className={`thread-action ${showPreview ? "is-active" : ""}`}
+                className={`thread-action thread-action-text ${showPreview ? "is-active" : ""}`}
               >
                 Preview
               </button>
-              <button
-                onClick={() => setShowAttention((open) => !open)}
-                title="Attention inbox"
-                aria-pressed={showAttention}
-                className={`thread-action relative ${showAttention ? "is-active" : ""}`}
-              >
-                Attn
-                {unresolvedAttention > 0 ? (
-                  <span className="sidebar-count absolute -right-1 -top-1">{unresolvedAttention}</span>
-                ) : null}
-              </button>
-              <button
-                onClick={() => setShowDevices((open) => !open)}
-                title="Paired devices"
-                aria-pressed={showDevices}
-                className={`thread-action ${showDevices ? "is-active" : ""}`}
-              >
-                Devices
-              </button>
-              <button
-                onClick={() => setShowAutomation((open) => !open)}
-                title="Scheduled tasks"
-                aria-pressed={showAutomation}
-                className={`thread-action ${showAutomation ? "is-active" : ""}`}
-              >
-                Auto
-              </button>
-              <button
-                onClick={() => setShowDiagnostics((open) => !open)}
-                title="Runtime diagnostics"
-                aria-pressed={showDiagnostics}
-                className={`thread-action ${showDiagnostics ? "is-active" : ""}`}
-              >
-                Diag
-              </button>
+              <PanelsMenu
+                open={panelsMenuOpen}
+                onOpenChange={setPanelsMenuOpen}
+                items={[
+                  { label: "Terminals", open: showProcesses, onToggle: () => setShowProcesses((v) => !v) },
+                  { label: "Attention inbox", open: showAttention, onToggle: () => setShowAttention((v) => !v), badge: unresolvedAttention },
+                  { label: "Paired devices", open: showDevices, onToggle: () => setShowDevices((v) => !v) },
+                  { label: "Scheduled tasks", open: showAutomation, onToggle: () => setShowAutomation((v) => !v) },
+                  { label: "Runtime diagnostics", open: showDiagnostics, onToggle: () => setShowDiagnostics((v) => !v) },
+                  ...(hasSession ? [{ label: "Session & worktree…", action: () => setShowWorktreeModal(true) }] : []),
+                ]}
+              />
               <button onClick={() => setShowCommandPalette(true)} title="Search and commands (⌘K)" className="thread-action">
                 <FolderIcon size={16} />
               </button>
@@ -1307,7 +1415,7 @@ export default function App() {
           ) : null}
 
           {hasSession ? (
-            <div className="absolute inset-x-0 bottom-0 z-10 flex flex-col">
+            <div ref={composerDockRef} className="absolute inset-x-0 bottom-0 z-10 flex flex-col">
               {history.activeRollback ? (
                 <RollbackDock rollback={history.activeRollback} busy={rollbackBusy} onUndo={() => void undoRollback()} />
               ) : null}
@@ -1321,9 +1429,6 @@ export default function App() {
                 models={models}
                 thinkingLevels={thinkingLevels}
                 draftRequest={draftRequest}
-                cwd={status.cwd}
-                gitStatus={status.cwd ? gitStatuses[status.cwd] ?? null : null}
-                onGitChanged={refreshGitStatuses}
                 toast={toast}
                 onSend={send}
                 onAbort={abort}
@@ -1338,7 +1443,15 @@ export default function App() {
         <Suspense fallback={null}>
           {ready && contextOpen ? (
             <WorkspacePane width={contextWidth} onResizeStart={beginContextResize}>
-              {showBranchPanel ? (
+              {showGitView ? (
+                <GitView
+                  cwd={status.cwd}
+                  sidebarStatus={status.cwd ? gitStatuses[status.cwd] ?? null : null}
+                  onChanged={refreshGitStatuses}
+                  onClose={() => setShowGitView(false)}
+                  toast={toast}
+                />
+              ) : showBranchPanel ? (
                 <BranchPanel
                   onClose={() => setShowBranchPanel(false)}
                   refreshToken={historyRevision}
@@ -1386,73 +1499,62 @@ export default function App() {
       {ready && showWorktreeModal && worktreeInfo && (
         <WorktreeModal info={worktreeInfo} onClose={() => setShowWorktreeModal(false)} toast={toast} />
       )}
-      {showPermissions ? <PermissionsPanel onClose={() => setShowPermissions(false)} /> : null}
-      {showPlans ? (
-        <PlansPanel plans={plans} setPlans={setPlans} onClose={() => setShowPlans(false)} />
-      ) : null}
-      {showProcesses ? (
-        <ProcessPanel
-          registry={processRegistry}
-          setRegistry={setProcessRegistry}
-          onClose={() => setShowProcesses(false)}
-        />
-      ) : null}
-      {showPreview ? (
-        <PreviewPanel
-          registry={previewRegistry}
-          setRegistry={setPreviewRegistry}
-          onClose={() => setShowPreview(false)}
-        />
-      ) : null}
-      {showAttention ? (
-        <AttentionPanel
-          registry={attention}
-          setRegistry={setAttention}
-          onClose={() => setShowAttention(false)}
-        />
-      ) : null}
-      {showDevices ? (
-        <DevicesPanel
-          registry={devices}
-          setRegistry={setDevices}
-          onClose={() => setShowDevices(false)}
-          pairingCrypto={{
-            newToken: () =>
-              Array.from(crypto.getRandomValues(new Uint8Array(16)))
-                .map((b) => b.toString(16).padStart(2, "0"))
-                .join(""),
-            hash: async (token) => {
-              const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
-              return Array.from(new Uint8Array(bytes))
-                .map((b) => b.toString(16).padStart(2, "0"))
-                .join("");
-            },
-          }}
-        />
-      ) : null}
-      {showAutomation ? (
-        <AutomationPanel
-          schedule={schedule}
-          setSchedule={setSchedule}
-          history={automationHistory}
-          onClose={() => setShowAutomation(false)}
-        />
-      ) : null}
-      {showDiagnostics ? (
-        <DiagnosticsPanel
-          snapshot={collectDiagnostics({
-            now: Date.now(),
-            attention,
-            processes: processRegistry,
-            schedule,
-            history: automationHistory,
-            policy: defaultBackgroundPolicy(),
-            devices,
-            events: eventLog,
-          })}
-          onClose={() => setShowDiagnostics(false)}
-        />
-      ) : null}
+      <Suspense fallback={null}>
+        {showProcesses ? (
+          <ProcessPanel
+            registry={processRegistry}
+            setRegistry={setProcessRegistry}
+            onClose={() => setShowProcesses(false)}
+          />
+        ) : null}
+        {showPreview ? (
+          <PreviewPanel
+            registry={previewRegistry}
+            setRegistry={setPreviewRegistry}
+            onClose={() => setShowPreview(false)}
+          />
+        ) : null}
+        {showAttention ? (
+          <AttentionPanel
+            registry={attention}
+            setRegistry={setAttention}
+            onClose={() => setShowAttention(false)}
+          />
+        ) : null}
+        {showDevices ? (
+          <DevicesPanel
+            registry={devices}
+            setRegistry={setDevices}
+            onClose={() => setShowDevices(false)}
+            pairingCrypto={{
+              newToken: () =>
+                Array.from(crypto.getRandomValues(new Uint8Array(16)))
+                  .map((b) => b.toString(16).padStart(2, "0"))
+                  .join(""),
+              hash: async (token) => {
+                const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+                return Array.from(new Uint8Array(bytes))
+                  .map((b) => b.toString(16).padStart(2, "0"))
+                  .join("");
+              },
+            }}
+          />
+        ) : null}
+        {showAutomation ? (
+          <AutomationPanel
+            schedule={schedule}
+            setSchedule={setSchedule}
+            history={automationHistory}
+            onClose={() => setShowAutomation(false)}
+          />
+        ) : null}
+        {showDiagnostics ? (
+          <DiagnosticsPanel
+            snapshot={diagnosticsSnapshot}
+            onClose={() => setShowDiagnostics(false)}
+          />
+        ) : null}
+      </Suspense>
       <ApprovalGate />
       {rollbackPlan ? (
         <RollbackConfirm
@@ -1468,7 +1570,65 @@ export default function App() {
         onDismiss={(id) => dispatch({ type: "dialog-dismiss", id })}
         toast={toast}
       />
+      <PromptHost />
       <Toasts toasts={state.toasts} onDismiss={(id) => dispatch({ type: "toast-dismiss", id })} />
+    </div>
+    )
+  );
+}
+
+function PanelsMenu({ open, onOpenChange, items }: {
+  open: boolean;
+  onOpenChange(open: boolean): void;
+  items: Array<{ label: string; open?: boolean; onToggle?(): void; badge?: number; action?(): void }>;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) onOpenChange(false);
+    };
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onOpenChange(false);
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open, onOpenChange]);
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        onClick={() => onOpenChange(!open)}
+        title="More panels"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className={`thread-action ${open ? "is-active" : ""}`}
+      >
+        <MoreIcon size={16} />
+      </button>
+      {open && (
+        <div role="menu" aria-label="Panels" className="thread-menu absolute right-0 top-full z-50 mt-2 min-w-[200px]">
+          {items.map((item) => (
+            <button
+              key={item.label}
+              role="menuitemcheckbox"
+              aria-checked={item.open ?? false}
+              onClick={() => {
+                if (item.action) item.action();
+                else item.onToggle?.();
+              }}
+              className="thread-menu-item"
+            >
+              <span>{item.label}</span>
+              <span className="ml-auto flex shrink-0 items-center gap-1.5">
+                {item.badge ? <span className="sidebar-count">{item.badge}</span> : null}
+                {item.open ? <span className="text-accent">✓</span> : null}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

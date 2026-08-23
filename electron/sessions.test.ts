@@ -80,6 +80,20 @@ describe("tail-first session reads", () => {
     expect(tail.startOffset).toBeGreaterThan(0);
   });
 
+  it("carries the entry timestamp into projected messages so recaps interleave", async () => {
+    // Regression: projection used to drop the entry-level timestamp, so every
+    // message sorted as t=0 and recap annotations piled up after the last
+    // message instead of interleaving by time.
+    const msg = { type: "message", id: "m1", timestamp: "2026-01-01T10:00:00Z", message: { role: "user", content: "hi" } };
+    const { file } = await fixture([
+      { type: "session", id: "s1", cwd: "/project", timestamp: "2026-01-01T00:00:00Z" },
+      msg,
+    ]);
+    const tail = await readSessionTail(file, 4096);
+    expect(typeof tail.messages[0].timestamp).toBe("number");
+    expect(tail.messages[0].timestamp).toBe(Date.parse("2026-01-01T10:00:00Z"));
+  });
+
   it("loads older windows ending at a given offset", async () => {
     const header = { type: "session", id: "s1", cwd: "/project", timestamp: "2026-01-01T00:00:00Z" };
     const oldMessage = { type: "message", id: "m1", message: { role: "user", content: "old" } };

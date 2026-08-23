@@ -37,10 +37,11 @@ export default function ProjectFilter({ projects, value, onChange }: Props) {
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="listbox"
         aria-expanded={open}
-        className="sidebar-input flex items-center justify-between gap-2 text-left"
+        title={current.name}
+        className="flex min-w-0 items-center gap-1 rounded-md px-1.5 py-1 text-[15px] font-semibold tracking-[-0.01em] hover:bg-inset"
       >
         <span className="truncate">{current.name}</span>
-        <ChevronIcon size={14} className={`shrink-0 text-dim transition-transform ${open ? "rotate-180" : ""}`} />
+        <ChevronIcon size={13} className={`shrink-0 text-dim transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
       {open && (
         <div className="thread-menu absolute left-0 right-0 z-50 mt-1 max-h-64 overflow-y-auto">

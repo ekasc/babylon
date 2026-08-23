@@ -86,8 +86,8 @@ export default function StatsPopover({ stats, hasSession, onCompact }: Props) {
             </div>
             <div className="h-1.5 overflow-hidden rounded-full bg-inset">
               <div
-                className="h-full rounded-full bg-accent transition-[width] duration-300"
-                style={{ width: `${Math.min(100, pct ?? 0)}%` }}
+                className="h-full w-full origin-left rounded-full bg-accent transition-transform duration-300"
+                style={{ transform: `scaleX(${Math.min(100, pct ?? 0) / 100})` }}
               />
             </div>
           </div>

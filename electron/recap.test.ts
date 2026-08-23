@@ -6,6 +6,7 @@ import { RecapStore } from "./recap-store";
 import {
   buildRecapPrompt,
   mergeRecaps,
+  mergeRecapsIntoWindow,
   normalizeRecapText,
   pickRecapDelta,
   recapDue,
@@ -17,6 +18,33 @@ import {
 function entry(id: string, role: string, text: string, ts: string): any {
   return { id, type: "message", timestamp: ts, message: { role, content: text, timestamp: Date.parse(ts) } };
 }
+
+describe("mergeRecaps interleaving", () => {
+  // Regression: when projected messages lacked timestamps, the merge sorted
+  // every recap after every message — a pile of back-to-back "Recap:" lines at
+  // the tail instead of one recap per turn.
+  it("places each recap right after the exchange it summarizes", () => {
+    const messages = [
+      { role: "user", content: "turn one", timestamp: Date.parse("2026-01-01T10:00:00Z") },
+      { role: "assistant", content: "done", timestamp: Date.parse("2026-01-01T10:01:00Z") },
+      { role: "user", content: "turn two", timestamp: Date.parse("2026-01-01T11:00:00Z") },
+      { role: "assistant", content: "also done", timestamp: Date.parse("2026-01-01T11:01:00Z") },
+    ];
+    const recaps: Recap[] = [
+      { id: "r1", at: "2026-01-01T10:03:00Z", coveredEntryId: "m2", text: "Recap: one" },
+      { id: "r2", at: "2026-01-01T11:03:00Z", coveredEntryId: "m4", text: "Recap: two" },
+    ];
+    const merged = mergeRecaps(messages, recaps);
+    expect(merged.map((m: any) => m.content ?? m.text)).toEqual([
+      "turn one",
+      "done",
+      "Recap: one",
+      "turn two",
+      "also done",
+      "Recap: two",
+    ]);
+  });
+});
 
 describe("recapDue", () => {
   it("is due only after the interval with no recap covering the stretch", () => {
@@ -105,6 +133,35 @@ describe("mergeRecaps", () => {
   it("leaves the window alone when there are no recaps", () => {
     const messages = [message(1000)];
     expect(mergeRecaps(messages, [])).toBe(messages);
+  });
+});
+
+describe("mergeRecapsIntoWindow", () => {
+  const message = (ts: number) => ({ role: "user", content: "x", timestamp: ts });
+  const rec = (id: string, at: number): Recap => ({ id, at: new Date(at).toISOString(), coveredEntryId: "b", text: "Recap: hi" });
+
+  it("keeps only recaps generated inside the window's time span", () => {
+    // Older transcript window (an earlier scroll-up page) with a recap that was
+    // generated while this stretch was the live tail.
+    const merged = mergeRecapsIntoWindow([message(1000), message(3000)], [rec("r1", 2000), rec("r2", 9000)]);
+    expect(merged.map((m) => (m as any).entryId ?? null)).toEqual([null, "recap:r1", null]);
+  });
+
+  it("never duplicates a recap across disjoint windows of one scroll-back", () => {
+    const older = [message(1000), message(3000)];
+    const newer = [message(5000), message(6000)];
+    const recaps = [rec("r1", 2000), rec("r2", 5500)];
+    const inOlder = mergeRecapsIntoWindow(older, recaps);
+    const inNewer = mergeRecapsIntoWindow(newer, recaps);
+    expect(inOlder.filter((m) => m.customType === "babylon_recap")).toHaveLength(1);
+    expect(inNewer.filter((m) => m.customType === "babylon_recap")).toHaveLength(1);
+    expect((inNewer[1] as any).entryId).toBe("recap:r2");
+  });
+
+  it("returns the window untouched when no recap falls inside it", () => {
+    const messages = [message(1000), message(3000)];
+    expect(mergeRecapsIntoWindow(messages, [rec("r1", 9000)])).toBe(messages);
+    expect(mergeRecapsIntoWindow([], [rec("r1", 2000)])).toEqual([]);
   });
 });
 

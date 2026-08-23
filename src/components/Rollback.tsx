@@ -24,7 +24,7 @@ export function RollbackConfirm({ plan, busy, onCancel, onConfirm }: { plan: Rol
   }, [busy, onCancel]);
 
   return (
-    <div className="fade-in fixed inset-0 z-50 grid place-items-center bg-black/55 p-6" onMouseDown={() => !busy && onCancel()}>
+    <div className="fade-in fixed inset-0 z-50 grid place-items-center bg-[var(--scrim)] p-6" onMouseDown={() => !busy && onCancel()}>
       <div
         ref={(node) => { ref.current = node; surface(node); }}
         role="dialog"

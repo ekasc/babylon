@@ -49,6 +49,8 @@ export interface GitChangedFile {
   path: string;
   insertions: number;
   deletions: number;
+  /** Porcelain change kind: A | M | D | R | C | T | U | ?. */
+  status?: string;
 }
 
 export interface GitStatusDetails {
@@ -397,6 +399,24 @@ export interface PermissionState {
   rules: PermissionRule[];
 }
 
+/** Reference to a catalogue model, persisted in Babylon-owned settings. */
+export interface ModelRef {
+  provider: string;
+  modelId: string;
+}
+
+/** Babylon-owned user preferences (Settings → Pi). Mirrors the host's
+ *  `PiSettings` in electron/app-settings.ts. */
+export interface PiSettings {
+  chatModel?: ModelRef;
+  chatReasoning?: string;
+  titleModel?: ModelRef;
+  titleReasoning?: string;
+  gitCommitModel?: ModelRef;
+  gitCommitPrompt?: string;
+  contextWindowOverrides?: Record<string, number>;
+}
+
 export interface Bridge {
   listSessions(): Promise<ProjectGroup[]>;
   getSessionMessages(path: string): Promise<SessionWindow>;
@@ -415,9 +435,12 @@ export interface Bridge {
   getStats(): Promise<any>;
   gitStatus(cwd: string): Promise<GitStatusResult | null>;
   gitStatusDetails(cwd: string): Promise<GitStatusDetails>;
+  /** Unified diff of one file's working-tree changes vs HEAD (untracked files diff as all-added). */
+  gitDiffFile(cwd: string, file: string): Promise<string>;
   gitBranches(cwd: string): Promise<{ branches: GitBranchInfo[]; current: string | null }>;
   gitBranchCreate(cwd: string, name: string, switchTo: boolean): Promise<{ branch: string }>;
-  gitBranchSwitch(cwd: string, name: string): Promise<{ branch: string | null }>;
+  gitBranchSwitch(cwd: string, name: string, options?: { stash?: boolean }): Promise<{ branch: string | null; stashed?: boolean }>;
+  gitStartCommitPush(cwd: string): Promise<{ runId: string; model: string }>;
   gitCommit(cwd: string, message: string): Promise<{ commitSha: string; subject: string }>;
   gitPush(cwd: string): Promise<{ status: "pushed" | "skipped_up_to_date"; branch: string; upstreamBranch?: string }>;
   gitPull(cwd: string): Promise<{ status: "pulled" | "skipped_up_to_date"; branch: string; upstreamRef: string | null }>;
@@ -484,6 +507,8 @@ export interface Bridge {
   onStatus(cb: (status: SessionStatus) => void): () => void;
 
   permissionsGet(): Promise<PermissionState>;
+  getSettings(): Promise<PiSettings>;
+  setSettings(patch: Partial<PiSettings>): Promise<PiSettings>;
   permissionsSetMode(mode: PermissionMode): Promise<{ mode: PermissionMode }>;
   permissionsAddRule(
     input: Omit<PermissionRule, "id" | "createdAt"> & Partial<Pick<PermissionRule, "id" | "createdAt">>
@@ -491,6 +516,9 @@ export interface Bridge {
   permissionsRemoveRule(id: string): Promise<{ removed: boolean }>;
   permissionsResolveApproval(id: string, choice: ApprovalChoice): Promise<{ ok: boolean }>;
   onApprovalRequested(cb: (req: ApprovalRequest) => void): () => void;
+  /** Fires when a pending approval is released without a user decision
+   *  (e.g. Full Access mode was enabled while the agent waited). */
+  onApprovalCleared(cb: (payload: { id: string }) => void): () => void;
   /** Fires when an interactive approval is resolved (allowed/denied), so the
    *  UI can drop the matching attention item. */
   onApprovalResolved(cb: (payload: { id: string; choice: ApprovalChoice }) => void): () => void;
@@ -532,9 +560,11 @@ export const bridge: Bridge = window.pideck ?? {
   getStats: () => Promise.resolve(null),
   gitStatus: () => Promise.resolve(null),
   gitStatusDetails: () => Promise.resolve({ isRepo: false } as GitStatusDetails),
+  gitDiffFile: () => Promise.reject(new Error("bridge unavailable")),
   gitBranches: () => Promise.resolve({ branches: [], current: null }),
   gitBranchCreate: () => Promise.reject(new Error("bridge unavailable")),
   gitBranchSwitch: () => Promise.reject(new Error("bridge unavailable")),
+  gitStartCommitPush: () => Promise.reject(new Error("bridge unavailable")),
   gitCommit: () => Promise.reject(new Error("bridge unavailable")),
   gitPush: () => Promise.reject(new Error("bridge unavailable")),
   gitPull: () => Promise.reject(new Error("bridge unavailable")),
@@ -589,11 +619,14 @@ export const bridge: Bridge = window.pideck ?? {
   onStatus: () => () => {},
 
   permissionsGet: () => Promise.resolve({ mode: "auto", rules: [] }),
+  getSettings: () => Promise.resolve({}),
+  setSettings: () => Promise.resolve({}),
   permissionsSetMode: () => Promise.resolve({ mode: "auto" }),
   permissionsAddRule: () => Promise.reject(new Error("bridge unavailable")),
   permissionsRemoveRule: () => Promise.resolve({ removed: false }),
   permissionsResolveApproval: () => Promise.resolve({ ok: false }),
   onApprovalRequested: () => () => {},
+  onApprovalCleared: () => () => {},
   onApprovalResolved: () => () => {},
   onPermissionsChanged: () => () => {},
 };

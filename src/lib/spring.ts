@@ -15,7 +15,7 @@ export const springSnappy: SpringConfig = { damping: 1.0, response: 0.2 };
 export const springMomentum: SpringConfig = { damping: 0.8, response: 0.3 };
 // Non-gestural surfaces should settle without ornamental bounce. Momentum is
 // reserved for interactions that actually inherit a release velocity.
-export const springModal: SpringConfig = { damping: 1.0, response: 0.28 };
+export const springModal: SpringConfig = { damping: 1.0, response: 0.2 };
 
 export class Spring {
   private x: number;

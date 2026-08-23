@@ -7,6 +7,7 @@ dist-electron/
 .pi/
 .pi-docs/
 .superpowers/
+.impeccable/
 
 # Local environment and secrets
 .env

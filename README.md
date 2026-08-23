@@ -35,7 +35,7 @@ Useful checks:
 pnpm typecheck
 pnpm test
 pnpm build
-PIDECK_SMOKE=7000 pnpm start
+pnpm smoke
 ```
 
 `PIDECK_SMOKE` starts Electron and exits automatically after the specified number of milliseconds.

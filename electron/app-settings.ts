@@ -21,6 +21,10 @@ export interface PiSettings {
   titleModel?: ModelRef;
   /** Reasoning level applied to title-generation calls. */
   titleReasoning?: string;
+  /** Model used to generate commit messages for the Git quick action. */
+  gitCommitModel?: ModelRef;
+  /** User-editable instructions appended to Babylon's built-in Unslop rules. */
+  gitCommitPrompt?: string;
   /**
    * Per-model context-window overrides, keyed by "provider/model".
    * Only present when the user has customized a model's window.
@@ -36,7 +40,19 @@ export interface PiSettings {
   };
 }
 
-const EMPTY: PiSettings = { contextWindowOverrides: {} };
+export const DEFAULT_GIT_COMMIT_MODEL: ModelRef = {
+  provider: "openai-codex",
+  modelId: "gpt-5.6-luna",
+};
+
+export const DEFAULT_GIT_COMMIT_PROMPT =
+  "Describe the primary change and why it matters. Follow the repository's existing commit style when the recent history makes it clear.";
+
+const EMPTY: PiSettings = {
+  contextWindowOverrides: {},
+  gitCommitModel: DEFAULT_GIT_COMMIT_MODEL,
+  gitCommitPrompt: DEFAULT_GIT_COMMIT_PROMPT,
+};
 
 let cache: PiSettings | null = null;
 

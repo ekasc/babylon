@@ -15,6 +15,8 @@ export interface GitChangedFile {
   path: string;
   insertions: number;
   deletions: number;
+  /** Porcelain change kind: A | M | D | R | C | T | U | ?. */
+  status?: string;
 }
 
 export interface GitStatusDetails {
@@ -183,6 +185,36 @@ function parsePorcelainPath(line: string): string | null {
   return filePath.length > 0 ? filePath : null;
 }
 
+/** XY code from a porcelain=v2 entry, reduced to one display letter.
+ *  Prefers the worktree letter (Y); falls back to the index letter (X). */
+function parsePorcelainStatus(line: string): string | null {
+  if (line.startsWith("? ")) return "?";
+  if (!(line.startsWith("1 ") || line.startsWith("2 ") || line.startsWith("u "))) return null;
+  const xy = line.split(" ")[1];
+  if (!xy || xy.length < 2) return null;
+  const [, y] = xy;
+  const chosen = y !== "." ? y : xy[0];
+  return chosen === "." ? "M" : chosen;
+}
+
+const MAX_UNTRACKED_TEXT_BYTES = 5 * 1024 * 1024;
+
+async function countUntrackedTextLines(cwd: string, path: string): Promise<number> {
+  try {
+    const filePath = join(cwd, path);
+    const stat = await fsp.stat(filePath);
+    if (!stat.isFile() || stat.size > MAX_UNTRACKED_TEXT_BYTES) return 0;
+    const data = await fsp.readFile(filePath);
+    if (data.includes(0)) return 0; // binary
+    let lines = 0;
+    for (const byte of data) if (byte === 10) lines++;
+    if (data.length > 0 && data[data.length - 1] !== 10) lines++;
+    return lines;
+  } catch {
+    return 0;
+  }
+}
+
 async function resolveDefaultBranch(cwd: string): Promise<string | null> {
   const result = await runGit(["symbolic-ref", "refs/remotes/origin/HEAD"], cwd);
   if (result.exitCode !== 0) return null;
@@ -228,7 +260,9 @@ const NON_REPO_STATUS: GitStatusDetails = {
 };
 
 export async function statusDetails(cwd: string): Promise<GitStatusDetails> {
-  const status = await runGit(["status", "--porcelain=2", "--branch"], cwd);
+  // -uall lists untracked files individually instead of collapsing whole
+  // directories, so every entry is a concrete diffable file.
+  const status = await runGit(["status", "--porcelain=2", "--branch", "-uall"], cwd);
   if (status.exitCode !== 0) {
     if (isNotRepoStderr(status.stderr)) return NON_REPO_STATUS;
     throw new GitError(firstLine(status.stderr) || "git status failed");
@@ -240,6 +274,7 @@ export async function statusDetails(cwd: string): Promise<GitStatusDetails> {
   let behind = 0;
   let hasChanges = false;
   const changedWithoutNumstat = new Set<string>();
+  const statusByPath = new Map<string, string>();
 
   for (const line of status.stdout.split(/\r?\n/g)) {
     if (line.startsWith("# branch.head ")) {
@@ -259,7 +294,11 @@ export async function statusDetails(cwd: string): Promise<GitStatusDetails> {
     if (line.trim().length > 0 && !line.startsWith("#")) {
       hasChanges = true;
       const pathValue = parsePorcelainPath(line);
-      if (pathValue) changedWithoutNumstat.add(pathValue);
+      if (pathValue) {
+        changedWithoutNumstat.add(pathValue);
+        const st = parsePorcelainStatus(line);
+        if (st) statusByPath.set(pathValue, st);
+      }
     }
   }
 
@@ -313,10 +352,19 @@ export async function statusDetails(cwd: string): Promise<GitStatusDetails> {
     .map(([path, stat]) => {
       insertions += stat.insertions;
       deletions += stat.deletions;
-      return { path, insertions: stat.insertions, deletions: stat.deletions };
+      return { path, insertions: stat.insertions, deletions: stat.deletions, status: statusByPath.get(path) };
     });
-  for (const path of changedWithoutNumstat) {
-    if (!fileStatMap.has(path)) files.push({ path, insertions: 0, deletions: 0 });
+  const withoutNumstat = [...changedWithoutNumstat].filter((path) => !fileStatMap.has(path));
+  const additionalFiles = await Promise.all(
+    withoutNumstat.map(async (path): Promise<GitChangedFile> => {
+      const status = statusByPath.get(path) ?? "?";
+      const added = status === "?" ? await countUntrackedTextLines(cwd, path) : 0;
+      return { path, insertions: added, deletions: 0, status };
+    })
+  );
+  for (const file of additionalFiles) {
+    files.push(file);
+    insertions += file.insertions;
   }
   files.sort((a, b) => a.path.localeCompare(b.path));
 
@@ -472,11 +520,24 @@ export async function createBranch(cwd: string, name: string, switchTo: boolean)
   return { branch };
 }
 
-export async function switchBranch(cwd: string, name: string): Promise<{ branch: string | null }> {
+export async function switchBranch(
+  cwd: string,
+  name: string,
+  options?: { stash?: boolean }
+): Promise<{ branch: string | null; stashed?: boolean }> {
   const refName = validateBranchName(name);
   const dirty = await statusDetails(cwd);
-  if (dirty.hasChanges) {
+  if (dirty.hasChanges && !options?.stash) {
     throw new GitError("commit or stash local changes before switching branches");
+  }
+  let stashed = false;
+  if (dirty.hasChanges) {
+    const stashResult = await runGit(
+      ["stash", "push", "--include-untracked", "-m", `babylon: auto-stash before switching to ${refName}`],
+      cwd
+    );
+    if (stashResult.exitCode !== 0) throw new GitError(firstLine(stashResult.stderr) || "git stash failed");
+    stashed = true;
   }
 
   const [localCheck, remoteCheck] = await Promise.all([
@@ -494,7 +555,7 @@ export async function switchBranch(cwd: string, name: string): Promise<{ branch:
   const result = await runGit(checkoutArgs, cwd);
   if (result.exitCode !== 0) throw new GitError(firstLine(result.stderr) || "git checkout failed");
   const branch = await gitStdout(["branch", "--show-current"], cwd).catch(() => "");
-  return { branch: branch || null };
+  return { branch: branch || null, ...(stashed ? { stashed: true } : {}) };
 }
 
 // ---------------------------------------------------------------------------
@@ -727,4 +788,45 @@ export async function createPr(cwd: string, input: { title: string; body?: strin
   } finally {
     await fsp.rm(bodyFile, { force: true }).catch(() => {});
   }
+}
+
+/** Max bytes of diff text returned for one file — guards the IPC channel. */
+const MAX_DIFF_BYTES = 512 * 1024;
+
+/**
+ * Unified diff of a single file's working-tree changes (staged + unstaged)
+ * against HEAD. Untracked files diff against the empty file so they show as
+ * all-added, git-style.
+ */
+export async function diffForFile(cwd: string, file: string): Promise<string> {
+  const target = file.replace(/\/+$/, "");
+  if (!target) return ""; // bare directory paths have no diff
+
+  try {
+    const st = await fsp.stat(join(cwd, target));
+    if (st.isDirectory()) return "";
+  } catch {
+    // Not present in the working tree — let the git calls below decide.
+  }
+
+  // Changed tracked files are the common path: one git process, no preflight.
+  const tracked = await runGit(["diff", "HEAD", "--", target], cwd);
+  if (tracked.stdout.length > 0) return truncateDiff(tracked.stdout);
+  if (tracked.exitCode !== 0) throw new GitError(firstLine(tracked.stderr) || "git diff failed");
+
+  // Empty tracked diffs and untracked files both produce no stdout above;
+  // distinguish them only on this uncommon path.
+  const trackedCheck = await runGit(["ls-files", "--", target], cwd);
+  if (trackedCheck.exitCode === 0 && trackedCheck.stdout.trim().length > 0) return "";
+
+  const nullDevice = process.platform === "win32" ? "NUL" : "/dev/null";
+  const untracked = await runGit(["diff", "--no-index", "--", nullDevice, target], cwd, 15_000);
+  if (untracked.stdout.length > 0) return truncateDiff(untracked.stdout);
+  if (!isNotRepoStderr(untracked.stderr)) throw new GitError(firstLine(untracked.stderr) || "git diff failed");
+  return "";
+}
+
+function truncateDiff(text: string): string {
+  if (text.length <= MAX_DIFF_BYTES) return text;
+  return `${text.slice(0, MAX_DIFF_BYTES)}\n… diff truncated at ${Math.round(MAX_DIFF_BYTES / 1024)}KB`;
 }

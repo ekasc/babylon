@@ -75,9 +75,22 @@ describe("statusDetails", () => {
     expect(details.hasChanges).toBe(true);
     expect(details.files.map((f) => f.path)).toEqual(["file.txt", "new.txt"]);
     expect(details.files[0]).toMatchObject({ insertions: 2, deletions: 0 });
-    // Untracked files carry no numstat until they are staged.
-    expect(details.files[1]).toMatchObject({ insertions: 0, deletions: 0 });
-    expect(details.insertions).toBe(2);
+    expect(details.files[1]).toMatchObject({ insertions: 1, deletions: 0, status: "?" });
+    expect(details.insertions).toBe(3);
+  });
+
+  it("excludes ignored files and expands visible untracked directories", async () => {
+    const root = await makeRepoWithCommit();
+    await writeFile(join(root, ".gitignore"), "ignored/\n");
+    await mkdir(join(root, "ignored"));
+    await mkdir(join(root, "visible"));
+    await writeFile(join(root, "ignored", "secret.txt"), "ignored\n");
+    await writeFile(join(root, "visible", "new.txt"), "one\ntwo\n");
+
+    const details = await statusDetails(root);
+    expect(details.files.map((file) => file.path)).toContain("visible/new.txt");
+    expect(details.files.map((file) => file.path)).not.toContain("ignored/secret.txt");
+    expect(details.files.find((file) => file.path === "visible/new.txt")).toMatchObject({ insertions: 2, status: "?" });
   });
 
   it("counts unpushed commits against the default branch", async () => {

@@ -22,6 +22,7 @@ import {
 } from "./icons";
 import ProjectFilter from "./ProjectFilter";
 import { projectColor } from "../lib/colors";
+import { promptText } from "../lib/prompts";
 
 /* ------------------------------------------------------------------ *
  * Icons (t3code-style glyphs)                                          *
@@ -110,37 +111,64 @@ function ThreadMenu(props: {
   const isSnoozed = snoozedUntil != null && snoozedUntil > Date.now();
   const [sub, setSub] = useState<"snooze" | "copy" | null>(null);
   const presets = useMemo(() => buildSnoozePresets(Date.now()), []);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    requestAnimationFrame(() => menuRef.current?.querySelector<HTMLElement>("button")?.focus());
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const items = [...(menuRef.current?.querySelectorAll<HTMLElement>("[role='menuitem']") ?? [])];
+        if (!items.length) return;
+        const index = items.indexOf(document.activeElement as HTMLElement);
+        const next = e.key === "ArrowDown" ? (index + 1) % items.length : (index - 1 + items.length) % items.length;
+        items[index === -1 ? (e.key === "ArrowDown" ? 0 : items.length - 1) : next]?.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      previousFocus?.focus();
+    };
+  }, [onClose]);
 
   return (
     <>
-      <div className="fixed inset-0 z-40" onClick={onClose} onContextMenu={(e) => { e.preventDefault(); onClose(); }} />
+      <div className="fixed inset-0 z-40" aria-hidden="true" onClick={onClose} onContextMenu={(e) => { e.preventDefault(); onClose(); }} />
       <div
+        ref={menuRef}
+        role="menu"
+        aria-label={`Chat actions for ${session.name ?? session.id}`}
         className="thread-menu fixed z-50"
         style={{ top: Math.min(props.y, window.innerHeight - 360), left: Math.min(props.x, window.innerWidth - 210) }}
       >
         {archived ? (
           <>
-            <button className="thread-menu-item" onClick={() => { props.onToggleArchive(session.path); onClose(); }}>Unarchive chat</button>
-            <button className="thread-menu-item danger" onClick={() => { props.onDelete(session.path, session.name ?? session.firstUserText ?? session.id); onClose(); }}>Delete chat</button>
+            <button role="menuitem" className="thread-menu-item" onClick={() => { props.onToggleArchive(session.path); onClose(); }}>Unarchive chat</button>
+            <button role="menuitem" className="thread-menu-item danger" onClick={() => { props.onDelete(session.path, session.name ?? session.firstUserText ?? session.id); onClose(); }}>Delete chat</button>
           </>
         ) : (
           <>
-            <button className="thread-menu-item" onClick={() => { props.onTogglePin(session.path); onClose(); }}>{pinned ? "Unpin chat" : "Pin chat"}</button>
-            <button className="thread-menu-item" onClick={() => { props.onToggleSettle(session.path); onClose(); }}>{settled ? "Un-settle chat" : "Settle chat"}</button>
+            <button role="menuitem" className="thread-menu-item" onClick={() => { props.onTogglePin(session.path); onClose(); }}>{pinned ? "Unpin chat" : "Pin chat"}</button>
+            <button role="menuitem" className="thread-menu-item" onClick={() => { props.onToggleSettle(session.path); onClose(); }}>{settled ? "Un-settle chat" : "Settle chat"}</button>
             {isSnoozed ? (
-              <button className="thread-menu-item" onClick={() => { props.onToggleSnooze(session.path); onClose(); }}>Wake chat</button>
+              <button role="menuitem" className="thread-menu-item" onClick={() => { props.onToggleSnooze(session.path); onClose(); }}>Wake chat</button>
             ) : (
               <div className="relative" onMouseEnter={() => setSub("snooze")} onMouseLeave={() => setSub(null)}>
-                <button className="thread-menu-item" onClick={() => setSub((s) => (s === "snooze" ? null : "snooze"))}>
+                <button role="menuitem" aria-haspopup="true" aria-expanded={sub === "snooze"} className="thread-menu-item" onClick={() => setSub((s) => (s === "snooze" ? null : "snooze"))}>
                   <span>Snooze</span><span className="text-dim">›</span>
                 </button>
                 {sub === "snooze" && (
-                  <div className="thread-menu-sub">
+                  <div role="menu" aria-label="Snooze presets" className="thread-menu-sub">
                     {presets.map((p) => (
-                      <button key={p.id} className="thread-menu-item" onClick={() => { props.onToggleSnooze(session.path, p.until); onClose(); }}>{p.label}</button>
+                      <button key={p.id} role="menuitem" className="thread-menu-item" onClick={() => { props.onToggleSnooze(session.path, p.until); onClose(); }}>{p.label}</button>
                     ))}
-                    <button className="thread-menu-item" onClick={() => {
-                      const v = window.prompt("Snooze until (e.g. 2025-03-10 09:00 or +2h)");
+                    <button role="menuitem" className="thread-menu-item" onClick={async () => {
+                      const v = await promptText({ title: "Snooze until", message: "e.g. 2025-03-10 09:00 or +2h", placeholder: "2025-03-10 09:00" });
                       if (!v) return onClose();
                       let until = Number.NaN;
                       if (v.startsWith("+")) until = Date.now() + (parseFloat(v.slice(1)) * (v.includes("h") ? 3600_000 : v.includes("d") ? 86400_000 : 60_000));
@@ -153,66 +181,25 @@ function ThreadMenu(props: {
               </div>
             )}
             <div className="thread-menu-sep" />
-            <button className="thread-menu-item" onClick={() => { props.onRename(session.path); onClose(); }}>Rename chat</button>
-            <button className="thread-menu-item" onClick={() => { props.onToggleUnread(session.path); onClose(); }}>{unread ? "Mark read" : "Mark unread"}</button>
+            <button role="menuitem" className="thread-menu-item" onClick={() => { props.onRename(session.path); onClose(); }}>Rename chat</button>
+            <button role="menuitem" className="thread-menu-item" onClick={() => { props.onToggleUnread(session.path); onClose(); }}>{unread ? "Mark read" : "Mark unread"}</button>
             <div className="relative" onMouseEnter={() => setSub("copy")} onMouseLeave={() => setSub(null)}>
-              <button className="thread-menu-item" onClick={() => setSub((s) => (s === "copy" ? null : "copy"))}>
+              <button role="menuitem" aria-haspopup="true" aria-expanded={sub === "copy"} className="thread-menu-item" onClick={() => setSub((s) => (s === "copy" ? null : "copy"))}>
                 <span>Copy</span><span className="text-dim">›</span>
               </button>
               {sub === "copy" && (
-                <div className="thread-menu-sub">
-                  <button className="thread-menu-item" onClick={() => { props.onCopy("path", session); onClose(); }}>Path</button>
-                  <button className="thread-menu-item" onClick={() => { props.onCopy("id", session); onClose(); }}>Chat ID</button>
-                  {session.isWorktree && <button className="thread-menu-item" onClick={() => { props.onCopy("branch", session); onClose(); }}>Branch</button>}
+                <div role="menu" aria-label="Copy options" className="thread-menu-sub">
+                  <button role="menuitem" className="thread-menu-item" onClick={() => { props.onCopy("path", session); onClose(); }}>Path</button>
+                  <button role="menuitem" className="thread-menu-item" onClick={() => { props.onCopy("id", session); onClose(); }}>Chat ID</button>
+                  {session.isWorktree && <button role="menuitem" className="thread-menu-item" onClick={() => { props.onCopy("branch", session); onClose(); }}>Branch</button>}
                 </div>
               )}
             </div>
             <div className="thread-menu-sep" />
-            <button className="thread-menu-item" onClick={() => { props.onToggleArchive(session.path); onClose(); }}>Archive chat</button>
-            <button className="thread-menu-item danger" onClick={() => { props.onDelete(session.path, session.name ?? session.firstUserText ?? session.id); onClose(); }}>Delete chat</button>
+            <button role="menuitem" className="thread-menu-item" onClick={() => { props.onToggleArchive(session.path); onClose(); }}>Archive chat</button>
+            <button role="menuitem" className="thread-menu-item danger" onClick={() => { props.onDelete(session.path, session.name ?? session.firstUserText ?? session.id); onClose(); }}>Delete chat</button>
           </>
         )}
-      </div>
-    </>
-  );
-}
-
-type ThemePref = "light" | "dark" | "system";
-function applyTheme(theme: ThemePref) {
-  localStorage.setItem("pideck:theme", theme);
-  const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-  const isDark = theme === "dark" || (theme === "system" && prefersDark);
-  document.documentElement.classList.toggle("dark", isDark);
-  document.documentElement.style.colorScheme = isDark ? "dark" : "light";
-}
-
-function SettingsMenu(props: {
-  anchor: { left: number; top: number };
-  current: ThemePref;
-  onClose(): void;
-  onPick(theme: ThemePref): void;
-}) {
-  const themes: ThemePref[] = ["light", "dark", "system"];
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") props.onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [props]);
-  const left = Math.max(8, Math.min(props.anchor.left, window.innerWidth - 196));
-  const bottom = window.innerHeight - props.anchor.top + 8;
-  return (
-    <>
-      <div className="fixed inset-0 z-40" onClick={props.onClose} onContextMenu={(e) => { e.preventDefault(); props.onClose(); }} />
-      <div className="thread-menu fixed z-50" style={{ left, bottom, minWidth: 180 }}>
-        <div className="px-2 py-1 text-[11px] uppercase tracking-wide text-dim">Theme</div>
-        {themes.map((t) => (
-          <button key={t} className={`thread-menu-item ${props.current === t ? "is-selected" : ""}`} onClick={() => { props.onPick(t); props.onClose(); }}>
-            <span className="capitalize">{t}</span>
-            {props.current === t && <span className="ml-auto pr-1 text-accent">✓</span>}
-          </button>
-        ))}
       </div>
     </>
   );
@@ -298,8 +285,6 @@ const SessionRow = memo(function SessionRow(props: RowProps) {
   const { session, cwd, section, active, pinned, snoozedUntil, settled, unread, archived, streaming, dragIndex, index, agentStatus, branch, gitStatus, onRefreshGitStatus } = props;
   const title = session.name ?? session.firstUserText ?? session.id.slice(0, 8);
   const hoverTimer = useRef(0);
-  const clickTimer = useRef<number | null>(null);
-  const pointer = useRef({ x: 0, y: 0 });
   const cancelPrefetch = () => { if (hoverTimer.current) { window.clearTimeout(hoverTimer.current); hoverTimer.current = 0; } };
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const isSnoozed = snoozedUntil != null && snoozedUntil > Date.now();
@@ -346,19 +331,7 @@ const SessionRow = memo(function SessionRow(props: RowProps) {
       <button
         className="flex min-w-0 flex-1 items-center gap-2 text-left"
         draggable={false}
-        onClick={(e) => {
-          pointer.current = { x: e.clientX, y: e.clientY };
-          if (clickTimer.current) {
-            window.clearTimeout(clickTimer.current);
-            clickTimer.current = null;
-            setMenu({ x: pointer.current.x, y: pointer.current.y });
-            return;
-          }
-          clickTimer.current = window.setTimeout(() => {
-            clickTimer.current = null;
-            props.onOpen(session.path, cwd, title);
-          }, 200);
-        }}
+        onClick={() => props.onOpen(session.path, cwd, title)}
         onMouseEnter={() => {
           onRefreshGitStatus?.();
           if (!props.onPrefetch || active) return;
@@ -395,7 +368,7 @@ const SessionRow = memo(function SessionRow(props: RowProps) {
             </span>
             <span className="flex min-w-0 items-center gap-1.5">
               {unread && <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--pc)] align-middle" />}
-              {streaming && active && <span className="inline-block h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-emerald-400 align-middle" />}
+              {streaming && active && <span className="inline-block h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-[var(--ok)] align-middle" />}
               <span className="truncate text-fg text-[14px] leading-snug">{title}</span>
             </span>
             <span className="flex min-w-0 items-center gap-1.5">
@@ -445,6 +418,7 @@ interface Props {
   canOpenTree: boolean;
   minimized: boolean;
   onToggleMinimize(): void;
+  onOpenSettings(): void;
   onOpen(path: string | undefined, cwd: string, name?: string): void;
   onPrefetch?: (path: string) => void;
   onNew(): void;
@@ -483,7 +457,7 @@ const SETTLED_PAGE = 25;
 export default function Sidebar(props: Props) {
   const {
     groups, activePath, activeCwd, activeStreaming,
-    treeOpen, canOpenTree, minimized, onToggleMinimize,
+    treeOpen, canOpenTree, minimized, onToggleMinimize, onOpenSettings,
     onOpen, onPrefetch, onNew, onNewSessionIn, onDeleteSession,
     onOpenFolder, onOpenTree, onSearch,
     projectFilter, onProjectFilterChange,
@@ -521,13 +495,6 @@ export default function Sidebar(props: Props) {
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
   };
-
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsAnchor, setSettingsAnchor] = useState<{ left: number; top: number } | null>(null);
-  const [currentTheme, setCurrentTheme] = useState<ThemePref>(() => {
-    const t = localStorage.getItem("pideck:theme");
-    return t === "light" || t === "dark" || t === "system" ? t : "dark";
-  });
 
   const pinnedSet = useMemo(() => new Set(pinnedOrder), [pinnedOrder]);
   const settledSet = useMemo(() => new Set(settled), [settled]);
@@ -595,11 +562,9 @@ export default function Sidebar(props: Props) {
   };
 
   if (minimized) {
-    return (
-      <button onClick={onToggleMinimize} title="Show sidebar (⌘B)" aria-label="Show sidebar" className="sidebar-expand fixed left-2 top-10 z-50">
-        <ChevronIcon size={16} strokeWidth={2} />
-      </button>
-    );
+    // The expand control lives in the thread header (App.tsx) so it never
+    // collides with the macOS traffic lights' click region.
+    return null;
   }
 
   const renderRow = (entry: { session: SessionMeta; cwd: string }, section: Section, index: number) => {
@@ -645,11 +610,42 @@ export default function Sidebar(props: Props) {
 
   return (
     <aside className="app-sidebar flex shrink-0 flex-col" style={{ width }}>
-      <div className="sidebar-resize-handle" onMouseDown={startResize} />
-      <div className="titlebar flex h-16 shrink-0 items-center gap-2.5 px-4 pl-[76px]">
-        <PiMark size={20} className="shrink-0 text-fg" />
-        <span className="text-[16px] font-semibold tracking-[-0.02em]">Babylon</span>
-        <button onClick={onToggleMinimize} title="Minimize sidebar (⌘B)" aria-label="Minimize sidebar" className="sidebar-toggle ml-auto">
+      <div
+        className="sidebar-resize-handle"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize sidebar"
+        aria-valuenow={width}
+        aria-valuemin={220}
+        aria-valuemax={560}
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+          e.preventDefault();
+          setWidth((w) => {
+            const next = Math.min(560, Math.max(220, w + (e.key === "ArrowRight" ? 16 : -16)));
+            localStorage.setItem("babylon:sidebar-width", String(next));
+            return next;
+          });
+        }}
+        onMouseDown={startResize}
+      />
+      <div className="titlebar flex h-16 shrink-0 items-center gap-2 pl-[88px] pr-3">
+        {projectCwds.length > 1 ? (
+          <div className="min-w-0 flex-1">
+            <ProjectFilter
+              projects={projectCwds.map((c) => ({ cwd: c, name: projectName(c) }))}
+              value={projectFilter}
+              onChange={onProjectFilterChange}
+            />
+          </div>
+        ) : (
+          <>
+            <PiMark size={20} className="shrink-0 text-fg" />
+            <span className="text-[16px] font-semibold tracking-[-0.02em]">Babylon</span>
+          </>
+        )}
+        <button onClick={onToggleMinimize} title="Minimize sidebar (⌘B)" aria-label="Minimize sidebar" className="sidebar-toggle ml-auto shrink-0">
           <ChevronIcon size={14} className="rotate-180" />
         </button>
       </div>
@@ -669,16 +665,6 @@ export default function Sidebar(props: Props) {
           <span>History</span>
         </button>
       </nav>
-
-      {projectCwds.length > 1 && (
-        <div className="px-2.5 pb-2 pt-2">
-          <ProjectFilter
-            projects={projectCwds.map((c) => ({ cwd: c, name: projectName(c) }))}
-            value={projectFilter}
-            onChange={onProjectFilterChange}
-          />
-        </div>
-      )}
 
       <div className="min-h-0 flex-1 overflow-y-auto px-2.5 py-2">
         {totalThreads === 0 ? (
@@ -742,15 +728,10 @@ export default function Sidebar(props: Props) {
             <span>{showArchived ? "Hide archived" : `Archived (${archivedList.length})`}</span>
           </button>
         )}
-        <button type="button" onClick={(e) => { setSettingsAnchor(e.currentTarget.getBoundingClientRect()); setSettingsOpen((v) => !v); }} className="sidebar-action mt-0.5" aria-haspopup="menu" aria-expanded={settingsOpen}>
+        <button type="button" onClick={onOpenSettings} className="sidebar-action mt-0.5" aria-haspopup="dialog">
           <GearIcon size={14} className="sidebar-action-icon" />
           <span>Settings</span>
         </button>
-        {settingsOpen && settingsAnchor &&
-          createPortal(
-            <SettingsMenu anchor={settingsAnchor} current={currentTheme} onClose={() => setSettingsOpen(false)} onPick={(t) => { applyTheme(t); setCurrentTheme(t); }} />,
-            document.body
-          )}
       </div>
     </aside>
   );

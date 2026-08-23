@@ -1,9 +1,9 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import type { CommandInfo, GitStatusResult } from "../bridge";
+import type { CommandInfo } from "../bridge";
 import { commandTokenAtStart, insertCommand, rankCommands } from "../commands";
 import CommandMenu from "./CommandMenu";
-import GitPanel from "./GitPanel";
 import ModelPicker from "./ModelPicker";
+import PermissionModePicker from "./PermissionModePicker";
 import ThinkingPicker from "./ThinkingPicker";
 import StatsPopover from "./StatsPopover";
 import { PaperclipIcon, SendIcon, StopIcon, XIcon } from "./icons";
@@ -27,9 +27,6 @@ interface Props {
   models: any[];
   thinkingLevels: string[];
   draftRequest?: { id: number; text: string } | null;
-  cwd?: string;
-  gitStatus?: GitStatusResult | null;
-  onGitChanged(): void;
   toast(kind: "info" | "warning" | "error", text: string): void;
   onSend(text: string, images: Attachment[] | undefined, streamingBehavior?: "steer" | "followUp"): Promise<boolean>;
   onAbort(): void;
@@ -86,7 +83,7 @@ async function prepareImage(file: File): Promise<{ blob: Blob; mimeType: string 
   }
 }
 
-const Composer = memo(function Composer({ streaming, steering, followUp, commands, agentState, stats, models, thinkingLevels, draftRequest, cwd, gitStatus, onGitChanged, toast, onSend, onAbort, onSetModel, onSetThinking, onCompact }: Props) {
+const Composer = memo(function Composer({ streaming, steering, followUp, commands, agentState, stats, models, thinkingLevels, draftRequest, toast, onSend, onAbort, onSetModel, onSetThinking, onCompact }: Props) {
   const [text, setText] = useState("");
   const [mode, setMode] = useState<"steer" | "followUp">("steer");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -271,8 +268,8 @@ const Composer = memo(function Composer({ streaming, steering, followUp, command
                       return list.filter((_, j) => j !== i);
                     })
                   }
-                  title="Remove"
-                  className="absolute -right-1.5 -top-1.5 grid h-4 w-4 place-items-center rounded-full bg-fg text-bg opacity-0 transition-opacity group-hover:opacity-100"
+                  aria-label={`Remove attachment ${a.name}`}
+                  className="absolute -right-2 -top-2 grid h-6 w-6 place-items-center rounded-full bg-fg text-bg opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
                 >
                   <XIcon size={9} />
                 </button>
@@ -316,6 +313,7 @@ const Composer = memo(function Composer({ streaming, steering, followUp, command
                 : "Ask Pi to change, inspect, or explain something"
             }
             role="combobox"
+            aria-label="Message Pi"
             aria-autocomplete="list"
             aria-expanded={commandMatches.length > 0}
             className="composer flex-1 resize-none bg-transparent px-2 py-2 text-[15px] outline-none placeholder:text-dim"
@@ -357,12 +355,11 @@ const Composer = memo(function Composer({ streaming, steering, followUp, command
           </div>
           <div className="composer-meta">
             <div className="flex min-w-0 items-center gap-1.5">
+              <PermissionModePicker />
               <ModelPicker models={models} current={agentState?.model ?? null} disabled={!models.length} onSelect={onSetModel} />
               <ThinkingPicker current={agentState?.thinkingLevel ?? "off"} available={thinkingLevels.length ? thinkingLevels : undefined} disabled={!agentState} onSelect={onSetThinking} />
               <StatsPopover stats={stats} hasSession={!!agentState} onCompact={onCompact} />
-              <GitPanel cwd={cwd} sidebarStatus={gitStatus} onChanged={onGitChanged} toast={toast} />
             </div>
-            <span className="ml-auto text-[12px] text-dim">Enter to send · Shift+Enter for newline</span>
           </div>
         </div>
       </div>

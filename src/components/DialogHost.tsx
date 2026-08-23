@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import { bridge } from "../bridge";
-import { useFluidAppear } from "../lib/useSpring";
 import type { Dialog } from "../store";
 
 interface Props {
@@ -9,9 +8,24 @@ interface Props {
   toast(type: "info" | "warning" | "error", text: string): void;
 }
 
+/**
+ * Extension dialogs (select / confirm / input / editor) render as non-modal
+ * popovers docked above the composer. No scrim: the transcript stays visible
+ * and the rest of the app stays interactive while the extension waits.
+ *
+ * Dismissal is explicit only — Escape or the Cancel button. Clicking elsewhere
+ * never cancels, so a typed draft cannot be lost by an accidental click-away.
+ */
 export default function DialogHost({ dialogs, onDismiss, toast }: Props) {
   if (!dialogs.length) return null;
-  return <DialogCard key={dialogs[0].id} dialog={dialogs[0]} onDismiss={onDismiss} toast={toast} />;
+  return (
+    <div
+      className="pointer-events-none fixed inset-x-0 z-40 flex flex-col items-center px-6"
+      style={{ bottom: "var(--dock-bottom, 188px)" }}
+    >
+      <DialogCard key={dialogs[0].id} dialog={dialogs[0]} onDismiss={onDismiss} toast={toast} />
+    </div>
+  );
 }
 
 function DialogCard({
@@ -24,7 +38,6 @@ function DialogCard({
   toast(type: "info" | "warning" | "error", text: string): void;
 }) {
   const [value, setValue] = useState(dialog.prefill ?? "");
-  const appear = useFluidAppear<HTMLDivElement>();
   const cardRef = useRef<HTMLDivElement | null>(null);
 
   const respond = async (payload: Record<string, unknown>) => {
@@ -46,19 +59,6 @@ function DialogCard({
     });
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") cancel();
-      if (e.key === "Tab" && cardRef.current) {
-        const focusable = [...cardRef.current.querySelectorAll<HTMLElement>("button, input, textarea, [tabindex]:not([tabindex='-1'])")];
-        if (!focusable.length) return;
-        const first = focusable[0];
-        const last = focusable[focusable.length - 1];
-        if (e.shiftKey && document.activeElement === first) {
-          e.preventDefault();
-          last.focus();
-        } else if (!e.shiftKey && document.activeElement === last) {
-          e.preventDefault();
-          first.focus();
-        }
-      }
     };
     window.addEventListener("keydown", onKey);
     return () => {
@@ -69,84 +69,77 @@ function DialogCard({
   }, [dialog.id]);
 
   return (
-    <div className="fade-in fixed inset-0 z-50 grid place-items-center bg-black/50 p-6" onMouseDown={cancel}>
-      <div
-        ref={(node) => {
-          cardRef.current = node;
-          appear(node);
-        }}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={`dialog-title-${dialog.id}`}
-        className="modal-surface w-full max-w-md p-5"
-        onMouseDown={(e) => e.stopPropagation()}
-      >
-        <h3 id={`dialog-title-${dialog.id}`} className="text-[14px] font-semibold tracking-tight">{dialog.title ?? "Extension request"}</h3>
-        {dialog.message && <p className="mt-1 text-[12.5px] text-dim">{dialog.message}</p>}
+    <div
+      ref={cardRef}
+      role="dialog"
+      aria-labelledby={`dialog-title-${dialog.id}`}
+      className="operator-popover pointer-events-auto w-full max-w-md p-4"
+    >
+      <h2 id={`dialog-title-${dialog.id}`} className="text-[14px] font-semibold tracking-tight">{dialog.title ?? "Extension request"}</h2>
+      {dialog.message && <p className="mt-1 text-[12.5px] text-dim">{dialog.message}</p>}
 
-        <div className="mt-4">
-          {dialog.method === "select" && (
-            <div className="flex flex-col gap-1.5">
-              {(dialog.options ?? []).map((o) => (
-                <button
-                  key={o}
-                  onClick={() => void respond({ value: o })}
-                  className="rounded-lg border border-line bg-bg px-3 py-2 text-left text-[13px] hover:border-accent"
-                >
-                  {o}
-                </button>
-              ))}
-            </div>
-          )}
+      <div className="mt-3">
+        {dialog.method === "select" && (
+          <div className="flex flex-col gap-1.5">
+            {(dialog.options ?? []).map((o) => (
+              <button
+                key={o}
+                onClick={() => void respond({ value: o })}
+                className="rounded-lg border border-line bg-bg px-3 py-2 text-left text-[13px] hover:border-accent"
+              >
+                {o}
+              </button>
+            ))}
+          </div>
+        )}
 
-          {dialog.method === "confirm" && (
+        {dialog.method === "confirm" && (
+          <div className="flex justify-end gap-2">
+            <button onClick={cancel} className="rounded-lg border border-line px-3 py-1.5 text-[12.5px]">
+              Cancel
+            </button>
+            <button
+              onClick={() => void respond({ confirmed: true })}
+              className="rounded-lg bg-accent px-3 py-1.5 text-[12.5px] font-semibold text-bg"
+            >
+              Confirm
+            </button>
+          </div>
+        )}
+
+        {(dialog.method === "input" || dialog.method === "editor") && (
+          <div className="flex flex-col gap-2">
+            {dialog.method === "input" ? (
+              <input
+                autoFocus
+                value={value}
+                onChange={(e) => setValue(e.target.value)}
+                placeholder={dialog.placeholder}
+                onKeyDown={(e) => e.key === "Enter" && void respond({ value })}
+                className="rounded-lg border border-line bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent"
+              />
+            ) : (
+              <textarea
+                autoFocus
+                value={value}
+                onChange={(e) => setValue(e.target.value)}
+                rows={8}
+                className="resize-y rounded-lg border border-line bg-bg px-3 py-2 font-mono text-[12px] outline-none focus:border-accent"
+              />
+            )}
             <div className="flex justify-end gap-2">
               <button onClick={cancel} className="rounded-lg border border-line px-3 py-1.5 text-[12.5px]">
                 Cancel
               </button>
               <button
-                onClick={() => void respond({ confirmed: true })}
+                onClick={() => void respond({ value })}
                 className="rounded-lg bg-accent px-3 py-1.5 text-[12.5px] font-semibold text-bg"
               >
-                Confirm
+                Submit
               </button>
             </div>
-          )}
-
-          {(dialog.method === "input" || dialog.method === "editor") && (
-            <div className="flex flex-col gap-2">
-              {dialog.method === "input" ? (
-                <input
-                  autoFocus
-                  value={value}
-                  onChange={(e) => setValue(e.target.value)}
-                  placeholder={dialog.placeholder}
-                  onKeyDown={(e) => e.key === "Enter" && void respond({ value })}
-                  className="rounded-lg border border-line bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent"
-                />
-              ) : (
-                <textarea
-                  autoFocus
-                  value={value}
-                  onChange={(e) => setValue(e.target.value)}
-                  rows={8}
-                  className="resize-y rounded-lg border border-line bg-bg px-3 py-2 font-mono text-[12px] outline-none focus:border-accent"
-                />
-              )}
-              <div className="flex justify-end gap-2">
-                <button onClick={cancel} className="rounded-lg border border-line px-3 py-1.5 text-[12.5px]">
-                  Cancel
-                </button>
-                <button
-                  onClick={() => void respond({ value })}
-                  className="rounded-lg bg-accent px-3 py-1.5 text-[12.5px] font-semibold text-bg"
-                >
-                  Submit
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
+          </div>
+        )}
       </div>
     </div>
   );

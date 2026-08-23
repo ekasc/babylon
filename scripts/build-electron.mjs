@@ -15,7 +15,9 @@ const requireBanner = {
 const shared = {
   bundle: true,
   platform: "node",
-  external: ["electron"],
+  // Pi loads provider auth and API implementations with relative dynamic
+  // imports. Keep the package intact so those imports resolve inside it.
+  external: ["electron", "@earendil-works/pi-coding-agent"],
   sourcemap: true,
 };
 

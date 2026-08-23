@@ -67,15 +67,16 @@ export function useFluidAppear<T extends HTMLElement = HTMLElement>(cfg?: Spring
     (el: T | null) => {
       if (!el) return;
       ref.current = el;
-      el.style.willChange = "transform, opacity, filter";
+      el.style.willChange = "transform, opacity";
       const reduce = typeof matchMedia !== "undefined" && matchMedia("(prefers-reduced-motion: reduce)").matches;
       const apply = (k: number) => {
         const progress = Math.min(1, Math.max(0, k));
         el.style.opacity = String(progress);
         el.style.transform = reduce ? "none" : `translate3d(0,${(1 - progress) * 8}px,0) scale(${0.975 + 0.025 * progress})`;
-        el.style.filter = reduce ? "none" : `blur(${(1 - progress) * 5}px)`;
       };
-      const s = new Spring(0, 1, cfg ?? springModal, apply);
+      const s = new Spring(0, 1, cfg ?? springModal, apply, () => {
+        el.style.willChange = "auto";
+      });
       springRef.current = s;
       s.retarget(1);
     },

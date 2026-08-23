@@ -55,7 +55,7 @@ export default function StatusBar({ agentState, stats, models, onSetModel, onSet
           </span>
         )}
         {agentState?.autoCompactionEnabled && (
-          <span className="rounded-full bg-white/5 px-2 py-0.5 text-[10.5px] font-medium text-dim">
+          <span className="rounded-full bg-[color-mix(in_srgb,var(--fg)_6%,transparent)] px-2 py-0.5 text-[10.5px] font-medium text-dim">
             Auto-compact
           </span>
         )}

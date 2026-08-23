@@ -7,6 +7,7 @@ import {
   type DeviceRegistry,
   type DeviceScope,
 } from "../device-pairing";
+import { useModalDialog } from "./useModalDialog";
 
 const SCOPE_LABELS: Record<DeviceScope, string> = {
   view_tasks: "View tasks",
@@ -43,6 +44,7 @@ export function DevicesPanel({
   const [scope, setScope] = useState<DeviceScope[]>(["view_tasks"]);
   const [error, setError] = useState<string | null>(null);
   const [shownToken, setShownToken] = useState<{ name: string; token: string } | null>(null);
+  const dialogRef = useModalDialog(onClose);
 
   const toggleScope = (s: DeviceScope) =>
     setScope((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]));
@@ -74,10 +76,10 @@ export function DevicesPanel({
   const revoke = (id: string) => setRegistry((prev) => revokeDevice(prev, id));
 
   return (
-    <div className="fade-in fixed inset-0 z-50 grid place-items-center bg-black/50 p-6" onMouseDown={onClose}>
-      <div className="modal-surface w-full max-w-lg p-5" onMouseDown={(e) => e.stopPropagation()}>
+    <div className="fade-in fixed inset-0 z-50 grid place-items-center bg-[var(--scrim)] p-6" onMouseDown={onClose}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="devices-title" className="modal-surface w-full max-w-lg p-5" onMouseDown={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between">
-          <h3 className="text-[15px] font-semibold tracking-tight">Paired devices</h3>
+          <h2 id="devices-title" className="text-[15px] font-semibold tracking-tight">Paired devices</h2>
           <button onClick={onClose} className="rounded-lg border border-line px-2 py-1 text-[12.5px] hover:border-accent">
             Close
           </button>

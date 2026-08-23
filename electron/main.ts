@@ -1,8 +1,8 @@
-import { app, BrowserWindow, dialog, ipcMain, shell, type IpcMainInvokeEvent } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, screen, shell, type IpcMainInvokeEvent } from "electron";
 import { randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import * as net from "node:net";
-import { existsSync, promises as fsp } from "node:fs";
+import { existsSync, promises as fsp, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -12,7 +12,7 @@ import * as gitOps from "./git";
 import { getSettings } from "./app-settings";
 import { PiHost } from "./pi-host";
 import { PermissionEngine, type AgentAction, type Risk } from "./permissions";
-import { mergeRecaps } from "./recap";
+import { mergeRecaps, mergeRecapsIntoWindow } from "./recap";
 import { isTrustedRendererUrl } from "./navigation";
 import { validateSessionPath } from "./session-path";
 import { SessionIndex, readSessionRange, readSessionTail } from "./sessions";
@@ -20,8 +20,56 @@ import { SessionIndex, readSessionRange, readSessionTail } from "./sessions";
 // Pi engine session store (mirrors electron/threads.ts).
 const PI_SESSIONS_ROOT = join(homedir(), ".pi", "agent", "sessions");
 
+const DEV_SERVER = !!process.env.VITE_DEV_SERVER_URL;
+
+// ---------------------------------------------------------------------------
+// Window bounds persistence — dev restarts reopen at the same place instead
+// of re-centering over the user's work.
+// ---------------------------------------------------------------------------
+
+function windowBoundsFile(): string {
+  return join(app.getPath("userData"), "window-bounds.json");
+}
+
+function loadSavedBounds(): Electron.Rectangle | undefined {
+  try {
+    const raw = JSON.parse(readFileSync(windowBoundsFile(), "utf8"));
+    const bounds = {
+      x: Number(raw.x),
+      y: Number(raw.y),
+      width: Number(raw.width),
+      height: Number(raw.height),
+    };
+    if (![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite)) return undefined;
+    // Ignore saved bounds that no longer intersect any display (unplugged
+    // monitor) so the window can never reopen off-screen.
+    const area = screen.getDisplayMatching(bounds).workArea;
+    const overlaps =
+      bounds.x < area.x + area.width &&
+      bounds.x + bounds.width > area.x &&
+      bounds.y < area.y + area.height &&
+      bounds.y + bounds.height > area.y;
+    return overlaps ? bounds : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+let saveBoundsTimer: ReturnType<typeof setTimeout> | null = null;
+
+function rememberBounds(): void {
+  if (!win || win.isDestroyed()) return;
+  if (saveBoundsTimer) clearTimeout(saveBoundsTimer);
+  saveBoundsTimer = setTimeout(() => {
+    saveBoundsTimer = null;
+    if (!win || win.isDestroyed()) return;
+    void fsp.writeFile(windowBoundsFile(), JSON.stringify(win.getNormalBounds())).catch(() => undefined);
+  }, 400);
+}
+
 const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
 const RENDERER_ENTRY = pathToFileURL(join(__dirname, "../dist/index.html")).href;
 
 let win: BrowserWindow | null = null;
@@ -134,14 +182,18 @@ function createWindow(): void {
   // the user's screen.
   const headless = process.env.PIDECK_HEADLESS === "1";
   win = new BrowserWindow({
-    width: 1280,
-    height: 840,
+    ...(loadSavedBounds() ?? { width: 1280, height: 840 }),
     minWidth: 940,
     minHeight: 620,
-    show: !headless,
+    // Under the dev server the window appears only after first paint and via
+    // showInactive(), so watcher restarts never steal focus or cover the
+    // screen the user is working in.
+    show: !headless && !DEV_SERVER,
     title: "Babylon",
     titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
-    trafficLightPosition: { x: 16, y: 16 },
+    // Center the lights on the 64px titlebar line (y + 12/2 = 32) and keep
+    // clear of the header content that starts at 88px.
+    trafficLightPosition: { x: 20, y: 26 },
     backgroundColor: "#161616",
     webPreferences: {
       preload: join(__dirname, "preload.cjs"),
@@ -164,6 +216,11 @@ function createWindow(): void {
   win.on("closed", () => {
     win = null;
   });
+  win.on("move", rememberBounds);
+  win.on("resize", rememberBounds);
+  if (!headless && DEV_SERVER) {
+    win.once("ready-to-show", () => win?.showInactive());
+  }
   if (devUrl) {
     // Keep renderer diagnostics visible during development only. Production
     // output may contain prompts/tool data and should not be mirrored to logs.
@@ -250,7 +307,9 @@ async function gitStatus(cwd: string): Promise<GitStatusResult> {
     behind: 0,
   };
   try {
-    const porcelain = await git(["status", "--porcelain"], cwd);
+    // List concrete untracked files while retaining Git's standard ignore,
+    // info/exclude, and global-excludes behavior.
+    const porcelain = await git(["status", "--porcelain", "--untracked-files=all"], cwd);
     result.dirty = porcelain
       .split("\n")
       .filter(Boolean)
@@ -409,7 +468,7 @@ function registerIpc(): void {
     if (!Number.isSafeInteger(endOffset) || endOffset < 0) throw new Error("invalid session window offset");
     const maxBytes = Math.min(Math.max(countBytes ?? 2 * 1024 * 1024, 256 * 1024), 16 * 1024 * 1024);
     const window = await readSessionRange(target, endOffset, maxBytes);
-    return { ...window, messages: mergeRecaps(window.messages, await getHost().getRecaps(target)) };
+    return { ...window, messages: mergeRecapsIntoWindow(window.messages, await getHost().getRecaps(target)) };
   });
 
   handle("pideck:get-tool-output", async (_e, toolCallId: string) => {
@@ -490,13 +549,32 @@ function registerIpc(): void {
     }
   });
   handle("pideck:git-branches", (_e, cwd: unknown) => gitOps.listBranches(requireCwd(cwd)));
+  handle("pideck:git-diff-file", async (_e, cwd: unknown, file: unknown) => {
+    const root = requireCwd(cwd);
+    if (typeof file !== "string" || file.length === 0 || file.length > 1024 || file.includes("\u0000")) {
+      throw new Error("invalid file path");
+    }
+    return gitOps.diffForFile(root, file);
+  });
   handle("pideck:git-branch-create", (_e, cwd: unknown, name: unknown, switchTo: unknown) => {
     if (typeof name !== "string" || name.length > 200) throw new Error("invalid branch name");
     return gitOps.createBranch(requireCwd(cwd), name, switchTo === true);
   });
-  handle("pideck:git-branch-switch", (_e, cwd: unknown, name: unknown) => {
+  handle("pideck:git-branch-switch", (_e, cwd: unknown, name: unknown, options: unknown) => {
     if (typeof name !== "string" || name.length > 200) throw new Error("invalid branch name");
-    return gitOps.switchBranch(requireCwd(cwd), name);
+    if (options !== undefined && (typeof options !== "object" || options === null || typeof (options as any).stash !== "boolean")) {
+      throw new Error("invalid switch options");
+    }
+    return gitOps.switchBranch(requireCwd(cwd), name, options as { stash?: boolean } | undefined);
+  });
+  handle("pideck:git-start-commit-push", async (_e, cwd: unknown) => {
+    const root = requireCwd(cwd);
+    const details = await gitOps.statusDetails(root);
+    if (!details.isRepo) throw new Error("not a git repository");
+    if (!details.hasChanges) throw new Error("no changes to commit");
+    const result = await getHost().startGitCommitPush(root);
+    await activityBridge?.refresh();
+    return result;
   });
   handle("pideck:git-commit", (_e, cwd: unknown, message: unknown) => {
     if (typeof message !== "string" || message.length > 20_000) throw new Error("invalid commit message");
@@ -728,6 +806,17 @@ function registerIpc(): void {
       throw new Error("invalid execution mode");
     }
     void permissionEngine.setModeAndPersist(mode as any);
+    // A mode change retroactively re-evaluates what the agent is blocked on:
+    // under Full Access the pending approvals are no longer required, so
+    // release them instead of leaving the agent waiting on stale gates.
+    if (mode === "full_access") {
+      for (const [id, pending] of pendingApprovals) {
+        clearTimeout(pending.timer);
+        pendingApprovals.delete(id);
+        win?.webContents.send("pideck:approval-cleared", { id });
+        pending.resolve(true);
+      }
+    }
     notifyPermissionsChanged();
     return { mode: permissionEngine.getMode() };
   });
@@ -899,6 +988,12 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  // Flush window bounds synchronously; the debounced writer may not have run.
+  try {
+    if (win && !win.isDestroyed()) writeFileSync(windowBoundsFile(), JSON.stringify(win.getNormalBounds()));
+  } catch {
+    /* best effort */
+  }
   agentEvents.dispose();
   sessionIndex.dispose();
   activityBridge?.dispose();

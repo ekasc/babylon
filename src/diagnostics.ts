@@ -11,7 +11,7 @@ import type { AutomationHistory } from "./automation-runner";
 import type { BackgroundPolicy } from "./background-policy";
 import type { DeviceRegistry } from "./device-pairing";
 import type { EventLog } from "./events";
-import { OWNERSHIP_KEYS, type OwnershipKey } from "./events";
+import { EVENT_TYPES, OWNERSHIP_KEYS, type BabylonEventType, type OwnershipKey } from "./events";
 import { ownershipCoverage } from "./event-projection";
 import type { ProcessRegistry } from "./process-model";
 import { listActive, listHistory } from "./process-model";
@@ -42,6 +42,14 @@ export interface DiagnosticsSnapshot {
   events?: {
     total: number;
     byType: Record<string, number>;
+    /** Event types seen in the current log (catalog order). */
+    observedTypes: BabylonEventType[];
+    /**
+     * Catalog types never seen in the current log. Absence is runtime
+     * visibility, not a defect verdict: a type may be unobserved simply
+     * because its lifecycle did not occur this session.
+     */
+    unobservedTypes: BabylonEventType[];
     firstTs?: number;
     lastTs?: number;
     ownershipCoverage: Record<OwnershipKey, number>;
@@ -92,9 +100,14 @@ export function collectDiagnostics(input: DiagnosticsInput): DiagnosticsSnapshot
       byType[event.type] = (byType[event.type] ?? 0) + 1;
     }
     const timestamps = input.events.events.map((e) => e.ts);
+    // Producer-coverage visibility: which catalog types the current log has
+    // (and has not) observed. Catalog order keeps exports deterministic.
+    const seen = new Set<string>(input.events.events.map((e) => e.type));
     snapshot.events = {
       total: input.events.events.length,
       byType,
+      observedTypes: EVENT_TYPES.filter((t) => seen.has(t)),
+      unobservedTypes: EVENT_TYPES.filter((t) => !seen.has(t)),
       firstTs: timestamps.length ? Math.min(...timestamps) : undefined,
       lastTs: timestamps.length ? Math.max(...timestamps) : undefined,
       ownershipCoverage: coverage,

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useFlipList } from "../flip";
+import { confirmAction, promptText } from "../lib/prompts";
 import {
   bridge,
   type ActivityUpdate,
@@ -235,7 +236,14 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props)
 
   const remove = useCallback(
     async (runId: string) => {
-      if (!window.confirm("Delete this workflow run?\n\nIts on-disk run state (including agent logs) will be removed.")) {
+      if (
+        !(await confirmAction({
+          title: "Delete this workflow run?",
+          message: "Its on-disk run state (including agent logs) will be removed.",
+          confirmLabel: "Delete run",
+          danger: true,
+        }))
+      ) {
         return;
       }
       try {
@@ -284,6 +292,7 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props)
           <button
             onClick={back}
             title="Back"
+            aria-label="Back"
             className="rounded-md px-1 py-0.5 text-dim hover:bg-inset hover:text-fg"
           >
             <ChevronIcon size={14} className="rotate-180" />
@@ -848,9 +857,15 @@ function AgentDetail({ item, toast, onOpenSession, onUpdate }: { item: AgentItem
   }, [recent?.length]);
 
   const control = async (action: "steer" | "follow-up" | "stop") => {
-    const message = action === "stop" ? undefined : window.prompt(action === "steer" ? "Interrupt and redirect this agent" : "Send a follow-up") ?? undefined;
+    const message =
+      action === "stop"
+        ? undefined
+        : ((await promptText({
+            title: action === "steer" ? "Interrupt and redirect this agent" : "Send a follow-up",
+            placeholder: "Message",
+          })) ?? undefined);
     if (action !== "stop" && !message?.trim()) return;
-    if (action === "stop" && !window.confirm(`Stop this ${thread ? "thread" : "subagent"}?`)) return;
+    if (action === "stop" && !(await confirmAction({ title: `Stop this ${thread ? "thread" : "subagent"}?`, confirmLabel: "Stop", danger: true }))) return;
     try {
       if (thread) {
         const next = await bridge.threadsControl(action, id, message);

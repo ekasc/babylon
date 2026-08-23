@@ -2,6 +2,7 @@ import { useState } from "react";
 import { bridge } from "../bridge";
 import { useFluidAppear } from "../lib/useSpring";
 import { FlaskIcon } from "./icons";
+import { useModalDialog } from "./useModalDialog";
 
 export interface WorktreeInfo {
   isWorktree: boolean;
@@ -88,7 +89,7 @@ export function WorktreeModal({
   const [useGit, setUseGit] = useState(false);
   const [busy, setBusy] = useState(false);
   const appear = useFluidAppear<HTMLDivElement>();
-
+  const dialogRef = useModalDialog(onClose);
   const create = async () => {
     setBusy(true);
     try {
@@ -108,16 +109,22 @@ export function WorktreeModal({
   };
 
   return (
-    <div className="fade-in fixed inset-0 z-50 grid place-items-center bg-black/50 p-6" onMouseDown={onClose}>
+    <div className="fade-in fixed inset-0 z-50 grid place-items-center bg-[var(--scrim)] p-6" onMouseDown={onClose}>
       <div
-        ref={appear}
+        ref={(el) => {
+          appear(el);
+          dialogRef.current = el;
+        }}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="worktree-title"
         className="modal-surface w-full max-w-lg p-5"
         onMouseDown={(e) => e.stopPropagation()}
       >
-        <h3 className="flex items-center gap-2 text-[14px] font-semibold">
+        <h2 id="worktree-title" className="flex items-center gap-2 text-[14px] font-semibold">
           <FlaskIcon size={16} className="text-warn" />
           New experimental worktree
-        </h3>
+        </h2>
         <p className="mt-1 text-[12px] leading-relaxed text-dim">
           Clones this session into a separate worktree so you can try the change without touching the
           original conversation

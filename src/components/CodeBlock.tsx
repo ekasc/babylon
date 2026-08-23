@@ -49,7 +49,7 @@ export default function CodeBlock({ code, lang, bare }: Props) {
       {!bare && (
         <div className="codeblock-bar">
           <span>{lang ?? "text"}</span>
-          <button onClick={copy} className="hover:text-fg">
+          <button onClick={copy} aria-label={`Copy ${lang ?? "text"} code`} className="cursor-pointer rounded px-2 py-1 hover:bg-inset hover:text-fg">
             {copied ? "copied ✓" : "copy"}
           </button>
         </div>

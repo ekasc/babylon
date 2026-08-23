@@ -20,7 +20,8 @@ import { SnapshotStore, type RestoreChange, type SnapshotCapture } from "./snaps
 import { toPiImages } from "./prompt-images";
 import { clampToolOutput, readSessionTail, readToolOutput } from "./sessions";
 import { RecapStore } from "./recap-store";
-import { getSettings, saveSettings, type PiSettings } from "./app-settings";
+import { DEFAULT_GIT_COMMIT_MODEL, getSettings, saveSettings, type PiSettings } from "./app-settings";
+import { buildCommitPushTask } from "./git-commit-subagent";
 import { buildRecapPrompt, normalizeRecapText, pickRecapDelta, recapDue, recapWorthy, RECAP_INTERVAL_MS, type Recap } from "./recap";
 import { ManagedSubagents, type ManagedSubagentRecord, type SubagentControlAction, type SubagentParentEvent } from "./subagents";
 import { installPermissionHook } from "./permission-hook";
@@ -449,6 +450,26 @@ export class PiHost {
     return text.replace(/^["'“”]+|["'“”]+$/g, "").slice(0, 60);
   }
 
+  async startGitCommitPush(cwd: string): Promise<{ runId: string; model: string }> {
+    await this.ensureSession();
+    if (resolve(cwd) !== resolve(this.cwd)) throw new Error("Git action cwd does not match the active project");
+    const settings = getSettings();
+    const ref = settings.gitCommitModel ?? DEFAULT_GIT_COMMIT_MODEL;
+    const model = `${ref.provider}/${ref.modelId}`;
+    const record = await this.managedSubagents.start(
+      {
+        task: buildCommitPushTask(settings.gitCommitPrompt ?? ""),
+        model,
+        profile: "write",
+        thinking: "low",
+        timeoutMs: 10 * 60_000,
+        name: "Commit & push",
+      },
+      this.runtime.session.extensionRunner.createContext()
+    );
+    return { runId: record.runId, model: record.sessionModel };
+  }
+
   /** One cheap model call shared by naming and recaps. The model + reasoning
    *  level are configurable (Settings → Pi → Title generation), falling back
    *  to the previous hardcoded cheap model when unset. */
@@ -854,6 +875,14 @@ export class PiHost {
       createdAt: new Date().toISOString(),
     };
     await this.rollbacks.addCheckpoint(checkpoint);
+    // Real checkpoint lifecycle → Babylon event stream (renderer maps this to
+    // checkpoint.created). Ids only; never checkpoint contents.
+    this.opts.onEvent({
+      type: "pideck_checkpoint_created",
+      sessionId: start.sessionId,
+      sessionFile: start.sessionFile,
+      userEntryId: user.id,
+    });
     this.opts.onEvent({
       type: "pideck_history_changed",
       sessionId: start.sessionId,

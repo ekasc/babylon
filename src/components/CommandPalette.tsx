@@ -95,7 +95,7 @@ export default function CommandPalette({
   };
 
   return (
-    <div className="fade-in fixed inset-0 z-50 flex items-start justify-center bg-black/55 px-4 pt-[12vh]" onMouseDown={onClose}>
+    <div className="fade-in fixed inset-0 z-50 flex items-start justify-center bg-[var(--scrim)] px-4 pt-[12vh]" onMouseDown={onClose}>
       <div
         ref={dialogRef}
         role="dialog"
@@ -124,9 +124,11 @@ export default function CommandPalette({
               if (event.key === "Escape") onClose();
               else if (event.key === "ArrowDown") {
                 event.preventDefault();
+                if (!results.length) return;
                 setSelected((index) => (index + 1) % results.length);
               } else if (event.key === "ArrowUp") {
                 event.preventDefault();
+                if (!results.length) return;
                 setSelected((index) => (index - 1 + results.length) % results.length);
               } else if (event.key === "Enter") {
                 event.preventDefault();

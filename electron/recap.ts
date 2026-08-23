@@ -117,3 +117,24 @@ export function mergeRecaps(messages: any[], recaps: Recap[]): any[] {
     return at - bt;
   });
 }
+
+/** Merges recaps into an OLDER transcript window: only recaps generated within
+ *  the window's time span, so each recap lands in exactly one window and
+ *  scroll-up history loads cannot duplicate recaps already shown nearer the
+ *  tail. */
+export function mergeRecapsIntoWindow(messages: any[], recaps: Recap[]): any[] {
+  if (!messages.length || !recaps?.length) return messages;
+  let first = Infinity;
+  let last = -Infinity;
+  for (const m of messages) {
+    if (typeof m?.timestamp !== "number" || !Number.isFinite(m.timestamp)) continue;
+    first = Math.min(first, m.timestamp);
+    last = Math.max(last, m.timestamp);
+  }
+  if (!Number.isFinite(first) || !Number.isFinite(last)) return messages;
+  const inside = recaps.filter((r) => {
+    const t = Date.parse(r.at);
+    return Number.isFinite(t) && t >= first && t <= last;
+  });
+  return mergeRecaps(messages, inside);
+}

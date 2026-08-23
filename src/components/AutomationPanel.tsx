@@ -9,6 +9,7 @@ import {
   type Trigger,
 } from "../automation";
 import type { AutomationHistory } from "../automation-runner";
+import { useModalDialog } from "./useModalDialog";
 
 function describeTrigger(trigger: Trigger): string {
   switch (trigger.kind) {
@@ -47,6 +48,7 @@ export function AutomationPanel({
   onClose: () => void;
 }) {
   const tasks = Object.values(schedule.tasks);
+  const dialogRef = useModalDialog(onClose);
   const [name, setName] = useState("");
   const [project, setProject] = useState("");
   const [kind, setKind] = useState<Trigger["kind"]>("interval");
@@ -128,10 +130,10 @@ export function AutomationPanel({
   const runs = [...history.runs].slice(-20);
 
   return (
-    <div className="fade-in fixed inset-0 z-50 grid place-items-center bg-black/50 p-6" onMouseDown={onClose}>
-      <div className="modal-surface w-full max-w-lg p-5" onMouseDown={(e) => e.stopPropagation()}>
+    <div className="fade-in fixed inset-0 z-50 grid place-items-center bg-[var(--scrim)] p-6" onMouseDown={onClose}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="automation-title" className="modal-surface w-full max-w-lg p-5" onMouseDown={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between">
-          <h3 className="text-[15px] font-semibold tracking-tight">Automation</h3>
+          <h2 id="automation-title" className="text-[15px] font-semibold tracking-tight">Automation</h2>
           <button onClick={onClose} className="rounded-lg border border-line px-2 py-1 text-[12.5px] hover:border-accent">
             Close
           </button>

@@ -1,5 +1,6 @@
-// Dev orchestrator: watches electron/*.ts with esbuild and (re)starts Electron
-// against the Vite dev server. Renderer HMR comes from Vite itself.
+// Dev orchestrator: watches electron/*.ts with esbuild and starts Electron once
+// against the Vite dev server. Renderer updates are handled by Vite HMR.
+// Main/preload rebuilds are written to disk but never reload or restart the app.
 import esbuild from "esbuild";
 import { spawn } from "node:child_process";
 import path from "node:path";
@@ -10,11 +11,6 @@ const { context: createContext } = esbuild;
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const devUrl = process.env.VITE_DEV_SERVER_URL ?? "http://127.0.0.1:5173";
 
-// ESM output can't do dynamic `require()` (esbuild shims it and throws
-// "Dynamic require of … is not supported"). A transitive CJS dep (cross-spawn,
-// via the pi-coding-agent) calls require("child_process") at runtime, so we
-// re-expose a real `require` backed by createRequire. CJS output (preload)
-// already has a native require and must NOT get this banner.
 const requireBanner = {
   js: `import { createRequire as topLevelCreateRequire } from "module"; const require = topLevelCreateRequire(import.meta.url);`,
 };
@@ -23,101 +19,84 @@ const shared = {
   bundle: true,
   platform: "node",
   format: "esm",
-  external: ["electron"],
+  // Pi loads provider auth and API implementations with relative dynamic
+  // imports. Keep the package intact so those imports resolve inside it.
+  external: ["electron", "@earendil-works/pi-coding-agent"],
   sourcemap: true,
   logLevel: "silent",
 };
 
 let electron = null;
-let restarting = false;
-let restartTimer = null;
-let builtOnce = false;
+let starting = false;
+const initialBuilds = new Set();
 
 function startElectron() {
-  electron = spawn(path.join(root, "node_modules", ".bin", "electron"), ["."], {
+  const debugArgs = process.env.PIDECK_CDP ? ["--remote-debugging-port=9222"] : [];
+  electron = spawn(path.join(root, "node_modules", ".bin", "electron"), [".", ...debugArgs], {
     cwd: root,
     stdio: "inherit",
     env: { ...process.env, VITE_DEV_SERVER_URL: devUrl },
   });
   electron.on("exit", (code, signal) => {
-    if (restarting) return;
-    // Under a smoke-test kill (SIGTERM → code null), treat as success.
     process.exit(signal && code === null ? 0 : (code ?? 0));
   });
 }
 
-function scheduleRestart() {
-  // `!electron` guards the initial-build double-fire (main + preload both emit
-  // onEnd before Electron has started): nothing to restart yet, so skip instead
-  // of scheduling a spurious restart that would kill the freshly launched app.
-  if (!builtOnce || restarting || !electron) return;
-  clearTimeout(restartTimer);
-  restartTimer = setTimeout(() => {
-    console.log("\n[pideck] electron/ changed — restarting Electron…");
-    restarting = true;
-    const old = electron;
-    old.once("exit", () => {
-      restarting = false;
-      startElectron();
-    });
-    old.kill("SIGTERM");
-  }, 500);
+async function startWhenReady() {
+  if (starting || electron || initialBuilds.size < 2) return;
+  starting = true;
+  const startedAt = Date.now();
+  for (;;) {
+    try {
+      const response = await fetch(devUrl);
+      if (response.ok) break;
+    } catch {
+      // Vite is still starting.
+    }
+    if (Date.now() - startedAt > 30_000) {
+      console.error("[pideck] Vite dev server did not come up at", devUrl);
+      process.exit(1);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+  startElectron();
 }
 
-const restartPlugin = {
-  name: "pideck-restart",
+const buildPlugin = (label) => ({
+  name: `pideck-${label}-build`,
   setup(build) {
     build.onEnd((result) => {
       if (result.errors.length) return;
-      if (!builtOnce) {
-        builtOnce = true;
-        void (async () => {
-          // Wait for Vite before opening the window.
-          const t0 = Date.now();
-          for (;;) {
-            try {
-              const r = await fetch(devUrl);
-              if (r.ok) break;
-            } catch {
-              /* not up yet */
-            }
-            if (Date.now() - t0 > 30_000) {
-              console.error("[pideck] Vite dev server did not come up at", devUrl);
-              process.exit(1);
-            }
-            await new Promise((r) => setTimeout(r, 300));
-          }
-          startElectron();
-        })();
-      } else {
-        scheduleRestart();
+      if (!initialBuilds.has(label)) {
+        initialBuilds.add(label);
+        void startWhenReady();
+        return;
       }
+      if (electron) console.log(`[pideck] ${label} rebuilt; restart pnpm dev to apply.`);
     });
   },
-};
+});
 
 const mainCtx = await createContext({
   ...shared,
   banner: requireBanner,
   entryPoints: [path.join(root, "electron/main.ts")],
   outfile: path.join(root, "dist-electron/main.mjs"),
-  plugins: [restartPlugin],
+  plugins: [buildPlugin("main")],
 });
 const preloadCtx = await createContext({
   ...shared,
   format: "cjs",
   entryPoints: [path.join(root, "electron/preload.ts")],
   outfile: path.join(root, "dist-electron/preload.cjs"),
-  plugins: [restartPlugin],
+  plugins: [buildPlugin("preload")],
 });
 
-await mainCtx.watch();
-await preloadCtx.watch();
-await Promise.all([mainCtx.rebuild(), preloadCtx.rebuild()]);
+await Promise.all([mainCtx.watch(), preloadCtx.watch()]);
 
-for (const sig of ["SIGINT", "SIGTERM"]) {
-  process.on(sig, () => {
-    electron?.kill(sig);
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.on(signal, () => {
+    electron?.kill(signal);
     process.exit(0);
   });
 }
