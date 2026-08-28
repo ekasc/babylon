@@ -33,7 +33,8 @@ export type ChatItem =
       truncated?: boolean;
     }
   | { kind: "system"; key: string; text: string }
-  | { kind: "recap"; key: string; text: string; at: number };
+  | { kind: "recap"; key: string; text: string; at: number }
+  | { kind: "launch"; key: string; runKind: "subagent" | "thread" | "workflow"; runId: string; label: string; status: "running" | "completed" | "failed" | "stopped" };
 
 export type DialogMethod = "select" | "confirm" | "input" | "editor";
 
@@ -244,14 +245,22 @@ export function reducer(state: State, action: Action): State {
   switch (action.type) {
     case "reset":
       return { ...initialState, toasts: state.toasts };
-    case "rebuild":
+    case "rebuild": {
+      const fromMessages = messagesToItems(action.messages);
+      // Launch cards are not part of the agent's session file; preserve any
+      // live rows so the user doesn't lose sight of running work after a
+      // session-rebuild (e.g. settings change, agent_settled replay).
+      const preserved = state.items.filter(
+        (it) => it.kind === "launch" && !fromMessages.some((row) => row.key === it.key)
+      );
       return {
         ...state,
-        items: reconcileItems(state.items, messagesToItems(action.messages)),
+        items: reconcileItems(state.items, [...fromMessages, ...preserved]),
         streaming: false,
         steering: [],
         followUp: [],
       };
+    }
     case "local-user":
       return {
         ...state,
@@ -296,6 +305,32 @@ function applyEvent(state: State, ev: any): State {
         ...state,
         items: [...state.items, { kind: "recap", key: nextKey("c"), text, at: Date.parse(ev.recap?.at ?? "") || Date.now() }],
       };
+    }
+
+    case "babylon_launch_started": {
+      const { runId, runKind, label } = ev;
+      if (!runId || !runKind) return state;
+      const items = state.items.slice();
+      // Reuse the row on re-emit (e.g. session rehydrate) so the same key sticks.
+      const existing = items.findIndex((it) => it.kind === "launch" && it.runId === runId);
+      const next = { kind: "launch" as const, key: `l:${runKind}:${runId}`, runKind, runId, label: label ?? runId, status: "running" as const };
+      if (existing >= 0) items[existing] = { ...items[existing], ...next };
+      else items.push(next);
+      return { ...state, items };
+    }
+
+    case "babylon_launch_terminated": {
+      const { runId, status } = ev;
+      if (!runId) return state;
+      const items = state.items.slice();
+      const idx = items.findIndex((it) => it.kind === "launch" && it.runId === runId);
+      if (idx < 0) return state;
+      const current = items[idx];
+      if (current.kind !== "launch") return state;
+      const allowed = new Set(["completed", "failed", "stopped"]);
+      const next = allowed.has(status) ? status : "completed";
+      items[idx] = { ...current, status: next };
+      return { ...state, items };
     }
 
     case "pideck_history_changed":
@@ -530,6 +565,9 @@ function sameItem(a: ChatItem, b: ChatItem): boolean {
   }
   if (a.kind === "system" && b.kind === "system") return a.text === b.text;
   if (a.kind === "recap" && b.kind === "recap") return a.text === b.text && a.at === b.at;
+  if (a.kind === "launch" && b.kind === "launch") {
+    return a.runId === b.runId && a.status === b.status && a.label === b.label;
+  }
   return false;
 }
 

@@ -111,6 +111,7 @@ export class ManagedSubagents {
       onParentMessage?: (record: ManagedSubagentRecord, action: SubagentParentEvent, message?: string) => void | Promise<void>;
       /** Babylon permission controller, if enabled. Gates the subagent's tools. */
       permission?: BabylonPermissionController;
+      onLaunch?: (ev: { type: "babylon_launch_started" | "babylon_launch_terminated"; runId: string; runKind: "subagent" | "thread" | "workflow"; label?: string; status?: string }) => void;
     }
   ) {
     void this.recoverPersistent();
@@ -331,6 +332,7 @@ export class ManagedSubagents {
     this.addMessage(record, "user", task);
     const runtime = await this.createRuntime(record);
     this.runtimes.set(runId, runtime);
+    this.options.onLaunch?.({ type: "babylon_launch_started", runId, runKind: "subagent", label: record.name ?? task.slice(0, 80), status: "running" });
     void this.runTurn(runtime, task, params.timeoutMs);
     return runtime;
   }
@@ -533,6 +535,8 @@ export class ManagedSubagents {
       runtime.timeout = null;
       runtime.running = null;
       await this.save(record);
+      const terminal = (record.status as string) === "failed" ? "failed" : (record.status as string) === "stopped" ? "stopped" : "completed";
+      this.options.onLaunch?.({ type: "babylon_launch_terminated", runId: record.runId, runKind: "subagent", status: terminal });
     }
   }
 
@@ -552,6 +556,7 @@ export class ManagedSubagents {
     runtime.unsubscribe = null;
     runtime.session.dispose();
     this.runtimes.delete(runtime.record.runId);
+    this.options.onLaunch?.({ type: "babylon_launch_terminated", runId: runtime.record.runId, runKind: "subagent", status: "stopped" });
   }
 
   private addMessage(record: ManagedSubagentRecord, role: ManagedSubagentRecord["recentMessages"][number]["role"], text: string): void {

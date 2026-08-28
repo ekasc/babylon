@@ -177,6 +177,7 @@ export class PiHost {
       onUpdate: () => this.opts.onEvent({ type: "pideck_subagents_changed" }),
       onParentMessage: (record, action, message) => this.notifySubagentParent(record, action, message),
       permission: this.opts.permission,
+      onLaunch: (ev) => this.opts.onEvent({ ...ev, sessionId: this.runtime?.session?.sessionId, sessionFile: this.runtime?.session?.sessionFile }),
     });
     this.threads = new ThreadManager({
       runTool: async (toolName, args) => {
@@ -421,6 +422,17 @@ export class PiHost {
 
     this.unsubscribeEvents = session.subscribe((event) => {
       this.opts.onEvent({ ...event, sessionId: session.sessionId, sessionFile: session.sessionFile });
+      if (event.type === "tool_execution_end" && ((event as any).toolName === "spawn_thread" || (event as any).toolName === "workflow")) {
+        const details = (event as any).result?.details ?? {};
+        const runId = details.threadId ?? details.runId ?? (event as any).toolCallId;
+        if (runId) {
+          const status = (event as any).isError ? "failed" : "running";
+          const args = (event as any).args ?? {};
+          const label = args.name?.trim() || args.goal?.trim()?.slice(0, 80) || details.threadId || details.runId || (event as any).toolName;
+          this.opts.onEvent({ type: "babylon_launch_started", runId, runKind: (event as any).toolName === "spawn_thread" ? "thread" : "workflow", label, status: "running", sessionId: session.sessionId, sessionFile: session.sessionFile });
+          if (status === "failed") this.opts.onEvent({ type: "babylon_launch_terminated", runId, status: "failed", sessionId: session.sessionId, sessionFile: session.sessionFile });
+        }
+      }
       if (event.type === "tool_execution_end") {
         const toolName = (event as any).toolName ?? (event as any).toolCall?.name ?? "";
         void this.opts.hookManager?.dispatch(

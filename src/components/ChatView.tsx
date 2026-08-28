@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef } from "react";
 import type { ChatItem } from "../store";
 import type { HistoryTurn } from "../bridge";
-import { UserMessage, AssistantMessage, ToolCard, ToolGroup, SystemLine, RecapLine } from "./items";
+import { UserMessage, AssistantMessage, ToolCard, ToolGroup, SystemLine, RecapLine, LaunchCard } from "./items";
 import { TurnChanges } from "./TurnChanges";
 
 /** Runs of consecutive tool calls at least this long render as one collapsed row. */
@@ -47,6 +47,7 @@ interface Props {
   chromeBottom?: number;
   historyTurns?: HistoryTurn[];
   onRollback?(entryId: string): void;
+  onOpenLaunch?(runId: string, runKind: "subagent" | "thread" | "workflow"): void;
 }
 
 export default function ChatView({
@@ -60,6 +61,7 @@ export default function ChatView({
   chromeBottom = 156,
   historyTurns = [],
   onRollback,
+  onOpenLaunch,
 }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
@@ -181,6 +183,8 @@ export default function ChatView({
                   <ToolCard item={entry.item} />
                 ) : entry.item.kind === "recap" ? (
                   <RecapLine text={entry.item.text} />
+                ) : entry.item.kind === "launch" ? (
+                  <LaunchCard item={entry.item} onOpen={onOpenLaunch} />
                 ) : (
                   <SystemLine text={entry.item.text} />
                 )}

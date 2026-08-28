@@ -82,6 +82,41 @@ export const SystemLine = memo(function SystemLine({ text }: { text: string }) {
   return <p className="conversation-system-in my-4 border-l-2 border-line py-1 pl-3 text-[13px] text-dim">{text}</p>;
 });
 
+/** One-line marker for a model-launched subagent, thread, or workflow. Stays
+ *  visible across rebuilds and turns into a colored dot at terminal state. */
+export const LaunchCard = memo(function LaunchCard({ item, onOpen }: { item: Extract<ChatItem, { kind: "launch" }>; onOpen?(runId: string, runKind: "subagent" | "thread" | "workflow"): void }) {
+  const { runKind, label, status, runId } = item;
+  const dot =
+    status === "running"
+      ? "bg-accent animate-pulse"
+      : status === "completed"
+        ? "bg-ok"
+        : status === "failed"
+          ? "bg-err"
+          : "bg-dim";
+  const verb =
+    status === "running"
+      ? "Started"
+      : status === "completed"
+        ? "Finished"
+        : status === "failed"
+          ? "Failed"
+          : "Stopped";
+  return (
+    <button
+      type="button"
+      onClick={() => onOpen?.(runId, runKind)}
+      title={`Open ${runKind} ${runId} in Activity`}
+      className="conversation-launch my-1 flex w-full items-center gap-2 rounded-md border border-line bg-inset/40 px-3 py-1.5 text-left text-[13px] text-fg transition-colors duration-100 hover:bg-inset"
+    >
+      <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${dot}`} aria-hidden="true" />
+      <span className="shrink-0 font-medium capitalize text-dim">{runKind}</span>
+      <span className="min-w-0 flex-1 truncate font-mono text-[12.5px]">{label}</span>
+      <span className="shrink-0 text-[11.5px] text-dim">{verb}</span>
+    </button>
+  );
+});
+
 /** Auto-recap annotation: a distinct, slightly raised card so a summary is
  *  easy to spot in a long transcript without leaving the instrument register. */
 export const RecapLine = memo(function RecapLine({ text }: { text: string }) {

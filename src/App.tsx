@@ -1376,6 +1376,7 @@ export default function App() {
                 chromeBottom={composerHeight - 28}
                 historyTurns={history.turns}
                 onRollback={(entryId) => void prepareRollback(entryId)}
+                onOpenLaunch={() => setShowWorkflowsPanel(true)}
               />
             ) : (
               <Hero status={status} groups={groups} onOpen={(path, cwd) => { setPromotedParent(null); void openSession(path, cwd); }} onNew={newSession} />
