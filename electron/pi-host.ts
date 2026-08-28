@@ -446,7 +446,7 @@ export class PiHost {
     const prompt =
       "You are naming a coding-agent conversation. Reply with ONLY a short title (3-6 words, no quotes, no period) that captures the intent of this conversation:\n\n" +
       sample;
-    const text = await this.askCheap(prompt, 200);
+    const text = await this.askCheap(prompt, 1024);
     if (!text) return null;
     return text.replace(/^["'“”]+|["'“”]+$/g, "").slice(0, 60);
   }
@@ -516,16 +516,30 @@ export class PiHost {
       this.runtime.session.model;
     if (!model) return null;
     const reasoning = (settings.titleReasoning as any) || "low";
+    const effectiveMaxTokens = reasoning === "low" ? Math.max(maxTokens, 1024) : maxTokens;
     try {
       const response = await this.modelRuntime.completeSimple(
         model,
         { messages: [{ role: "user", content: prompt }] } as any,
-        { reasoning, maxTokens }
+        { reasoning, maxTokens: effectiveMaxTokens }
       );
-      return (response?.content ?? [])
+      const text = (response?.content ?? [])
         .map((block: any) => (block?.type === "text" ? block.text ?? "" : ""))
         .join("")
         .trim();
+      if (text) return text;
+      if (response?.stopReason === "length") {
+        const retry = await this.modelRuntime.completeSimple(
+          model,
+          { messages: [{ role: "user", content: prompt }] } as any,
+          { reasoning: "minimal", maxTokens: Math.max(effectiveMaxTokens, 1024) }
+        );
+        return (retry?.content ?? [])
+          .map((block: any) => (block?.type === "text" ? block.text ?? "" : ""))
+          .join("")
+          .trim() || null;
+      }
+      return null;
     } catch {
       return null;
     }
@@ -573,7 +587,7 @@ export class PiHost {
       const delta = pickRecapDelta(messages, recaps[recaps.length - 1]?.coveredEntryId ?? null);
       if (!recapWorthy(delta.messages) || !delta.coveredEntryId) return;
       const deltaText = delta.messages.map((m) => messageText(m)).join("\n").slice(0, 8000);
-      const text = await this.askCheap(buildRecapPrompt(deltaText), 320);
+      const text = await this.askCheap(buildRecapPrompt(deltaText), 1024);
       const line = normalizeRecapText(text ?? "");
       if (!line) return;
       const recap: Recap = {
