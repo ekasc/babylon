@@ -21,6 +21,10 @@ export interface TrackedProcess {
   exitCode?: number;
   state: ProcessState;
   detectedPorts: number[];
+  /** Bounded combined stdout/stderr output (capped at 256 KiB). */
+  output: string;
+  /** True when oldest output was dropped due to the cap. */
+  outputTruncated: boolean;
 }
 
 export interface ProcessRegistry {
@@ -42,6 +46,11 @@ export function createProcess(
     pid?: number;
     startedAt?: number;
     state?: ProcessState;
+    output?: string;
+    outputTruncated?: boolean;
+    detectedPorts?: number[];
+    exitedAt?: number;
+    exitCode?: number;
   }
 ): ProcessRegistry {
   const proc: TrackedProcess = {
@@ -53,7 +62,11 @@ export function createProcess(
     pid: params.pid,
     startedAt: params.startedAt ?? 0,
     state: params.state ?? "starting",
-    detectedPorts: [],
+    detectedPorts: params.detectedPorts ? [...params.detectedPorts].sort((a, b) => a - b) : [],
+    output: params.output ?? "",
+    outputTruncated: params.outputTruncated ?? false,
+    exitedAt: params.exitedAt,
+    exitCode: params.exitCode,
   };
   return { processes: { ...registry.processes, [params.id]: proc } };
 }

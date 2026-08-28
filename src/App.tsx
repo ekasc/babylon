@@ -492,6 +492,26 @@ export default function App() {
     };
   }, []);
 
+  // Process manager: Electron is the source of truth. Mirror snapshots into the
+  // ProcessRegistry so diagnostics and the Processes panel render truthful runtime state.
+  useEffect(() => {
+    let cancelled = false;
+    bridge
+      .processList()
+      .then((snapshots) => {
+        if (cancelled) return;
+        setProcessRegistry({ processes: Object.fromEntries(snapshots.map((s) => [s.id, s])) });
+      })
+      .catch(() => undefined);
+    const off = bridge.onProcessUpdate((snapshots) => {
+      setProcessRegistry({ processes: Object.fromEntries(snapshots.map((s: any) => [s.id, s])) });
+    });
+    return () => {
+      cancelled = true;
+      off();
+    };
+  }, []);
+
   // Attention Inbox: raise an item when the agent needs the user (here, a
   // permission request). The id is keyed to the approval id so repeats of the
   // same request do not create duplicates. The user dismisses from the inbox.
@@ -681,6 +701,28 @@ export default function App() {
       setCanLoadMore(earliestOffsetRef.current != null && earliestOffsetRef.current > 0);
       setModels(ms ?? []);
       setCommands(commandData ?? []);
+      if (!commandData?.length) {
+        const retryEpoch = expectedEpoch;
+        let attempts = 6;
+        const retry = async () => {
+          if (retryEpoch !== epochRef.current) return;
+          if (attempts-- <= 0) return;
+          await new Promise<void>((r) => setTimeout(r, 400));
+          if (retryEpoch !== epochRef.current) return;
+          try {
+            const refreshed = await bridge.getCommands();
+            if (retryEpoch !== epochRef.current) return;
+            if (refreshed?.length) {
+              setCommands(refreshed);
+              return;
+            }
+          } catch {
+            /* transient, retry until bound */
+          }
+          if (attempts > 0) void retry();
+        };
+        void retry();
+      }
       setAgentState(st);
       setStats(statsData);
       setWorktreeInfo(wt);
@@ -1504,6 +1546,7 @@ export default function App() {
           <ProcessPanel
             registry={processRegistry}
             setRegistry={setProcessRegistry}
+            activeCwd={status.cwd ?? undefined}
             onClose={() => setShowProcesses(false)}
           />
         ) : null}

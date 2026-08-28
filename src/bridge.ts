@@ -407,6 +407,24 @@ export interface ModelRef {
 
 /** Babylon-owned user preferences (Settings → Pi). Mirrors the host's
  *  `PiSettings` in electron/app-settings.ts. */
+export type ProcessState = "starting" | "running" | "exited" | "failed" | "killed";
+
+export interface ProcessSnapshot {
+  id: string;
+  command: string;
+  cwd: string;
+  owner?: string;
+  ownerSession?: string;
+  pid?: number;
+  startedAt: number;
+  exitedAt?: number;
+  exitCode?: number;
+  state: ProcessState;
+  detectedPorts: number[];
+  output: string;
+  outputTruncated: boolean;
+}
+
 export interface PiSettings {
   chatModel?: ModelRef;
   chatReasoning?: string;
@@ -521,8 +539,13 @@ export interface Bridge {
   onApprovalCleared(cb: (payload: { id: string }) => void): () => void;
   /** Fires when an interactive approval is resolved (allowed/denied), so the
    *  UI can drop the matching attention item. */
-  onApprovalResolved(cb: (payload: { id: string; choice: ApprovalChoice }) => void): () => void;
+   onApprovalResolved(cb: (payload: { id: string; choice: ApprovalChoice }) => void): () => void;
   onPermissionsChanged(cb: (state: PermissionState) => void): () => void;
+
+  processList(): Promise<ProcessSnapshot[]>;
+  processSpawn(opts: { command: string; cwd: string; owner?: string; ownerSession?: string }): Promise<ProcessSnapshot>;
+  processKill(id: string): Promise<ProcessSnapshot>;
+  onProcessUpdate(cb: (snapshots: ProcessSnapshot[]) => void): () => void;
 }
 
 declare global {
@@ -629,4 +652,9 @@ export const bridge: Bridge = window.pideck ?? {
   onApprovalCleared: () => () => {},
   onApprovalResolved: () => () => {},
   onPermissionsChanged: () => () => {},
+
+  processList: () => Promise.resolve([]),
+  processSpawn: () => Promise.reject(new Error("bridge unavailable")),
+  processKill: () => Promise.reject(new Error("bridge unavailable")),
+  onProcessUpdate: () => () => {},
 };

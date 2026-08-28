@@ -1,6 +1,6 @@
 # Babylon Roadmap
 
-> Audited 2026-08-20 against the actual runtime. 1 of 16 features is genuinely Done; 10 are Partial; 5 are Foundation. 358 tests pass, `tsc` clean. Previous status language overstated integration; this version states what actually works.
+> Audited 2026-08-27 against the actual runtime. 1 of 16 features is genuinely Done; 10 are Partial; 5 are Foundation. 426 tests pass, `tsc` clean. Previous status language overstated integration; this version states what actually works.
 
 ## Integration priority
 
@@ -68,9 +68,9 @@ Statuses: **DONE** (real, end-to-end, user-exercisable) · **PARTIAL** (meaningf
 
   Missing integration: a Pi tool or convention for plan proposal, an approval gate that pauses the agent, decision delivery back to the session, and automatic step-status updates from tool activity.
 
-- [ ] **FOUNDATION · 4. Agent-aware terminal** — `ProcessPanel.tsx` has a button labeled "Simulate a dev server (demo)" that fabricates a running process with port 5173; Kill only flips registry state; nothing is ever spawned. No PTY, no stdout/stderr capture, no real PID/cwd/exit status, no port probing, no output reference for Pi. `src/process-model.ts` (the data shape) is fine and reused by diagnostics.
+- [ ] **PARTIAL · 4. Agent-aware terminal** — Electron now owns a real `ProcessManager`. `ProcessPanel.tsx` can spawn project commands, display bounded stdout/stderr, PID, cwd, detected output ports, exit state/code, and kill the real process group. Renderer and diagnostics state comes from process snapshots over IPC rather than fabricated React state. Inputs are validated at the main-process boundary and live children are disposed on app quit.
 
-  Missing integration: a main-process process manager (spawn, PTY where interactive, output buffers, kill/restart, exit codes, port detection from listening sockets or output), renderer views over that manager, and agent-created process registration.
+  Missing integration: PTY/stdin support for interactive commands, restart, listening-socket probing, output references/tools for Pi, agent-created process registration, and eventual daemon ownership so processes survive desktop closure.
 
 - [ ] **FOUNDATION · 5. Browser preview** — `PreviewPanel.tsx` calls `detectServerFromCommand("pnpm dev")`, a hardcoded string-to-port guess; there is no network probing, no console/page-error capture, no screenshot, no element inspection, and none of the promised `preview_*` agent tools exist anywhere.
 

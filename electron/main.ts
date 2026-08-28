@@ -16,6 +16,7 @@ import { mergeRecaps, mergeRecapsIntoWindow } from "./recap";
 import { isTrustedRendererUrl } from "./navigation";
 import { validateSessionPath } from "./session-path";
 import { SessionIndex, readSessionRange, readSessionTail } from "./sessions";
+import { ProcessManager, validateCommand, validateCwd, validateId } from "./process-manager";
 
 // Pi engine session store (mirrors electron/threads.ts).
 const PI_SESSIONS_ROOT = join(homedir(), ".pi", "agent", "sessions");
@@ -148,6 +149,7 @@ function resolveApproval(id: string, choice: "allow_once" | "allow_session" | "a
 let workflowsBridge: any = null;
 let activityBridge: any = null;
 const sessionIndex = new SessionIndex(PI_SESSIONS_ROOT);
+const processManager = new ProcessManager();
 const agentEvents = new AgentEventBuffer((events) => {
   win?.webContents.send("pideck:agent-events", events);
 });
@@ -309,7 +311,7 @@ async function gitStatus(cwd: string): Promise<GitStatusResult> {
   try {
     // List concrete untracked files while retaining Git's standard ignore,
     // info/exclude, and global-excludes behavior.
-    const porcelain = await git(["status", "--porcelain", "--untracked-files=all"], cwd);
+    const porcelain = await git(["-c", "core.quotepath=false", "status", "--porcelain", "--untracked-files=all"], cwd);
     result.dirty = porcelain
       .split("\n")
       .filter(Boolean)
@@ -909,6 +911,23 @@ function registerIpc(): void {
       return workflowsBridge.control(opts.action, opts.runId);
     }
   );
+
+  // Process manager (Electron-owned manual project commands)
+  handle("pideck:process-list", () => processManager.list());
+  handle("pideck:process-spawn", (_e, opts: unknown) => {
+    const command = validateCommand((opts as { command?: unknown })?.command);
+    const cwd = validateCwd((opts as { cwd?: unknown })?.cwd);
+    const owner = typeof (opts as { owner?: unknown })?.owner === "string" ? (opts as { owner: string }).owner.slice(0, 500) : undefined;
+    const ownerSession =
+      typeof (opts as { ownerSession?: unknown })?.ownerSession === "string"
+        ? (opts as { ownerSession: string }).ownerSession.slice(0, 500)
+        : undefined;
+    return processManager.spawn({ command, cwd, owner, ownerSession });
+  });
+  handle("pideck:process-kill", (_e, id: unknown) => {
+    const validated = validateId(id);
+    return processManager.kill(validated);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -959,6 +978,7 @@ async function ensureDaemon(): Promise<void> {
 app.whenReady().then(() => {
   registerIpc();
   createWindow();
+  processManager.subscribe((snapshots) => win?.webContents.send("pideck:process-update", snapshots));
   sessionIndex.subscribe((update) => win?.webContents.send("pideck:sessions-update", update));
   // Start the in-process pi host immediately (builds shared services once) so
   // the first session open is instant. Runs in the background; the user just
@@ -979,6 +999,7 @@ app.on("window-all-closed", () => {
   // new window. Keep the shared host alive there; disposing it made the new
   // window reconnect to a dead runtime.
   if (process.platform !== "darwin") {
+    processManager.dispose();
     sessionIndex.dispose();
     activityBridge?.dispose();
     workflowsBridge?.dispose();
@@ -995,6 +1016,7 @@ app.on("before-quit", () => {
     /* best effort */
   }
   agentEvents.dispose();
+  processManager.dispose();
   sessionIndex.dispose();
   activityBridge?.dispose();
   workflowsBridge?.dispose();

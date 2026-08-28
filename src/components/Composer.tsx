@@ -157,20 +157,22 @@ const Composer = memo(function Composer({ streaming, steering, followUp, command
 
   const submit = async () => {
     const t = text.trim();
-    if ((!t && attachments.length === 0) || sending) return;
+    if (!t && attachments.length === 0) return;
+    if (sending && !streaming) return;
     const outgoing = attachments;
-    setSending(true);
+    const isStreamingSubmit = streaming;
+    if (!isStreamingSubmit) setSending(true);
     // Clear optimistically: the sent text must leave the box the moment the
     // user submits, not when the (possibly slow) prompt pipeline resolves.
     setText("");
     try {
-      const accepted = await onSend(t, outgoing.length ? outgoing : undefined, streaming ? mode : undefined);
+      const accepted = await onSend(t, outgoing.length ? outgoing : undefined, isStreamingSubmit ? mode : undefined);
       if (!accepted) {
         setText(t); // restore the draft on failure
         return;
       }
     } finally {
-      setSending(false);
+      if (!isStreamingSubmit) setSending(false);
     }
     for (const attachment of outgoing) URL.revokeObjectURL(attachment.url);
     setAttachments([]);

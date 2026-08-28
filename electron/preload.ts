@@ -102,6 +102,16 @@ const api = {
     return () => ipcRenderer.removeListener("pideck:workflows-update", listener);
   },
 
+  processList: (): Promise<any> => ipcRenderer.invoke("pideck:process-list"),
+  processSpawn: (opts: { command: string; cwd: string; owner?: string; ownerSession?: string }): Promise<any> =>
+    ipcRenderer.invoke("pideck:process-spawn", opts),
+  processKill: (id: string): Promise<any> => ipcRenderer.invoke("pideck:process-kill", id),
+  onProcessUpdate: (cb: (snapshots: any[]) => void): (() => void) => {
+    const listener = (_e: unknown, snapshots: any[]) => cb(snapshots);
+    ipcRenderer.on("pideck:process-update", listener);
+    return () => ipcRenderer.removeListener("pideck:process-update", listener);
+  },
+
   onAgentEvents: (cb: (events: any[]) => void): (() => void) => {
     const listener = (_e: unknown, events: any[]) => cb(events);
     ipcRenderer.on("pideck:agent-events", listener);
