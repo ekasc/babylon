@@ -1337,7 +1337,6 @@ async function ensureDaemon(): Promise<void> {
     daemonClient = connectDaemonClient({ listen: { socketPath }, reconnect: { initialDelayMs: 100, maxDelayMs: 5000 } });
     daemonClient.onEvent((envelope) => {
       if (envelope.type === "task.created" || envelope.type === "task.updated" || envelope.type === "task.removed") {
-        // Refresh task list from daemon snapshot for thin-client cache
         daemonClient
           ?.request("state.get", {})
           .then((res) => {
@@ -1355,6 +1354,12 @@ async function ensureDaemon(): Promise<void> {
             win?.webContents.send("pideck:attention-update", runtime?.attention ?? { items: {} });
           })
           .catch(() => {});
+      }
+      if (envelope.type === "pi.event") {
+        win?.webContents.send("pideck:agent-events", [envelope.payload]);
+      }
+      if (envelope.type === "pi.session.status") {
+        win?.webContents.send("pideck:session-status", envelope.payload);
       }
     });
     // Warm cache once connected

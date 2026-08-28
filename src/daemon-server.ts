@@ -206,6 +206,14 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
     }
   };
 
+  // If a PiHost was supplied, wire its events to daemon broadcast so Electron
+  // thin clients receive live agent streaming.
+  if (options.piHost) {
+    const piHost = options.piHost as unknown as { opts: { onEvent: (ev: unknown) => void; onStatus: (s: unknown) => void } };
+    piHost.opts.onEvent = (ev: unknown) => broadcast("pi.event", ev);
+    piHost.opts.onStatus = (s: unknown) => broadcast("pi.session.status", s);
+  }
+
   const handleFrame = (socket: net.Socket, json: string): void => {
     let request: ProtocolEnvelope;
     try {
