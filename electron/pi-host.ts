@@ -20,7 +20,8 @@ import { SnapshotStore, type RestoreChange, type SnapshotCapture } from "./snaps
 import { toPiImages } from "./prompt-images";
 import { clampToolOutput, readSessionTail, readToolOutput } from "./sessions";
 import { RecapStore } from "./recap-store";
-import { DEFAULT_GIT_COMMIT_MODEL, getSettings, saveSettings, type PiSettings } from "./app-settings";
+import { DEFAULT_GIT_COMMIT_MODEL, type PiSettings } from "./app-settings";
+import { getSettings as defaultGetSettings, saveSettings as defaultSaveSettings } from "./app-settings";
 import { buildGitCommitPrompt, extractModelText, parseGeneratedCommitMessage, type GeneratedCommitMessage } from "./git-commit-message";
 import type { PreparedCommitContext } from "./git";
 import { buildRecapPrompt, normalizeRecapText, pickRecapDelta, recapDue, recapWorthy, RECAP_INTERVAL_MS, type Recap } from "./recap";
@@ -90,6 +91,8 @@ export interface HostOptions {
   hookManager?: HookManager;
   /** Resolve the owning task id for a session file, if any. */
   getTaskIdForSessionFile?: (sessionFile: string | null) => string | undefined;
+  /** Settings provider for daemon vs Electron. */
+  settingsProvider?: { getSettings(): PiSettings; saveSettings(patch: Partial<PiSettings>): PiSettings };
 }
 
 export class PiHost {
@@ -129,6 +132,13 @@ export class PiHost {
     editorText: string;
     createdAt: number;
   }>();
+
+  private _getSettings(): PiSettings {
+    return this.opts.settingsProvider?.getSettings() ?? defaultGetSettings();
+  }
+  private _saveSettings(patch: Partial<PiSettings>): PiSettings {
+    return this.opts.settingsProvider?.saveSettings(patch) ?? defaultSaveSettings(patch);
+  }
 
   constructor(opts: HostOptions) {
     this.opts = opts;
@@ -481,7 +491,7 @@ export class PiHost {
   }
 
   async generateGitCommitMessage(context: PreparedCommitContext): Promise<GeneratedCommitMessage> {
-    const settings = getSettings();
+    const settings = this._getSettings();
     const ref = settings.gitCommitModel ?? DEFAULT_GIT_COMMIT_MODEL;
     const model = this.modelRuntime.getModel(ref.provider, ref.modelId);
     if (!model) {
@@ -535,7 +545,7 @@ export class PiHost {
    *  level are configurable (Settings → Pi → Title generation), falling back
    *  to the previous hardcoded cheap model when unset. */
   private async askCheap(prompt: string, maxTokens: number): Promise<string | null> {
-    const settings = getSettings();
+    const settings = this._getSettings();
     const titleModel = settings.titleModel
       ? this.modelRuntime.getModel(settings.titleModel.provider, settings.titleModel.modelId)
       : undefined;
@@ -1041,7 +1051,7 @@ export class PiHost {
   async getModels(): Promise<any[]> {
     await this.ensureSession();
     const available = await this.runtime.services.modelRuntime.getAvailable();
-    const overrides = getSettings().contextWindowOverrides ?? {};
+    const overrides = this._getSettings().contextWindowOverrides ?? {};
     return [...available].map((m) => {
       const key = `${m.provider}/${m.id}`;
       const override = overrides[key];
@@ -1068,11 +1078,11 @@ export class PiHost {
   }
   /** Read the user's Babylon preferences (model + reasoning + overrides). */
   async getSettings(): Promise<PiSettings> {
-    return getSettings();
+    return this._getSettings();
   }
   /** Merge + persist a patch of the user's Babylon preferences. */
   async setSettings(patch: Partial<PiSettings>): Promise<PiSettings> {
-    return saveSettings(patch);
+    return this._saveSettings(patch);
   }
   async getThinkingLevels(): Promise<string[]> {
     await this.ensureSession();

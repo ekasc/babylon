@@ -41,6 +41,7 @@ import {
   type AutomationHistory,
   type RunnerResult,
 } from "./automation-runner";
+import type { PiHost } from "../electron/pi-host";
 import {
   defaultPolicy,
   type BackgroundPolicy,
@@ -72,6 +73,7 @@ export interface DaemonServerOptions {
   runAutomation?: (task: ScheduledTask) => RunnerResult;
   defaultProject?: string;
   log?: (message: string) => void;
+  piHost?: PiHost;
 }
 
 export interface DaemonServer {
@@ -263,6 +265,58 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
       state = { ...state, schedule: after };
       if (removed) persist();
       send(socket, createEnvelope("response", "automation.removed", { id, ok: true, removed }, request.id));
+      return;
+    }
+
+    // PiHost-owned session/agent lifecycle (when daemon owns PiHost). Keep this
+    // before the pure dispatch so pi.* never falls through as "unsupported".
+    if (request.type.startsWith("pi.")) {
+      const piHost = options.piHost;
+      if (!piHost) {
+        send(socket, createEnvelope("response", "error", { error: "PiHost not available in daemon" }, request.id));
+        return;
+      }
+      void (async () => {
+        try {
+          let payload: unknown = {};
+          switch (request.type) {
+            case "pi.getState":
+              payload = await piHost.getState();
+              break;
+            case "pi.getMessages":
+              payload = await piHost.getMessages();
+              break;
+            case "pi.getStats":
+              payload = await piHost.getStats();
+              break;
+            case "pi.openSession": {
+              const { path, cwd, requestId } = request.payload as { path?: string; cwd: string; requestId?: number };
+              payload = await piHost.open({ path, cwd, requestId });
+              break;
+            }
+            case "pi.prompt": {
+              const { message, images, streamingBehavior } = request.payload as { message: string; images?: unknown[]; streamingBehavior?: string };
+              payload = await piHost.prompt(message, images as never, streamingBehavior as never);
+              break;
+            }
+            case "pi.abort":
+              payload = await piHost.abort();
+              break;
+            case "pi.ui.respond": {
+              const { id, resp } = request.payload as { id: string; resp: unknown };
+              piHost.respondUi(id, resp as never);
+              payload = { ok: true };
+              break;
+            }
+            default:
+              send(socket, createEnvelope("response", "error", { error: `unsupported pi request ${request.type}` }, request.id));
+              return;
+          }
+          send(socket, createEnvelope("response", request.type, payload as never, request.id));
+        } catch (err) {
+          send(socket, createEnvelope("response", "error", { error: err instanceof Error ? err.message : String(err) }, request.id));
+        }
+      })();
       return;
     }
 

@@ -1,5 +1,5 @@
-import { app } from "electron";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 /**
@@ -64,7 +64,14 @@ const EMPTY: PiSettings = {
 let cache: PiSettings | null = null;
 
 function settingsPath(): string {
-  return join(app.getPath("userData"), "pideck-settings.json");
+  try {
+    const { app } = require("electron") as typeof import("electron");
+    if (app && typeof app.getPath === "function") {
+      return join(app.getPath("userData"), "pideck-settings.json");
+    }
+  } catch {}
+  const base = process.env.BABYLON_SETTINGS_PATH ?? join(homedir(), ".babylon", "pideck-settings.json");
+  return base;
 }
 
 /** Read the current settings (cached; reads disk once). */
