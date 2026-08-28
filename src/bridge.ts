@@ -1,3 +1,5 @@
+import type { Task } from "./tasks";
+
 export interface SessionMeta {
   id: string;
   path: string;
@@ -499,14 +501,21 @@ export interface Bridge {
   fork(entryId: string): Promise<{ text?: string; cancelled?: boolean }>;
   clone(): Promise<{ cancelled?: boolean }>;
 
+  taskList(): Promise<Task[]>;
+  taskGet(id: string): Promise<Task | null>;
+  taskSpawn(taskId: string, command: string, cwd: string): Promise<ProcessSnapshot>;
+  onTaskUpdate(cb: (tasks: Task[]) => void): () => void;
   worktreeInfo(): Promise<{
     isWorktree: boolean;
     sessionFile?: string;
     parentSession?: string;
     cwd?: string;
+    task?: Task;
     git: { isRepo: boolean; root?: string; branch?: string; isLinkedWorktree?: boolean };
   }>;
   worktreeCreate(opts: { name: string; description?: string; useGit?: boolean }): Promise<{
+    task: Task;
+    taskId: string;
     worktreePath: string;
     originalPath: string;
     gitWorktree?: { path: string; branch: string; baseBranch?: string } | null;
@@ -515,6 +524,8 @@ export interface Bridge {
     originalPath: string;
     kept: boolean;
     gitRemoved: boolean;
+    task?: Task;
+    removed?: boolean;
   }>;
 
   uiRespond(resp: Record<string, unknown>): Promise<void>;
@@ -661,6 +672,10 @@ export const bridge: Bridge = window.pideck ?? {
   getForkMessages: () => Promise.resolve([]),
   fork: () => Promise.resolve({ cancelled: true }),
   clone: () => Promise.resolve({ cancelled: true }),
+  taskList: () => Promise.resolve([]),
+  taskGet: () => Promise.resolve(null),
+  taskSpawn: () => Promise.reject(new Error("bridge unavailable")),
+  onTaskUpdate: () => () => {},
   worktreeInfo: () =>
     Promise.resolve({
       isWorktree: false,

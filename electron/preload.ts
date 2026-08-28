@@ -65,6 +65,15 @@ const api = {
   getForkMessages: (): Promise<any[]> => ipcRenderer.invoke("pideck:get-fork-messages"),
   fork: (entryId: string): Promise<any> => ipcRenderer.invoke("pideck:fork", entryId),
   clone: (): Promise<any> => ipcRenderer.invoke("pideck:clone"),
+  taskList: (): Promise<any[]> => ipcRenderer.invoke("pideck:task-list"),
+  taskGet: (id: string): Promise<any> => ipcRenderer.invoke("pideck:task-get", id),
+  taskSpawn: (taskId: string, command: string, cwd: string): Promise<any> =>
+    ipcRenderer.invoke("pideck:task-spawn", taskId, command, cwd),
+  onTaskUpdate: (cb: (tasks: any[]) => void): (() => void) => {
+    const listener = (_e: unknown, tasks: any[]) => cb(tasks);
+    ipcRenderer.on("pideck:task-update", listener);
+    return () => ipcRenderer.removeListener("pideck:task-update", listener);
+  },
   worktreeInfo: (): Promise<any> => ipcRenderer.invoke("pideck:worktree-info"),
   worktreeCreate: (opts: { name: string; description?: string; useGit?: boolean }): Promise<any> =>
     ipcRenderer.invoke("pideck:worktree-create", opts),

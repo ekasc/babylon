@@ -17,6 +17,7 @@ import { isTrustedRendererUrl } from "./navigation";
 import { validateSessionPath } from "./session-path";
 import { SessionIndex, readSessionRange, readSessionTail } from "./sessions";
 import { ProcessManager, validateCommand, validateCwd, validateId } from "./process-manager";
+import { TaskManager } from "./task-manager";
 import { LspManager, validateCwd as validateLspCwd } from "./lsp-manager";
 
 // Pi engine session store (mirrors electron/threads.ts).
@@ -151,6 +152,7 @@ let workflowsBridge: any = null;
 let activityBridge: any = null;
 const sessionIndex = new SessionIndex(PI_SESSIONS_ROOT);
 const processManager = new ProcessManager();
+const taskManager = new TaskManager(processManager);
 const lspManager = new LspManager();
 const agentEvents = new AgentEventBuffer((events) => {
   win?.webContents.send("pideck:agent-events", events);
@@ -164,6 +166,7 @@ const agentEvents = new AgentEventBuffer((events) => {
 function applyCwd(cwd: string): void {
   if (!cwd) return;
   activeCwd = cwd;
+  taskManager.resumeForSession(host?.activeSessionFile);
   // LSP: set active project; failures are best-effort (e.g. cwd deleted).
   void lspManager.setActiveProject(cwd).catch(() => undefined);
 }
@@ -350,16 +353,44 @@ async function readSessionHeader(file: string): Promise<any> {
   }
 }
 
-/** Rewrite a session file's header cwd while the agent is idle. */
-async function rewriteSessionCwd(file: string, cwd: string): Promise<void> {
-  // clone() may defer flushing until the first assistant message; wait briefly.
+/** Ensure a cloned session file exists on disk for task resume and header patching. */
+async function ensureClonedSessionFile(
+  clonedPath: string,
+  originalPath: string,
+  cwd: string,
+  sessionId?: string
+): Promise<void> {
+  for (let i = 0; i < 15 && !existsSync(clonedPath); i++) {
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  if (existsSync(clonedPath)) return;
+  const raw = await fsp.readFile(originalPath, "utf8").catch(() => "");
+  const nl = raw.indexOf("\n");
+  const entries = nl === -1 ? "" : raw.slice(nl);
+  const header = {
+    type: "session",
+    version: 3,
+    id: sessionId ?? `forked-${Date.now()}`,
+    timestamp: new Date().toISOString(),
+    cwd,
+    parentSession: originalPath,
+  };
+  await fsp.writeFile(clonedPath, `${JSON.stringify(header)}\n${entries}`);
+}
+
+/** Rewrite cloned-session ownership metadata while the agent is idle. */
+async function rewriteSessionHeader(
+  file: string,
+  patch: { cwd?: string; parentSession?: string }
+): Promise<void> {
   for (let i = 0; i < 15 && !existsSync(file); i++) {
     await new Promise((r) => setTimeout(r, 200));
   }
   const raw = await fsp.readFile(file, "utf8");
   const nl = raw.indexOf("\n");
   const header = JSON.parse(nl === -1 ? raw : raw.slice(0, nl));
-  header.cwd = cwd;
+  if (patch.cwd) header.cwd = patch.cwd;
+  if (patch.parentSession) header.parentSession = patch.parentSession;
   await fsp.writeFile(file, JSON.stringify(header) + (nl === -1 ? "\n" : raw.slice(nl)));
 }
 
@@ -512,7 +543,9 @@ function registerIpc(): void {
       if (!opts || typeof opts.cwd !== "string" || opts.cwd.length > 4096) throw new Error("invalid session options");
       if (hostReady) await hostReady;
       const path = opts.path === undefined ? undefined : await validateSessionPath(PI_SESSIONS_ROOT, opts.path);
-      return getHost().open({ ...opts, path });
+      const state = await getHost().open({ ...opts, path });
+      taskManager.resumeForSession(state?.sessionFile);
+      return state;
     }
   );
 
@@ -676,19 +709,27 @@ function registerIpc(): void {
     return getHost().fork(entryId);
   });
   handle("pideck:clone", () => getHost().clone());
+  handle("pideck:task-list", () => taskManager.list());
+  handle("pideck:task-get", (_e, id: unknown) => {
+    if (typeof id !== "string" || id.length === 0 || id.length > 200) throw new Error("invalid task id");
+    return taskManager.get(id) ?? null;
+  });
 
   handle("pideck:worktree-info", async () => {
     try {
       const state = await getHost().getState();
       const file = state?.sessionFile;
       const header = file ? await readSessionHeader(file) : null;
-      const cwd = header?.cwd ?? activeCwd;
+      const task = taskManager.findBySessionFile(file);
+      const parentSession = header?.parentSession ?? task?.parentSessionFile;
+      const cwd = header?.cwd ?? task?.cwd ?? activeCwd;
       const g = cwd ? await gitInfo(cwd) : { isRepo: false };
       return {
-        isWorktree: !!header?.parentSession,
+        isWorktree: !!parentSession,
         sessionFile: file,
-        parentSession: header?.parentSession,
+        parentSession,
         cwd,
+        task,
         git: g,
       };
     } catch {
@@ -720,7 +761,9 @@ function registerIpc(): void {
         if (!worktreePath || worktreePath === originalPath) throw new Error("clone did not produce a session file");
 
         const safeName = sanitizeWorktreeName(opts.name) || `exp-${Date.now().toString(36)}`;
-        await getHost().setSessionName(`worktree: ${safeName}`).catch(() => {});
+        await getHost().setSessionName(`worktree: ${safeName}`);
+        const afterNameState = await getHost().getState();
+        await ensureClonedSessionFile(worktreePath, originalPath, activeCwd, afterNameState?.sessionId);
         let workCwd = activeCwd;
 
         if (opts.useGit) {
@@ -736,7 +779,7 @@ function registerIpc(): void {
           const wtPath = uniquePath(join(dirname(info.root), `${basename(info.root)}--${safeName}`));
           await git(["worktree", "add", "-b", branch, wtPath], info.root);
           gitWorktree = { path: wtPath, branch, baseBranch: info.branch };
-          await rewriteSessionCwd(worktreePath, wtPath);
+          await rewriteSessionHeader(worktreePath, { cwd: wtPath });
           await getHost().switchTo(worktreePath);
           workCwd = wtPath;
           applyCwd(wtPath);
@@ -751,8 +794,19 @@ function registerIpc(): void {
         }
 
         const state = await getHost().getState();
+        if (!state?.sessionId) throw new Error("cloned session has no runtime identity");
+        const task = taskManager.register({
+          title: safeName,
+          ownerSession: before.sessionId,
+          sessionId: state.sessionId,
+          sessionFile: worktreePath,
+          parentSessionFile: originalPath,
+          cwd: workCwd,
+          branch: gitWorktree?.branch,
+          worktreePath: gitWorktree?.path,
+        });
         sendStatus("ready", { state, sessionPath: worktreePath, cwd: workCwd });
-        return { worktreePath, originalPath, gitWorktree };
+        return { task, taskId: task.id, worktreePath, originalPath, gitWorktree };
       } catch (error) {
         // Clone + git worktree creation is transactional: restore the original
         // runtime first, then remove only artifacts this attempt created.
@@ -776,45 +830,50 @@ function registerIpc(): void {
   );
 
   handle("pideck:worktree-exit", async (_e, opts: { keep: boolean }) => {
+    if (!opts || typeof opts.keep !== "boolean") throw new Error("invalid worktree exit options");
     const state = await getHost().getState();
     const file = state?.sessionFile;
     if (!file) throw new Error("no active session");
     const header = await readSessionHeader(file);
-    const originalPath = header?.parentSession;
+    const task = taskManager.findBySessionFile(file);
+    const originalPath = header?.parentSession ?? task?.parentSessionFile;
     if (!originalPath || !existsSync(originalPath)) {
       throw new Error("this session has no original to return to");
     }
-    const workCwd = header?.cwd;
+    const workCwd = header?.cwd ?? task?.cwd;
+    const gitWorktree = workCwd ? await gitInfo(workCwd) : { isRepo: false };
+    const dirty = gitWorktree.isLinkedWorktree
+      ? (await gitOps.statusDetails(workCwd)).hasChanges
+      : false;
 
-    await getHost().switchTo(originalPath);
+    const cleanup = async () => {
+      await getHost().switchTo(originalPath);
 
-    let gitRemoved = false;
-    if (!opts.keep) {
-      if (workCwd) {
-        const g = await gitInfo(workCwd);
-        if (g.isLinkedWorktree) {
-          try {
-            const branch = await git(["rev-parse", "--abbrev-ref", "HEAD"], workCwd).catch(() => "");
-            const commonDir = await git(["rev-parse", "--git-common-dir"], workCwd);
-            const mainRoot = dirname(commonDir.startsWith("/") ? commonDir : join(workCwd, commonDir));
-            await git(["worktree", "remove", "--force", workCwd], mainRoot);
-            if (branch.startsWith("pideck/")) {
-              await git(["branch", "-D", branch], mainRoot).catch(() => {});
-            }
-            gitRemoved = true;
-          } catch {
-            /* leave on disk; user can clean up manually */
-          }
+      let gitRemoved = false;
+      if (!opts.keep) {
+        if (workCwd && gitWorktree.isLinkedWorktree) {
+          const branch = await git(["rev-parse", "--abbrev-ref", "HEAD"], workCwd).catch(() => "");
+          const commonDir = await git(["rev-parse", "--git-common-dir"], workCwd);
+          const mainRoot = dirname(commonDir.startsWith("/") ? commonDir : join(workCwd, commonDir));
+          await git(["worktree", "remove", "--force", workCwd], mainRoot);
+          if (branch.startsWith("pideck/")) await git(["branch", "-D", branch], mainRoot).catch(() => {});
+          gitRemoved = true;
         }
+        await fsp.rm(file);
       }
-      await fsp.rm(file).catch(() => {});
-    }
 
-    const newState = await getHost().getState();
-    const origHeader = await readSessionHeader(originalPath);
-    applyCwd(origHeader?.cwd ?? activeCwd);
-    sendStatus("ready", { state: newState, sessionPath: originalPath, cwd: activeCwd });
-    return { originalPath, kept: opts.keep, gitRemoved };
+      const newState = await getHost().getState();
+      const origHeader = await readSessionHeader(originalPath);
+      applyCwd(origHeader?.cwd ?? activeCwd);
+      sendStatus("ready", { state: newState, sessionPath: originalPath, cwd: activeCwd });
+      return { originalPath, kept: opts.keep, gitRemoved };
+    };
+
+    if (task) {
+      return taskManager.exit({ taskId: task.id, keep: opts.keep, dirty, cleanup });
+    }
+    if (!opts.keep && dirty) throw new Error("Cannot discard a task worktree with uncommitted changes");
+    return cleanup();
   });
 
   handle("pideck:ui-respond", (_e, resp: { id: string; [k: string]: unknown }) => {
@@ -977,17 +1036,24 @@ function registerIpc(): void {
     win?.webContents.send("pideck:lsp-update", snapshots);
   });
 
-  // Process manager (Electron-owned manual project commands)
+  // Process manager (Electron-owned manual and task-owned project commands)
   handle("pideck:process-list", () => processManager.list());
   handle("pideck:process-spawn", (_e, opts: unknown) => {
     const command = validateCommand((opts as { command?: unknown })?.command);
     const cwd = validateCwd((opts as { cwd?: unknown })?.cwd);
+    const activeTask = taskManager.findBySessionFile(host?.activeSessionFile);
+    if (activeTask) return taskManager.spawn(activeTask.id, command, cwd);
+
     const owner = typeof (opts as { owner?: unknown })?.owner === "string" ? (opts as { owner: string }).owner.slice(0, 500) : undefined;
     const ownerSession =
       typeof (opts as { ownerSession?: unknown })?.ownerSession === "string"
         ? (opts as { ownerSession: string }).ownerSession.slice(0, 500)
         : undefined;
     return processManager.spawn({ command, cwd, owner, ownerSession });
+  });
+  handle("pideck:task-spawn", (_e, taskId: unknown, command: unknown, cwd: unknown) => {
+    const id = validateId(taskId);
+    return taskManager.spawn(id, validateCommand(command), validateCwd(cwd));
   });
   handle("pideck:process-kill", (_e, id: unknown) => {
     const validated = validateId(id);
@@ -1044,6 +1110,7 @@ app.whenReady().then(() => {
   registerIpc();
   createWindow();
   processManager.subscribe((snapshots) => win?.webContents.send("pideck:process-update", snapshots));
+  taskManager.subscribe((tasks) => win?.webContents.send("pideck:task-update", tasks));
   sessionIndex.subscribe((update) => win?.webContents.send("pideck:sessions-update", update));
   // Start the in-process pi host immediately (builds shared services once) so
   // the first session open is instant. Runs in the background; the user just

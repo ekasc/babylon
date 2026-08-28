@@ -1,6 +1,6 @@
 # Babylon Roadmap
 
-> Audited 2026-08-27 against the actual runtime. 1 of 16 features is genuinely Done; 11 are Partial; 4 are Foundation. 435 tests pass, `tsc` clean. Previous status language overstated integration; this version states what actually works.
+> Audited 2026-08-27 against the actual runtime. 1 of 16 features is genuinely Done; 11 are Partial; 4 are Foundation. 442 tests pass, `tsc` clean. Previous status language overstated integration; this version states what actually works.
 
 ## Integration priority
 
@@ -78,9 +78,9 @@ Statuses: **DONE** (real, end-to-end, user-exercisable) · **PARTIAL** (meaningf
 
 ## Phase 4: Parallel Work
 
-- [ ] **PARTIAL · 6. Task-owned worktrees** — real Git worktrees exist and are user-exercisable (`pideck:worktree-create/info`, BranchPanel, WorktreeBanner in `electron/main.ts`). What does not exist: the Task primitive. `src/tasks.ts` is imported by nothing outside its own tests and the never-connected `runtime.ts`; no execution path creates a task, links a session/branch/worktree to it, or promotes/merges through it.
+- [ ] **PARTIAL · 6. Task-owned worktrees** — Electron now owns task lifecycle via `TaskManager` (`src/tasks.ts` registry plus `electron/process-manager.ts`). `pideck:worktree-create` provisions one running task that owns the cloned Pi session, optional git branch/worktree, and later processes; `pideck:task-spawn` / task-stamped `process-spawn` validates cwd, stamps `owner`/`ownerSession`, and records `terminalIds`; `pideck:worktree-exit` goes through `TaskManager.exit` which refuses discard of a dirty worktree, kills owned processes before git/file cleanup, and rejects concurrent exits. A live Electron probe verified session-only create → process ownership → keep (paused + killed) → session reopen (running) → discard (removed). Renderer can list/get tasks and subscribe to `pideck:task-update`.
 
-  Missing integration: make the task the unit of execution — creating a task provisions session + branch + worktree, its terminals/preview/diff/checkpoints hang off the task id, and removal guards dirty worktrees at the runtime layer, not just in the pure model.
+  Missing integration: daemon persistence so tasks survive app quit and worktree recovery on restart, plus attachment of preview/diff/checkpoints to the task id (still panel-local).
 
 - [ ] **PARTIAL · 7. Structured subagent graph** — real subagents exist and work: `ManagedSubagents` spawns bounded and persistent agents, gates them through permissions, relays parent messages, and surfaces activity in the transcript. `src/subagent-graph.ts` (parent/child tree, goals, results, summaries) is imported by nothing and represents none of those real agents.
 

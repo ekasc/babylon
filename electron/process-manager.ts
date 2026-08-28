@@ -160,6 +160,18 @@ export class ProcessManager {
     return e ? { ...e.snapshot } : undefined;
   }
 
+  listByOwner(owner: string): ProcessSnapshot[] {
+    return this.list().filter((process) => process.owner === owner);
+  }
+
+  async killByOwner(owner: string): Promise<ProcessSnapshot[]> {
+    const owned = this.listByOwner(owner);
+    const active = owned.filter((process) => process.state === "running" || process.state === "starting");
+    for (const process of active) this.kill(process.id);
+    await Promise.all(active.map((process) => this.waitForTerminalState(process.id)));
+    return this.listByOwner(owner);
+  }
+
   spawn(params: { command: string; cwd: string; owner?: string; ownerSession?: string }): ProcessSnapshot {
     const command = validateCommand(params.command);
     const cwd = validateCwd(params.cwd);
@@ -449,6 +461,26 @@ export class ProcessManager {
         /* ignore listener errors */
       }
     }
+  }
+
+  private waitForTerminalState(id: string): Promise<void> {
+    const timeoutMs = this.killGraceMs + 1000;
+    return new Promise((resolve, reject) => {
+      const startedAt = this.nowFn();
+      const check = () => {
+        const process = this.entries.get(id)?.snapshot;
+        if (!process || (process.state !== "running" && process.state !== "starting")) {
+          resolve();
+          return;
+        }
+        if (this.nowFn() - startedAt >= timeoutMs) {
+          reject(new Error(`timed out stopping process ${id}`));
+          return;
+        }
+        setTimeout(check, 25);
+      };
+      check();
+    });
   }
 
   private clearKillTimer(entry: InternalEntry): void {
