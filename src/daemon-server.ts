@@ -316,6 +316,12 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
               payload = { ok: true };
               break;
             }
+            case "pi.notifyDiagnostics": {
+              const { diagnostics } = request.payload as { diagnostics: unknown[] };
+              await piHost.notifyDiagnostics(diagnostics as never);
+              payload = { ok: true };
+              break;
+            }
             default:
               send(socket, createEnvelope("response", "error", { error: `unsupported pi request ${request.type}` }, request.id));
               return;

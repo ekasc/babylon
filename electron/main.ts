@@ -840,15 +840,20 @@ function registerIpc(): void {
       }
     );
     if (hookOutcome.blocked) {
-      attentionManager.add({
+      const item = {
         id: `hook-${id}-${Date.now()}`,
-        type: "blocked_task",
+        type: "blocked_task" as const,
         title: `Task blocked by hook: ${task.title}`,
         detail: hookOutcome.blocked.result.block?.reason ?? "blocked",
         source: id,
         createdAt: Date.now(),
         resolved: false,
-      });
+      };
+      if (isDaemonEnabled() && daemonClient) {
+        await daemonClient.request("attention.raised", item).catch(() => attentionManager.add(item));
+      } else {
+        attentionManager.add(item);
+      }
       return { blocked: true, reason: hookOutcome.blocked.result.block?.reason, hookId: hookOutcome.blocked.id };
     }
     const contractId = task.contractId;
@@ -857,15 +862,20 @@ function registerIpc(): void {
       const evaluation = evaluateContract(contract, checkResults);
       if (!evaluation.passed) {
         const failed = evaluation.checks.filter((c) => c.check.required && !c.satisfied).map((c) => c.check.label);
-        attentionManager.add({
+        const item = {
           id: `contract-${id}-${Date.now()}`,
-          type: "failed_task",
+          type: "failed_task" as const,
           title: `Completion blocked: ${contract.title}`,
           detail: failed.length ? `contract failed: ${failed.join(", ")}` : "contract failed",
           source: id,
           createdAt: Date.now(),
           resolved: false,
-        });
+        };
+        if (isDaemonEnabled() && daemonClient) {
+          await daemonClient.request("attention.raised", item).catch(() => attentionManager.add(item));
+        } else {
+          attentionManager.add(item);
+        }
         return { blocked: true, reason: failed.length ? `contract failed: ${failed.join(", ")}` : "contract failed", evaluation };
       }
       if (isDaemonEnabled() && daemonClient) {
@@ -1386,12 +1396,30 @@ async function ensureDaemon(): Promise<void> {
 app.whenReady().then(async () => {
   registerIpc();
   createWindow();
-  processManager.subscribe((snapshots) => win?.webContents.send("pideck:process-update", snapshots));
-  taskManager.subscribe((tasks) => win?.webContents.send("pideck:task-update", tasks));
-  hookManager.subscribe((registry) => win?.webContents.send("pideck:hooks-update", registry));
-  attentionManager.subscribe((registry) => win?.webContents.send("pideck:attention-update", registry));
-  sessionIndex.subscribe((update) => win?.webContents.send("pideck:sessions-update", update));
   await ensureDaemon();
+  if (isDaemonEnabled()) {
+    // Daemon owns tasks and attention when enabled — thin client, no local subscriptions
+    sessionIndex.subscribe((update) => win?.webContents.send("pideck:sessions-update", update));
+  } else {
+    processManager.subscribe((snapshots) => win?.webContents.send("pideck:process-update", snapshots));
+    taskManager.subscribe((tasks) => win?.webContents.send("pideck:task-update", tasks));
+    hookManager.subscribe((registry) => win?.webContents.send("pideck:hooks-update", registry));
+    attentionManager.subscribe((registry) => win?.webContents.send("pideck:attention-update", registry));
+    sessionIndex.subscribe((update) => win?.webContents.send("pideck:sessions-update", update));
+  }
+  if (isDaemonEnabled() && daemonClient) {
+    lspManager.setPiNotifier((diagCwd, diagnostics) => {
+      if (diagCwd !== activeCwd) return;
+      daemonClient?.request("pi.notifyDiagnostics", { diagnostics }).catch(() => {});
+    });
+  } else {
+    lspManager.setPiNotifier((diagCwd, diagnostics) => {
+      if (diagCwd !== activeCwd) return;
+      try {
+        host!.notifyDiagnostics(diagnostics);
+      } catch {}
+    });
+  }
   hostReady = startHost();
   // Smoke-test hook: PIDECK_SMOKE=<ms> auto-quits after a delay.
   if (process.env.PIDECK_SMOKE) {
