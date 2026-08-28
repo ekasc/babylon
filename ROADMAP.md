@@ -1,6 +1,6 @@
 # Babylon Roadmap
 
-> Audited 2026-08-27 against the actual runtime. 1 of 16 features is genuinely Done; 11 are Partial; 4 are Foundation. 442 tests pass, `tsc` clean. Previous status language overstated integration; this version states what actually works.
+> Audited 2026-08-27 against the actual runtime. 1 of 16 features is genuinely Done; 11 are Partial; 4 are Foundation. 447 tests pass, `tsc` clean. Previous status language overstated integration; this version states what actually works.
 
 ## Integration priority
 
@@ -96,13 +96,13 @@ Statuses: **DONE** (real, end-to-end, user-exercisable) · **PARTIAL** (meaningf
 
   Missing integration: emit attention from real conditions — workflow/worktree conflicts, failed sessions, contract failures once contracts gate real work, review requests — and resolve them when the condition clears.
 
-- [ ] **FOUNDATION · 10. Completion contracts** — `src/completion-contracts.ts` evaluates required vs optional checks; `automation-runner` applies it, but only to the placeholder executor's synthetic runs. No real task or agent lifecycle consults a contract; "agent finished" and "contract passed" are never distinguished in a real flow.
+- [ ] **PARTIAL · 10. Completion contracts** — `src/completion-contracts.ts` evaluator is real and now gates task completion: `pideck:task-complete` checks required checks, fails closed on missing results, blocks `completed` and raises `failed_task` attention with the contract title/detail; passing checks marks the task `completed`. `automation-runner` also uses the same evaluator. Live Electron probe verified a task with a typecheck/tests contract failing then passing.
 
-  Missing integration: hook contract evaluation into before_stop/task completion (depends on Features 11 and 6), surface unsatisfied checks, and drive repair passes.
+  Missing integration: automatic check execution (typecheck/tests/lint/diagnostics) rather than supplied `CheckResult`s, and surfacing unsatisfied checks for a repair pass.
 
-- [ ] **FOUNDATION · 11. Hook system** — `src/hooks.ts` is a registry (pre/post_tool_use, before_stop, attention_required slots, ordering, timeout fields) with copy-on-insert semantics. There is no dispatcher: nothing executes hooks, enforces timeouts, isolates failures, or can block/rewrite a tool call. Pi's real pre-tool interception exists separately inside the permission hook.
+- [ ] **PARTIAL · 11. Hook system** — registry plus `src/hook-dispatcher.ts` (timeout via `Promise.race`, `AbortSignal`, error isolation, block short-circuit, `rewriteArgs` threading, metadata collection) wired into `pre_tool_use` via `installAgentGuards` (composed with the permission hook) and `post_tool_use`/`before_stop` via `HookManager`. `pideck:hooks-*` IPC and `pideck:hooks-update` exist. Live probe verified `before_stop` block → `blocked_task` attention, then contract fail → `failed_task` attention, then pass → `completed`.
 
-  Missing integration: a hook runner with timeouts and error isolation, wired to the same lifecycle points the permission hook uses, plus before_stop tied to completion contracts.
+  Missing integration: richer `rewrite_args`/`attach_metadata` actions, `attention_required` dispatch, and hook persistence for the future daemon owner.
 
 ## Phase 6: Control Plane
 

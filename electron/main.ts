@@ -19,6 +19,9 @@ import { SessionIndex, readSessionRange, readSessionTail } from "./sessions";
 import { ProcessManager, validateCommand, validateCwd, validateId } from "./process-manager";
 import { TaskManager } from "./task-manager";
 import { LspManager, validateCwd as validateLspCwd } from "./lsp-manager";
+import { HookManager } from "./hook-manager";
+import { AttentionManager } from "./attention-manager";
+import { evaluateContract, type CheckResult, type CompletionContract } from "../src/completion-contracts";
 
 // Pi engine session store (mirrors electron/threads.ts).
 const PI_SESSIONS_ROOT = join(homedir(), ".pi", "agent", "sessions");
@@ -154,6 +157,9 @@ const sessionIndex = new SessionIndex(PI_SESSIONS_ROOT);
 const processManager = new ProcessManager();
 const taskManager = new TaskManager(processManager);
 const lspManager = new LspManager();
+const hookManager = new HookManager();
+const attentionManager = new AttentionManager();
+const contracts = new Map<string, CompletionContract>();
 const agentEvents = new AgentEventBuffer((events) => {
   win?.webContents.send("pideck:agent-events", events);
 });
@@ -450,6 +456,8 @@ async function startHost(): Promise<void> {
             clearSessionRules: () => permissionEngine!.clearSessionRules(),
           }
         : undefined,
+      hookManager,
+      getTaskIdForSessionFile: (file) => taskManager.findBySessionFile(file)?.id,
       onEvent: (ev) => {
         agentEvents.push(ev);
         if (ev?.type === "message_end" || ev?.type === "agent_settled" || ev?.type === "session_info_changed") {
@@ -713,6 +721,79 @@ function registerIpc(): void {
   handle("pideck:task-get", (_e, id: unknown) => {
     if (typeof id !== "string" || id.length === 0 || id.length > 200) throw new Error("invalid task id");
     return taskManager.get(id) ?? null;
+  });
+  handle("pideck:task-set-contract", (_e, taskId: unknown, contract: unknown) => {
+    const id = validateId(taskId);
+    if (!contract || typeof (contract as CompletionContract).id !== "string") throw new Error("invalid contract");
+    const c = contract as CompletionContract;
+    contracts.set(c.id, c);
+    taskManager.setContractId(id, c.id);
+    return c;
+  });
+  handle("pideck:task-complete", async (_e, taskId: unknown, results: unknown) => {
+    const id = validateId(taskId);
+    const task = taskManager.get(id);
+    if (!task) throw new Error("unknown task");
+    const checkResults = Array.isArray(results) ? (results as CheckResult[]) : [];
+    const hookOutcome = await hookManager.dispatch(
+      "before_stop",
+      { sessionId: task.sessionId ?? "", taskId: id },
+      async (def) => {
+        if (def.action === "block") return { block: { reason: `Blocked by hook ${def.id}` } };
+        return {};
+      }
+    );
+    if (hookOutcome.blocked) {
+      attentionManager.add({
+        id: `hook-${id}-${Date.now()}`,
+        type: "blocked_task",
+        title: `Task blocked by hook: ${task.title}`,
+        detail: hookOutcome.blocked.result.block?.reason ?? "blocked",
+        source: id,
+        createdAt: Date.now(),
+        resolved: false,
+      });
+      return { blocked: true, reason: hookOutcome.blocked.result.block?.reason, hookId: hookOutcome.blocked.id };
+    }
+    const contractId = task.contractId;
+    const contract = contractId ? contracts.get(contractId) : undefined;
+    if (contract) {
+      const evaluation = evaluateContract(contract, checkResults);
+      if (!evaluation.passed) {
+        const failed = evaluation.checks.filter((c) => c.check.required && !c.satisfied).map((c) => c.check.label);
+        attentionManager.add({
+          id: `contract-${id}-${Date.now()}`,
+          type: "failed_task",
+          title: `Completion blocked: ${contract.title}`,
+          detail: failed.length ? `contract failed: ${failed.join(", ")}` : "contract failed",
+          source: id,
+          createdAt: Date.now(),
+          resolved: false,
+        });
+        return { blocked: true, reason: failed.length ? `contract failed: ${failed.join(", ")}` : "contract failed", evaluation };
+      }
+      taskManager.markCompleted(id);
+      return { blocked: false, evaluation };
+    }
+    taskManager.markCompleted(id);
+    return { blocked: false };
+  });
+  handle("pideck:hooks-list", () => hookManager.list());
+  handle("pideck:hooks-register", (_e, hook: unknown) => {
+    if (!hook || typeof (hook as { id?: unknown }).id !== "string") throw new Error("invalid hook");
+    hookManager.register(hook as import("../src/hooks").HookDefinition);
+    return hookManager.list();
+  });
+  handle("pideck:hooks-remove", (_e, id: unknown) => {
+    hookManager.remove(validateId(id));
+    return hookManager.list();
+  });
+  handle("pideck:contracts-list", () => [...contracts.values()]);
+  handle("pideck:contracts-get", (_e, id: unknown) => contracts.get(validateId(id as string)) ?? null);
+  handle("pideck:attention-list", () => attentionManager.list());
+  handle("pideck:attention-resolve", (_e, id: unknown) => {
+    attentionManager.resolve(validateId(id));
+    return attentionManager.list();
   });
 
   handle("pideck:worktree-info", async () => {
@@ -1111,6 +1192,8 @@ app.whenReady().then(() => {
   createWindow();
   processManager.subscribe((snapshots) => win?.webContents.send("pideck:process-update", snapshots));
   taskManager.subscribe((tasks) => win?.webContents.send("pideck:task-update", tasks));
+  hookManager.subscribe((registry) => win?.webContents.send("pideck:hooks-update", registry));
+  attentionManager.subscribe((registry) => win?.webContents.send("pideck:attention-update", registry));
   sessionIndex.subscribe((update) => win?.webContents.send("pideck:sessions-update", update));
   // Start the in-process pi host immediately (builds shared services once) so
   // the first session open is instant. Runs in the background; the user just

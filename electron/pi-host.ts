@@ -25,9 +25,10 @@ import { buildGitCommitPrompt, extractModelText, parseGeneratedCommitMessage, ty
 import type { PreparedCommitContext } from "./git";
 import { buildRecapPrompt, normalizeRecapText, pickRecapDelta, recapDue, recapWorthy, RECAP_INTERVAL_MS, type Recap } from "./recap";
 import { ManagedSubagents, type ManagedSubagentRecord, type SubagentControlAction, type SubagentParentEvent } from "./subagents";
-import { installPermissionHook } from "./permission-hook";
+import { installAgentGuards } from "./permission-hook";
 import { mapToolToAction } from "./permission-agent";
 import type { BabylonPermissionController } from "./permissions";
+import type { HookManager } from "./hook-manager";
 import { ThreadManager } from "./threads";
 import {
   AgentSessionRuntime,
@@ -85,6 +86,10 @@ export interface HostOptions {
   onProjectTrust?: (cwd: string) => Promise<{ trusted: boolean; remember?: boolean }>;
   /** Babylon permission system controller, if enabled. */
   permission?: BabylonPermissionController;
+  /** Hook registry owner for pre/post tool use and before_stop. */
+  hookManager?: HookManager;
+  /** Resolve the owning task id for a session file, if any. */
+  getTaskIdForSessionFile?: (sessionFile: string | null) => string | undefined;
 }
 
 export class PiHost {
@@ -385,16 +390,40 @@ export class PiHost {
       },
     });
     this.unsubscribeEvents?.();
-    // Babylon permission system: intercept every agent tool call before it
-    // runs. installPermissionHook wraps the SDK's hook so extensions like
-    // managed-subagents keep working underneath us.
     if (this.opts.permission) {
       this.opts.permission.clearSessionRules();
-      installPermissionHook(session.agent as any, this.opts.permission, this.cwd);
+      installAgentGuards(session.agent as any, {
+        controller: this.opts.permission,
+        cwd: this.cwd,
+        hookManager: this.opts.hookManager,
+        sessionId: session.sessionId,
+        taskId: this.opts.getTaskIdForSessionFile?.(session.sessionFile ?? null),
+      });
+    } else if (this.opts.hookManager) {
+      installAgentGuards(session.agent as any, {
+        controller: { evaluate: () => ({ decision: "allow" as const }), requestApproval: async () => true, clearSessionRules: () => {}, getMode: () => "auto" as const, listRules: () => [] } as unknown as BabylonPermissionController,
+        cwd: this.cwd,
+        hookManager: this.opts.hookManager,
+        sessionId: session.sessionId,
+        taskId: this.opts.getTaskIdForSessionFile?.(session.sessionFile ?? null),
+      });
     }
 
     this.unsubscribeEvents = session.subscribe((event) => {
       this.opts.onEvent({ ...event, sessionId: session.sessionId, sessionFile: session.sessionFile });
+      if (event.type === "tool_execution_end") {
+        const toolName = (event as any).toolName ?? (event as any).toolCall?.name ?? "";
+        void this.opts.hookManager?.dispatch(
+          "post_tool_use",
+          {
+            toolName,
+            args: (event as any).args ?? (event as any).result,
+            sessionId: session.sessionId,
+            taskId: this.opts.getTaskIdForSessionFile?.(session.sessionFile ?? null),
+          },
+          async () => ({})
+        );
+      }
       if (event.type === "message_end" && event.message?.role === "assistant") {
         void this.relayPromotedSubagentReply(session, messageText(event.message));
       }

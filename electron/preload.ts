@@ -69,10 +69,31 @@ const api = {
   taskGet: (id: string): Promise<any> => ipcRenderer.invoke("pideck:task-get", id),
   taskSpawn: (taskId: string, command: string, cwd: string): Promise<any> =>
     ipcRenderer.invoke("pideck:task-spawn", taskId, command, cwd),
+  taskSetContract: (taskId: string, contract: any): Promise<any> =>
+    ipcRenderer.invoke("pideck:task-set-contract", taskId, contract),
+  taskComplete: (taskId: string, results: any[]): Promise<any> =>
+    ipcRenderer.invoke("pideck:task-complete", taskId, results),
   onTaskUpdate: (cb: (tasks: any[]) => void): (() => void) => {
     const listener = (_e: unknown, tasks: any[]) => cb(tasks);
     ipcRenderer.on("pideck:task-update", listener);
     return () => ipcRenderer.removeListener("pideck:task-update", listener);
+  },
+  hooksList: (): Promise<any[]> => ipcRenderer.invoke("pideck:hooks-list"),
+  hooksRegister: (hook: any): Promise<any[]> => ipcRenderer.invoke("pideck:hooks-register", hook),
+  hooksRemove: (id: string): Promise<any[]> => ipcRenderer.invoke("pideck:hooks-remove", id),
+  onHooksUpdate: (cb: (hooks: any) => void): (() => void) => {
+    const listener = (_e: unknown, hooks: any) => cb(hooks);
+    ipcRenderer.on("pideck:hooks-update", listener);
+    return () => ipcRenderer.removeListener("pideck:hooks-update", listener);
+  },
+  contractsList: (): Promise<any[]> => ipcRenderer.invoke("pideck:contracts-list"),
+  contractsGet: (id: string): Promise<any> => ipcRenderer.invoke("pideck:contracts-get", id),
+  attentionList: (): Promise<any> => ipcRenderer.invoke("pideck:attention-list"),
+  attentionResolve: (id: string): Promise<any> => ipcRenderer.invoke("pideck:attention-resolve", id),
+  onAttentionUpdate: (cb: (attention: any) => void): (() => void) => {
+    const listener = (_e: unknown, attention: any) => cb(attention);
+    ipcRenderer.on("pideck:attention-update", listener);
+    return () => ipcRenderer.removeListener("pideck:attention-update", listener);
   },
   worktreeInfo: (): Promise<any> => ipcRenderer.invoke("pideck:worktree-info"),
   worktreeCreate: (opts: { name: string; description?: string; useGit?: boolean }): Promise<any> =>

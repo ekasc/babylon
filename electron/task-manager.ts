@@ -136,6 +136,22 @@ export class TaskManager {
     }
   }
 
+  setContractId(taskId: string, contractId: string): Task | undefined {
+    const task = this.registry.tasks[taskId];
+    if (!task) return undefined;
+    this.registry = updateTask(this.registry, taskId, { contractId });
+    this.broadcast();
+    return this.get(taskId);
+  }
+
+  markCompleted(taskId: string): Task | undefined {
+    const task = this.registry.tasks[taskId];
+    if (!task) return undefined;
+    this.registry = updateTask(this.registry, taskId, { status: "completed" });
+    this.broadcast();
+    return this.get(taskId);
+  }
+
   resumeForSession(sessionFile: string | null | undefined): Task | undefined {
     if (!sessionFile) return undefined;
     const task = Object.values(this.registry.tasks).find((candidate) => candidate.sessionFile === sessionFile);

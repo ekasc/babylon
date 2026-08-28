@@ -504,7 +504,18 @@ export interface Bridge {
   taskList(): Promise<Task[]>;
   taskGet(id: string): Promise<Task | null>;
   taskSpawn(taskId: string, command: string, cwd: string): Promise<ProcessSnapshot>;
+  taskSetContract(taskId: string, contract: import("./completion-contracts").CompletionContract): Promise<import("./completion-contracts").CompletionContract>;
+  taskComplete(taskId: string, results: import("./completion-contracts").CheckResult[]): Promise<{ blocked: boolean; reason?: string; hookId?: string; evaluation?: import("./completion-contracts").ContractEvaluation }>;
   onTaskUpdate(cb: (tasks: Task[]) => void): () => void;
+  hooksList(): Promise<import("./hooks").HookDefinition[]>;
+  hooksRegister(hook: import("./hooks").HookDefinition): Promise<import("./hooks").HookDefinition[]>;
+  hooksRemove(id: string): Promise<import("./hooks").HookDefinition[]>;
+  onHooksUpdate(cb: (registry: import("./hooks").HookRegistry) => void): () => void;
+  contractsList(): Promise<import("./completion-contracts").CompletionContract[]>;
+  contractsGet(id: string): Promise<import("./completion-contracts").CompletionContract | null>;
+  attentionList(): Promise<import("./attention").AttentionRegistry>;
+  attentionResolve(id: string): Promise<import("./attention").AttentionRegistry>;
+  onAttentionUpdate(cb: (registry: import("./attention").AttentionRegistry) => void): () => void;
   worktreeInfo(): Promise<{
     isWorktree: boolean;
     sessionFile?: string;
@@ -675,7 +686,18 @@ export const bridge: Bridge = window.pideck ?? {
   taskList: () => Promise.resolve([]),
   taskGet: () => Promise.resolve(null),
   taskSpawn: () => Promise.reject(new Error("bridge unavailable")),
+  taskSetContract: () => Promise.reject(new Error("bridge unavailable")),
+  taskComplete: () => Promise.reject(new Error("bridge unavailable")),
   onTaskUpdate: () => () => {},
+  hooksList: () => Promise.resolve([]),
+  hooksRegister: () => Promise.reject(new Error("bridge unavailable")),
+  hooksRemove: () => Promise.resolve([]),
+  onHooksUpdate: () => () => {},
+  contractsList: () => Promise.resolve([]),
+  contractsGet: () => Promise.resolve(null),
+  attentionList: () => Promise.resolve({ items: {} }),
+  attentionResolve: () => Promise.resolve({ items: {} }),
+  onAttentionUpdate: () => () => {},
   worktreeInfo: () =>
     Promise.resolve({
       isWorktree: false,

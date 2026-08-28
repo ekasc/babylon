@@ -27,6 +27,8 @@ export interface Task {
   terminalIds: string[];
   previewId?: string;
   checkpointIds: string[];
+  /** Optional completion contract id that must pass before the task is considered done. */
+  contractId?: string;
   createdAt: number;
 }
 
