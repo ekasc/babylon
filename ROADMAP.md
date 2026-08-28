@@ -92,9 +92,9 @@ Statuses: **DONE** (real, end-to-end, user-exercisable) · **PARTIAL** (meaningf
 
 ## Phase 5: Attention and Completion
 
-- [ ] **PARTIAL · 9. Attention inbox** — real source: permission requests (raised on `onApprovalRequested`, cleared when the approval resolves). Synthetic source: automation failures from the placeholder executor. None of the other promised sources exist: no agent questions, blocked tasks, merge conflicts, missing credentials, environment failures, or review requests feed it.
+- [ ] **PARTIAL · 9. Attention inbox** — real sources: permission requests plus `blocked_task` (hook `before_stop` block) and `failed_task` (contract-gated `task.complete` fail) via `AttentionManager` and `pideck:attention-*` IPC with `pideck:attention-update` broadcast. Automation failures still feed it synthetically. Live probe verified hook block and contract fail each created an unresolved attention item that survives until resolved.
 
-  Missing integration: emit attention from real conditions — workflow/worktree conflicts, failed sessions, contract failures once contracts gate real work, review requests — and resolve them when the condition clears.
+  Missing integration: workflow/worktree conflicts, failed sessions, missing credentials, environment failures, and review requests; plus daemon persistence for attention items when `daemon.enabled`.
 
 - [ ] **PARTIAL · 10. Completion contracts** — `src/completion-contracts.ts` evaluator is real and now gates task completion: `pideck:task-complete` checks required checks, fails closed on missing results, blocks `completed` and raises `failed_task` attention with the contract title/detail; passing checks marks the task `completed`. `automation-runner` also uses the same evaluator. Live Electron probe verified a task with a typecheck/tests contract failing then passing.
 
