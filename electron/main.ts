@@ -22,6 +22,7 @@ import { LspManager, validateCwd as validateLspCwd } from "./lsp-manager";
 import { HookManager } from "./hook-manager";
 import { AttentionManager } from "./attention-manager";
 import { evaluateContract, type CheckResult, type CompletionContract } from "../src/completion-contracts";
+import { connectDaemonClient, type DaemonClient } from "../src/daemon-client";
 
 // Pi engine session store (mirrors electron/threads.ts).
 const PI_SESSIONS_ROOT = join(homedir(), ".pi", "agent", "sessions");
@@ -160,6 +161,30 @@ const lspManager = new LspManager();
 const hookManager = new HookManager();
 const attentionManager = new AttentionManager();
 const contracts = new Map<string, CompletionContract>();
+let daemonClient: DaemonClient | null = null;
+
+function daemonPaths() {
+  return {
+    socketPath: join(app.getPath("userData"), "daemon.sock"),
+    snapshotPath: join(app.getPath("userData"), "daemon-state.json"),
+  };
+}
+
+function isDaemonEnabled(): boolean {
+  return !!getSettings().daemon?.enabled;
+}
+
+async function daemonTaskBySessionFile(file: string | null | undefined): Promise<import("../src/tasks").Task | undefined> {
+  if (!file || !isDaemonEnabled() || !daemonClient) return undefined;
+  try {
+    const res = await daemonClient.request("state.get", {});
+    const runtime = (res.payload as { runtime?: { tasks?: { tasks: Record<string, import("../src/tasks").Task> } } })?.runtime;
+    const tasks = runtime?.tasks?.tasks ?? {};
+    return Object.values(tasks).find((t) => t.sessionFile === file) as import("../src/tasks").Task | undefined;
+  } catch {
+    return undefined;
+  }
+}
 const agentEvents = new AgentEventBuffer((events) => {
   win?.webContents.send("pideck:agent-events", events);
 });
@@ -717,22 +742,44 @@ function registerIpc(): void {
     return getHost().fork(entryId);
   });
   handle("pideck:clone", () => getHost().clone());
-  handle("pideck:task-list", () => taskManager.list());
-  handle("pideck:task-get", (_e, id: unknown) => {
+  handle("pideck:task-list", async () => {
+    if (isDaemonEnabled() && daemonClient) {
+      const res = await daemonClient.request("state.get", {});
+      const runtime = (res.payload as { runtime?: { tasks?: { tasks: Record<string, import("../src/tasks").Task> } } })?.runtime;
+      return runtime?.tasks ? Object.values(runtime.tasks.tasks) : [];
+    }
+    return taskManager.list();
+  });
+  handle("pideck:task-get", async (_e, id: unknown) => {
     if (typeof id !== "string" || id.length === 0 || id.length > 200) throw new Error("invalid task id");
+    if (isDaemonEnabled() && daemonClient) {
+      const res = await daemonClient.request("state.get", {});
+      const runtime = (res.payload as { runtime?: { tasks?: { tasks: Record<string, import("../src/tasks").Task> } } })?.runtime;
+      return runtime?.tasks?.tasks[id as string] ?? null;
+    }
     return taskManager.get(id) ?? null;
   });
-  handle("pideck:task-set-contract", (_e, taskId: unknown, contract: unknown) => {
+  handle("pideck:task-set-contract", async (_e, taskId: unknown, contract: unknown) => {
     const id = validateId(taskId);
     if (!contract || typeof (contract as CompletionContract).id !== "string") throw new Error("invalid contract");
     const c = contract as CompletionContract;
     contracts.set(c.id, c);
-    taskManager.setContractId(id, c.id);
+    if (isDaemonEnabled() && daemonClient) {
+      await daemonClient.request("task.updated", { id, patch: { contractId: c.id } });
+    } else {
+      taskManager.setContractId(id, c.id);
+    }
     return c;
   });
   handle("pideck:task-complete", async (_e, taskId: unknown, results: unknown) => {
     const id = validateId(taskId);
-    const task = taskManager.get(id);
+    const task = isDaemonEnabled() && daemonClient
+      ? await (async () => {
+          const res = await daemonClient!.request("state.get", {});
+          const runtime = (res.payload as { runtime?: { tasks?: { tasks: Record<string, import("../src/tasks").Task> } } })?.runtime;
+          return runtime?.tasks?.tasks[id] ?? null;
+        })()
+      : taskManager.get(id);
     if (!task) throw new Error("unknown task");
     const checkResults = Array.isArray(results) ? (results as CheckResult[]) : [];
     const hookOutcome = await hookManager.dispatch(
@@ -772,10 +819,18 @@ function registerIpc(): void {
         });
         return { blocked: true, reason: failed.length ? `contract failed: ${failed.join(", ")}` : "contract failed", evaluation };
       }
-      taskManager.markCompleted(id);
+      if (isDaemonEnabled() && daemonClient) {
+        await daemonClient.request("task.updated", { id, patch: { status: "completed" } });
+      } else {
+        taskManager.markCompleted(id);
+      }
       return { blocked: false, evaluation };
     }
-    taskManager.markCompleted(id);
+    if (isDaemonEnabled() && daemonClient) {
+      await daemonClient.request("task.updated", { id, patch: { status: "completed" } });
+    } else {
+      taskManager.markCompleted(id);
+    }
     return { blocked: false };
   });
   handle("pideck:hooks-list", () => hookManager.list());
@@ -801,7 +856,9 @@ function registerIpc(): void {
       const state = await getHost().getState();
       const file = state?.sessionFile;
       const header = file ? await readSessionHeader(file) : null;
-      const task = taskManager.findBySessionFile(file);
+      const task = isDaemonEnabled()
+        ? await daemonTaskBySessionFile(file)
+        : taskManager.findBySessionFile(file);
       const parentSession = header?.parentSession ?? task?.parentSessionFile;
       const cwd = header?.cwd ?? task?.cwd ?? activeCwd;
       const g = cwd ? await gitInfo(cwd) : { isRepo: false };
@@ -876,16 +933,38 @@ function registerIpc(): void {
 
         const state = await getHost().getState();
         if (!state?.sessionId) throw new Error("cloned session has no runtime identity");
-        const task = taskManager.register({
-          title: safeName,
-          ownerSession: before.sessionId,
-          sessionId: state.sessionId,
-          sessionFile: worktreePath,
-          parentSessionFile: originalPath,
-          cwd: workCwd,
-          branch: gitWorktree?.branch,
-          worktreePath: gitWorktree?.path,
-        });
+        let task: import("../src/tasks").Task;
+        if (isDaemonEnabled() && daemonClient) {
+          const payload = {
+            id: randomUUID(),
+            title: safeName,
+            status: "running" as const,
+            ownerSession: before.sessionId,
+            sessionId: state.sessionId,
+            sessionFile: worktreePath,
+            parentSessionFile: originalPath,
+            cwd: workCwd,
+            branch: gitWorktree?.branch,
+            worktreePath: gitWorktree?.path,
+            dirty: false,
+            terminalIds: [],
+            checkpointIds: [],
+            createdAt: Date.now(),
+          };
+          const res = await daemonClient.request("task.created", payload);
+          task = res.payload as import("../src/tasks").Task;
+        } else {
+          task = taskManager.register({
+            title: safeName,
+            ownerSession: before.sessionId,
+            sessionId: state.sessionId,
+            sessionFile: worktreePath,
+            parentSessionFile: originalPath,
+            cwd: workCwd,
+            branch: gitWorktree?.branch,
+            worktreePath: gitWorktree?.path,
+          });
+        }
         sendStatus("ready", { state, sessionPath: worktreePath, cwd: workCwd });
         return { task, taskId: task.id, worktreePath, originalPath, gitWorktree };
       } catch (error) {
@@ -916,7 +995,9 @@ function registerIpc(): void {
     const file = state?.sessionFile;
     if (!file) throw new Error("no active session");
     const header = await readSessionHeader(file);
-    const task = taskManager.findBySessionFile(file);
+    const task = isDaemonEnabled()
+      ? await daemonTaskBySessionFile(file)
+      : taskManager.findBySessionFile(file);
     const originalPath = header?.parentSession ?? task?.parentSessionFile;
     if (!originalPath || !existsSync(originalPath)) {
       throw new Error("this session has no original to return to");
@@ -951,6 +1032,17 @@ function registerIpc(): void {
     };
 
     if (task) {
+      if (isDaemonEnabled() && daemonClient) {
+        if (!opts.keep && dirty) throw new Error("Cannot discard a task worktree with uncommitted changes");
+        await processManager.killByOwner(task.id).catch(() => {});
+        const result = await cleanup();
+        if (opts.keep) {
+          await daemonClient.request("task.updated", { id: task.id, patch: { status: "paused", dirty } });
+        } else {
+          await daemonClient.request("task.removed", { id: task.id });
+        }
+        return { ...result, task, removed: !opts.keep };
+      }
       return taskManager.exit({ taskId: task.id, keep: opts.keep, dirty, cleanup });
     }
     if (!opts.keep && dirty) throw new Error("Cannot discard a task worktree with uncommitted changes");
@@ -1119,11 +1211,22 @@ function registerIpc(): void {
 
   // Process manager (Electron-owned manual and task-owned project commands)
   handle("pideck:process-list", () => processManager.list());
-  handle("pideck:process-spawn", (_e, opts: unknown) => {
+  handle("pideck:process-spawn", async (_e, opts: unknown) => {
     const command = validateCommand((opts as { command?: unknown })?.command);
     const cwd = validateCwd((opts as { cwd?: unknown })?.cwd);
-    const activeTask = taskManager.findBySessionFile(host?.activeSessionFile);
-    if (activeTask) return taskManager.spawn(activeTask.id, command, cwd);
+    const activeFile = host?.activeSessionFile;
+    const activeTask = isDaemonEnabled()
+      ? await daemonTaskBySessionFile(activeFile)
+      : taskManager.findBySessionFile(activeFile);
+    if (activeTask) {
+      if (isDaemonEnabled()) {
+        const proc = processManager.spawn({ command, cwd, owner: activeTask.id, ownerSession: activeTask.sessionId });
+        // Keep daemon task's terminalIds in sync (best-effort)
+        await daemonClient?.request("task.updated", { id: activeTask.id, patch: { terminalIds: [...(activeTask.terminalIds ?? []), proc.id] } }).catch(() => {});
+        return proc;
+      }
+      return taskManager.spawn(activeTask.id, command, cwd);
+    }
 
     const owner = typeof (opts as { owner?: unknown })?.owner === "string" ? (opts as { owner: string }).owner.slice(0, 500) : undefined;
     const ownerSession =
@@ -1153,9 +1256,8 @@ function registerIpc(): void {
  * socket is reused rather than replaced.
  */
 async function ensureDaemon(): Promise<void> {
-  if (!getSettings().daemon?.enabled) return;
-  const socketPath = join(app.getPath("userData"), "daemon.sock");
-  const snapshotPath = join(app.getPath("userData"), "daemon-state.json");
+  if (!isDaemonEnabled()) return;
+  const { socketPath, snapshotPath } = daemonPaths();
   const alive = await new Promise<boolean>((resolve) => {
     const probe = net.connect(socketPath);
     probe.once("connect", () => {
@@ -1164,23 +1266,63 @@ async function ensureDaemon(): Promise<void> {
     });
     probe.once("error", () => resolve(false));
   });
-  if (alive) return;
-  const entry = join(__dirname, "..", "dist-daemon", "main.mjs");
-  if (!existsSync(entry)) {
-    console.warn("daemon.enabled is set but dist-daemon/main.mjs is missing; run pnpm build:daemon");
-    return;
+  if (!alive) {
+    const entry = join(__dirname, "..", "dist-daemon", "main.mjs");
+    if (!existsSync(entry)) {
+      console.warn("daemon.enabled is set but dist-daemon/main.mjs is missing; run pnpm build:daemon");
+    } else {
+      const child = spawn(process.execPath, [entry], {
+        env: {
+          ...process.env,
+          ELECTRON_RUN_AS_NODE: "1",
+          BABYLON_DAEMON_SOCKET: socketPath,
+          BABYLON_DAEMON_SNAPSHOT: snapshotPath,
+        },
+        detached: true,
+        stdio: "ignore",
+      });
+      child.unref();
+    }
   }
-  const child = spawn(process.execPath, [entry], {
-    env: {
-      ...process.env,
-      ELECTRON_RUN_AS_NODE: "1",
-      BABYLON_DAEMON_SOCKET: socketPath,
-      BABYLON_DAEMON_SNAPSHOT: snapshotPath,
-    },
-    detached: true,
-    stdio: "ignore",
-  });
-  child.unref();
+  if (!daemonClient) {
+    daemonClient = connectDaemonClient({ listen: { socketPath }, reconnect: { initialDelayMs: 100, maxDelayMs: 5000 } });
+    daemonClient.onEvent((envelope) => {
+      if (envelope.type === "task.created" || envelope.type === "task.updated" || envelope.type === "task.removed") {
+        // Refresh task list from daemon snapshot for thin-client cache
+        daemonClient
+          ?.request("state.get", {})
+          .then((res) => {
+            const runtime = (res.payload as { runtime?: { tasks?: { tasks: Record<string, unknown> } } })?.runtime;
+            const tasks = runtime?.tasks ? Object.values(runtime.tasks.tasks) : [];
+            win?.webContents.send("pideck:task-update", tasks);
+          })
+          .catch(() => {});
+      }
+      if (envelope.type === "attention.raised" || envelope.type === "attention.resolved") {
+        daemonClient
+          ?.request("state.get", {})
+          .then((res) => {
+            const runtime = (res.payload as { runtime?: { attention?: unknown } })?.runtime;
+            win?.webContents.send("pideck:attention-update", runtime?.attention ?? { items: {} });
+          })
+          .catch(() => {});
+      }
+    });
+    // Warm cache once connected
+    daemonClient
+      .request("ping", {})
+      .catch(() => {})
+      .finally(() => {
+        daemonClient
+          ?.request("state.get", {})
+          .then((res) => {
+            const runtime = (res.payload as { runtime?: { tasks?: { tasks: Record<string, unknown> } } })?.runtime;
+            const tasks = runtime?.tasks ? Object.values(runtime.tasks.tasks) : [];
+            win?.webContents.send("pideck:task-update", tasks);
+          })
+          .catch(() => {});
+      });
+  }
 }
 
 // ---------------------------------------------------------------------------
