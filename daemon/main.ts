@@ -13,6 +13,9 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { startDaemonServer } from "../src/daemon-server";
+import { PiHost } from "../electron/pi-host";
+import { HookManager } from "../electron/hook-manager";
+import { listSessions } from "../electron/sessions";
 
 function fail(message: string): never {
   console.error(`babylon-daemon: ${message}`);
@@ -35,10 +38,25 @@ const babylonDir = join(homedir(), ".babylon");
 const listen = port !== undefined ? { port, host: "127.0.0.1" } : { socketPath: process.env.BABYLON_DAEMON_SOCKET ?? join(babylonDir, "daemon.sock") };
 const snapshotPath = process.env.BABYLON_DAEMON_SNAPSHOT ?? join(babylonDir, "daemon-state.json");
 
+const defaultProject = process.env.BABYLON_DAEMON_DEFAULT_PROJECT ?? "";
+const sessionGroups = await listSessions(defaultProject || undefined).catch(() => []);
+const initialCwd = sessionGroups[0]?.cwd ?? (defaultProject || homedir());
+const hookManager = new HookManager();
+const piHost = new PiHost({
+  cwd: initialCwd,
+  agentDir: process.env.BABYLON_DAEMON_AGENT_DIR,
+  stateDir: process.env.BABYLON_DAEMON_STATE_DIR ?? join(babylonDir, "pideck-state"),
+  hookManager,
+  onEvent: () => {},
+  onStatus: () => {},
+});
+await piHost.start();
+
 const server = await startDaemonServer({
   listen,
   snapshotPath,
   ...(policyTickMs !== undefined ? { policyTickMs } : {}),
+  piHost,
   log: (message) => console.log(`babylon-daemon: ${message}`),
 });
 
@@ -53,6 +71,7 @@ async function stop(): Promise<void> {
   if (stopping) return;
   stopping = true;
   await server.close();
+  await piHost.dispose();
   process.exit(0);
 }
 process.on("SIGINT", () => void stop());

@@ -472,6 +472,11 @@ async function startHost(): Promise<void> {
     const permissionDir = join(app.getPath("userData"), "pideck-state", "permissions");
     permissionEngine = new PermissionEngine({ dir: permissionDir });
     await permissionEngine.load();
+    if (isDaemonEnabled() && daemonClient) {
+      // Daemon owns PiHost when enabled — no in-process host
+      console.log("[pideck] pi host is daemon-owned (thin client)");
+      return;
+    }
     host = new PiHost({
       cwd,
       permission: permissionEngine
@@ -576,13 +581,24 @@ function registerIpc(): void {
       if (!opts || typeof opts.cwd !== "string" || opts.cwd.length > 4096) throw new Error("invalid session options");
       if (hostReady) await hostReady;
       const path = opts.path === undefined ? undefined : await validateSessionPath(PI_SESSIONS_ROOT, opts.path);
+      if (isDaemonEnabled() && daemonClient) {
+        const res = await daemonClient.request("pi.openSession", { ...opts, path });
+        const state = res.payload as { sessionFile?: string };
+        if (isDaemonEnabled()) {
+          const t = await daemonTaskBySessionFile(state?.sessionFile ?? null);
+          if (t?.status === "paused") await daemonClient.request("task.updated", { id: t.id, patch: { status: "running" } });
+        } else {
+          taskManager.resumeForSession(state?.sessionFile);
+        }
+        return state;
+      }
       const state = await getHost().open({ ...opts, path });
       taskManager.resumeForSession(state?.sessionFile);
       return state;
     }
   );
 
-  handle("pideck:prompt", (_e, message: string, images?: any[], streamingBehavior?: string) => {
+  handle("pideck:prompt", async (_e, message: string, images?: any[], streamingBehavior?: string) => {
     if (typeof message !== "string" || message.length > 2_000_000) throw new Error("invalid prompt payload");
     if (streamingBehavior !== undefined && streamingBehavior !== "steer" && streamingBehavior !== "followUp") {
       throw new Error("invalid streaming behavior");
@@ -598,15 +614,48 @@ function registerIpc(): void {
         }
       }
     }
+    if (isDaemonEnabled() && daemonClient) {
+      const res = await daemonClient.request("pi.prompt", { message, images, streamingBehavior });
+      return res.payload;
+    }
     return getHost().prompt(message, images, streamingBehavior as any);
   });
-  handle("pideck:abort", () => getHost().abort());
-  handle("pideck:refresh-session", async (_e, path: string) =>
-    getHost().refreshFromDisk(await validateSessionPath(PI_SESSIONS_ROOT, path))
-  );
-  handle("pideck:get-messages", () => getHost().getMessages());
-  handle("pideck:get-state", () => getHost().getState());
-  handle("pideck:get-stats", () => getHost().getStats());
+  handle("pideck:abort", async () => {
+    if (isDaemonEnabled() && daemonClient) {
+      const res = await daemonClient.request("pi.abort", {});
+      return res.payload;
+    }
+    return getHost().abort();
+  });
+  handle("pideck:refresh-session", async (_e, path: string) => {
+    const p = await validateSessionPath(PI_SESSIONS_ROOT, path);
+    if (isDaemonEnabled() && daemonClient) {
+      const res = await daemonClient.request("pi.getState", { path: p });
+      return res.payload;
+    }
+    return getHost().refreshFromDisk(p);
+  });
+  handle("pideck:get-messages", async () => {
+    if (isDaemonEnabled() && daemonClient) {
+      const res = await daemonClient.request("pi.getMessages", {});
+      return res.payload;
+    }
+    return getHost().getMessages();
+  });
+  handle("pideck:get-state", async () => {
+    if (isDaemonEnabled() && daemonClient) {
+      const res = await daemonClient.request("pi.getState", {});
+      return res.payload;
+    }
+    return getHost().getState();
+  });
+  handle("pideck:get-stats", async () => {
+    if (isDaemonEnabled() && daemonClient) {
+      const res = await daemonClient.request("pi.getStats", {});
+      return res.payload;
+    }
+    return getHost().getStats();
+  });
   handle("pideck:git-status", async (_e, cwd: unknown) => {
     if (typeof cwd !== "string" || cwd.length > 4096) throw new Error("invalid cwd");
     try {
@@ -1329,7 +1378,7 @@ async function ensureDaemon(): Promise<void> {
 // App lifecycle
 // ---------------------------------------------------------------------------
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   registerIpc();
   createWindow();
   processManager.subscribe((snapshots) => win?.webContents.send("pideck:process-update", snapshots));
@@ -1337,11 +1386,8 @@ app.whenReady().then(() => {
   hookManager.subscribe((registry) => win?.webContents.send("pideck:hooks-update", registry));
   attentionManager.subscribe((registry) => win?.webContents.send("pideck:attention-update", registry));
   sessionIndex.subscribe((update) => win?.webContents.send("pideck:sessions-update", update));
-  // Start the in-process pi host immediately (builds shared services once) so
-  // the first session open is instant. Runs in the background; the user just
-  // sees sessions open with no "starting" phase.
+  await ensureDaemon();
   hostReady = startHost();
-  void ensureDaemon();
   // Smoke-test hook: PIDECK_SMOKE=<ms> auto-quits after a delay.
   if (process.env.PIDECK_SMOKE) {
     setTimeout(() => app.quit(), Number(process.env.PIDECK_SMOKE)).unref();
