@@ -21,7 +21,8 @@ import { toPiImages } from "./prompt-images";
 import { clampToolOutput, readSessionTail, readToolOutput } from "./sessions";
 import { RecapStore } from "./recap-store";
 import { DEFAULT_GIT_COMMIT_MODEL, getSettings, saveSettings, type PiSettings } from "./app-settings";
-import { buildCommitPushTask } from "./git-commit-subagent";
+import { buildGitCommitPrompt, extractModelText, parseGeneratedCommitMessage, type GeneratedCommitMessage } from "./git-commit-message";
+import type { PreparedCommitContext } from "./git";
 import { buildRecapPrompt, normalizeRecapText, pickRecapDelta, recapDue, recapWorthy, RECAP_INTERVAL_MS, type Recap } from "./recap";
 import { ManagedSubagents, type ManagedSubagentRecord, type SubagentControlAction, type SubagentParentEvent } from "./subagents";
 import { installPermissionHook } from "./permission-hook";
@@ -450,24 +451,55 @@ export class PiHost {
     return text.replace(/^["'“”]+|["'“”]+$/g, "").slice(0, 60);
   }
 
-  async startGitCommitPush(cwd: string): Promise<{ runId: string; model: string }> {
-    await this.ensureSession();
-    if (resolve(cwd) !== resolve(this.cwd)) throw new Error("Git action cwd does not match the active project");
+  async generateGitCommitMessage(context: PreparedCommitContext): Promise<GeneratedCommitMessage> {
     const settings = getSettings();
     const ref = settings.gitCommitModel ?? DEFAULT_GIT_COMMIT_MODEL;
-    const model = `${ref.provider}/${ref.modelId}`;
-    const record = await this.managedSubagents.start(
-      {
-        task: buildCommitPushTask(settings.gitCommitPrompt ?? ""),
+    const model = this.modelRuntime.getModel(ref.provider, ref.modelId);
+    if (!model) {
+      throw new Error(
+        `Commit model is unavailable: ${ref.provider}/${ref.modelId}. ` +
+          `Select an installed model in Settings → Pi → Git commit model.`
+      );
+    }
+    if (context.fileCount === 0) throw new Error("No staged files to describe — commit context is empty");
+    if (context.stagedPatch.trim().length === 0 && context.stagedSummary.trim().length === 0) {
+      throw new Error("Staged patch is empty — nothing to commit");
+    }
+
+    const complete = (prompt: string) =>
+      this.modelRuntime.completeSimple(
         model,
-        profile: "write",
-        thinking: "low",
-        timeoutMs: 10 * 60_000,
-        name: "Commit & push",
-      },
-      this.runtime.session.extensionRunner.createContext()
-    );
-    return { runId: record.runId, model: record.sessionModel };
+        { messages: [{ role: "user", content: prompt }] } as any,
+        { reasoning: "low", maxTokens: 4_096 }
+      );
+    const read = async (prompt: string): Promise<string> => {
+      let response: any;
+      try {
+        response = await complete(prompt);
+      } catch (cause) {
+        throw new Error(`commit model request failed: ${cause instanceof Error ? cause.message : String(cause)}`);
+      }
+      if (response.stopReason === "error") {
+        throw new Error(response.errorMessage?.trim() || "commit model failed");
+      }
+      const text = extractModelText(response);
+      if (!text) throw new Error(`commit model returned no text (stop reason: ${response.stopReason})`);
+      return text;
+    };
+
+    const first = await read(buildGitCommitPrompt(context, settings.gitCommitPrompt ?? ""));
+    try {
+      return parseGeneratedCommitMessage(first, context.requiresBody);
+    } catch (cause) {
+      const correction = cause instanceof Error ? cause.message : String(cause);
+      const retry = await read(buildGitCommitPrompt(context, settings.gitCommitPrompt ?? "", correction));
+      try {
+        return parseGeneratedCommitMessage(retry, context.requiresBody);
+      } catch (retryCause) {
+        const detail = retryCause instanceof Error ? retryCause.message : String(retryCause);
+        throw new Error(`commit message still invalid after retry: ${detail} (first error: ${correction})`);
+      }
+    }
   }
 
   /** One cheap model call shared by naming and recaps. The model + reasoning
@@ -480,7 +512,7 @@ export class PiHost {
       : undefined;
     const model =
       titleModel ??
-      this.modelRuntime.getModel("opencode-go", "deepseek-v4-flash") ??
+      this.modelRuntime.getModel("opencode-go", "muse-spark-1.2-contributor") ??
       this.runtime.session.model;
     if (!model) return null;
     const reasoning = (settings.titleReasoning as any) || "low";
@@ -1359,6 +1391,30 @@ export class PiHost {
 
   async promoteSubagent(runId: string): Promise<{ sessionFile: string; cwd: string; parentSessionFile: string | null }> {
     return this.managedSubagents.promote(this.cwd, runId);
+  }
+
+  /** Deliver newly-introduced diagnostics to the active Pi session as visible context.
+   *  Bounded to 20 items; uses a custom message so the model can repair post-edit
+   *  failures without being interrupted or prompted automatically. */
+  async notifyDiagnostics(diagnostics: Array<{ file: string; line: number; character: number; severity: string; message: string; source?: string; code?: string | number }>): Promise<void> {
+    if (!diagnostics.length) return;
+    const bounded = diagnostics.slice(0, 20);
+    const lines = bounded.map((d) => `${d.file}:${d.line}:${d.character} [${d.severity}]${d.source ? ` (${d.source}${d.code ? `/${d.code}` : ""})` : ""} ${d.message}`);
+    const content = `[Babylon Diagnostics]\nNew problems detected:\n${lines.join("\n")}`;
+    try {
+      await this.runtime.session.sendCustomMessage({
+        customType: "babylon_diagnostics",
+        content,
+        display: true,
+        details: { diagnostics: bounded },
+      } as unknown as Parameters<(typeof this.runtime.session)["sendCustomMessage"]>[0]);
+      this.opts.onEvent({
+        type: "message_start",
+        message: { role: "custom", customType: "babylon_diagnostics", content, display: true },
+      });
+    } catch {
+      // Best-effort; diagnostics should never break the session.
+    }
   }
 
   async dispose(): Promise<void> {

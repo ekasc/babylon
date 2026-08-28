@@ -177,7 +177,7 @@ export default function SettingsPage(props: Props) {
                   {!settings && <p className="mt-2 text-[12px] text-dim">Loading settings…</p>}
                 </Section>
 
-                <Section title="Commit and push" hint="Runs a bounded write subagent that inspects the diff, commits, and pushes. Babylon always applies its built-in Unslop rules with low reasoning.">
+                <Section title="Commit and push" hint="Stages the current tree, generates a message from the staged diff, then commits and pushes. Babylon always applies its built-in Unslop rules with low reasoning.">
                   <div className="flex items-center gap-2">
                     <ModelPicker
                       models={props.models}
@@ -197,7 +197,7 @@ export default function SettingsPage(props: Props) {
                     onBlur={() => void save({ gitCommitPrompt: gitPromptDraft })}
                     className="settings-input mt-1 w-full resize-y font-mono text-[12px] leading-5"
                   />
-                  <p className="mt-1.5 text-[11.5px] text-dim">These instructions are appended to the fixed Git safety and Unslop task.</p>
+                  <p className="mt-1.5 text-[11.5px] text-dim">These instructions are appended to the fixed structured-output and Unslop prompt.</p>
                 </Section>
 
                 <Section title="Context windows" hint="Override the advertised context window per model. Empty restores the default.">

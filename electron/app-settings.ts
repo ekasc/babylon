@@ -41,8 +41,13 @@ export interface PiSettings {
 }
 
 export const DEFAULT_GIT_COMMIT_MODEL: ModelRef = {
-  provider: "openai-codex",
-  modelId: "gpt-5.6-luna",
+  provider: "opencode-go",
+  modelId: "muse-spark-1.2-contributor",
+};
+
+export const DEFAULT_CHAT_MODEL: ModelRef = {
+  provider: "opencode-go",
+  modelId: "muse-spark-1.2-contributor",
 };
 
 export const DEFAULT_GIT_COMMIT_PROMPT =
@@ -50,6 +55,8 @@ export const DEFAULT_GIT_COMMIT_PROMPT =
 
 const EMPTY: PiSettings = {
   contextWindowOverrides: {},
+  chatModel: DEFAULT_CHAT_MODEL,
+  titleModel: DEFAULT_GIT_COMMIT_MODEL,
   gitCommitModel: DEFAULT_GIT_COMMIT_MODEL,
   gitCommitPrompt: DEFAULT_GIT_COMMIT_PROMPT,
 };

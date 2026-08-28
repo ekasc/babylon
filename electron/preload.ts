@@ -29,7 +29,12 @@ const api = {
     ipcRenderer.invoke("pideck:git-branch-create", cwd, name, switchTo),
   gitBranchSwitch: (cwd: string, name: string, options?: { stash?: boolean }): Promise<any> =>
     ipcRenderer.invoke("pideck:git-branch-switch", cwd, name, options),
-  gitStartCommitPush: (cwd: string): Promise<any> => ipcRenderer.invoke("pideck:git-start-commit-push", cwd),
+  gitCommitPush: (cwd: string, requestId: string): Promise<any> => ipcRenderer.invoke("pideck:git-commit-push", cwd, requestId),
+  onGitCommitPushProgress: (cb: (progress: any) => void): (() => void) => {
+    const listener = (_e: unknown, progress: any) => cb(progress);
+    ipcRenderer.on("pideck:git-commit-push-progress", listener);
+    return () => ipcRenderer.removeListener("pideck:git-commit-push-progress", listener);
+  },
   gitCommit: (cwd: string, message: string): Promise<any> => ipcRenderer.invoke("pideck:git-commit", cwd, message),
   gitPush: (cwd: string): Promise<any> => ipcRenderer.invoke("pideck:git-push", cwd),
   gitPull: (cwd: string): Promise<any> => ipcRenderer.invoke("pideck:git-pull", cwd),
@@ -148,6 +153,16 @@ const api = {
     const listener = (_e: unknown, state: any) => cb(state);
     ipcRenderer.on("pideck:permissions-changed", listener);
     return () => ipcRenderer.removeListener("pideck:permissions-changed", listener);
+  },
+
+  lspGetSnapshot: (cwd: string): Promise<any> => ipcRenderer.invoke("pideck:lsp-get-snapshot", cwd),
+  lspListSnapshots: (): Promise<any[]> => ipcRenderer.invoke("pideck:lsp-list-snapshots"),
+  lspSetProject: (cwd: string | null): Promise<any> => ipcRenderer.invoke("pideck:lsp-set-project", cwd),
+  lspRefresh: (cwd: string): Promise<any> => ipcRenderer.invoke("pideck:lsp-refresh", cwd),
+  onLspUpdate: (cb: (snapshots: any[]) => void): (() => void) => {
+    const listener = (_e: unknown, snaps: any[]) => cb(snaps);
+    ipcRenderer.on("pideck:lsp-update", listener);
+    return () => ipcRenderer.removeListener("pideck:lsp-update", listener);
   },
 
   onStatus: (cb: (status: any) => void): (() => void) => {

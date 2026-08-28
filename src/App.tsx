@@ -25,6 +25,7 @@ const AttentionPanel = lazy(() => import("./components/AttentionPanel").then((m)
 const DevicesPanel = lazy(() => import("./components/DevicesPanel").then((m) => ({ default: m.DevicesPanel })));
 const AutomationPanel = lazy(() => import("./components/AutomationPanel").then((m) => ({ default: m.AutomationPanel })));
 const DiagnosticsPanel = lazy(() => import("./components/DiagnosticsPanel").then((m) => ({ default: m.DiagnosticsPanel })));
+import { ProblemsPanel } from "./components/ProblemsPanel";
 import { collectDiagnostics } from "./diagnostics";
 import { PromptHost, confirmAction, promptText } from "./lib/prompts";
 import { createDeviceRegistry, type DeviceRegistry } from "./device-pairing";
@@ -224,6 +225,8 @@ export default function App() {
   const [schedule, setSchedule] = useState<ScheduledTaskRegistry>(createScheduledTaskRegistry);
   const [automationHistory, setAutomationHistory] = useState<AutomationHistory>(createAutomationHistory);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [showProblems, setShowProblems] = useState(false);
+  const [lspSnapshots, setLspSnapshots] = useState<import("./bridge").LspProjectSnapshot[]>([]);
   const [eventLog, setEventLog] = useState<EventLog>(createEventLog);
 
   // Append a batch of Babylon events to the diagnostics log. Invalid events
@@ -511,6 +514,18 @@ export default function App() {
       off();
     };
   }, []);
+
+  // LSP: keep active project and problem list in sync
+  useEffect(() => {
+    const off = bridge.onLspUpdate((snapshots) => setLspSnapshots(snapshots));
+    bridge.lspListSnapshots().then(setLspSnapshots).catch(() => undefined);
+    return off;
+  }, []);
+  useEffect(() => {
+    const cwd = status.cwd;
+    if (!cwd) return;
+    bridge.lspSetProject(cwd).catch(() => undefined);
+  }, [status.cwd]);
 
   // Attention Inbox: raise an item when the agent needs the user (here, a
   // permission request). The id is keyed to the approval id so repeats of the
@@ -1436,6 +1451,7 @@ export default function App() {
                 onOpenChange={setPanelsMenuOpen}
                 items={[
                   { label: "Terminals", open: showProcesses, onToggle: () => setShowProcesses((v) => !v) },
+                  { label: "Problems", open: showProblems, onToggle: () => setShowProblems((v) => !v), badge: lspSnapshots.find((s) => s.cwd === status.cwd)?.diagnostics.length ?? 0 },
                   { label: "Attention inbox", open: showAttention, onToggle: () => setShowAttention((v) => !v), badge: unresolvedAttention },
                   { label: "Paired devices", open: showDevices, onToggle: () => setShowDevices((v) => !v) },
                   { label: "Scheduled tasks", open: showAutomation, onToggle: () => setShowAutomation((v) => !v) },
@@ -1595,6 +1611,16 @@ export default function App() {
           <DiagnosticsPanel
             snapshot={diagnosticsSnapshot}
             onClose={() => setShowDiagnostics(false)}
+          />
+        ) : null}
+        {showProblems ? (
+          <ProblemsPanel
+            snapshot={lspSnapshots.find((s) => s.cwd === status.cwd) ?? null}
+            cwd={status.cwd}
+            onRefresh={() => {
+              if (status.cwd) bridge.lspRefresh(status.cwd).catch(() => undefined);
+            }}
+            onClose={() => setShowProblems(false)}
           />
         ) : null}
       </Suspense>

@@ -55,7 +55,7 @@ interface ManagedRuntime {
   timeout: NodeJS.Timeout | null;
 }
 
-export interface ManagedSubagentStart {
+interface SubagentParams {
   task: string;
   model?: string;
   profile?: ManagedSubagentRecord["profile"];
@@ -116,10 +116,6 @@ export class ManagedSubagents {
     void this.recoverPersistent();
   }
 
-  async start(params: ManagedSubagentStart, ctx: ExtensionContext): Promise<ManagedSubagentRecord> {
-    return (await this.create(params, ctx)).record;
-  }
-
   tool(): ToolDefinition<any, any> {
     return {
       name: "subagent",
@@ -148,7 +144,7 @@ export class ManagedSubagents {
       } as any,
       execute: async (_toolCallId, raw, signal, onUpdate, ctx) => {
         try {
-          const runtime = await this.create(raw as ManagedSubagentStart, ctx);
+          const runtime = await this.create(raw as SubagentParams, ctx);
           onUpdate?.({
             content: [{ type: "text", text: `Subagent ${runtime.record.runId} started. It can receive steer and follow-up messages from Activity.` }],
             details: { runId: runtime.record.runId, status: "running", controllable: true },
@@ -292,7 +288,7 @@ export class ManagedSubagents {
     this.runtimes.clear();
   }
 
-  private async create(params: ManagedSubagentStart, ctx: ExtensionContext): Promise<ManagedRuntime> {
+  private async create(params: SubagentParams, ctx: ExtensionContext): Promise<ManagedRuntime> {
     const task = params.task?.trim();
     if (!task) throw new Error("Subagent task is required");
     const requestedModel = params.model?.trim() || (ctx.model ? exactModel(ctx.model) : "");

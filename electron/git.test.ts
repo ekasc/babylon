@@ -6,7 +6,9 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import {
   commitAll,
+  commitStaged,
   createBranch,
+  prepareCommitContext,
   detectProviderFromRemoteUrl,
   listBranches,
   pullCurrentBranch,
@@ -91,6 +93,26 @@ describe("statusDetails", () => {
     expect(details.files.map((file) => file.path)).toContain("visible/new.txt");
     expect(details.files.map((file) => file.path)).not.toContain("ignored/secret.txt");
     expect(details.files.find((file) => file.path === "visible/new.txt")).toMatchObject({ insertions: 2, status: "?" });
+  });
+
+  it("prepares staged context that includes untracked file contents", async () => {
+    const root = await makeRepoWithCommit();
+    await writeFile(join(root, "file.txt"), "one\ntwo\n");
+    await writeFile(join(root, "new.txt"), "new content\n");
+
+    const context = await prepareCommitContext(root);
+    expect(context.stagedSummary).toContain("file.txt");
+    expect(context.stagedSummary).toContain("new.txt");
+    expect(context.stagedPatch).toContain("+two");
+    expect(context.stagedPatch).toContain("+new content");
+    expect(context.recentSubjects).toContain("initial");
+    await expect(commitStaged(root, "Add prepared context test")).resolves.toMatchObject({ subject: "Add prepared context test" });
+  });
+
+  it("marks large staged changes as requiring a body", async () => {
+    const root = await makeRepoWithCommit();
+    await writeFile(join(root, "large.txt"), `${Array.from({ length: 501 }, (_, index) => `line ${index}`).join("\n")}\n`);
+    expect((await prepareCommitContext(root)).requiresBody).toBe(true);
   });
 
   it("counts unpushed commits against the default branch", async () => {

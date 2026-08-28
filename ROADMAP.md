@@ -1,6 +1,6 @@
 # Babylon Roadmap
 
-> Audited 2026-08-27 against the actual runtime. 1 of 16 features is genuinely Done; 10 are Partial; 5 are Foundation. 426 tests pass, `tsc` clean. Previous status language overstated integration; this version states what actually works.
+> Audited 2026-08-27 against the actual runtime. 1 of 16 features is genuinely Done; 11 are Partial; 4 are Foundation. 435 tests pass, `tsc` clean. Previous status language overstated integration; this version states what actually works.
 
 ## Integration priority
 
@@ -58,9 +58,9 @@ Statuses: **DONE** (real, end-to-end, user-exercisable) · **PARTIAL** (meaningf
 
 ## Phase 2: Coding Intelligence
 
-- [ ] **FOUNDATION · 2. LSP integration** — `electron/lsp.ts` implements Content-Length framing, `encodeLspMessage`/`decodeLspMessages`, and diagnostic mapping, with tests. Nothing imports it. No server is ever spawned, initialized, or restarted; no document sync; no project association; no diagnostics in the UI; no feedback loop to Pi.
+- [ ] **PARTIAL · 2. LSP integration** — Electron owns project-scoped TypeScript, Python, Go, and Rust language-server processes. The service discovers source files, initializes stdio servers, synchronizes `didOpen`/`didChange`/`didSave`/`didClose`, normalizes diagnostics, retries bounded crashes, reports unavailable servers, and disposes children and watchers on project switch or app quit. The Problems panel shows real server state, PID, restart count, and grouped diagnostics. Newly introduced errors and warnings reach the active Pi session as bounded `babylon_diagnostics` context. A live Electron probe verified initial diagnostics, document version 2 after a file change, Pi delivery, project-switch cleanup, and app-quit cleanup.
 
-  Missing integration: a project-scoped LSP service in the main process (spawn → initialize → didOpen/didChange/didSave → publishDiagnostics → crash restart), a workspace diagnostics surface, and a post-edit hook that returns new relevant diagnostics to the active Pi session. Narrow the promised capabilities (hover/rename/code actions) until each has a live server behind it.
+  Missing integration: daemon ownership so language servers can survive desktop closure, broader workspace-folder/configuration behavior for monorepos, and editor actions such as hover, rename, and code actions. Linux fallback watching also needs dynamic directory discovery beyond the initially observed directories.
 
 ## Phase 3: Runtime Workspace
 

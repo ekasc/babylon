@@ -78,6 +78,20 @@ export interface GitBranchInfo {
   committedAt: number;
 }
 
+export type GitCommitPushPhase = "preparing" | "generating" | "committing" | "pushing" | "done" | "error";
+
+export interface GitCommitPushProgress {
+  requestId: string;
+  phase: GitCommitPushPhase;
+  message: string;
+}
+
+export interface GitCommitPushResult {
+  generated: { subject: string; body: string; message: string };
+  commit: { commitSha: string; subject: string };
+  push: { status: "pushed" | "skipped_up_to_date"; branch: string; upstreamBranch?: string };
+}
+
 export interface GitPrSummary {
   number: number;
   title: string;
@@ -458,7 +472,8 @@ export interface Bridge {
   gitBranches(cwd: string): Promise<{ branches: GitBranchInfo[]; current: string | null }>;
   gitBranchCreate(cwd: string, name: string, switchTo: boolean): Promise<{ branch: string }>;
   gitBranchSwitch(cwd: string, name: string, options?: { stash?: boolean }): Promise<{ branch: string | null; stashed?: boolean }>;
-  gitStartCommitPush(cwd: string): Promise<{ runId: string; model: string }>;
+  gitCommitPush(cwd: string, requestId: string): Promise<GitCommitPushResult>;
+  onGitCommitPushProgress(cb: (progress: GitCommitPushProgress) => void): () => void;
   gitCommit(cwd: string, message: string): Promise<{ commitSha: string; subject: string }>;
   gitPush(cwd: string): Promise<{ status: "pushed" | "skipped_up_to_date"; branch: string; upstreamBranch?: string }>;
   gitPull(cwd: string): Promise<{ status: "pulled" | "skipped_up_to_date"; branch: string; upstreamRef: string | null }>;
@@ -542,10 +557,43 @@ export interface Bridge {
    onApprovalResolved(cb: (payload: { id: string; choice: ApprovalChoice }) => void): () => void;
   onPermissionsChanged(cb: (state: PermissionState) => void): () => void;
 
+  lspGetSnapshot(cwd: string): Promise<LspProjectSnapshot | null>;
+  lspListSnapshots(): Promise<LspProjectSnapshot[]>;
+  lspSetProject(cwd: string | null): Promise<LspProjectSnapshot | null>;
+  lspRefresh(cwd: string): Promise<LspProjectSnapshot>;
+  onLspUpdate(cb: (snapshots: LspProjectSnapshot[]) => void): () => void;
+
   processList(): Promise<ProcessSnapshot[]>;
   processSpawn(opts: { command: string; cwd: string; owner?: string; ownerSession?: string }): Promise<ProcessSnapshot>;
   processKill(id: string): Promise<ProcessSnapshot>;
   onProcessUpdate(cb: (snapshots: ProcessSnapshot[]) => void): () => void;
+}
+
+export type LspServerStatus = "unavailable" | "starting" | "running" | "crashed" | "stopped";
+export interface LspDiagnostic {
+  file: string;
+  line: number;
+  character: number;
+  severity: "error" | "warning" | "info" | "hint";
+  message: string;
+  source?: string;
+  code?: number | string;
+}
+export interface LspServerSnapshot {
+  language: string;
+  command: string;
+  args: string[];
+  pid?: number;
+  status: LspServerStatus;
+  message?: string;
+  restartCount: number;
+  diagnostics: LspDiagnostic[];
+}
+export interface LspProjectSnapshot {
+  cwd: string;
+  updatedAt: number;
+  diagnostics: LspDiagnostic[];
+  servers: LspServerSnapshot[];
 }
 
 declare global {
@@ -587,7 +635,8 @@ export const bridge: Bridge = window.pideck ?? {
   gitBranches: () => Promise.resolve({ branches: [], current: null }),
   gitBranchCreate: () => Promise.reject(new Error("bridge unavailable")),
   gitBranchSwitch: () => Promise.reject(new Error("bridge unavailable")),
-  gitStartCommitPush: () => Promise.reject(new Error("bridge unavailable")),
+  gitCommitPush: () => Promise.reject(new Error("bridge unavailable")),
+  onGitCommitPushProgress: () => () => undefined,
   gitCommit: () => Promise.reject(new Error("bridge unavailable")),
   gitPush: () => Promise.reject(new Error("bridge unavailable")),
   gitPull: () => Promise.reject(new Error("bridge unavailable")),
@@ -652,6 +701,12 @@ export const bridge: Bridge = window.pideck ?? {
   onApprovalCleared: () => () => {},
   onApprovalResolved: () => () => {},
   onPermissionsChanged: () => () => {},
+
+  lspGetSnapshot: () => Promise.resolve(null),
+  lspListSnapshots: () => Promise.resolve([]),
+  lspSetProject: () => Promise.resolve(null),
+  lspRefresh: () => Promise.reject(new Error("bridge unavailable")),
+  onLspUpdate: () => () => {},
 
   processList: () => Promise.resolve([]),
   processSpawn: () => Promise.reject(new Error("bridge unavailable")),

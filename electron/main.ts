@@ -17,6 +17,7 @@ import { isTrustedRendererUrl } from "./navigation";
 import { validateSessionPath } from "./session-path";
 import { SessionIndex, readSessionRange, readSessionTail } from "./sessions";
 import { ProcessManager, validateCommand, validateCwd, validateId } from "./process-manager";
+import { LspManager, validateCwd as validateLspCwd } from "./lsp-manager";
 
 // Pi engine session store (mirrors electron/threads.ts).
 const PI_SESSIONS_ROOT = join(homedir(), ".pi", "agent", "sessions");
@@ -150,6 +151,7 @@ let workflowsBridge: any = null;
 let activityBridge: any = null;
 const sessionIndex = new SessionIndex(PI_SESSIONS_ROOT);
 const processManager = new ProcessManager();
+const lspManager = new LspManager();
 const agentEvents = new AgentEventBuffer((events) => {
   win?.webContents.send("pideck:agent-events", events);
 });
@@ -162,6 +164,8 @@ const agentEvents = new AgentEventBuffer((events) => {
 function applyCwd(cwd: string): void {
   if (!cwd) return;
   activeCwd = cwd;
+  // LSP: set active project; failures are best-effort (e.g. cwd deleted).
+  void lspManager.setActiveProject(cwd).catch(() => undefined);
 }
 
 function updateActivityBridge(_cwd: string): void {
@@ -427,6 +431,13 @@ async function startHost(): Promise<void> {
       },
     });
     await host.start();
+    // Wire LSP -> Pi diagnostics delivery (bounded, newly introduced only).
+    lspManager.setPiNotifier((diagCwd, diagnostics) => {
+      if (diagCwd !== activeCwd) return;
+      try {
+        host!.notifyDiagnostics(diagnostics);
+      } catch {}
+    });
     applyCwd(activeCwd);
     // Warm but invisible — the user hasn't opened a session yet.
     console.log("[pideck] pi host ready (in-process)");
@@ -569,14 +580,43 @@ function registerIpc(): void {
     }
     return gitOps.switchBranch(requireCwd(cwd), name, options as { stash?: boolean } | undefined);
   });
-  handle("pideck:git-start-commit-push", async (_e, cwd: unknown) => {
+  handle("pideck:git-commit-push", async (event, cwd: unknown, requestId: unknown) => {
     const root = requireCwd(cwd);
-    const details = await gitOps.statusDetails(root);
-    if (!details.isRepo) throw new Error("not a git repository");
-    if (!details.hasChanges) throw new Error("no changes to commit");
-    const result = await getHost().startGitCommitPush(root);
-    await activityBridge?.refresh();
-    return result;
+    if (typeof requestId !== "string" || requestId.length === 0 || requestId.length > 100) throw new Error("invalid request id");
+    if (!/^[a-zA-Z0-9_-]+$/.test(requestId)) throw new Error("invalid request id format");
+    const emit = (phase: string, message: string) => {
+      if (!event.sender.isDestroyed()) event.sender.send("pideck:git-commit-push-progress", { requestId, phase, message });
+    };
+    let committed = false;
+    let stagedForRecovery = false;
+    try {
+      emit("preparing", "Staging changes and preparing diff context");
+      const context = await gitOps.prepareCommitContext(root);
+      stagedForRecovery = true;
+      if (context.truncatedPatch) emit("generating", "Generating commit message (patch truncated — using file summary for remaining changes)");
+      else emit("generating", "Generating commit message");
+      const generated = await getHost().generateGitCommitMessage(context);
+      emit("committing", `Committing ${generated.subject}`);
+      const commit = await gitOps.commitStaged(root, generated.message);
+      committed = true;
+      stagedForRecovery = false;
+      emit("pushing", "Pushing current branch");
+      const push = await gitOps.pushCurrentBranch(root);
+      const pushLabel = push.status === "skipped_up_to_date" ? `Already up to date on ${push.branch}` : `Committed and pushed ${push.branch}`;
+      emit("done", pushLabel);
+      return { generated, commit, push };
+    } catch (cause) {
+      // If we staged via prepareCommitContext but failed before commit, leave the
+      // working tree unstaged so the user is not stuck with a half-staged state.
+      if (stagedForRecovery && !committed) {
+        await gitOps.resetStaged(root);
+        emit("error", `${cause instanceof Error ? cause.message : String(cause)} — staged changes were unstaged`);
+      }
+      const detail = cause instanceof Error ? cause.message : String(cause);
+      const message = committed ? `Commit succeeded, but push failed: ${detail}` : detail;
+      if (!stagedForRecovery || committed) emit("error", message);
+      throw new Error(message);
+    }
   });
   handle("pideck:git-commit", (_e, cwd: unknown, message: unknown) => {
     if (typeof message !== "string" || message.length > 20_000) throw new Error("invalid commit message");
@@ -912,6 +952,31 @@ function registerIpc(): void {
     }
   );
 
+  // LSP diagnostics loop
+  handle("pideck:lsp-get-snapshot", (_e, cwd: unknown) => {
+    if (typeof cwd !== "string" || cwd.length > 4096) throw new Error("invalid cwd");
+    const validated = validateLspCwd(cwd);
+    return lspManager.getSnapshot(validated);
+  });
+  handle("pideck:lsp-list-snapshots", () => lspManager.listSnapshots());
+  handle("pideck:lsp-set-project", (_e, cwd: unknown) => {
+    if (cwd !== null && (typeof cwd !== "string" || cwd.length > 4096)) throw new Error("invalid cwd");
+    if (cwd !== null && (cwd as string).includes("\0")) throw new Error("invalid cwd");
+    if (cwd === null) return lspManager.setActiveProject(null);
+    const validated = validateLspCwd(cwd as string);
+    return lspManager.setActiveProject(validated);
+  });
+  handle("pideck:lsp-refresh", (_e, cwd: unknown) => {
+    if (typeof cwd !== "string" || cwd.length > 4096) throw new Error("invalid cwd");
+    const validated = validateLspCwd(cwd);
+    return lspManager.refresh(validated);
+  });
+
+  // Subscribe to LSP updates
+  lspManager.subscribe((snapshots) => {
+    win?.webContents.send("pideck:lsp-update", snapshots);
+  });
+
   // Process manager (Electron-owned manual project commands)
   handle("pideck:process-list", () => processManager.list());
   handle("pideck:process-spawn", (_e, opts: unknown) => {
@@ -999,6 +1064,7 @@ app.on("window-all-closed", () => {
   // new window. Keep the shared host alive there; disposing it made the new
   // window reconnect to a dead runtime.
   if (process.platform !== "darwin") {
+    lspManager.dispose();
     processManager.dispose();
     sessionIndex.dispose();
     activityBridge?.dispose();
@@ -1016,6 +1082,7 @@ app.on("before-quit", () => {
     /* best effort */
   }
   agentEvents.dispose();
+  lspManager.dispose();
   processManager.dispose();
   sessionIndex.dispose();
   activityBridge?.dispose();

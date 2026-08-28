@@ -3,9 +3,5 @@ packages:
 
 allowBuilds:
   '@google/genai': set this to true or false
+  electron: true
   protobufjs: set this to true or false
-
-onlyBuiltDependencies:
-  - electron
-  - esbuild
-  - fsevents
