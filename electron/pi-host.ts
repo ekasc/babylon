@@ -180,6 +180,7 @@ export class PiHost {
       onUpdate: () => this.opts.onEvent({ type: "pideck_subagents_changed" }),
       onParentMessage: (record, action, message) => this.notifySubagentParent(record, action, message),
       permission: this.opts.permission,
+      hookManager: this.opts.hookManager,
       onLaunch: (ev) => this.opts.onEvent({ ...ev, sessionId: this.runtime?.session?.sessionId, sessionFile: this.runtime?.session?.sessionFile }),
     });
     this.threads = new ThreadManager({

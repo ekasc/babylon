@@ -3,16 +3,18 @@ productName: Babylon
 directories:
   output: release
   buildResources: build
+beforePack: "./scripts/prepare-pi-for-pack.mjs"
 files:
   - dist/**/*
   - dist-electron/**/*
+  - dist-daemon/**/*
   - package.json
-  - from: /Users/ekassinghchhabra/.vite-plus/js_runtime/node/26.3.0/lib/node_modules/@earendil-works/pi-coding-agent
+  - from: node_modules/@earendil-works/pi-coding-agent
     to: node_modules/@earendil-works/pi-coding-agent
     filter:
       - "**/*"
       - "!node_modules/**/*"
-  - from: /Users/ekassinghchhabra/.vite-plus/js_runtime/node/26.3.0/lib/node_modules/@earendil-works/pi-coding-agent/node_modules
+  - from: node_modules/@earendil-works/pi-coding-agent/node_modules
     to: node_modules/@earendil-works/pi-coding-agent/node_modules
 asar: true
 asarUnpack:

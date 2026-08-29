@@ -519,9 +519,16 @@ async function startHost(): Promise<void> {
     permissionEngine = new PermissionEngine({ dir: permissionDir });
     await permissionEngine.load();
     if (isDaemonEnabled() && daemonClient) {
-      // Daemon owns PiHost when enabled — no in-process host
-      console.log("[pideck] pi host is daemon-owned (thin client)");
-      return;
+      const alive = await new Promise<boolean>((resolve) => {
+        const probe = net.connect(daemonPaths().socketPath);
+        probe.once("connect", () => { probe.destroy(); resolve(true); });
+        probe.once("error", () => resolve(false));
+      });
+      if (alive) {
+        console.log("[pideck] pi host is daemon-owned (thin client)");
+        return;
+      }
+      console.warn("[pideck] daemon enabled but not reachable; falling back to in-process host");
     }
     host = new PiHost({
       cwd,
@@ -588,7 +595,7 @@ function registerIpc(): void {
   handle("pideck:get-session-messages", async (_e, path: string) => {
     const target = await validateSessionPath(PI_SESSIONS_ROOT, path);
     const window = await readSessionTail(target);
-    return { ...window, messages: mergeRecaps(window.messages, await getHost().getRecaps(target)) };
+    return { ...window, messages: mergeRecaps(window.messages, await getRuntime().getRecaps(target) as any) };
   });
 
   handle("pideck:get-session-window", async (_e, path: string, endOffset: number, countBytes?: number) => {
@@ -596,12 +603,12 @@ function registerIpc(): void {
     if (!Number.isSafeInteger(endOffset) || endOffset < 0) throw new Error("invalid session window offset");
     const maxBytes = Math.min(Math.max(countBytes ?? 2 * 1024 * 1024, 256 * 1024), 16 * 1024 * 1024);
     const window = await readSessionRange(target, endOffset, maxBytes);
-    return { ...window, messages: mergeRecapsIntoWindow(window.messages, await getHost().getRecaps(target)) };
+    return { ...window, messages: mergeRecapsIntoWindow(window.messages, await getRuntime().getRecaps(target) as any) };
   });
 
   handle("pideck:get-tool-output", async (_e, toolCallId: string) => {
     if (typeof toolCallId !== "string" || !/^[a-zA-Z0-9|_\-:.]{1,200}$/.test(toolCallId)) throw new Error("invalid tool call id");
-    return getHost().getToolOutput(toolCallId);
+    return getRuntime().getToolOutput(toolCallId);
   });
 
   handle("pideck:delete-session", async (_e, path: string) => {
@@ -758,7 +765,7 @@ function registerIpc(): void {
       stagedForRecovery = true;
       if (context.truncatedPatch) emit("generating", "Generating commit message (patch truncated — using file summary for remaining changes)");
       else emit("generating", "Generating commit message");
-      const generated = await getHost().generateGitCommitMessage(context);
+      const generated = await getRuntime().generateCommitMessage(context) as any;
       emit("committing", `Committing ${generated.subject}`);
       const commit = await gitOps.commitStaged(root, generated.message);
       committed = true;
@@ -773,7 +780,7 @@ function registerIpc(): void {
       // the user's pre-existing staged selection instead of leaving a
       // half-staged state.
       if (stagedForRecovery && !committed) {
-        await gitOps.resetStaged(root, prepared?.stagedBefore);
+        await gitOps.resetStaged(root, prepared);
         emit("error", `${cause instanceof Error ? cause.message : String(cause)} — staged changes were unstaged`);
       }
       const detail = cause instanceof Error ? cause.message : String(cause);
@@ -820,13 +827,13 @@ function registerIpc(): void {
     return gitOps.discardHunk(requireCwd(cwd), file, patch);
   });
 
-  handle("pideck:get-models", () => getHost().getModels());
-  handle("pideck:get-commands", () => getHost().getCommands());
+  handle("pideck:get-models", () => getRuntime().getModels());
+  handle("pideck:get-commands", () => (getRuntime() as any).getCommands?.() ?? getHost().getCommands());
   handle("pideck:set-model", (_e, provider: string, modelId: string) =>
-    getHost().setModel(provider, modelId)
+    getRuntime().setModel(provider, modelId)
   );
-  handle("pideck:set-thinking", (_e, level: string) => getHost().setThinking(level));
-  handle("pideck:get-thinking-levels", () => getHost().getThinkingLevels());
+  handle("pideck:set-thinking", (_e, level: string) => getRuntime().setThinking(level));
+  handle("pideck:get-thinking-levels", () => getRuntime().getThinkingLevels());
   handle("pideck:list-fonts", async () => {
     const { execFile } = await import("node:child_process");
     const { promisify } = await import("node:util");
@@ -875,41 +882,41 @@ function registerIpc(): void {
     const sorted = ["System Default", ...cleaned.filter((f) => f !== "System Default")];
     return sorted;
   });
-  handle("pideck:get-settings", () => getHost().getSettings());
-  handle("pideck:set-settings", (_e, patch: any) => getHost().setSettings(patch));
+  handle("pideck:get-settings", () => getRuntime().getSettings());
+  handle("pideck:set-settings", (_e, patch: any) => getRuntime().setSettings(patch));
   handle("pideck:set-session-name", (_e, name: string) => {
     if (typeof name !== "string" || name.length > 500) throw new Error("invalid session name");
-    return getHost().setSessionName(name);
+    return getRuntime().setSessionName(name);
   });
-  handle("pideck:compact", () => getHost().compact());
+  handle("pideck:compact", () => getRuntime().compact());
 
   // Branching / worktrees
-  handle("pideck:get-tree", () => getHost().getTree());
-  handle("pideck:get-history", () => getHost().getHistory());
+  handle("pideck:get-tree", () => getRuntime().getTree());
+  handle("pideck:get-history", () => getRuntime().getHistory());
   handle("pideck:turn-changes", (_e, entryId: unknown) => {
     if (typeof entryId !== "string" || entryId.length < 1 || entryId.length > 200) throw new Error("invalid history entry ID");
-    return getHost().getTurnChanges(entryId);
+    return getRuntime().getTurnChanges(entryId);
   });
   handle("pideck:turn-file-diff", (_e, entryId: unknown, path: unknown) => {
     if (typeof entryId !== "string" || entryId.length < 1 || entryId.length > 200) throw new Error("invalid history entry ID");
     if (typeof path !== "string" || path.length < 1 || path.length > 4096) throw new Error("invalid file path");
-    return getHost().getTurnFileDiff(entryId, path);
+    return getRuntime().getTurnFileDiff(entryId, path);
   });
   handle("pideck:rollback:prepare", (_e, entryId: string) => {
     if (typeof entryId !== "string" || entryId.length < 1 || entryId.length > 200) throw new Error("invalid history entry ID");
-    return getHost().prepareRollback(entryId);
+    return getRuntime().prepareRollback(entryId);
   });
   handle("pideck:rollback:commit", (_e, planId: string) => {
     if (typeof planId !== "string" || !/^[0-9a-f-]{36}$/i.test(planId)) throw new Error("invalid rollback plan ID");
-    return getHost().commitRollback(planId);
+    return getRuntime().commitRollback(planId);
   });
-  handle("pideck:rollback:undo", () => getHost().undoRollback());
-  handle("pideck:get-fork-messages", () => getHost().getForkMessages());
+  handle("pideck:rollback:undo", () => getRuntime().undoRollback());
+  handle("pideck:get-fork-messages", () => getRuntime().getForkMessages());
   handle("pideck:fork", (_e, entryId: string) => {
     if (typeof entryId !== "string" || entryId.length < 1 || entryId.length > 200) throw new Error("invalid history entry ID");
-    return getHost().fork(entryId);
+    return getRuntime().fork(entryId);
   });
-  handle("pideck:clone", () => getHost().clone());
+  handle("pideck:clone", () => getRuntime().clone());
   handle("pideck:task-list", async () => getRuntime().taskList());
   handle("pideck:task-get", async (_e, id: unknown) => {
     if (typeof id !== "string" || id.length === 0 || id.length > 200) throw new Error("invalid task id");
@@ -992,7 +999,7 @@ function registerIpc(): void {
 
   handle("pideck:worktree-info", async () => {
     try {
-      const state = await getHost().getState();
+      const state = await getRuntime().getState() as any;
       const file = state?.sessionFile;
       const header = file ? await readSessionHeader(file) : null;
       const task = isDaemonEnabled()
@@ -1021,7 +1028,7 @@ function registerIpc(): void {
       if (opts.description !== undefined && (typeof opts.description !== "string" || opts.description.length > 20_000)) {
         throw new Error("invalid worktree description");
       }
-      const before = await getHost().getState();
+      const before: any = await getRuntime().getState();
       if (!before?.sessionFile) {
         throw new Error("no persisted session to worktree yet — send at least one message first");
       }
@@ -1032,14 +1039,14 @@ function registerIpc(): void {
       let gitRoot: string | undefined;
 
       try {
-        const cloneRes = await getHost().clone();
+        const cloneRes: any = await getRuntime().clone();
         if (cloneRes?.cancelled) throw new Error("worktree cancelled by extension");
-        worktreePath = (await getHost().getState())?.sessionFile;
+        worktreePath = (await getRuntime().getState() as any)?.sessionFile;
         if (!worktreePath || worktreePath === originalPath) throw new Error("clone did not produce a session file");
 
         const safeName = sanitizeWorktreeName(opts.name) || `exp-${Date.now().toString(36)}`;
-        await getHost().setSessionName(`worktree: ${safeName}`);
-        const afterNameState = await getHost().getState();
+        await getRuntime().setSessionName(`worktree: ${safeName}`);
+        const afterNameState: any = await getRuntime().getState();
         await ensureClonedSessionFile(worktreePath, originalPath, activeCwd, afterNameState?.sessionId);
         let workCwd = activeCwd;
 
@@ -1057,20 +1064,20 @@ function registerIpc(): void {
           await git(["worktree", "add", "-b", branch, wtPath], info.root);
           gitWorktree = { path: wtPath, branch, baseBranch: info.branch };
           await rewriteSessionHeader(worktreePath, { cwd: wtPath });
-          await getHost().switchTo(worktreePath);
+          await getRuntime().switchTo(worktreePath as any);
           workCwd = wtPath;
           applyCwd(wtPath);
         }
 
         if (opts.description?.trim()) {
-          await getHost()
+          await getRuntime()
             .prompt(
               `[Experimental worktree "${safeName}"${gitWorktree ? `, git branch ${gitWorktree.branch}` : ""}] ${opts.description.trim()}`
             )
             .catch(() => {});
         }
 
-        const state = await getHost().getState();
+        const state: any = await getRuntime().getState();
         if (!state?.sessionId) throw new Error("cloned session has no runtime identity");
         let task: import("../src/tasks").Task;
         if (isDaemonEnabled() && daemonClient) {
@@ -1111,7 +1118,7 @@ function registerIpc(): void {
         // runtime first, then remove only artifacts this attempt created.
         let restored = false;
         try {
-          await getHost().switchTo(originalPath);
+          await getRuntime().switchTo(originalPath as any);
           restored = true;
           applyCwd(originalCwd);
         } catch {
@@ -1130,7 +1137,7 @@ function registerIpc(): void {
 
   handle("pideck:worktree-exit", async (_e, opts: { keep: boolean }) => {
     if (!opts || typeof opts.keep !== "boolean") throw new Error("invalid worktree exit options");
-    const state = await getHost().getState();
+    const state: any = await getRuntime().getState();
     const file = state?.sessionFile;
     if (!file) throw new Error("no active session");
     const header = await readSessionHeader(file);
@@ -1148,7 +1155,7 @@ function registerIpc(): void {
       : false;
 
     const cleanup = async () => {
-      await getHost().switchTo(originalPath);
+      await getRuntime().switchTo(originalPath as any);
 
       let gitRemoved = false;
       if (!opts.keep) {
@@ -1163,7 +1170,7 @@ function registerIpc(): void {
         await fsp.rm(file);
       }
 
-      const newState = await getHost().getState();
+      const newState: any = await getRuntime().getState();
       const origHeader = await readSessionHeader(originalPath);
       applyCwd(origHeader?.cwd ?? activeCwd);
       sendStatus("ready", { state: newState, sessionPath: originalPath, cwd: activeCwd });
@@ -1190,7 +1197,7 @@ function registerIpc(): void {
 
   handle("pideck:ui-respond", (_e, resp: { id: string; [k: string]: unknown }) => {
     if (!resp || typeof resp.id !== "string" || resp.id.length > 200) throw new Error("invalid dialog response");
-    getHost().respondUi(resp.id, resp);
+    return getRuntime().respondUi(resp.id, resp);
   });
   handle("pideck:open-external", async (_e, url: string) => {
     let parsed: URL;
@@ -1441,24 +1448,29 @@ async function ensureDaemon(): Promise<void> {
     });
     probe.once("error", () => resolve(false));
   });
+  const entry = join(__dirname, "..", "dist-daemon", "main.mjs");
+  const entryExists = existsSync(entry);
   if (!alive) {
-    const entry = join(__dirname, "..", "dist-daemon", "main.mjs");
-    if (!existsSync(entry)) {
-      console.warn("daemon.enabled is set but dist-daemon/main.mjs is missing; run pnpm build:daemon");
-    } else {
-      const child = spawn(process.execPath, [entry], {
-        env: {
-          ...process.env,
-          ELECTRON_RUN_AS_NODE: "1",
-          BABYLON_DAEMON_SOCKET: socketPath,
-          BABYLON_DAEMON_SNAPSHOT: snapshotPath,
-          BABYLON_DAEMON_PERMISSIONS_DIR: permissionDir(),
-        },
-        detached: true,
-        stdio: "ignore",
-      });
-      child.unref();
+    if (!entryExists) {
+      console.warn("daemon.enabled is set but dist-daemon/main.mjs is missing; run pnpm build:daemon — falling back to in-process host");
+      return;
     }
+    const child = spawn(process.execPath, [entry], {
+      env: {
+        ...process.env,
+        ELECTRON_RUN_AS_NODE: "1",
+        BABYLON_DAEMON_SOCKET: socketPath,
+        BABYLON_DAEMON_SNAPSHOT: snapshotPath,
+        BABYLON_DAEMON_PERMISSIONS_DIR: permissionDir(),
+        BABYLON_SETTINGS_PATH: app.getPath("userData") + "/pideck-settings.json",
+      },
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+  } else if (!entryExists && !alive) {
+    console.warn("daemon.enabled is set but dist-daemon/main.mjs is missing; falling back to in-process host");
+    return;
   }
   if (!daemonClient) {
     daemonClient = connectDaemonClient({ listen: { socketPath }, reconnect: { initialDelayMs: 100, maxDelayMs: 5000 } });

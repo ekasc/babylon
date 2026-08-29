@@ -11,7 +11,7 @@ import {
   type ExtensionContext,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { installPermissionHook } from "./permission-hook";
+import { installAgentGuards } from "./permission-hook";
 import type { BabylonPermissionController } from "./permissions";
 
 export type SubagentDelivery = "steer" | "follow-up";
@@ -111,6 +111,7 @@ export class ManagedSubagents {
       onParentMessage?: (record: ManagedSubagentRecord, action: SubagentParentEvent, message?: string) => void | Promise<void>;
       /** Babylon permission controller, if enabled. Gates the subagent's tools. */
       permission?: BabylonPermissionController;
+      hookManager?: import("./hook-manager").HookManager;
       onLaunch?: (ev: { type: "babylon_launch_started" | "babylon_launch_terminated"; runId: string; runKind: "subagent" | "thread" | "workflow"; label?: string; status?: string }) => void;
     }
   ) {
@@ -488,7 +489,15 @@ export class ManagedSubagents {
     // Gate the subagent's tool calls through the same Babylon permission policy
     // as the parent session, so isolated agents can't bypass it.
     if (this.options.permission) {
-      installPermissionHook(created.session.agent, this.options.permission, record.cwd);
+      if (this.options.permission) {
+        installAgentGuards(created.session.agent as any, {
+          controller: this.options.permission,
+          cwd: record.cwd,
+          hookManager: this.options.hookManager,
+          sessionId: created.session.sessionId,
+          taskId: undefined,
+        });
+      }
     }
     const runtime: ManagedRuntime = { record, session: created.session, running: null, unsubscribe: null, timeout: null };
     record.sessionFile = created.session.sessionFile ?? manager.getSessionFile() ?? null;

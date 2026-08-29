@@ -439,6 +439,9 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
             case "pi.getStats":
               payload = await piHost.getStats();
               break;
+            case "pi.getCommands":
+              payload = await (piHost as any).getCommands();
+              break;
             case "pi.openSession": {
               const { path, cwd, requestId } = request.payload as { path?: string; cwd: string; requestId?: number };
               payload = await piHost.open({ path, cwd, requestId });
@@ -464,6 +467,103 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
               payload = { ok: true };
               break;
             }
+            case "pi.getToolOutput": {
+              const { toolCallId } = request.payload as { toolCallId: string };
+              payload = await piHost.getToolOutput(toolCallId);
+              break;
+            }
+            case "pi.getModels":
+              payload = await piHost.getModels();
+              break;
+            case "pi.setModel": {
+              const { provider, modelId } = request.payload as { provider: string; modelId: string };
+              payload = await piHost.setModel(provider, modelId);
+              break;
+            }
+            case "pi.getThinkingLevels":
+              payload = await piHost.getThinkingLevels();
+              break;
+            case "pi.setThinking": {
+              const { level } = request.payload as { level: string };
+              payload = await piHost.setThinking(level);
+              break;
+            }
+            case "pi.getSettings":
+              payload = await piHost.getSettings();
+              break;
+            case "pi.setSettings": {
+              const { patch } = request.payload as { patch: unknown };
+              payload = await piHost.setSettings(patch as any);
+              break;
+            }
+            case "pi.setSessionName": {
+              const { name } = request.payload as { name: string };
+              payload = await piHost.setSessionName(name);
+              break;
+            }
+            case "pi.compact":
+              payload = await piHost.compact();
+              break;
+            case "pi.getTree":
+              payload = await piHost.getTree();
+              break;
+            case "pi.getHistory":
+              payload = await piHost.getHistory();
+              break;
+            case "pi.getTurnChanges": {
+              const { entryId } = request.payload as { entryId: string };
+              payload = await piHost.getTurnChanges(entryId);
+              break;
+            }
+            case "pi.getTurnFileDiff": {
+              const { entryId, path } = request.payload as { entryId: string; path: string };
+              payload = await piHost.getTurnFileDiff(entryId, path);
+              break;
+            }
+            case "pi.prepareRollback": {
+              const { entryId } = request.payload as { entryId: string };
+              payload = await piHost.prepareRollback(entryId);
+              break;
+            }
+            case "pi.commitRollback": {
+              const { planId } = request.payload as { planId: string };
+              payload = await piHost.commitRollback(planId);
+              break;
+            }
+            case "pi.undoRollback":
+              payload = await piHost.undoRollback();
+              break;
+            case "pi.getForkMessages":
+              payload = await piHost.getForkMessages();
+              break;
+            case "pi.fork": {
+              const { entryId } = request.payload as { entryId: string };
+              payload = await piHost.fork(entryId);
+              break;
+            }
+            case "pi.clone":
+              payload = await piHost.clone();
+              break;
+            case "pi.generateCommitMessage": {
+              const { context } = request.payload as { context: unknown };
+              payload = await (piHost as any).generateGitCommitMessage(context);
+              break;
+            }
+            case "pi.getRecaps": {
+              const { sessionFile } = request.payload as { sessionFile: string };
+              payload = await piHost.getRecaps(sessionFile);
+              break;
+            }
+            case "pi.refreshFromDisk": {
+              const { sessionFile } = request.payload as { sessionFile: string };
+              payload = { refreshed: await piHost.refreshFromDisk(sessionFile) };
+              break;
+            }
+            case "pi.switchTo": {
+              const { sessionFile } = request.payload as { sessionFile: string };
+              payload = await piHost.switchTo(sessionFile);
+              break;
+            }
             default:
               send(socket, createEnvelope("response", "error", { error: `unsupported pi request ${request.type}` }, request.id));
               return;
@@ -473,6 +573,33 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
           send(socket, createEnvelope("response", "error", { error: err instanceof Error ? err.message : String(err) }, request.id));
         }
       })();
+      return;
+    }
+
+    if (request.type === "hooks.register") {
+      const hook = request.payload as import("./hooks").HookDefinition;
+      const { registerHook } = await import("./hooks");
+      const beforeHooks = state.runtime.hooks;
+      const afterHooks = registerHook(beforeHooks, hook);
+      if (afterHooks !== beforeHooks) {
+        state = { ...state, runtime: { ...state.runtime, hooks: afterHooks } };
+        persist();
+        broadcast("hooks.updated", afterHooks, socket);
+      }
+      send(socket, createEnvelope("response", "hooks.register", { ok: true }, request.id));
+      return;
+    }
+    if (request.type === "hooks.remove") {
+      const { id } = request.payload as { id: string };
+      const { removeHook } = await import("./hooks");
+      const beforeHooks = state.runtime.hooks;
+      const afterHooks = removeHook(beforeHooks, id);
+      if (afterHooks !== beforeHooks) {
+        state = { ...state, runtime: { ...state.runtime, hooks: afterHooks } };
+        persist();
+        broadcast("hooks.updated", afterHooks, socket);
+      }
+      send(socket, createEnvelope("response", "hooks.remove", { ok: true, removed: afterHooks !== beforeHooks }, request.id));
       return;
     }
 

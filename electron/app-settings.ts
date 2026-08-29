@@ -71,13 +71,14 @@ const EMPTY: PiSettings = {
 let cache: PiSettings | null = null;
 
 function settingsPath(): string {
+  if (process.env.BABYLON_SETTINGS_PATH) return process.env.BABYLON_SETTINGS_PATH;
   try {
     const { app } = require("electron") as typeof import("electron");
     if (app && typeof app.getPath === "function") {
       return join(app.getPath("userData"), "pideck-settings.json");
     }
   } catch {}
-  const base = process.env.BABYLON_SETTINGS_PATH ?? join(homedir(), ".babylon", "pideck-settings.json");
+  const base = join(homedir(), ".babylon", "pideck-settings.json");
   return base;
 }
 

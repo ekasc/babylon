@@ -73,7 +73,9 @@ export interface PreparedCommitContext {
   deletions: number;
   areas: string[];
   requiresBody: boolean;
-  /** Paths that were staged before prepareCommitContext ran `git add -A`. */
+  /** Tree SHA of the index before `git add -A`, for exact hunk-level restore. */
+  indexTreeBefore?: string;
+  /** Fallback: paths that were staged before, for unborn HEAD where write-tree fails. */
   stagedBefore: string[];
 }
 
@@ -415,11 +417,18 @@ export async function prepareCommitContext(cwd: string): Promise<PreparedCommitC
   if (!details.isRepo) throw new GitError("not a git repository");
   if (!details.hasChanges) throw new GitError("no changes to commit");
 
-  // Snapshot the user's staged selection before `git add -A` so a failed
-  // generation/commit can restore it instead of blanking the index.
+  // Snapshot the index exactly (hunk-level) before `git add -A` so a failed
+  // generation/commit can restore the user's staged selection exactly, not just
+  // the set of files. For unborn HEAD, write-tree fails, so keep the old
+  // filename fallback.
   const stagedBefore = (await gitStdout(["-c", "core.quotepath=false", "diff", "--cached", "--name-only", "-z"], cwd))
     .split("\0")
     .filter(Boolean);
+  let indexTreeBefore: string | undefined;
+  try {
+    const tree = await gitStdout(["write-tree"], cwd);
+    if (/^[0-9a-f]{40}$/.test(tree.trim())) indexTreeBefore = tree.trim();
+  } catch {}
   await gitStdout(["add", "-A"], cwd);
   const [stagedSummary, patchResult, numstatResult, recentResult] = await Promise.all([
     gitStdout(["-c", "core.quotepath=false", "diff", "--cached", "--name-status"], cwd),
@@ -451,16 +460,26 @@ export async function prepareCommitContext(cwd: string): Promise<PreparedCommitC
     deletions,
     areas,
     requiresBody: stats.length >= 10 || insertions + deletions >= 500 || areas.length >= 3,
+    indexTreeBefore,
     stagedBefore,
   };
 }
 
 /**
- * Undo what prepareCommitContext staged. When `stagedBefore` is given (the
- * paths that were staged before `git add -A`), restore exactly that selection
- * instead of blanking the whole index. Best-effort: never throws.
+ * Undo what prepareCommitContext staged. Prefers the exact index tree snapshot
+ * (hunk-level) when available; otherwise falls back to the filename list for
+ * unborn HEAD. Best-effort: never throws.
  */
-export async function resetStaged(cwd: string, stagedBefore?: readonly string[]): Promise<void> {
+export async function resetStaged(cwd: string, context?: PreparedCommitContext | readonly string[]): Promise<void> {
+  const indexTreeBefore = !Array.isArray(context) ? (context as PreparedCommitContext | undefined)?.indexTreeBefore : undefined;
+  const stagedBefore = Array.isArray(context) ? context : (context as PreparedCommitContext | undefined)?.stagedBefore;
+  if (indexTreeBefore && /^[0-9a-f]{40}$/.test(indexTreeBefore)) {
+    const read = await runGit(["read-tree", indexTreeBefore], cwd).catch(() => null);
+    if (read && read.exitCode === 0) {
+      await runGit(["checkout-index", "--all", "--force"], cwd).catch(() => undefined);
+      return;
+    }
+  }
   await runGit(["reset", "HEAD", "--"], cwd).catch(() => undefined);
   if (stagedBefore && stagedBefore.length > 0) {
     await runGit(["add", "--", ...stagedBefore], cwd).catch(() => undefined);
