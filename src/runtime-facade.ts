@@ -54,6 +54,13 @@ export interface RuntimeFacade {
   refreshFromDisk(sessionFile: string): Promise<boolean>;
   switchTo(sessionFile: string): Promise<unknown>;
   respondUi(id: string, resp: unknown): Promise<void>;
+  getCommands(): Promise<unknown[]>;
+  getActiveSessionFile(): Promise<string | null>;
+  controlThread(action: "steer" | "follow-up" | "stop", threadId: string, message?: string): Promise<unknown>;
+  promoteThread(threadId: string): Promise<unknown>;
+  controlSubagent(action: "steer" | "follow-up" | "stop", runId: string, message?: string): Promise<unknown>;
+  promoteSubagent(runId: string): Promise<unknown>;
+  getStats(): Promise<unknown>;
   // Lifecycle
   onTaskUpdate(cb: (tasks: Task[]) => void): () => void;
   onAttentionUpdate(cb: (reg: AttentionRegistry) => void): () => void;

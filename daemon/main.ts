@@ -75,6 +75,7 @@ const server = await startDaemonServer({
   ...(policyTickMs !== undefined ? { policyTickMs } : {}),
   piHost,
   permissionEngine,
+  hookManager,
   log: (message) => console.log(`babylon-daemon: ${message}`),
 });
 approvalRequester = (action, risk) => server.requestApproval(action, risk);

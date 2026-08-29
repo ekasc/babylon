@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
@@ -13,6 +13,7 @@ import {
   listBranches,
   pullCurrentBranch,
   pushCurrentBranch,
+  resetStaged,
   statusDetails,
   suggestPrContent,
   switchBranch,
@@ -137,6 +138,37 @@ describe("statusDetails", () => {
     expect(details.hasChanges).toBe(true);
     expect(details.files.map((f) => f.path)).toContain("file.txt");
     expect(details.insertions).toBe(1);
+  });
+});
+
+describe("resetStaged", () => {
+  it("preserves both the staged diff and unstaged working-tree edits when generation fails", async () => {
+    const root = await makeRepoWithCommit();
+    // 1. partially stage file.ts: index has 2 lines, HEAD has 1
+    await writeFile(join(root, "file.ts"), "one\ntwo\n");
+    await git(root, ["add", "file.ts"]);
+    // 2. make additional unstaged edits on top of the staged set
+    await writeFile(join(root, "file.ts"), "one\ntwo\nthree\n");
+
+    const stagedBefore = await git(root, ["diff", "--cached", "file.ts"]);
+    const workingBefore = await git(root, ["diff", "file.ts"]);
+    const fileBefore = await readFile(join(root, "file.ts"), "utf8");
+
+    const context = await prepareCommitContext(root);
+    // Sanity: prepareCommitContext ran git add -A, so the working-tree diff
+    // should now be empty.
+    expect(await git(root, ["diff", "file.ts"])).toBe("");
+    expect(context.indexTreeBefore).toBeDefined();
+
+    await resetStaged(root, context);
+
+    const stagedAfter = await git(root, ["diff", "--cached", "file.ts"]);
+    const workingAfter = await git(root, ["diff", "file.ts"]);
+    const fileAfter = await readFile(join(root, "file.ts"), "utf8");
+
+    expect(stagedAfter).toBe(stagedBefore);
+    expect(workingAfter).toBe(workingBefore);
+    expect(fileAfter).toBe(fileBefore);
   });
 });
 

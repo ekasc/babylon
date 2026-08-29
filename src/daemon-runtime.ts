@@ -181,6 +181,34 @@ export function createDaemonRuntime(client: DaemonClient): RuntimeFacade {
     async respondUi(id, r) {
       await client.request("pi.ui.respond" as any, { id, resp: r });
     },
+    async getCommands() {
+      const res = await client.request("pi.getCommands" as any, {});
+      return (res.payload as { commands?: unknown[] })?.commands ?? [];
+    },
+    async getActiveSessionFile() {
+      const res = await client.request("pi.getActiveSessionFile" as any, {});
+      return (res.payload as { path?: string | null })?.path ?? null;
+    },
+    async controlThread(action, threadId, message) {
+      const res = await client.request("pi.controlThread" as any, { action, threadId, message });
+      return res.payload;
+    },
+    async promoteThread(threadId) {
+      const res = await client.request("pi.promoteThread" as any, { threadId });
+      return res.payload;
+    },
+    async controlSubagent(action, runId, message) {
+      const res = await client.request("pi.controlSubagent" as any, { action, runId, message });
+      return res.payload;
+    },
+    async promoteSubagent(runId) {
+      const res = await client.request("pi.promoteSubagent" as any, { runId });
+      return res.payload;
+    },
+    async getStats() {
+      const res = await client.request("pi.getStats", {});
+      return res.payload;
+    },
     onTaskUpdate(cb) {
       const handler = (env: { type: string; payload: unknown }) => {
         if (env.type === "task.created" || env.type === "task.updated" || env.type === "task.removed") {

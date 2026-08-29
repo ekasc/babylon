@@ -22,7 +22,8 @@ import {
   serializeEnvelope,
   type ProtocolEnvelope,
 } from "./daemon-protocol";
-import { registerHook, removeHook } from "./hooks";
+import { registerHook, removeHook, type HookDefinition } from "./hooks";
+import type { HookManager } from "../electron/hook-manager";
 import { createFrameDecoder, encodeFrame, type FrameDecoder } from "./daemon-transport";
 import { dispatchRequest } from "./daemon-host";
 import {
@@ -79,6 +80,10 @@ export interface DaemonServerOptions {
   piHost?: PiHost;
   /** Permission engine enforced for daemon-owned agent sessions. */
   permissionEngine?: PermissionEngine;
+  /** HookManager used by the daemon-owned PiHost. Mutating this is what
+   *  makes `pre_tool_use` / `post_tool_use` actually fire on the PiHost side
+   *  in daemon mode. */
+  hookManager?: HookManager;
 }
 
 export interface DaemonServer {
@@ -565,6 +570,30 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
               payload = await (piHost as any).switchTo(sessionFile);
               break;
             }
+            case "pi.getActiveSessionFile" as any: {
+              payload = { path: (piHost as any).activeSessionFile ?? null };
+              break;
+            }
+            case "pi.controlThread" as any: {
+              const { action, threadId, message } = request.payload as { action: "steer" | "follow-up" | "stop"; threadId: string; message?: string };
+              payload = await (piHost as any).controlThread(action, threadId, message);
+              break;
+            }
+            case "pi.promoteThread" as any: {
+              const { threadId } = request.payload as { threadId: string };
+              payload = await (piHost as any).promoteThread(threadId);
+              break;
+            }
+            case "pi.controlSubagent" as any: {
+              const { action, runId, message } = request.payload as { action: "steer" | "follow-up" | "stop"; runId: string; message?: string };
+              payload = await (piHost as any).controlSubagent(action, runId, message);
+              break;
+            }
+            case "pi.promoteSubagent" as any: {
+              const { runId } = request.payload as { runId: string };
+              payload = await (piHost as any).promoteSubagent(runId);
+              break;
+            }
             default:
               send(socket, createEnvelope("response", "error", { error: `unsupported pi request ${request.type}` }, request.id));
               return;
@@ -578,7 +607,10 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
     }
 
     if ((request as any).type === "hooks.register") {
-      const hook = (request as any).payload as import("./hooks").HookDefinition;
+      const hook = (request as any).payload as HookDefinition;
+      if (options.hookManager) {
+        options.hookManager.register(hook);
+      }
       const beforeHooks = state.runtime.hooks;
       const afterHooks = registerHook(beforeHooks, hook);
       if (afterHooks !== beforeHooks) {
@@ -591,6 +623,9 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
     }
     if ((request as any).type === "hooks.remove") {
       const { id } = (request as any).payload as { id: string };
+      if (options.hookManager) {
+        options.hookManager.remove(id);
+      }
       const beforeHooks = state.runtime.hooks;
       const afterHooks = removeHook(beforeHooks, id);
       if (afterHooks !== beforeHooks) {

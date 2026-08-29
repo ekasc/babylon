@@ -468,17 +468,15 @@ export async function prepareCommitContext(cwd: string): Promise<PreparedCommitC
 /**
  * Undo what prepareCommitContext staged. Prefers the exact index tree snapshot
  * (hunk-level) when available; otherwise falls back to the filename list for
- * unborn HEAD. Best-effort: never throws.
+ * unborn HEAD. Restores the index only — never touches the working tree, so
+ * the user's unstaged edits are preserved. Best-effort: never throws.
  */
 export async function resetStaged(cwd: string, context?: PreparedCommitContext | readonly string[]): Promise<void> {
   const indexTreeBefore = !Array.isArray(context) ? (context as PreparedCommitContext | undefined)?.indexTreeBefore : undefined;
   const stagedBefore = Array.isArray(context) ? context : (context as PreparedCommitContext | undefined)?.stagedBefore;
   if (indexTreeBefore && /^[0-9a-f]{40}$/.test(indexTreeBefore)) {
     const read = await runGit(["read-tree", indexTreeBefore], cwd).catch(() => null);
-    if (read && read.exitCode === 0) {
-      await runGit(["checkout-index", "--all", "--force"], cwd).catch(() => undefined);
-      return;
-    }
+    if (read && read.exitCode === 0) return;
   }
   await runGit(["reset", "HEAD", "--"], cwd).catch(() => undefined);
   if (stagedBefore && stagedBefore.length > 0) {

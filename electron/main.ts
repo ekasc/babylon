@@ -165,6 +165,10 @@ const hookManager = new HookManager();
 const attentionManager = new AttentionManager();
 const contracts = new Map<string, CompletionContract>();
 let daemonClient: DaemonClient | null = null;
+/** True only after a successful handshake with the daemon. The setting
+ *  `daemon.enabled` alone is not enough — a process crash, missing binary, or
+ *  refused connection must fall back to the local host. */
+let daemonActive = false;
 
 function daemonPaths() {
   return {
@@ -183,16 +187,21 @@ function isDaemonEnabled(): boolean {
 }
 
 function getRuntime(): RuntimeFacade {
-  if (isDaemonEnabled() && daemonClient) return createDaemonRuntime(daemonClient);
+  if (daemonActive && daemonClient) return createDaemonRuntime(daemonClient);
   // Fallback to local runtime — host may be null during early startup, so guard
   const hostForLocal = host ?? ({ open: async () => ({}), prompt: async () => ({}), abort: async () => ({}), getState: async () => ({}), getMessages: async () => [] } as unknown as PiHost);
   return createLocalRuntime({ taskManager, attentionManager, hookManager, piHost: hostForLocal, contracts });
 }
 
+function daemonOnly(): DaemonClient | null {
+  return daemonActive && daemonClient ? daemonClient : null;
+}
+
 async function daemonClientTasks(): Promise<import("../src/tasks").Task[]> {
-  if (!isDaemonEnabled() || !daemonClient) return [];
+  const client = daemonOnly();
+  if (!client) return [];
   try {
-    const res = await daemonClient.request("state.get", {});
+    const res = await client.request("state.get", {});
     const runtime = (res.payload as { runtime?: { tasks?: { tasks: Record<string, import("../src/tasks").Task> } } })?.runtime;
     return Object.values(runtime?.tasks?.tasks ?? {});
   } catch {
@@ -201,16 +210,19 @@ async function daemonClientTasks(): Promise<import("../src/tasks").Task[]> {
 }
 
 async function daemonTaskBySessionFile(file: string | null | undefined): Promise<import("../src/tasks").Task | undefined> {
-  if (!file || !isDaemonEnabled() || !daemonClient) return undefined;
+  if (!file) return undefined;
+  const client = daemonOnly();
+  if (!client) return undefined;
   const tasks = await daemonClientTasks();
   return tasks.find((t) => t.sessionFile === file);
 }
 
 /** Active session file of the daemon-owned PiHost (daemon mode only). */
 async function daemonActiveSessionFile(): Promise<string | null> {
-  if (!isDaemonEnabled() || !daemonClient) return null;
+  const client = daemonOnly();
+  if (!client) return null;
   try {
-    const res = await daemonClient.request("pi.getState", {});
+    const res = await client.request("pi.getState", {});
     const sessionFile = (res.payload as { sessionFile?: string } | null)?.sessionFile;
     return typeof sessionFile === "string" && sessionFile.length > 0 ? sessionFile : null;
   } catch {
@@ -518,7 +530,7 @@ async function startHost(): Promise<void> {
     const permissionDir = join(app.getPath("userData"), "pideck-state", "permissions");
     permissionEngine = new PermissionEngine({ dir: permissionDir });
     await permissionEngine.load();
-    if (isDaemonEnabled() && daemonClient) {
+    const client = daemonOnly(); if (client) {
       const alive = await new Promise<boolean>((resolve) => {
         const probe = net.connect(daemonPaths().socketPath);
         probe.once("connect", () => { probe.destroy(); resolve(true); });
@@ -613,7 +625,8 @@ function registerIpc(): void {
 
   handle("pideck:delete-session", async (_e, path: string) => {
     const target = await validateSessionPath(PI_SESSIONS_ROOT, path);
-    if (getHost().activeSessionFile === target) {
+    const active = await getRuntime().getActiveSessionFile();
+    if (active === target) {
       throw new Error("Close this chat before deleting it");
     }
     await fsp.rm(target, { force: true });
@@ -634,19 +647,15 @@ function registerIpc(): void {
       if (!opts || typeof opts.cwd !== "string" || opts.cwd.length > 4096) throw new Error("invalid session options");
       if (hostReady) await hostReady;
       const path = opts.path === undefined ? undefined : await validateSessionPath(PI_SESSIONS_ROOT, opts.path);
-      if (isDaemonEnabled() && daemonClient) {
-        const res = await daemonClient.request("pi.openSession", { ...opts, path });
+      const client = daemonOnly(); if (client) {
+        const res = await client.request("pi.openSession", { ...opts, path });
         const state = res.payload as { sessionFile?: string };
-        if (isDaemonEnabled()) {
-          const t = await daemonTaskBySessionFile(state?.sessionFile ?? null);
-          if (t?.status === "paused") await daemonClient.request("task.updated", { id: t.id, patch: { status: "running" } });
-        } else {
-          taskManager.resumeForSession(state?.sessionFile);
-        }
+        const t = await daemonTaskBySessionFile(state?.sessionFile ?? null);
+        if (t?.status === "paused") await client.request("task.updated", { id: t.id, patch: { status: "running" } });
         return state;
       }
-      const state = await getHost().open({ ...opts, path });
-      taskManager.resumeForSession(state?.sessionFile);
+      const state = (await getRuntime().openSession({ ...opts, path })) as { sessionFile?: string } | null | undefined;
+      taskManager.resumeForSession((state as { sessionFile?: string } | null | undefined)?.sessionFile);
       return state;
     }
   );
@@ -667,47 +676,47 @@ function registerIpc(): void {
         }
       }
     }
-    if (isDaemonEnabled() && daemonClient) {
-      const res = await daemonClient.request("pi.prompt", { message, images, streamingBehavior });
+    const client = daemonOnly(); if (client) {
+      const res = await client.request("pi.prompt", { message, images, streamingBehavior });
       return res.payload;
     }
-    return getHost().prompt(message, images, streamingBehavior as any);
+    return getRuntime().prompt(message, images, streamingBehavior);
   });
   handle("pideck:abort", async () => {
-    if (isDaemonEnabled() && daemonClient) {
-      const res = await daemonClient.request("pi.abort", {});
+    const client = daemonOnly(); if (client) {
+      const res = await client.request("pi.abort", {});
       return res.payload;
     }
-    return getHost().abort();
+    return getRuntime().abort();
   });
   handle("pideck:refresh-session", async (_e, path: string) => {
     const p = await validateSessionPath(PI_SESSIONS_ROOT, path);
-    if (isDaemonEnabled() && daemonClient) {
-      const res = await daemonClient.request("pi.getState", { path: p });
+    const client = daemonOnly(); if (client) {
+      const res = await client.request("pi.getState", { path: p });
       return res.payload;
     }
-    return getHost().refreshFromDisk(p);
+    return getRuntime().refreshFromDisk(p);
   });
   handle("pideck:get-messages", async () => {
-    if (isDaemonEnabled() && daemonClient) {
-      const res = await daemonClient.request("pi.getMessages", {});
+    const client = daemonOnly(); if (client) {
+      const res = await client.request("pi.getMessages", {});
       return res.payload;
     }
-    return getHost().getMessages();
+    return getRuntime().getMessages();
   });
   handle("pideck:get-state", async () => {
-    if (isDaemonEnabled() && daemonClient) {
-      const res = await daemonClient.request("pi.getState", {});
+    const client = daemonOnly(); if (client) {
+      const res = await client.request("pi.getState", {});
       return res.payload;
     }
-    return getHost().getState();
+    return getRuntime().getState();
   });
   handle("pideck:get-stats", async () => {
-    if (isDaemonEnabled() && daemonClient) {
-      const res = await daemonClient.request("pi.getStats", {});
+    const client = daemonOnly(); if (client) {
+      const res = await client.request("pi.getStats", {});
       return res.payload;
     }
-    return getHost().getStats();
+    return (getRuntime() as any).getStats?.() ?? (getHost() as any).getStats();
   });
   handle("pideck:git-status", async (_e, cwd: unknown) => {
     if (typeof cwd !== "string" || cwd.length > 4096) throw new Error("invalid cwd");
@@ -828,7 +837,7 @@ function registerIpc(): void {
   });
 
   handle("pideck:get-models", () => getRuntime().getModels());
-  handle("pideck:get-commands", () => (getRuntime() as any).getCommands?.() ?? getHost().getCommands());
+  handle("pideck:get-commands", () => getRuntime().getCommands());
   handle("pideck:set-model", (_e, provider: string, modelId: string) =>
     getRuntime().setModel(provider, modelId)
   );
@@ -966,11 +975,11 @@ function registerIpc(): void {
     // persisted contract and raises failed_task attention atomically, so the
     // gate survives client restarts. The local runtime mirrors that logic.
     const outcome = await runtime.taskComplete(id, checkResults);
-    if (outcome.blocked && isDaemonEnabled() && daemonClient) {
+    if (outcome.blocked && daemonOnly()) {
       // Surface the daemon-raised failed_task item on the attention channel
       // like any attention.raised event.
-      daemonClient
-        .request("state.get", {})
+      daemonOnly()
+        ?.request("state.get", {})
         .then((res) => {
           const runtimeState = (res.payload as { runtime?: { attention?: unknown } })?.runtime;
           win?.webContents.send("pideck:attention-update", runtimeState?.attention ?? { items: {} });
@@ -1080,7 +1089,7 @@ function registerIpc(): void {
         const state: any = await getRuntime().getState();
         if (!state?.sessionId) throw new Error("cloned session has no runtime identity");
         let task: import("../src/tasks").Task;
-        if (isDaemonEnabled() && daemonClient) {
+        const client = daemonOnly(); if (client) {
           const payload = {
             id: randomUUID(),
             title: safeName,
@@ -1097,7 +1106,7 @@ function registerIpc(): void {
             checkpointIds: [],
             createdAt: Date.now(),
           };
-          const res = await daemonClient.request("task.created", payload);
+          const res = await client.request("task.created", payload);
           task = res.payload as import("../src/tasks").Task;
         } else {
           task = taskManager.register({
@@ -1178,14 +1187,14 @@ function registerIpc(): void {
     };
 
     if (task) {
-      if (isDaemonEnabled() && daemonClient) {
+      const client = daemonOnly(); if (client) {
         if (!opts.keep && dirty) throw new Error("Cannot discard a task worktree with uncommitted changes");
         await processManager.killByOwner(task.id).catch(() => {});
         const result = await cleanup();
         if (opts.keep) {
-          await daemonClient.request("task.updated", { id: task.id, patch: { status: "paused", dirty } });
+          await client.request("task.updated", { id: task.id, patch: { status: "paused", dirty } });
         } else {
-          await daemonClient.request("task.removed", { id: task.id });
+          await client.request("task.removed", { id: task.id });
         }
         return { ...result, task, removed: !opts.keep };
       }
@@ -1217,8 +1226,8 @@ function registerIpc(): void {
   // ---------------------------------------------------------------------------
 
   handle("pideck:permissions:get", async () => {
-    if (isDaemonEnabled() && daemonClient) {
-      const res = await daemonClient.request("permissions.get", {});
+    const client = daemonOnly(); if (client) {
+      const res = await client.request("permissions.get", {});
       return res.payload;
     }
     if (!permissionEngine) return { mode: "auto" as const, rules: [] };
@@ -1228,8 +1237,8 @@ function registerIpc(): void {
     if (mode !== "supervised" && mode !== "auto" && mode !== "full_access") {
       throw new Error("invalid execution mode");
     }
-    if (isDaemonEnabled() && daemonClient) {
-      const res = await daemonClient.request("permissions.set-mode", { mode });
+    const client = daemonOnly(); if (client) {
+      const res = await client.request("permissions.set-mode", { mode });
       return res.payload;
     }
     if (!permissionEngine) throw new Error("permission engine not ready");
@@ -1255,8 +1264,8 @@ function registerIpc(): void {
     if (input.scope !== "always" && input.scope !== "session") {
       throw new Error("invalid rule scope");
     }
-    if (isDaemonEnabled() && daemonClient) {
-      const res = await daemonClient.request("permissions.add-rule", input);
+    const client = daemonOnly(); if (client) {
+      const res = await client.request("permissions.add-rule", input);
       return res.payload;
     }
     if (!permissionEngine) throw new Error("permission engine not ready");
@@ -1272,8 +1281,8 @@ function registerIpc(): void {
   });
   handle("pideck:permissions:remove-rule", async (_e, id: string) => {
     if (typeof id !== "string" || id.length < 1 || id.length > 200) throw new Error("invalid rule id");
-    if (isDaemonEnabled() && daemonClient) {
-      const res = await daemonClient.request("permissions.remove-rule", { id });
+    const client = daemonOnly(); if (client) {
+      const res = await client.request("permissions.remove-rule", { id });
       return res.payload;
     }
     if (!permissionEngine) throw new Error("permission engine not ready");
@@ -1285,8 +1294,8 @@ function registerIpc(): void {
     if (!payload || typeof payload.id !== "string" || typeof payload.choice !== "string") {
       throw new Error("invalid approval resolution");
     }
-    if (isDaemonEnabled() && daemonClient) {
-      await daemonClient.request("approval.resolved", { id: payload.id, choice: payload.choice });
+    const client = daemonOnly(); if (client) {
+      await client.request("approval.resolved", { id: payload.id, choice: payload.choice });
       win?.webContents.send("pideck:approval-resolved", { id: payload.id, choice: payload.choice });
       return { ok: true };
     }
@@ -1306,14 +1315,14 @@ function registerIpc(): void {
         throw new Error("invalid thread action");
       }
       if (opts.action !== "stop" && !opts.message?.trim()) throw new Error("message is required");
-      const result = await getHost().controlThread(opts.action, opts.threadId, opts.message?.trim());
+      const result = await getRuntime().controlThread(opts.action, opts.threadId, opts.message?.trim());
       await activityBridge?.refresh();
       return result;
     }
   );
   handle("pideck:threads:promote", async (_e, threadId: string) => {
     if (!/^[a-f0-9-]{8,}$/i.test(threadId)) throw new Error("invalid thread id");
-    const result = await getHost().promoteThread(threadId);
+    const result = await getRuntime().promoteThread(threadId);
     await activityBridge?.refresh();
     return result;
   });
@@ -1323,14 +1332,14 @@ function registerIpc(): void {
       if (!/^[a-f0-9-]{20,}$/i.test(opts.runId)) throw new Error("invalid subagent run id");
       if (opts.action !== "steer" && opts.action !== "follow-up" && opts.action !== "stop") throw new Error("invalid subagent action");
       if (opts.action !== "stop" && !opts.message?.trim()) throw new Error("message is required");
-      const result = await getHost().controlSubagent(opts.action, opts.runId, opts.message?.trim());
+      const result = await getRuntime().controlSubagent(opts.action, opts.runId, opts.message?.trim());
       await activityBridge?.refresh();
       return result;
     }
   );
   handle("pideck:subagents:promote", async (_e, runId: string) => {
     if (!/^[a-f0-9-]{20,}$/i.test(runId)) throw new Error("invalid subagent run id");
-    const result = await getHost().promoteSubagent(runId);
+    const result = await getRuntime().promoteSubagent(runId);
     await activityBridge?.refresh();
     return result;
   });
@@ -1384,14 +1393,14 @@ function registerIpc(): void {
     // The active session file lives in the daemon-owned PiHost when daemon
     // mode is on; the in-process host does not exist then.
     const activeFile = isDaemonEnabled() ? await daemonActiveSessionFile() : host?.activeSessionFile ?? null;
-    const activeTask = isDaemonEnabled()
+    const activeTask = daemonOnly()
       ? await daemonTaskBySessionFile(activeFile)
       : taskManager.findBySessionFile(activeFile);
     if (activeTask) {
-      if (isDaemonEnabled()) {
+      const client = daemonOnly(); if (client) {
         const proc = processManager.spawn({ command, cwd, owner: activeTask.id, ownerSession: activeTask.sessionId });
         // Keep daemon task's terminalIds in sync (best-effort)
-        await daemonClient?.request("task.updated", { id: activeTask.id, patch: { terminalIds: [...(activeTask.terminalIds ?? []), proc.id] } }).catch(() => {});
+        await client?.request("task.updated", { id: activeTask.id, patch: { terminalIds: [...(activeTask.terminalIds ?? []), proc.id] } }).catch(() => {});
         return proc;
       }
       return taskManager.spawn(activeTask.id, command, cwd);
@@ -1408,7 +1417,7 @@ function registerIpc(): void {
     const id = validateId(taskId);
     const validatedCommand = validateCommand(command);
     const validatedCwd = validateCwd(cwd);
-    if (isDaemonEnabled() && daemonClient) {
+    const client = daemonOnly(); if (client) {
       // Tasks are daemon-owned in daemon mode; resolve there instead of the
       // Electron TaskManager registry (which is empty in daemon mode).
       const task = (await daemonClientTasks()).find((t) => t.id === id);
@@ -1416,7 +1425,7 @@ function registerIpc(): void {
       if (task.status !== "running") throw new Error("task is not running");
       if (!task.cwd || !cwdWithin(task.cwd, validatedCwd)) throw new Error("process cwd does not match task cwd");
       const proc = processManager.spawn({ command: validatedCommand, cwd: validatedCwd, owner: task.id, ownerSession: task.sessionId });
-      await daemonClient.request("task.updated", { id: task.id, patch: { terminalIds: [...(task.terminalIds ?? []), proc.id] } }).catch(() => {});
+      await client.request("task.updated", { id: task.id, patch: { terminalIds: [...(task.terminalIds ?? []), proc.id] } }).catch(() => {});
       return proc;
     }
     return taskManager.spawn(id, validatedCommand, validatedCwd);
@@ -1447,6 +1456,10 @@ async function ensureDaemon(): Promise<void> {
       resolve(true);
     });
     probe.once("error", () => resolve(false));
+    setTimeout(() => {
+      probe.destroy();
+      resolve(false);
+    }, 1_000);
   });
   const entry = join(__dirname, "..", "dist-daemon", "main.mjs");
   const entryExists = existsSync(entry);
@@ -1468,13 +1481,15 @@ async function ensureDaemon(): Promise<void> {
       stdio: "ignore",
     });
     child.unref();
-  } else if (!entryExists && !alive) {
-    console.warn("daemon.enabled is set but dist-daemon/main.mjs is missing; falling back to in-process host");
-    return;
   }
   if (!daemonClient) {
     daemonClient = connectDaemonClient({ listen: { socketPath }, reconnect: { initialDelayMs: 100, maxDelayMs: 5000 } });
+    // Track authoritative daemon state. Only mark active after a successful
+    // ping; clear it on disconnect so callers fall back to the local host.
     daemonClient.onEvent((envelope) => {
+      if (envelope.type === "disconnect" as any) {
+        daemonActive = false;
+      }
       if (envelope.type === "task.created" || envelope.type === "task.updated" || envelope.type === "task.removed") {
         daemonClient
           ?.request("state.get", {})
@@ -1513,8 +1528,10 @@ async function ensureDaemon(): Promise<void> {
     // Warm cache once connected
     daemonClient
       .request("ping", {})
-      .catch(() => {})
+      .then(() => { daemonActive = true; })
+      .catch(() => { daemonActive = false; })
       .finally(() => {
+        if (!daemonActive) return;
         daemonClient
           ?.request("state.get", {})
           .then((res) => {
@@ -1535,8 +1552,10 @@ app.whenReady().then(async () => {
   registerIpc();
   createWindow();
   await ensureDaemon();
-  if (isDaemonEnabled()) {
-    // Daemon owns tasks and attention when enabled — thin client, no local subscriptions
+  // daemonActive was already set by ensureDaemon's ping handshake; if it
+  // raced the disconnect handler and is now false, treat that as fallback.
+  if (daemonOnly()) {
+    // Daemon owns tasks and attention when active — thin client, no local subscriptions
     sessionIndex.subscribe((update) => win?.webContents.send("pideck:sessions-update", update));
   } else {
     processManager.subscribe((snapshots) => win?.webContents.send("pideck:process-update", snapshots));
@@ -1545,10 +1564,10 @@ app.whenReady().then(async () => {
     attentionManager.subscribe((registry) => win?.webContents.send("pideck:attention-update", registry));
     sessionIndex.subscribe((update) => win?.webContents.send("pideck:sessions-update", update));
   }
-  if (isDaemonEnabled() && daemonClient) {
+  const notifierClient = daemonOnly(); if (notifierClient) {
     lspManager.setPiNotifier((diagCwd, diagnostics) => {
       if (diagCwd !== activeCwd) return;
-      daemonClient?.request("pi.notifyDiagnostics", { diagnostics }).catch(() => {});
+      notifierClient.request("pi.notifyDiagnostics", { diagnostics }).catch(() => {});
     });
   } else {
     lspManager.setPiNotifier((diagCwd, diagnostics) => {
