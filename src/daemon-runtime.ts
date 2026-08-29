@@ -179,7 +179,7 @@ export function createDaemonRuntime(client: DaemonClient): RuntimeFacade {
       return res.payload;
     },
     async respondUi(id, r) {
-      await client.request("ui.respond", { id, ...((r as any) || {}) });
+      await client.request("pi.ui.respond" as any, { id, resp: r });
     },
     onTaskUpdate(cb) {
       const handler = (env: { type: string; payload: unknown }) => {

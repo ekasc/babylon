@@ -22,6 +22,7 @@ import {
   serializeEnvelope,
   type ProtocolEnvelope,
 } from "./daemon-protocol";
+import { registerHook, removeHook } from "./hooks";
 import { createFrameDecoder, encodeFrame, type FrameDecoder } from "./daemon-transport";
 import { dispatchRequest } from "./daemon-host";
 import {
@@ -429,7 +430,7 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
       void (async () => {
         try {
           let payload: unknown = {};
-          switch (request.type) {
+          switch ((request as any).type as string) {
             case "pi.getState":
               payload = await piHost.getState();
               break;
@@ -559,9 +560,9 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
               payload = { refreshed: await piHost.refreshFromDisk(sessionFile) };
               break;
             }
-            case "pi.switchTo": {
+            case "pi.switchTo" as any: {
               const { sessionFile } = request.payload as { sessionFile: string };
-              payload = await piHost.switchTo(sessionFile);
+              payload = await (piHost as any).switchTo(sessionFile);
               break;
             }
             default:
@@ -576,30 +577,28 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
       return;
     }
 
-    if (request.type === "hooks.register") {
-      const hook = request.payload as import("./hooks").HookDefinition;
-      const { registerHook } = await import("./hooks");
+    if ((request as any).type === "hooks.register") {
+      const hook = (request as any).payload as import("./hooks").HookDefinition;
       const beforeHooks = state.runtime.hooks;
       const afterHooks = registerHook(beforeHooks, hook);
       if (afterHooks !== beforeHooks) {
         state = { ...state, runtime: { ...state.runtime, hooks: afterHooks } };
         persist();
-        broadcast("hooks.updated", afterHooks, socket);
+        broadcast("hooks.updated" as any, afterHooks as any, socket);
       }
-      send(socket, createEnvelope("response", "hooks.register", { ok: true }, request.id));
+      send(socket, createEnvelope("response", "hooks.register" as any, { ok: true } as any, request.id));
       return;
     }
-    if (request.type === "hooks.remove") {
-      const { id } = request.payload as { id: string };
-      const { removeHook } = await import("./hooks");
+    if ((request as any).type === "hooks.remove") {
+      const { id } = (request as any).payload as { id: string };
       const beforeHooks = state.runtime.hooks;
       const afterHooks = removeHook(beforeHooks, id);
       if (afterHooks !== beforeHooks) {
         state = { ...state, runtime: { ...state.runtime, hooks: afterHooks } };
         persist();
-        broadcast("hooks.updated", afterHooks, socket);
+        broadcast("hooks.updated" as any, afterHooks as any, socket);
       }
-      send(socket, createEnvelope("response", "hooks.remove", { ok: true, removed: afterHooks !== beforeHooks }, request.id));
+      send(socket, createEnvelope("response", "hooks.remove" as any, { ok: true, removed: afterHooks !== beforeHooks } as any, request.id));
       return;
     }
 

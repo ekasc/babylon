@@ -780,7 +780,7 @@ function registerIpc(): void {
       // the user's pre-existing staged selection instead of leaving a
       // half-staged state.
       if (stagedForRecovery && !committed) {
-        await gitOps.resetStaged(root, prepared);
+        await gitOps.resetStaged(root, prepared ?? undefined);
         emit("error", `${cause instanceof Error ? cause.message : String(cause)} — staged changes were unstaged`);
       }
       const detail = cause instanceof Error ? cause.message : String(cause);
