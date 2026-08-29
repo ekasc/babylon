@@ -1011,7 +1011,7 @@ function registerIpc(): void {
       const state = await getRuntime().getState() as any;
       const file = state?.sessionFile;
       const header = file ? await readSessionHeader(file) : null;
-      const task = isDaemonEnabled()
+      const task = daemonOnly()
         ? await daemonTaskBySessionFile(file)
         : taskManager.findBySessionFile(file);
       const parentSession = header?.parentSession ?? task?.parentSessionFile;
@@ -1150,7 +1150,7 @@ function registerIpc(): void {
     const file = state?.sessionFile;
     if (!file) throw new Error("no active session");
     const header = await readSessionHeader(file);
-    const task = isDaemonEnabled()
+    const task = daemonOnly()
       ? await daemonTaskBySessionFile(file)
       : taskManager.findBySessionFile(file);
     const originalPath = header?.parentSession ?? task?.parentSessionFile;
@@ -1390,9 +1390,11 @@ function registerIpc(): void {
   handle("pideck:process-spawn", async (_e, opts: unknown) => {
     const command = validateCommand((opts as { command?: unknown })?.command);
     const cwd = validateCwd((opts as { cwd?: unknown })?.cwd);
-    // The active session file lives in the daemon-owned PiHost when daemon
-    // mode is on; the in-process host does not exist then.
-    const activeFile = isDaemonEnabled() ? await daemonActiveSessionFile() : host?.activeSessionFile ?? null;
+    // The active session file lives in the daemon-owned PiHost when the
+    // daemon is actually active; the in-process host does not exist then.
+    // Use the runtime state, not the preference flag, so fallback mode
+    // (setting enabled but daemon failed) still finds the local session.
+    const activeFile = daemonOnly() ? await daemonActiveSessionFile() : host?.activeSessionFile ?? null;
     const activeTask = daemonOnly()
       ? await daemonTaskBySessionFile(activeFile)
       : taskManager.findBySessionFile(activeFile);
@@ -1446,8 +1448,8 @@ function registerIpc(): void {
  * keeps running after the window closes. A daemon that already answers on the
  * socket is reused rather than replaced.
  */
-async function ensureDaemon(): Promise<void> {
-  if (!isDaemonEnabled()) return;
+async function ensureDaemon(): Promise<boolean> {
+  if (!isDaemonEnabled()) return false;
   const { socketPath, snapshotPath } = daemonPaths();
   const alive = await new Promise<boolean>((resolve) => {
     const probe = net.connect(socketPath);
@@ -1466,7 +1468,7 @@ async function ensureDaemon(): Promise<void> {
   if (!alive) {
     if (!entryExists) {
       console.warn("daemon.enabled is set but dist-daemon/main.mjs is missing; run pnpm build:daemon — falling back to in-process host");
-      return;
+      return false;
     }
     const child = spawn(process.execPath, [entry], {
       env: {
@@ -1484,12 +1486,16 @@ async function ensureDaemon(): Promise<void> {
   }
   if (!daemonClient) {
     daemonClient = connectDaemonClient({ listen: { socketPath }, reconnect: { initialDelayMs: 100, maxDelayMs: 5000 } });
-    // Track authoritative daemon state. Only mark active after a successful
-    // ping; clear it on disconnect so callers fall back to the local host.
+    // Track authoritative daemon state. The socket-level connection change
+    // callback is the source of truth (not a protocol event), and is what
+    // flips `daemonActive` on connect/disconnect. We do not flip the flag
+    // here — ensureDaemon() awaits the initial handshake below — but we
+    // keep the connection observer so runtime ownership transitions on
+    // later disconnects.
+    daemonClient.onConnectionChange((state) => {
+      if (state === "disconnected") daemonActive = false;
+    });
     daemonClient.onEvent((envelope) => {
-      if (envelope.type === "disconnect" as any) {
-        daemonActive = false;
-      }
       if (envelope.type === "task.created" || envelope.type === "task.updated" || envelope.type === "task.removed") {
         daemonClient
           ?.request("state.get", {})
@@ -1525,23 +1531,33 @@ async function ensureDaemon(): Promise<void> {
         win?.webContents.send("pideck:permissions-changed", envelope.payload);
       }
     });
-    // Warm cache once connected
-    daemonClient
-      .request("ping", {})
-      .then(() => { daemonActive = true; })
-      .catch(() => { daemonActive = false; })
-      .finally(() => {
-        if (!daemonActive) return;
-        daemonClient
-          ?.request("state.get", {})
-          .then((res) => {
-            const runtime = (res.payload as { runtime?: { tasks?: { tasks: Record<string, unknown> } } })?.runtime;
-            const tasks = runtime?.tasks ? Object.values(runtime.tasks.tasks) : [];
-            win?.webContents.send("pideck:task-update", tasks);
-          })
-          .catch(() => {});
-      });
   }
+  return handshakeDaemon();
+}
+
+/** Awaitable handshake: resolves to true once the daemon is connected and
+ *  round-trips a ping. Resolves to false (does not throw) when the daemon
+ *  is disabled, the binary is missing, the socket is refused, or the ping
+ *  times out. Either way, on return the caller can read `daemonActive` and
+ *  `daemonOnly()` and pick local vs. daemon ownership without racing. */
+async function handshakeDaemon(): Promise<boolean> {
+  if (!isDaemonEnabled() || !daemonClient) return false;
+  try {
+    await daemonClient.request("ping", {}, 5_000);
+  } catch {
+    return false;
+  }
+  daemonActive = true;
+  // Warm the task cache so the UI has something to render immediately.
+  daemonClient
+    .request("state.get", {})
+    .then((res) => {
+      const runtime = (res.payload as { runtime?: { tasks?: { tasks: Record<string, unknown> } } })?.runtime;
+      const tasks = runtime?.tasks ? Object.values(runtime.tasks.tasks) : [];
+      win?.webContents.send("pideck:task-update", tasks);
+    })
+    .catch(() => {});
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1551,9 +1567,12 @@ async function ensureDaemon(): Promise<void> {
 app.whenReady().then(async () => {
   registerIpc();
   createWindow();
+  // ensureDaemon() awaits the initial ping handshake, so by the time it
+  // returns, `daemonActive` is authoritative (true only when the daemon
+  // round-tripped a ping; false on a missing binary, refused socket, or
+  // timed-out ping). No split-brain: we choose local vs daemon ownership
+  // here, once, and start exactly one host.
   await ensureDaemon();
-  // daemonActive was already set by ensureDaemon's ping handshake; if it
-  // raced the disconnect handler and is now false, treat that as fallback.
   if (daemonOnly()) {
     // Daemon owns tasks and attention when active — thin client, no local subscriptions
     sessionIndex.subscribe((update) => win?.webContents.send("pideck:sessions-update", update));

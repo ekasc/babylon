@@ -149,4 +149,25 @@ describe("babylon daemon client", () => {
     await vi.waitFor(() => expect(client.connected()).toBe(false));
     await expect(client.request("ping", null, 500)).rejects.toThrow(/connection|timed out/);
   });
+
+  it("reports connect and disconnect transitions via onConnectionChange", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "babylon-daemon-cb-"));
+    const socketPath = join(dir, "daemon.sock");
+    const server = await startSocketServer(socketPath);
+    const client = connectDaemonClient({ listen: { socketPath } });
+    clients.push(client);
+
+    const states: ("connected" | "disconnected")[] = [];
+    const unsub = client.onConnectionChange((s) => states.push(s));
+
+    // The handler should have observed the already-connected state.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(states).toContain("connected");
+
+    // Drop the daemon to force a disconnect.
+    await server.close();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(states).toContain("disconnected");
+    unsub();
+  });
 });

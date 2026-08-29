@@ -194,6 +194,16 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
   const log = options.log ?? (() => {});
   let state = await loadState(options.snapshotPath, log);
 
+  // Persisted hooks must also be installed on the live HookManager that
+  // PiHost consults during pre_tool_use / post_tool_use. Without this
+  // replay, restarting the daemon would show hooks in the UI and runtime
+  // state but PiHost would have an empty dispatcher.
+  if (options.hookManager) {
+    for (const hook of Object.values(state.runtime.hooks.hooks)) {
+      options.hookManager.register(hook);
+    }
+  }
+
   // Serialize snapshot writes so concurrent mutations cannot interleave.
   let persistChain: Promise<void> = Promise.resolve();
   const persist = (): void => {

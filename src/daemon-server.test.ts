@@ -9,6 +9,8 @@ import { startDaemonServer, type DaemonServer } from "./daemon-server";
 import type { ScheduledTask } from "./automation";
 import { createTask } from "./tasks";
 import { PermissionEngine } from "../electron/permissions";
+import { HookManager } from "../electron/hook-manager";
+import type { HookDefinition } from "./hooks";
 
 const servers: DaemonServer[] = [];
 const tempDirs: string[] = [];
@@ -270,6 +272,51 @@ describe("babylon daemon server", () => {
     expect(revived.state().runtime.tasks.tasks.t1.status).not.toBe("completed");
     const item = Object.values(revived.state().runtime.attention.items)[0];
     expect(item).toMatchObject({ type: "failed_task", title: "Completion blocked: Ship it" });
+  });
+
+  it("replays persisted hooks into the live HookManager on restart", async () => {
+    const hook: HookDefinition = {
+      id: "h-1",
+      event: "pre_tool_use",
+      action: "block",
+      enabled: true,
+    };
+    // Round 1: register a hook and shut the daemon down. The registry is
+    // persisted via the existing hooks.register path.
+    const dir = await mkdtemp(join(tmpdir(), "babylon-daemon-hooks-"));
+    tempDirs.push(dir);
+    const snapshot = join(dir, "state.json");
+    const liveHookManager = new HookManager();
+    const first = await startDaemonServer({
+      listen: { port: 0 },
+      snapshotPath: snapshot,
+      hookManager: liveHookManager,
+    });
+    servers.push(first);
+    const firstPort = (first.address() as { port: number }).port;
+    const firstSocket = await connect(firstPort);
+    const fr = reader(firstSocket);
+    await request(firstSocket, "hooks.register" as never, hook);
+    await expect(fr.next("hooks.register")).resolves.toMatchObject({ kind: "response" });
+    expect(liveHookManager.list().map((h) => h.id)).toEqual(["h-1"]);
+
+    await first.close();
+    // After close, the live manager still has the hook from registration,
+    // so simulate a process restart by constructing a brand-new manager.
+    const restartedHookManager = new HookManager();
+    expect(restartedHookManager.list()).toEqual([]);
+
+    // Round 2: a fresh daemon on the same snapshot must rehydrate the
+    // persisted hook into the live manager, otherwise PiHost's
+    // pre_tool_use / post_tool_use dispatch would silently no-op while the
+    // UI claims the hook exists.
+    const revived = await startDaemonServer({
+      listen: { port: 0 },
+      snapshotPath: snapshot,
+      hookManager: restartedHookManager,
+    });
+    servers.push(revived);
+    expect(restartedHookManager.list().map((h) => h.id)).toEqual(["h-1"]);
   });
 
   it("broadcasts attention.raised when a task.complete blocks on its contract", async () => {

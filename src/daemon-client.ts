@@ -38,6 +38,9 @@ export interface DaemonClientOptions {
 export interface DaemonClient {
   request(type: ProtocolMessageType, payload: unknown, timeoutMs?: number): Promise<ProtocolEnvelope>;
   onEvent(handler: (envelope: ProtocolEnvelope) => void): () => void;
+  /** Subscribe to socket-level connect/disconnect transitions. Used by callers
+   *  to flip authoritative runtime ownership (e.g. `daemonActive`). */
+  onConnectionChange(handler: (state: "connected" | "disconnected") => void): () => void;
   connected(): boolean;
   close(): void;
 }
@@ -68,6 +71,7 @@ export function connectDaemonClient(options: DaemonClientOptions): DaemonClient 
   const pending = new Map<string, PendingCall>();
   const connectionWaiters: { resolve: (s: net.Socket) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }[] = [];
   const eventHandlers = new Set<(envelope: ProtocolEnvelope) => void>();
+  const connectionHandlers = new Set<(state: "connected" | "disconnected") => void>();
 
   const failPending = (message: string): void => {
     for (const call of pending.values()) {
@@ -132,6 +136,7 @@ export function connectDaemonClient(options: DaemonClientOptions): DaemonClient 
         clearTimeout(waiter.timer);
         waiter.resolve(next);
       }
+      for (const handler of connectionHandlers) handler("connected");
     });
     next.on("data", (chunk: Buffer) => {
       let frames: string[];
@@ -159,6 +164,9 @@ export function connectDaemonClient(options: DaemonClientOptions): DaemonClient 
       if (wasLive) live = null;
       if (wasCurrent) socket = null;
       if (!wasLive && !wasCurrent) return;
+      if (wasLive) {
+        for (const handler of connectionHandlers) handler("disconnected");
+      }
 
       // In-flight calls fail loudly. Requests waiting for a (re)connection
       // stay queued while reconnection continues; they die only when the
@@ -220,6 +228,14 @@ export function connectDaemonClient(options: DaemonClientOptions): DaemonClient 
     onEvent(handler): () => void {
       eventHandlers.add(handler);
       return () => eventHandlers.delete(handler);
+    },
+
+    onConnectionChange(handler): () => void {
+      connectionHandlers.add(handler);
+      // Report the current state so a late subscriber does not miss an
+      // already-connected or already-disconnected socket.
+      handler(live ? "connected" : "disconnected");
+      return () => connectionHandlers.delete(handler);
     },
 
     connected(): boolean {
