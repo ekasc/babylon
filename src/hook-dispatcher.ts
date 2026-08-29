@@ -52,7 +52,7 @@ export async function dispatchHooks(
     if (blocked) break;
     const timeoutMs = def.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    let timeout: ReturnType<typeof setTimeout> | undefined;
     const execPromise = (async () => {
       const res = await exec(def, { ...currentCtx, args: rewrittenArgs }, controller.signal);
       return res ?? {};
@@ -63,9 +63,13 @@ export async function dispatchHooks(
     try {
       result = await Promise.race([
         execPromise,
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error(`timeout:${timeoutMs}`)), timeoutMs)
-        ),
+        new Promise<never>((_, reject) => {
+          const timer = setTimeout(() => {
+            controller.abort();
+            reject(new Error(`timeout:${timeoutMs}`));
+          }, timeoutMs);
+          timeout = timer;
+        }),
       ]);
     } catch (e) {
       error = e instanceof Error ? e : new Error(String(e));

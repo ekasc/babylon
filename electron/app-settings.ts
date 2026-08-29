@@ -38,6 +38,12 @@ export interface PiSettings {
   daemon?: {
     enabled?: boolean;
   };
+  /** Appearance preferences. */
+  appearance?: {
+    useSystemFonts?: boolean;
+    /** Selected monospace font for inline code and blocks. "system" = ui-monospace stack. */
+    monoFontFamily?: string;
+  };
 }
 
 export const DEFAULT_GIT_COMMIT_MODEL: ModelRef = {
@@ -59,6 +65,7 @@ const EMPTY: PiSettings = {
   titleModel: DEFAULT_GIT_COMMIT_MODEL,
   gitCommitModel: DEFAULT_GIT_COMMIT_MODEL,
   gitCommitPrompt: DEFAULT_GIT_COMMIT_PROMPT,
+  appearance: { useSystemFonts: true, monoFontFamily: "system" },
 };
 
 let cache: PiSettings | null = null;
@@ -85,6 +92,7 @@ export function getSettings(): PiSettings {
         ...EMPTY,
         ...parsed,
         contextWindowOverrides: parsed.contextWindowOverrides ?? {},
+        appearance: { ...EMPTY.appearance, ...(parsed.appearance ?? {}) },
       };
       return cache;
     }
@@ -104,6 +112,10 @@ export function saveSettings(patch: Partial<PiSettings>): PiSettings {
     contextWindowOverrides: {
       ...(current.contextWindowOverrides ?? {}),
       ...(patch.contextWindowOverrides ?? {}),
+    },
+    appearance: {
+      ...(current.appearance ?? {}),
+      ...(patch.appearance ?? {}),
     },
   };
   cache = next;

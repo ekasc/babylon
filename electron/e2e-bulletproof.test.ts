@@ -144,6 +144,30 @@ describe("git workspace — bulletproof", () => {
     expect(r.commitSha).toMatch(/^[0-9a-f]{40}$/);
   });
 
+  it("resetStaged restores the user's pre-existing staged selection", async () => {
+    const root = await makeRepoWithCommit();
+    await writeFile(join(root, "keep.txt"), "keep\n");
+    await writeFile(join(root, "other.txt"), "other\n");
+    // User staged only keep.txt on purpose.
+    await git(root, ["add", "keep.txt"]);
+    expect(await git(root, ["diff", "--cached", "--name-only"])).toBe("keep.txt");
+
+    const ctx = await prepareCommitContext(root);
+    expect(ctx.stagedBefore).toEqual(["keep.txt"]);
+    // prepare stages everything for context generation...
+    expect(await git(root, ["diff", "--cached", "--name-only"])).toContain("other.txt");
+
+    // Simulated generation failure: restore the user's original selection.
+    await resetStaged(root, ctx.stagedBefore);
+    expect(await git(root, ["diff", "--cached", "--name-only"])).toBe("keep.txt");
+
+    // The restored selection commits cleanly and other.txt stays uncommitted.
+    const r = await commitStaged(root, "Commit keep only");
+    expect(r.commitSha).toMatch(/^[0-9a-f]{40}$/);
+    const after = await statusDetails(root);
+    expect(after.files.map((f) => f.path)).toContain("other.txt");
+  });
+
   it("commitStaged validates message and staged state", async () => {
     const root = await makeRepoWithCommit();
     await expect(commitStaged(root, "   ")).rejects.toThrow(/commit message is required/);
@@ -234,6 +258,7 @@ describe("commit message — hardening", () => {
     deletions: 2,
     areas: ["src"],
     requiresBody: false,
+    stagedBefore: [],
   };
 
   it("buildGitCommitPrompt includes Unslop and truncation note when needed", () => {
@@ -342,6 +367,7 @@ describe("PiHost cheap-model integration", () => {
       deletions: 0,
       areas: ["a"],
       requiresBody: false,
+      stagedBefore: [],
     };
     let call = 0;
     const fakeComplete = async (prompt: string) => {

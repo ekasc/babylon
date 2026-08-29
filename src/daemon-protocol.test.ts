@@ -95,6 +95,6 @@ describe("babylon daemon protocol", () => {
   });
 
   it("keeps the type union in sync with the known types list", () => {
-    expect(KNOWN_MESSAGE_TYPES.length).toBe(41);
+    expect(KNOWN_MESSAGE_TYPES.length).toBe(51);
   });
 });

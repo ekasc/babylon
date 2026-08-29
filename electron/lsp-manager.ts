@@ -716,7 +716,7 @@ export class LspManager {
           if (server.language === descriptor!.language) {
             if (server.status === "running") {
               this.sendNotification(server, "textDocument/didOpen", {
-                textDocument: { uri: doc.uri, languageId: this.languageId(descriptor!.language), version: doc.version, text: doc.content },
+                textDocument: { uri: doc.uri, languageId: this.languageId(descriptor!.language, filePath), version: doc.version, text: doc.content },
               });
             }
             // also save?
@@ -753,7 +753,14 @@ export class LspManager {
     }
   }
 
-  private languageId(language: string): string {
+  private languageId(language: string, filePath?: string): string {
+    if (language === "typescript" && filePath) {
+      const lower = filePath.toLowerCase();
+      if (lower.endsWith(".tsx")) return "typescriptreact";
+      if (lower.endsWith(".jsx")) return "javascriptreact";
+      if (lower.endsWith(".js") || lower.endsWith(".mjs") || lower.endsWith(".cjs")) return "javascript";
+      if (lower.endsWith(".ts") || lower.endsWith(".mts") || lower.endsWith(".cts")) return "typescript";
+    }
     if (language === "typescript") return "typescript";
     return language;
   }
@@ -934,7 +941,7 @@ export class LspManager {
       const d = this.descriptorForFile(filePath);
       if (!d || d.language !== server.language) continue;
       this.sendNotification(server, "textDocument/didOpen", {
-        textDocument: { uri: doc.uri, languageId: this.languageId(d.language), version: doc.version, text: doc.content },
+        textDocument: { uri: doc.uri, languageId: this.languageId(d.language, filePath), version: doc.version, text: doc.content },
       });
     }
   }

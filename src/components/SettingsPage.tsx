@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { bridge, type ModelRef, type PiSettings } from "../bridge";
-import { applyTheme, type ThemePref } from "../lib/theme";
+import { applyMonoFont, applySystemFonts, applyTheme, monoStack, MONO_FONTS, type ThemePref } from "../lib/theme";
 import ModelPicker from "./ModelPicker";
 import ThinkingPicker from "./ThinkingPicker";
 import PermissionRulesSection from "./PermissionRulesSection";
@@ -37,6 +37,8 @@ export default function SettingsPage(props: Props) {
   // Local edit buffers are committed on blur instead of writing on each key.
   const [ctxDraft, setCtxDraft] = useState<Record<string, string>>({});
   const [gitPromptDraft, setGitPromptDraft] = useState("");
+  const [systemFonts, setSystemFonts] = useState<string[]>([]);
+  const [fontFilter, setFontFilter] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -49,6 +51,26 @@ export default function SettingsPage(props: Props) {
         }
       })
       .catch(() => undefined);
+    void (async () => {
+      // Prefer Local Font Access API (renderer, no asar/binary issues) — falls back to main-process enumeration.
+      let fonts: string[] = [];
+      try {
+        if ("queryLocalFonts" in window) {
+          const localFonts: Array<{ family: string }> = await (window as any).queryLocalFonts();
+          fonts = [...new Set(localFonts.map((f) => f.family))].sort((a, b) => a.localeCompare(b));
+        }
+      } catch {}
+      if (!fonts.length) {
+        try {
+          const fromMain = await bridge.listFonts();
+          if (Array.isArray(fromMain) && fromMain.length) fonts = fromMain;
+        } catch {}
+      }
+      if (!cancelled) {
+        if (fonts.length) setSystemFonts(fonts);
+        else setSystemFonts(MONO_FONTS.map((f) => f.id));
+      }
+    })();
     return () => {
       cancelled = true;
     };
@@ -256,25 +278,83 @@ export default function SettingsPage(props: Props) {
             )}
 
             {tab === "Appearance" && (
-              <Section title="Theme">
-                <div className="flex flex-col gap-0.5">
-                  {( ["light", "dark", "system"] as ThemePref[] ).map((t) => (
-                    <button
-                      key={t}
-                      onClick={() => {
-                        applyTheme(t);
-                        props.onThemeChange(t);
-                      }}
-                      className={`flex items-center justify-between rounded-md px-3 py-2 text-left text-[13px] transition-colors duration-100 ${
-                        props.theme === t ? "bg-inset text-fg" : "text-dim hover:text-fg"
-                      }`}
-                    >
-                      <span className="capitalize">{t}</span>
-                      {props.theme === t && <span className="text-accent">✓</span>}
-                    </button>
-                  ))}
-                </div>
-              </Section>
+              <>
+                <Section title="Theme">
+                  <div className="flex flex-col gap-0.5">
+                    {( ["light", "dark", "system"] as ThemePref[] ).map((t) => (
+                      <button
+                        key={t}
+                        onClick={() => {
+                          applyTheme(t);
+                          props.onThemeChange(t);
+                        }}
+                        className={`flex items-center justify-between rounded-md px-3 py-2 text-left text-[13px] transition-colors duration-100 ${
+                          props.theme === t ? "bg-inset text-fg" : "text-dim hover:text-fg"
+                        }`}
+                      >
+                        <span className="capitalize">{t}</span>
+                        {props.theme === t && <span className="text-accent">✓</span>}
+                      </button>
+                    ))}
+                  </div>
+                </Section>
+                <Section title="Fonts" hint="Pick any font installed on this Mac — no font files are shipped. Inline code falls back to ui-monospace / SFMono-Regular if the family is missing.">
+                  <div className="flex flex-col gap-3">
+                    <label className="flex items-center justify-between rounded-md px-3 py-2 hover:bg-inset">
+                      <span className="text-[13px] text-fg">Use system fonts</span>
+                      <input
+                        type="checkbox"
+                        checked={settings?.appearance?.useSystemFonts ?? true}
+                        onChange={(e) => {
+                          const enabled = e.target.checked;
+                          applySystemFonts(enabled);
+                          localStorage.setItem("pideck:useSystemFonts", String(enabled));
+                          void save({ appearance: { ...(settings?.appearance ?? {}), useSystemFonts: enabled } });
+                        }}
+                        className="h-4 w-4 accent-accent"
+                      />
+                    </label>
+                    <div>
+                      <label className="block text-[12px] font-medium text-dim" htmlFor="font-filter">Font family</label>
+                      <input
+                        id="font-filter"
+                        type="text"
+                        placeholder="Filter fonts… (e.g. Helvetica)"
+                        value={fontFilter}
+                        onChange={(e) => setFontFilter(e.target.value)}
+                        className="settings-input mt-1 w-full"
+                      />
+                      <select
+                        id="mono-font"
+                        value={settings?.appearance?.monoFontFamily ?? "system"}
+                        onChange={(e) => {
+                          const family = e.target.value;
+                          applyMonoFont(family);
+                          void save({ appearance: { ...(settings?.appearance ?? {}), monoFontFamily: family, useSystemFonts: true } });
+                        }}
+                        className="settings-input mt-1 w-full"
+                        size={8}
+                        style={{ fontFamily: monoStack(settings?.appearance?.monoFontFamily ?? "system") }}
+                      >
+                        <option value="system" style={{ fontFamily: monoStack("system") }}>System Default — ui-monospace</option>
+                        {(systemFonts.length ? systemFonts : MONO_FONTS.map((f) => f.id))
+                          .filter((f) => !fontFilter.trim() || f.toLowerCase().includes(fontFilter.trim().toLowerCase()))
+                          .slice(0, 400)
+                          .map((f) => (
+                            <option key={f} value={f} style={{ fontFamily: monoStack(f) }}>{f}</option>
+                          ))}
+                      </select>
+                      <p className="mt-1 text-[11px] text-dim">{systemFonts.length ? `${systemFonts.length} system fonts found` : "Loading system fonts…"} {fontFilter ? `· ${systemFonts.filter((f) => f.toLowerCase().includes(fontFilter.toLowerCase())).length} matched` : ""}</p>
+                      <div className="mt-2 rounded-md border border-line bg-inset/40 px-3 py-2">
+                        <p className="text-[11px] font-medium text-dim">Preview — {settings?.appearance?.monoFontFamily ?? "system"}</p>
+                        <p className="mt-1 truncate text-[13px]" style={{ fontFamily: monoStack(settings?.appearance?.monoFontFamily ?? "system") }}>{`const answer = 42 // ${settings?.appearance?.monoFontFamily ?? "system"}`}</p>
+                        <p className="truncate text-[13px]" style={{ fontFamily: monoStack(settings?.appearance?.monoFontFamily ?? "system") }}>The quick brown fox jumps over 0123456789</p>
+                        <p className="truncate text-[12px] text-dim" style={{ fontFamily: monoStack(settings?.appearance?.monoFontFamily ?? "system") }}>git commit -m "feat: ship any system font"</p>
+                      </div>
+                    </div>
+                  </div>
+                </Section>
+              </>
             )}
           </div>
       </div>

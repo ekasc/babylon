@@ -4,7 +4,7 @@ import { execFile, spawn } from "node:child_process";
 import * as net from "node:net";
 import { existsSync, promises as fsp, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { AgentEventBuffer } from "./event-buffer";
@@ -21,8 +21,11 @@ import { TaskManager } from "./task-manager";
 import { LspManager, validateCwd as validateLspCwd } from "./lsp-manager";
 import { HookManager } from "./hook-manager";
 import { AttentionManager } from "./attention-manager";
-import { evaluateContract, type CheckResult, type CompletionContract } from "../src/completion-contracts";
+import { type CheckResult, type CompletionContract } from "../src/completion-contracts";
 import { connectDaemonClient, type DaemonClient } from "../src/daemon-client";
+import { createLocalRuntime } from "../src/local-runtime";
+import { createDaemonRuntime } from "../src/daemon-runtime";
+import type { RuntimeFacade } from "../src/runtime-facade";
 
 // Pi engine session store (mirrors electron/threads.ts).
 const PI_SESSIONS_ROOT = join(homedir(), ".pi", "agent", "sessions");
@@ -170,19 +173,48 @@ function daemonPaths() {
   };
 }
 
+/** Shared permission rule/mode store (Electron and the daemon must agree). */
+function permissionDir(): string {
+  return join(app.getPath("userData"), "pideck-state", "permissions");
+}
+
 function isDaemonEnabled(): boolean {
   return !!getSettings().daemon?.enabled;
 }
 
-async function daemonTaskBySessionFile(file: string | null | undefined): Promise<import("../src/tasks").Task | undefined> {
-  if (!file || !isDaemonEnabled() || !daemonClient) return undefined;
+function getRuntime(): RuntimeFacade {
+  if (isDaemonEnabled() && daemonClient) return createDaemonRuntime(daemonClient);
+  // Fallback to local runtime — host may be null during early startup, so guard
+  const hostForLocal = host ?? ({ open: async () => ({}), prompt: async () => ({}), abort: async () => ({}), getState: async () => ({}), getMessages: async () => [] } as unknown as PiHost);
+  return createLocalRuntime({ taskManager, attentionManager, hookManager, piHost: hostForLocal, contracts });
+}
+
+async function daemonClientTasks(): Promise<import("../src/tasks").Task[]> {
+  if (!isDaemonEnabled() || !daemonClient) return [];
   try {
     const res = await daemonClient.request("state.get", {});
     const runtime = (res.payload as { runtime?: { tasks?: { tasks: Record<string, import("../src/tasks").Task> } } })?.runtime;
-    const tasks = runtime?.tasks?.tasks ?? {};
-    return Object.values(tasks).find((t) => t.sessionFile === file) as import("../src/tasks").Task | undefined;
+    return Object.values(runtime?.tasks?.tasks ?? {});
   } catch {
-    return undefined;
+    return [];
+  }
+}
+
+async function daemonTaskBySessionFile(file: string | null | undefined): Promise<import("../src/tasks").Task | undefined> {
+  if (!file || !isDaemonEnabled() || !daemonClient) return undefined;
+  const tasks = await daemonClientTasks();
+  return tasks.find((t) => t.sessionFile === file);
+}
+
+/** Active session file of the daemon-owned PiHost (daemon mode only). */
+async function daemonActiveSessionFile(): Promise<string | null> {
+  if (!isDaemonEnabled() || !daemonClient) return null;
+  try {
+    const res = await daemonClient.request("pi.getState", {});
+    const sessionFile = (res.payload as { sessionFile?: string } | null)?.sessionFile;
+    return typeof sessionFile === "string" && sessionFile.length > 0 ? sessionFile : null;
+  } catch {
+    return null;
   }
 }
 const agentEvents = new AgentEventBuffer((events) => {
@@ -243,6 +275,15 @@ function createWindow(): void {
   });
 
   const devUrl = process.env.VITE_DEV_SERVER_URL;
+  win.webContents.session.setPermissionRequestHandler((_wc: any, permission: string, callback: any) => {
+    if ((permission as string) === "local-fonts") callback(true);
+    else callback(false);
+  });
+  // Some Chromium builds also gate local-fonts behind a check handler
+  try {
+    const ses: any = win.webContents.session;
+    ses.setPermissionCheckHandler?.((wc: any, perm: string) => (perm as string) === "local-fonts" ? true : false);
+  } catch {}
   win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   win.webContents.on("will-navigate", (event, url) => {
     if (!isTrustedRendererUrl(url, devUrl, RENDERER_ENTRY)) event.preventDefault();
@@ -439,6 +480,11 @@ function uniquePath(base: string): string {
   let i = 2;
   while (existsSync(p)) p = `${base}-${i++}`;
   return p;
+}
+
+function cwdWithin(parent: string, candidate: string): boolean {
+  const rel = relative(resolve(parent), resolve(candidate));
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
 async function branchExists(root: string, branch: string): Promise<boolean> {
@@ -704,9 +750,11 @@ function registerIpc(): void {
     };
     let committed = false;
     let stagedForRecovery = false;
+    let prepared: import("./git").PreparedCommitContext | null = null;
     try {
       emit("preparing", "Staging changes and preparing diff context");
-      const context = await gitOps.prepareCommitContext(root);
+      prepared = await gitOps.prepareCommitContext(root);
+      const context = prepared;
       stagedForRecovery = true;
       if (context.truncatedPatch) emit("generating", "Generating commit message (patch truncated — using file summary for remaining changes)");
       else emit("generating", "Generating commit message");
@@ -721,10 +769,11 @@ function registerIpc(): void {
       emit("done", pushLabel);
       return { generated, commit, push };
     } catch (cause) {
-      // If we staged via prepareCommitContext but failed before commit, leave the
-      // working tree unstaged so the user is not stuck with a half-staged state.
+      // If we staged via prepareCommitContext but failed before commit, restore
+      // the user's pre-existing staged selection instead of leaving a
+      // half-staged state.
       if (stagedForRecovery && !committed) {
-        await gitOps.resetStaged(root);
+        await gitOps.resetStaged(root, prepared?.stagedBefore);
         emit("error", `${cause instanceof Error ? cause.message : String(cause)} — staged changes were unstaged`);
       }
       const detail = cause instanceof Error ? cause.message : String(cause);
@@ -748,6 +797,28 @@ function registerIpc(): void {
     if (body !== undefined && (typeof body !== "string" || body.length > 100_000)) throw new Error("invalid PR body");
     return gitOps.createPr(requireCwd(cwd), { title, body: typeof body === "string" ? body : "" });
   });
+  handle("pideck:git-stage-file", (_e, cwd: unknown, file: unknown) => {
+    if (typeof file !== "string" || !file.trim() || file.length > 4096) throw new Error("invalid file");
+    return gitOps.stageFile(requireCwd(cwd), file);
+  });
+  handle("pideck:git-unstage-file", (_e, cwd: unknown, file: unknown) => {
+    if (typeof file !== "string" || !file.trim() || file.length > 4096) throw new Error("invalid file");
+    return gitOps.unstageFile(requireCwd(cwd), file);
+  });
+  handle("pideck:git-discard-file", (_e, cwd: unknown, file: unknown) => {
+    if (typeof file !== "string" || !file.trim() || file.length > 4096) throw new Error("invalid file");
+    return gitOps.discardFile(requireCwd(cwd), file);
+  });
+  handle("pideck:git-stage-hunk", (_e, cwd: unknown, file: unknown, patch: unknown) => {
+    if (typeof file !== "string" || !file.trim() || file.length > 4096) throw new Error("invalid file");
+    if (typeof patch !== "string" || !patch.trim() || patch.length > 200_000) throw new Error("invalid patch");
+    return gitOps.stageHunk(requireCwd(cwd), file, patch);
+  });
+  handle("pideck:git-discard-hunk", (_e, cwd: unknown, file: unknown, patch: unknown) => {
+    if (typeof file !== "string" || !file.trim() || file.length > 4096) throw new Error("invalid file");
+    if (typeof patch !== "string" || !patch.trim() || patch.length > 200_000) throw new Error("invalid patch");
+    return gitOps.discardHunk(requireCwd(cwd), file, patch);
+  });
 
   handle("pideck:get-models", () => getHost().getModels());
   handle("pideck:get-commands", () => getHost().getCommands());
@@ -756,6 +827,54 @@ function registerIpc(): void {
   );
   handle("pideck:set-thinking", (_e, level: string) => getHost().setThinking(level));
   handle("pideck:get-thinking-levels", () => getHost().getThinkingLevels());
+  handle("pideck:list-fonts", async () => {
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const pexec = promisify((await import("node:child_process")).exec);
+    const all = new Set<string>();
+    all.add("System Default");
+    // 1) Try font-list (may be inside asar, may fallback)
+    try {
+      const { getFonts } = await import("font-list");
+      const fonts: string[] = await (getFonts as any)({ disableQuoting: true });
+      for (const f of fonts) {
+        const c = f.replace(/^[\"']|[\"']$/g, "").trim();
+        if (c) all.add(c);
+      }
+    } catch {}
+    // 2) system_profiler — most reliable on macOS, includes Miracode
+    try {
+      const { stdout } = await pexec(`system_profiler SPFontsDataType 2>/dev/null | grep "Family:" | awk -F: '{print $2}' | sort | uniq`, { maxBuffer: 10 * 1024 * 1024 }) as any;
+      for (const line of String(stdout).split("\n")) {
+        const c = line.trim();
+        if (c) all.add(c);
+      }
+    } catch {}
+    // 3) Direct font file scan — catches newly installed .ttf/.otf like Miracode.ttf
+    try {
+      const { readdirSync, existsSync } = await import("node:fs");
+      const { homedir } = await import("node:os");
+      const { join, basename } = await import("node:path");
+      for (const dir of [join(homedir(), "Library/Fonts"), "/Library/Fonts", "/System/Library/Fonts"]) {
+        if (!existsSync(dir)) continue;
+        for (const f of readdirSync(dir)) {
+          if (/\.(ttf|otf|ttc)$/i.test(f)) {
+            const name = basename(f).replace(/\.(ttf|otf|ttc)$/i, "").replace(/[-_]/g, " ").trim();
+            if (name) all.add(name);
+            // Also add the raw family name without mangling for exact match
+            const raw = basename(f).replace(/\.(ttf|otf|ttc)$/i, "");
+            if (raw && raw !== name) all.add(raw);
+          }
+        }
+      }
+      // Ensure Miracode.ttf is explicitly added if present
+      if (existsSync(join(homedir(), "Library/Fonts/Miracode.ttf"))) all.add("Miracode");
+    } catch {}
+    const cleaned = [...all].sort((a, b) => a.localeCompare(b));
+    // Ensure System Default is first
+    const sorted = ["System Default", ...cleaned.filter((f) => f !== "System Default")];
+    return sorted;
+  });
   handle("pideck:get-settings", () => getHost().getSettings());
   handle("pideck:set-settings", (_e, patch: any) => getHost().setSettings(patch));
   handle("pideck:set-session-name", (_e, name: string) => {
@@ -791,47 +910,32 @@ function registerIpc(): void {
     return getHost().fork(entryId);
   });
   handle("pideck:clone", () => getHost().clone());
-  handle("pideck:task-list", async () => {
-    if (isDaemonEnabled() && daemonClient) {
-      const res = await daemonClient.request("state.get", {});
-      const runtime = (res.payload as { runtime?: { tasks?: { tasks: Record<string, import("../src/tasks").Task> } } })?.runtime;
-      return runtime?.tasks ? Object.values(runtime.tasks.tasks) : [];
-    }
-    return taskManager.list();
-  });
+  handle("pideck:task-list", async () => getRuntime().taskList());
   handle("pideck:task-get", async (_e, id: unknown) => {
     if (typeof id !== "string" || id.length === 0 || id.length > 200) throw new Error("invalid task id");
-    if (isDaemonEnabled() && daemonClient) {
-      const res = await daemonClient.request("state.get", {});
-      const runtime = (res.payload as { runtime?: { tasks?: { tasks: Record<string, import("../src/tasks").Task> } } })?.runtime;
-      return runtime?.tasks?.tasks[id as string] ?? null;
-    }
-    return taskManager.get(id) ?? null;
+    return getRuntime().taskGet(id);
   });
   handle("pideck:task-set-contract", async (_e, taskId: unknown, contract: unknown) => {
     const id = validateId(taskId);
     if (!contract || typeof (contract as CompletionContract).id !== "string") throw new Error("invalid contract");
     const c = contract as CompletionContract;
-    contracts.set(c.id, c);
-    if (isDaemonEnabled() && daemonClient) {
-      await daemonClient.request("task.updated", { id, patch: { contractId: c.id } });
-    } else {
-      taskManager.setContractId(id, c.id);
-    }
+    await getRuntime().contractSet(c);
+    // Also set contractId on task via facade
+    const task = await getRuntime().taskGet(id);
+    if (task) await getRuntime().taskUpdate(id, { contractId: c.id } as never);
     return c;
   });
   handle("pideck:task-complete", async (_e, taskId: unknown, results: unknown) => {
     const id = validateId(taskId);
-    const task = isDaemonEnabled() && daemonClient
-      ? await (async () => {
-          const res = await daemonClient!.request("state.get", {});
-          const runtime = (res.payload as { runtime?: { tasks?: { tasks: Record<string, import("../src/tasks").Task> } } })?.runtime;
-          return runtime?.tasks?.tasks[id] ?? null;
-        })()
-      : taskManager.get(id);
+    const runtime = getRuntime();
+    const task = await runtime.taskGet(id);
     if (!task) throw new Error("unknown task");
     const checkResults = Array.isArray(results) ? (results as CheckResult[]) : [];
-    const hookOutcome = await hookManager.dispatch(
+    const hooks = await runtime.hooksList();
+    const registry = { hooks: Object.fromEntries(hooks.map((h) => [h.id, h])), order: hooks.map((h) => h.id) } as import("../src/hooks").HookRegistry;
+    const { dispatchHooks } = await import("../src/hook-dispatcher");
+    const hookOutcome = await dispatchHooks(
+      registry,
       "before_stop",
       { sessionId: task.sessionId ?? "", taskId: id },
       async (def) => {
@@ -840,74 +944,50 @@ function registerIpc(): void {
       }
     );
     if (hookOutcome.blocked) {
-      const item = {
+      await runtime.attentionRaise({
         id: `hook-${id}-${Date.now()}`,
-        type: "blocked_task" as const,
+        type: "blocked_task",
         title: `Task blocked by hook: ${task.title}`,
         detail: hookOutcome.blocked.result.block?.reason ?? "blocked",
         source: id,
         createdAt: Date.now(),
         resolved: false,
-      };
-      if (isDaemonEnabled() && daemonClient) {
-        await daemonClient.request("attention.raised", item).catch(() => attentionManager.add(item));
-      } else {
-        attentionManager.add(item);
-      }
+      });
       return { blocked: true, reason: hookOutcome.blocked.result.block?.reason, hookId: hookOutcome.blocked.id };
     }
-    const contractId = task.contractId;
-    const contract = contractId ? contracts.get(contractId) : undefined;
-    if (contract) {
-      const evaluation = evaluateContract(contract, checkResults);
-      if (!evaluation.passed) {
-        const failed = evaluation.checks.filter((c) => c.check.required && !c.satisfied).map((c) => c.check.label);
-        const item = {
-          id: `contract-${id}-${Date.now()}`,
-          type: "failed_task" as const,
-          title: `Completion blocked: ${contract.title}`,
-          detail: failed.length ? `contract failed: ${failed.join(", ")}` : "contract failed",
-          source: id,
-          createdAt: Date.now(),
-          resolved: false,
-        };
-        if (isDaemonEnabled() && daemonClient) {
-          await daemonClient.request("attention.raised", item).catch(() => attentionManager.add(item));
-        } else {
-          attentionManager.add(item);
-        }
-        return { blocked: true, reason: failed.length ? `contract failed: ${failed.join(", ")}` : "contract failed", evaluation };
-      }
-      if (isDaemonEnabled() && daemonClient) {
-        await daemonClient.request("task.updated", { id, patch: { status: "completed" } });
-      } else {
-        taskManager.markCompleted(id);
-      }
-      return { blocked: false, evaluation };
+    // The daemon owns the contract gate when enabled: it evaluates the
+    // persisted contract and raises failed_task attention atomically, so the
+    // gate survives client restarts. The local runtime mirrors that logic.
+    const outcome = await runtime.taskComplete(id, checkResults);
+    if (outcome.blocked && isDaemonEnabled() && daemonClient) {
+      // Surface the daemon-raised failed_task item on the attention channel
+      // like any attention.raised event.
+      daemonClient
+        .request("state.get", {})
+        .then((res) => {
+          const runtimeState = (res.payload as { runtime?: { attention?: unknown } })?.runtime;
+          win?.webContents.send("pideck:attention-update", runtimeState?.attention ?? { items: {} });
+        })
+        .catch(() => {});
     }
-    if (isDaemonEnabled() && daemonClient) {
-      await daemonClient.request("task.updated", { id, patch: { status: "completed" } });
-    } else {
-      taskManager.markCompleted(id);
-    }
-    return { blocked: false };
+    return outcome;
   });
-  handle("pideck:hooks-list", () => hookManager.list());
-  handle("pideck:hooks-register", (_e, hook: unknown) => {
+  handle("pideck:hooks-list", async () => getRuntime().hooksList());
+  handle("pideck:hooks-register", async (_e, hook: unknown) => {
     if (!hook || typeof (hook as { id?: unknown }).id !== "string") throw new Error("invalid hook");
-    hookManager.register(hook as import("../src/hooks").HookDefinition);
-    return hookManager.list();
+    await getRuntime().hooksRegister(hook as import("../src/hooks").HookDefinition);
+    return getRuntime().hooksList();
   });
-  handle("pideck:hooks-remove", (_e, id: unknown) => {
-    hookManager.remove(validateId(id));
-    return hookManager.list();
+  handle("pideck:hooks-remove", async (_e, id: unknown) => {
+    await getRuntime().hooksRemove(validateId(id));
+    return getRuntime().hooksList();
   });
-  handle("pideck:contracts-list", () => [...contracts.values()]);
-  handle("pideck:contracts-get", (_e, id: unknown) => contracts.get(validateId(id as string)) ?? null);
-  handle("pideck:attention-list", () => attentionManager.list());
-  handle("pideck:attention-resolve", (_e, id: unknown) => {
-    attentionManager.resolve(validateId(id));
-    return attentionManager.list();
+  handle("pideck:contracts-list", async () => getRuntime().contractsList());
+  handle("pideck:contracts-get", async (_e, id: unknown) => getRuntime().contractGet(validateId(id as string)));
+  handle("pideck:attention-list", async () => getRuntime().attentionList());
+  handle("pideck:attention-resolve", async (_e, id: unknown) => {
+    await getRuntime().attentionResolve(validateId(id));
+    return getRuntime().attentionList();
   });
 
   handle("pideck:worktree-info", async () => {
@@ -1129,15 +1209,23 @@ function registerIpc(): void {
   // Permission system (Phase 1): modes, rules, and approval resolution.
   // ---------------------------------------------------------------------------
 
-  handle("pideck:permissions:get", () => {
+  handle("pideck:permissions:get", async () => {
+    if (isDaemonEnabled() && daemonClient) {
+      const res = await daemonClient.request("permissions.get", {});
+      return res.payload;
+    }
     if (!permissionEngine) return { mode: "auto" as const, rules: [] };
     return { mode: permissionEngine.getMode(), rules: permissionEngine.listRules() };
   });
-  handle("pideck:permissions:set-mode", (_e, mode: string) => {
-    if (!permissionEngine) throw new Error("permission engine not ready");
+  handle("pideck:permissions:set-mode", async (_e, mode: string) => {
     if (mode !== "supervised" && mode !== "auto" && mode !== "full_access") {
       throw new Error("invalid execution mode");
     }
+    if (isDaemonEnabled() && daemonClient) {
+      const res = await daemonClient.request("permissions.set-mode", { mode });
+      return res.payload;
+    }
+    if (!permissionEngine) throw new Error("permission engine not ready");
     void permissionEngine.setModeAndPersist(mode as any);
     // A mode change retroactively re-evaluates what the agent is blocked on:
     // under Full Access the pending approvals are no longer required, so
@@ -1153,14 +1241,18 @@ function registerIpc(): void {
     notifyPermissionsChanged();
     return { mode: permissionEngine.getMode() };
   });
-  handle("pideck:permissions:add-rule", (_e, input: any) => {
-    if (!permissionEngine) throw new Error("permission engine not ready");
+  handle("pideck:permissions:add-rule", async (_e, input: any) => {
     if (!input || typeof input.category !== "string" || (input.decision !== "allow" && input.decision !== "deny")) {
       throw new Error("invalid rule");
     }
     if (input.scope !== "always" && input.scope !== "session") {
       throw new Error("invalid rule scope");
     }
+    if (isDaemonEnabled() && daemonClient) {
+      const res = await daemonClient.request("permissions.add-rule", input);
+      return res.payload;
+    }
+    if (!permissionEngine) throw new Error("permission engine not ready");
     const rule = permissionEngine.addRule({
       category: input.category,
       decision: input.decision,
@@ -1171,16 +1263,25 @@ function registerIpc(): void {
     notifyPermissionsChanged();
     return rule;
   });
-  handle("pideck:permissions:remove-rule", (_e, id: string) => {
-    if (!permissionEngine) throw new Error("permission engine not ready");
+  handle("pideck:permissions:remove-rule", async (_e, id: string) => {
     if (typeof id !== "string" || id.length < 1 || id.length > 200) throw new Error("invalid rule id");
+    if (isDaemonEnabled() && daemonClient) {
+      const res = await daemonClient.request("permissions.remove-rule", { id });
+      return res.payload;
+    }
+    if (!permissionEngine) throw new Error("permission engine not ready");
     const removed = permissionEngine.removeRule(id);
     notifyPermissionsChanged();
     return { removed };
   });
-  handle("pideck:permissions:resolve-approval", (_e, payload: { id: string; choice: string }) => {
+  handle("pideck:permissions:resolve-approval", async (_e, payload: { id: string; choice: string }) => {
     if (!payload || typeof payload.id !== "string" || typeof payload.choice !== "string") {
       throw new Error("invalid approval resolution");
+    }
+    if (isDaemonEnabled() && daemonClient) {
+      await daemonClient.request("approval.resolved", { id: payload.id, choice: payload.choice });
+      win?.webContents.send("pideck:approval-resolved", { id: payload.id, choice: payload.choice });
+      return { ok: true };
     }
     resolveApproval(payload.id, payload.choice as any);
     return { ok: true };
@@ -1273,7 +1374,9 @@ function registerIpc(): void {
   handle("pideck:process-spawn", async (_e, opts: unknown) => {
     const command = validateCommand((opts as { command?: unknown })?.command);
     const cwd = validateCwd((opts as { cwd?: unknown })?.cwd);
-    const activeFile = host?.activeSessionFile;
+    // The active session file lives in the daemon-owned PiHost when daemon
+    // mode is on; the in-process host does not exist then.
+    const activeFile = isDaemonEnabled() ? await daemonActiveSessionFile() : host?.activeSessionFile ?? null;
     const activeTask = isDaemonEnabled()
       ? await daemonTaskBySessionFile(activeFile)
       : taskManager.findBySessionFile(activeFile);
@@ -1294,9 +1397,22 @@ function registerIpc(): void {
         : undefined;
     return processManager.spawn({ command, cwd, owner, ownerSession });
   });
-  handle("pideck:task-spawn", (_e, taskId: unknown, command: unknown, cwd: unknown) => {
+  handle("pideck:task-spawn", async (_e, taskId: unknown, command: unknown, cwd: unknown) => {
     const id = validateId(taskId);
-    return taskManager.spawn(id, validateCommand(command), validateCwd(cwd));
+    const validatedCommand = validateCommand(command);
+    const validatedCwd = validateCwd(cwd);
+    if (isDaemonEnabled() && daemonClient) {
+      // Tasks are daemon-owned in daemon mode; resolve there instead of the
+      // Electron TaskManager registry (which is empty in daemon mode).
+      const task = (await daemonClientTasks()).find((t) => t.id === id);
+      if (!task) throw new Error("unknown task");
+      if (task.status !== "running") throw new Error("task is not running");
+      if (!task.cwd || !cwdWithin(task.cwd, validatedCwd)) throw new Error("process cwd does not match task cwd");
+      const proc = processManager.spawn({ command: validatedCommand, cwd: validatedCwd, owner: task.id, ownerSession: task.sessionId });
+      await daemonClient.request("task.updated", { id: task.id, patch: { terminalIds: [...(task.terminalIds ?? []), proc.id] } }).catch(() => {});
+      return proc;
+    }
+    return taskManager.spawn(id, validatedCommand, validatedCwd);
   });
   handle("pideck:process-kill", (_e, id: unknown) => {
     const validated = validateId(id);
@@ -1336,6 +1452,7 @@ async function ensureDaemon(): Promise<void> {
           ELECTRON_RUN_AS_NODE: "1",
           BABYLON_DAEMON_SOCKET: socketPath,
           BABYLON_DAEMON_SNAPSHOT: snapshotPath,
+          BABYLON_DAEMON_PERMISSIONS_DIR: permissionDir(),
         },
         detached: true,
         stdio: "ignore",
@@ -1370,6 +1487,15 @@ async function ensureDaemon(): Promise<void> {
       }
       if (envelope.type === "pi.session.status") {
         win?.webContents.send("pideck:session-status", envelope.payload);
+      }
+      if (envelope.type === "approval.requested") {
+        win?.webContents.send("pideck:approval-requested", envelope.payload);
+      }
+      if (envelope.type === "approval.cleared") {
+        win?.webContents.send("pideck:approval-cleared", envelope.payload);
+      }
+      if (envelope.type === "permissions.changed") {
+        win?.webContents.send("pideck:permissions-changed", envelope.payload);
       }
     });
     // Warm cache once connected

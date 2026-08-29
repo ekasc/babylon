@@ -162,7 +162,7 @@ export default function ChatView({
             <p>{streaming ? "Preparing this session…" : "Describe the change, question, or outcome you want."}</p>
           </div>
         ) : null}
-        {entries.map((entry) =>
+        {entries.map((entry, idx) =>
           entry.type === "group" ? (
             <Fragment key={`g-${entry.tools[0].key}`}>
               <div className={longChat ? "chat-item chat-item-long" : "chat-item"}>
@@ -175,19 +175,29 @@ export default function ChatView({
           ) : (
             <Fragment key={entry.item.key}>
               <div className={longChat ? "chat-item chat-item-long" : "chat-item"}>
-                {entry.item.kind === "user" ? (
-                  <UserMessage item={entry.item} historyTurn={entry.item.entryId ? historyById.get(entry.item.entryId) : undefined} rollbackDisabled={streaming} onRollback={onRollback} />
-                ) : entry.item.kind === "assistant" ? (
-                  <AssistantMessage item={entry.item} />
-                ) : entry.item.kind === "tool" ? (
-                  <ToolCard item={entry.item} />
-                ) : entry.item.kind === "recap" ? (
-                  <RecapLine text={entry.item.text} />
-                ) : entry.item.kind === "launch" ? (
-                  <LaunchCard item={entry.item} onOpen={onOpenLaunch} />
-                ) : (
-                  <SystemLine text={entry.item.text} />
-                )}
+                {(() => {
+                  const prev = idx > 0 ? entries[idx - 1] : null;
+                  const prevIsTool = !!prev && (prev.type === "group" || (prev.type === "single" && (prev.item.kind === "tool" || prev.item.kind === "launch")));
+                  const showTopDivider = entry.item.kind === "assistant" && prevIsTool;
+                  return (
+                    <>
+                      {showTopDivider ? <hr className="assistant-divider" /> : null}
+                      {entry.item.kind === "user" ? (
+                        <UserMessage item={entry.item} historyTurn={entry.item.entryId ? historyById.get(entry.item.entryId) : undefined} rollbackDisabled={streaming} onRollback={onRollback} />
+                      ) : entry.item.kind === "assistant" ? (
+                        <AssistantMessage item={entry.item} />
+                      ) : entry.item.kind === "tool" ? (
+                        <ToolCard item={entry.item} />
+                      ) : entry.item.kind === "recap" ? (
+                        <RecapLine text={entry.item.text} />
+                      ) : entry.item.kind === "launch" ? (
+                        <LaunchCard item={entry.item} onOpen={onOpenLaunch} />
+                      ) : (
+                        <SystemLine text={entry.item.text} />
+                      )}
+                    </>
+                  );
+                })()}
               </div>
               {cards.get(entry.index) ? (
                 <TurnChanges turn={cards.get(entry.index)!} isLatest={latestChanged?.entryId === cards.get(entry.index)!.entryId} />

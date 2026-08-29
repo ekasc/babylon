@@ -42,12 +42,18 @@ const api = {
   gitPrSuggest: (cwd: string): Promise<any> => ipcRenderer.invoke("pideck:git-pr-suggest", cwd),
   gitPrCreate: (cwd: string, input: { title: string; body?: string }): Promise<any> =>
     ipcRenderer.invoke("pideck:git-pr-create", cwd, input),
+  gitStageFile: (cwd: string, file: string): Promise<void> => ipcRenderer.invoke("pideck:git-stage-file", cwd, file),
+  gitUnstageFile: (cwd: string, file: string): Promise<void> => ipcRenderer.invoke("pideck:git-unstage-file", cwd, file),
+  gitDiscardFile: (cwd: string, file: string): Promise<void> => ipcRenderer.invoke("pideck:git-discard-file", cwd, file),
+  gitStageHunk: (cwd: string, file: string, patch: string): Promise<void> => ipcRenderer.invoke("pideck:git-stage-hunk", cwd, file, patch),
+  gitDiscardHunk: (cwd: string, file: string, patch: string): Promise<void> => ipcRenderer.invoke("pideck:git-discard-hunk", cwd, file, patch),
   getModels: (): Promise<any[]> => ipcRenderer.invoke("pideck:get-models"),
   getCommands: (): Promise<any[]> => ipcRenderer.invoke("pideck:get-commands"),
   setModel: (provider: string, modelId: string): Promise<any> =>
     ipcRenderer.invoke("pideck:set-model", provider, modelId),
   setThinking: (level: string): Promise<any> => ipcRenderer.invoke("pideck:set-thinking", level),
   getThinkingLevels: (): Promise<string[]> => ipcRenderer.invoke("pideck:get-thinking-levels"),
+  listFonts: (): Promise<string[]> => ipcRenderer.invoke("pideck:list-fonts"),
   setSessionName: (name: string): Promise<any> => ipcRenderer.invoke("pideck:set-session-name", name),
   compact: (): Promise<any> => ipcRenderer.invoke("pideck:compact"),
   getSettings: (): Promise<any> => ipcRenderer.invoke("pideck:get-settings"),

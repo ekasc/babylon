@@ -203,6 +203,7 @@ export default function GitView({ cwd, sidebarStatus, onChanged, onClose, toast 
   const [rowsLoading, setRowsLoading] = useState(false);
   const [loadingDetails, setLoadingDetails] = useState(true);
   const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set());
+  const [query, setQuery] = useState("");
   const [treeWidth, setTreeWidth] = useState(() => {
     const stored = Number(localStorage.getItem("pideck:git-tree-width"));
     return Number.isFinite(stored) && stored >= 180 && stored <= 420 ? stored : 300;
@@ -334,7 +335,12 @@ export default function GitView({ cwd, sidebarStatus, onChanged, onClose, toast 
   const behind = details?.behind ?? sidebarStatus?.behind ?? 0;
   const isRepo = details ? details.isRepo : sidebarStatus?.isRepo ?? false;
 
-  const tree = useMemo(() => buildTree(files), [files]);
+  const filteredFiles = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return files;
+    return files.filter((f) => f.path.toLowerCase().includes(q));
+  }, [files, query]);
+  const tree = useMemo(() => buildTree(filteredFiles), [filteredFiles]);
   const selectedFile = useMemo(() => files.find((file) => file.path === selectedPath) ?? null, [files, selectedPath]);
 
   const toggleDir = (path: string) =>
@@ -597,16 +603,17 @@ export default function GitView({ cwd, sidebarStatus, onChanged, onClose, toast 
               style={{ width: treeWidth, maxWidth: "calc(100% - 180px)" }}
             >
               <div className="h-full overflow-y-auto">
-                <div className="sticky top-0 z-10 flex h-9 items-center justify-between border-b border-line/50 bg-[var(--context)] px-3 text-[11.5px] text-dim">
-                  <span>{files.length > 0 ? `Changes (${files.length})` : "Changes"}</span>
-                  {files.length > 0 && (
-                    <span className="tabular-nums">
-                      <span className="text-ok">+{details?.insertions ?? 0}</span>{" "}
-                      <span className="text-err">−{details?.deletions ?? 0}</span>
-                    </span>
-                  )}
+                <div className="sticky top-0 z-10 border-b border-line/50 bg-[var(--context)] px-2 py-1.5">
+                  <div className="flex h-7 items-center gap-1.5">
+                    <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Filter files…" aria-label="Filter changed files" className="min-w-0 flex-1 rounded-md border border-transparent bg-inset/50 px-2 py-1 text-[12px] placeholder:text-dim/60 focus:border-accent/50 focus:bg-inset outline-none" />
+                    {query && <button onClick={() => setQuery("")} className="rounded px-1 text-dim hover:text-fg" aria-label="Clear filter"><XIcon size={10} /></button>}
+                  </div>
+                  <div className="mt-1 flex items-center justify-between text-[11px] text-dim/70">
+                    <span>{filteredFiles.length !== files.length ? `${filteredFiles.length} / ${files.length}` : files.length > 0 ? `Changes (${files.length})` : "Changes"}</span>
+                    {files.length > 0 && <span className="tabular-nums"><span className="text-ok/70">+{details?.insertions ?? 0}</span> <span className="text-err/70">−{details?.deletions ?? 0}</span></span>}
+                  </div>
                 </div>
-                {files.length > 0 ? (
+                {filteredFiles.length > 0 ? (
                   <FileTree
                     node={tree}
                     prefix=""
@@ -616,6 +623,8 @@ export default function GitView({ cwd, sidebarStatus, onChanged, onClose, toast 
                     onToggleDir={toggleDir}
                     onSelect={(file) => setSelectedPath(file.path)}
                   />
+                ) : query ? (
+                  <div className="px-3 py-6 text-center text-[12px] text-dim">No files match “{query}”</div>
                 ) : (
                   <div className="px-3 py-6 text-center">
                     <p className="text-[13px] font-medium text-fg/80">Working tree clean</p>

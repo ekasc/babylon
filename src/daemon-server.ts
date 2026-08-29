@@ -12,6 +12,7 @@
 // policy tick live here because they touch server-owned state.
 
 import * as net from "node:net";
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { chmodSync, mkdirSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
@@ -42,6 +43,7 @@ import {
   type RunnerResult,
 } from "./automation-runner";
 import type { PiHost } from "../electron/pi-host";
+import { applyApproval, PermissionEngine, type AgentAction, type Risk } from "../electron/permissions";
 import {
   defaultPolicy,
   type BackgroundPolicy,
@@ -74,6 +76,8 @@ export interface DaemonServerOptions {
   defaultProject?: string;
   log?: (message: string) => void;
   piHost?: PiHost;
+  /** Permission engine enforced for daemon-owned agent sessions. */
+  permissionEngine?: PermissionEngine;
 }
 
 export interface DaemonServer {
@@ -82,6 +86,8 @@ export interface DaemonServer {
   state(): DaemonState;
   /** Run one background-policy tick now (also runs automatically on the timer). */
   tick(now?: number): Promise<void>;
+  /** Request interactive approval for an agent action; resolves true to allow. */
+  requestApproval(action: AgentAction, risk: Risk): Promise<boolean>;
   /** Flush pending persistence, stop the loop, disconnect clients, close. */
   close(): Promise<void>;
 }
@@ -206,6 +212,44 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
     }
   };
 
+  // Approvals raised by the daemon-owned PiHost are routed to connected
+  // clients (the Electron thin client forwards them to the renderer). The
+  // first client to answer wins; an unanswered ask fails closed on timeout.
+  const pendingApprovals = new Map<
+    string,
+    { action: AgentAction; resolve: (allowed: boolean) => void; timer: NodeJS.Timeout }
+  >();
+
+  const permissionSnapshot = (): { mode: string; rules: unknown[] } =>
+    options.permissionEngine
+      ? { mode: options.permissionEngine.getMode(), rules: options.permissionEngine.listRules() }
+      : { mode: "auto", rules: [] };
+
+  const requestApproval = (action: AgentAction, risk: Risk): Promise<boolean> =>
+    new Promise<boolean>((resolve) => {
+      const id = randomUUID();
+      const timeoutMs = Number(process.env.PIDECK_APPROVAL_TIMEOUT_MS) || 15 * 60_000;
+      const timer = setTimeout(() => {
+        pendingApprovals.delete(id);
+        resolve(false);
+      }, timeoutMs);
+      timer.unref();
+      pendingApprovals.set(id, { action, resolve, timer });
+      broadcast("approval.requested", { id, action, risk });
+    });
+
+  const resolveApproval = (id: string, choice: string): void => {
+    const pending = pendingApprovals.get(id);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    pendingApprovals.delete(id);
+    if (options.permissionEngine) {
+      applyApproval(options.permissionEngine, pending.action, choice as never);
+    }
+    pending.resolve(choice !== "deny");
+    broadcast("permissions.changed", permissionSnapshot());
+  };
+
   // If a PiHost was supplied, wire its events to daemon broadcast so Electron
   // thin clients receive live agent streaming.
   if (options.piHost) {
@@ -276,6 +320,104 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
       return;
     }
 
+    // Permission system: the daemon is the enforcement point for agent tool
+    // calls when it owns PiHost. Clients (the Electron thin client) read and
+    // mutate policy here, and resolve approvals raised by the daemon.
+    if (request.type === "permissions.get") {
+      send(socket, createEnvelope("response", "permissions.get", permissionSnapshot(), request.id));
+      return;
+    }
+
+    if (request.type === "permissions.set-mode") {
+      const engine = options.permissionEngine;
+      if (!engine) {
+        send(socket, createEnvelope("response", "error", { error: "permission engine not available in daemon" }, request.id));
+        return;
+      }
+      const { mode } = (request.payload ?? {}) as { mode?: string };
+      if (mode !== "supervised" && mode !== "auto" && mode !== "full_access") {
+        send(socket, createEnvelope("response", "error", { error: "invalid execution mode" }, request.id));
+        return;
+      }
+      void (async () => {
+        try {
+          await engine.setModeAndPersist(mode);
+          // Full Access retroactively releases asks already waiting, exactly like
+          // the in-process Electron path, so agents are not left blocked.
+          if (mode === "full_access") {
+            for (const [id, pending] of [...pendingApprovals]) {
+              clearTimeout(pending.timer);
+              pendingApprovals.delete(id);
+              pending.resolve(true);
+              broadcast("approval.cleared", { id });
+            }
+          }
+          send(socket, createEnvelope("response", "permissions.set-mode", { mode: engine.getMode() }, request.id));
+          broadcast("permissions.changed", permissionSnapshot());
+        } catch (err) {
+          send(socket, createEnvelope("response", "error", { error: err instanceof Error ? err.message : String(err) }, request.id));
+        }
+      })();
+      return;
+    }
+
+    if (request.type === "permissions.add-rule") {
+      const engine = options.permissionEngine;
+      if (!engine) {
+        send(socket, createEnvelope("response", "error", { error: "permission engine not available in daemon" }, request.id));
+        return;
+      }
+      const input = request.payload as { category?: string; decision?: string; scope?: string; match?: unknown; note?: unknown };
+      if (!input || typeof input.category !== "string" || (input.decision !== "allow" && input.decision !== "deny")) {
+        send(socket, createEnvelope("response", "error", { error: "invalid rule" }, request.id));
+        return;
+      }
+      if (input.scope !== "always" && input.scope !== "session") {
+        send(socket, createEnvelope("response", "error", { error: "invalid rule scope" }, request.id));
+        return;
+      }
+      const rule = engine.addRule({
+        category: input.category as never,
+        decision: input.decision,
+        scope: input.scope,
+        match: input.match as never,
+        note: input.note as never,
+      });
+      send(socket, createEnvelope("response", "permissions.add-rule", rule, request.id));
+      broadcast("permissions.changed", permissionSnapshot());
+      return;
+    }
+
+    if (request.type === "permissions.remove-rule") {
+      const engine = options.permissionEngine;
+      if (!engine) {
+        send(socket, createEnvelope("response", "error", { error: "permission engine not available in daemon" }, request.id));
+        return;
+      }
+      const { id } = (request.payload ?? {}) as { id?: string };
+      if (!id || typeof id !== "string") {
+        send(socket, createEnvelope("response", "error", { error: "permissions.remove-rule requires { id }" }, request.id));
+        return;
+      }
+      const removed = engine.removeRule(id);
+      send(socket, createEnvelope("response", "permissions.remove-rule", { id, ok: true, removed }, request.id));
+      if (removed) broadcast("permissions.changed", permissionSnapshot());
+      return;
+    }
+
+    if (request.type === "approval.resolved") {
+      const { id, choice } = (request.payload ?? {}) as { id?: string; choice?: string };
+      const validChoice =
+        choice === "allow_once" || choice === "allow_session" || choice === "allow_always" || choice === "deny";
+      if (!id || !validChoice) {
+        send(socket, createEnvelope("response", "error", { error: "approval.resolved requires { id, choice }" }, request.id));
+        return;
+      }
+      resolveApproval(id, choice);
+      send(socket, createEnvelope("response", "approval.resolved", { id, ok: true }, request.id));
+      return;
+    }
+
     // PiHost-owned session/agent lifecycle (when daemon owns PiHost). Keep this
     // before the pure dispatch so pi.* never falls through as "unsupported".
     if (request.type.startsWith("pi.")) {
@@ -335,7 +477,8 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
     }
 
     // Everything else goes through the pure dispatch core (ping, task.*,
-    // attention.*). Unsupported types come back as explicit errors.
+    // attention.*, contract.registered). Unsupported types come back as
+    // explicit errors.
     const before = state.runtime;
     const result = dispatchRequest(before, request);
     state = { ...state, runtime: result.runtime };
@@ -343,6 +486,16 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
     if (result.runtime !== before && result.response.type !== "error") {
       persist();
       broadcast(result.response.type, result.response.payload, socket);
+      // A blocked task.complete raised failed_task attention inside the
+      // dispatch; surface it as an attention.raised event so clients watching
+      // the attention channel see the new item like any other raise.
+      if (
+        result.response.type === "task.complete" &&
+        (result.response.payload as { blocked?: boolean })?.blocked === true &&
+        (result.response.payload as { attention?: unknown })?.attention
+      ) {
+        broadcast("attention.raised", (result.response.payload as { attention: unknown }).attention, socket);
+      }
     }
   };
 
@@ -474,6 +627,7 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
       return state;
     },
     tick,
+    requestApproval,
     close() {
       if (timer) clearInterval(timer);
       timer = null;

@@ -6,9 +6,9 @@
 // and a response envelope. It is pure and testable; the actual process, socket
 // transport, and reconnection build on top of this.
 //
-// Supported requests: ping, task.created/updated/removed, attention.raised/
-// resolved. Anything else returns an explicit error response so the contract is
-// honest rather than silently dropping frames.
+// Supported requests: ping, task.created/updated/removed/complete, contract.registered,
+// attention.raised/resolved. Anything else returns an explicit error response so the
+// contract is honest rather than silently dropping frames.
 
 import {
   createEnvelope,
@@ -23,6 +23,11 @@ import {
   updateTask,
   type Task,
 } from "./tasks";
+import {
+  evaluateContract,
+  type CheckResult,
+  type CompletionContract,
+} from "./completion-contracts";
 
 export interface DispatchResult {
   runtime: RuntimeState;
@@ -129,6 +134,98 @@ export function dispatchRequest(runtime: RuntimeState, request: ProtocolEnvelope
       const resolved = after !== next.attention;
       commitAttention(after);
       response = createEnvelope("response", "attention.resolved", { id, ok: true, resolved }, request.id);
+      break;
+    }
+
+    case "contract.get": {
+      const { id } = (request.payload ?? {}) as { id?: string };
+      if (!id) {
+        response = errorResponse(request, "contract.get requires { id }");
+        break;
+      }
+      response = createEnvelope("response", "contract.get", { contract: next.contracts[id] ?? null }, request.id);
+      break;
+    }
+
+    case "contract.list": {
+      response = createEnvelope("response", "contract.list", { contracts: Object.values(next.contracts) }, request.id);
+      break;
+    }
+
+    case "contract.registered": {
+      const contract = request.payload as CompletionContract;
+      if (
+        !isPlainObject(contract) ||
+        typeof contract.id !== "string" ||
+        typeof contract.title !== "string" ||
+        !Array.isArray(contract.checks)
+      ) {
+        response = errorResponse(request, "contract.registered requires a contract object with id, title, and checks");
+        break;
+      }
+      // Later registrations replace the definition (matching the desktop's
+      // previous set-by-id semantics) so re-setting a persisted contract is
+      // harmless rather than a duplicate error.
+      next = { ...next, contracts: { ...next.contracts, [contract.id]: contract } };
+      response = createEnvelope("response", "contract.registered", contract, request.id);
+      break;
+    }
+
+    case "task.complete": {
+      const body = (request.payload ?? {}) as { id?: string; results?: unknown };
+      const { id } = body;
+      if (!id) {
+        response = errorResponse(request, "task.complete requires { id }");
+        break;
+      }
+      const task = next.tasks.tasks[id];
+      if (!task) {
+        response = errorResponse(request, `task ${id} not found`);
+        break;
+      }
+      const contract = task.contractId ? next.contracts[task.contractId] : undefined;
+      if (task.contractId && !contract) {
+        // A task referencing a contract the runtime no longer has must fail
+        // loudly: silently completing would drop the gate entirely.
+        response = errorResponse(request, `contract ${task.contractId} not found for task ${id}`);
+        break;
+      }
+      const checkResults = Array.isArray(body.results) ? (body.results as CheckResult[]) : [];
+      if (contract) {
+        const evaluation = evaluateContract(contract, checkResults);
+        if (!evaluation.passed) {
+          const failed = evaluation.checks
+            .filter((c) => c.check.required && !c.satisfied)
+            .map((c) => c.check.label);
+          const item: AttentionItem = {
+            id: `contract-${id}-${Date.now()}`,
+            type: "failed_task",
+            title: `Completion blocked: ${contract.title}`,
+            detail: failed.length ? `contract failed: ${failed.join(", ")}` : "contract failed",
+            source: id,
+            createdAt: Date.now(),
+            resolved: false,
+          };
+          commitAttention(addAttention(next.attention, item));
+          response = createEnvelope(
+            "response",
+            "task.complete",
+            {
+              blocked: true,
+              reason: failed.length ? `contract failed: ${failed.join(", ")}` : "contract failed",
+              evaluation,
+              attention: item,
+            },
+            request.id,
+          );
+          break;
+        }
+        commitTasks(updateTask(next.tasks, id, { status: "completed" }));
+        response = createEnvelope("response", "task.complete", { blocked: false, evaluation }, request.id);
+        break;
+      }
+      commitTasks(updateTask(next.tasks, id, { status: "completed" }));
+      response = createEnvelope("response", "task.complete", { blocked: false }, request.id);
       break;
     }
 

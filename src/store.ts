@@ -31,6 +31,27 @@ export type ChatItem =
       details?: any;
       /** Output was clamped at the wire; a "show full" fetch is available. */
       truncated?: boolean;
+      /** Babylon-wrapped tool metadata (e.g. babylon_bash command chips, exit code, duration). */
+      babylon?: {
+        kind: "babylon_bash";
+        version: 1;
+        callId: string;
+        command: string;
+        argv: string[];
+        head: string;
+        headBase: string;
+        startedAt: number;
+        endedAt?: number;
+        exitCode?: number;
+        exitSignal?: string;
+        status: "running" | "completed" | "exited" | "signaled" | "timeout" | "aborted" | "failed";
+        cwd: string;
+        truncated: boolean;
+        fullOutputPath?: string;
+        unsafe?: string | null;
+        hints: Array<{ kind: "explain"; label: string; description: string }>;
+        durationMs?: number;
+      };
     }
   | { kind: "system"; key: string; text: string }
   | { kind: "recap"; key: string; text: string; at: number }
@@ -429,6 +450,7 @@ function applyEvent(state: State, ev: any): State {
         args: ev.args,
         status: "running",
         output: base?.output,
+        babylon: base?.babylon,
       };
       if (at >= 0) items[at] = item;
       else items.push(item);
@@ -440,6 +462,7 @@ function applyEvent(state: State, ev: any): State {
       return mapTool(state, ev.toolCallId, (t) => ({
         ...t,
         output: textOf(ev.partialResult?.content),
+        babylon: ev.partialResult?.details?.babylon ?? t.babylon,
       }));
 
     case "tool_execution_end":
@@ -448,6 +471,7 @@ function applyEvent(state: State, ev: any): State {
         status: ev.isError ? "error" : "done",
         output: textOf(ev.result?.content),
         details: ev.result?.details,
+        babylon: ev.result?.details?.babylon ?? t.babylon,
       }));
 
     case "queue_update":

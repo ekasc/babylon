@@ -244,6 +244,7 @@ describe.sequential("LspManager", () => {
     expect(piCalls[0][0].severity).toBe("error");
   });
 
+
   it("project switch ignores stale diagnostics and stops old child", async () => {
     const fake = fakeServerThatEchoesDiagnostics();
     tmpRoots.push(join(fake, ".."));

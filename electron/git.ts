@@ -73,6 +73,8 @@ export interface PreparedCommitContext {
   deletions: number;
   areas: string[];
   requiresBody: boolean;
+  /** Paths that were staged before prepareCommitContext ran `git add -A`. */
+  stagedBefore: string[];
 }
 
 export type GitProviderKind = "github" | "gitlab" | "unknown";
@@ -413,6 +415,11 @@ export async function prepareCommitContext(cwd: string): Promise<PreparedCommitC
   if (!details.isRepo) throw new GitError("not a git repository");
   if (!details.hasChanges) throw new GitError("no changes to commit");
 
+  // Snapshot the user's staged selection before `git add -A` so a failed
+  // generation/commit can restore it instead of blanking the index.
+  const stagedBefore = (await gitStdout(["-c", "core.quotepath=false", "diff", "--cached", "--name-only", "-z"], cwd))
+    .split("\0")
+    .filter(Boolean);
   await gitStdout(["add", "-A"], cwd);
   const [stagedSummary, patchResult, numstatResult, recentResult] = await Promise.all([
     gitStdout(["-c", "core.quotepath=false", "diff", "--cached", "--name-status"], cwd),
@@ -444,12 +451,20 @@ export async function prepareCommitContext(cwd: string): Promise<PreparedCommitC
     deletions,
     areas,
     requiresBody: stats.length >= 10 || insertions + deletions >= 500 || areas.length >= 3,
+    stagedBefore,
   };
 }
 
-/** Unstage everything that prepareCommitContext staged. Best-effort: never throws. */
-export async function resetStaged(cwd: string): Promise<void> {
+/**
+ * Undo what prepareCommitContext staged. When `stagedBefore` is given (the
+ * paths that were staged before `git add -A`), restore exactly that selection
+ * instead of blanking the whole index. Best-effort: never throws.
+ */
+export async function resetStaged(cwd: string, stagedBefore?: readonly string[]): Promise<void> {
   await runGit(["reset", "HEAD", "--"], cwd).catch(() => undefined);
+  if (stagedBefore && stagedBefore.length > 0) {
+    await runGit(["add", "--", ...stagedBefore], cwd).catch(() => undefined);
+  }
 }
 
 export async function commitStaged(cwd: string, message: string): Promise<GitCommitResult> {
@@ -890,6 +905,69 @@ export async function diffForFile(cwd: string, file: string): Promise<string> {
   if (untracked.stdout.length > 0) return truncateDiff(untracked.stdout);
   if (!isNotRepoStderr(untracked.stderr)) throw new GitError(firstLine(untracked.stderr) || "git diff failed");
   return "";
+}
+
+export async function stageFile(cwd: string, file: string): Promise<void> {
+  const target = file.replace(/\/+$/, "").trim();
+  if (!target || target.startsWith("-") || target.includes("\0")) throw new GitError("invalid file path");
+  const result = await runGit(["add", "--", target], cwd);
+  if (result.exitCode !== 0) throw new GitError(firstLine(result.stderr) || "git add failed");
+}
+
+export async function unstageFile(cwd: string, file: string): Promise<void> {
+  const target = file.replace(/\/+$/, "").trim();
+  if (!target || target.startsWith("-") || target.includes("\0")) throw new GitError("invalid file path");
+  const result = await runGit(["reset", "HEAD", "--", target], cwd);
+  if (result.exitCode !== 0) throw new GitError(firstLine(result.stderr) || "git reset failed");
+}
+
+export async function discardFile(cwd: string, file: string): Promise<void> {
+  const target = file.replace(/\/+$/, "").trim();
+  if (!target || target.startsWith("-") || target.includes("\0")) throw new GitError("invalid file path");
+  // Try checkout for tracked files, clean for untracked
+  const ls = await runGit(["ls-files", "--", target], cwd);
+  const isTracked = ls.exitCode === 0 && ls.stdout.trim().length > 0;
+  if (isTracked) {
+    const result = await runGit(["checkout", "--", target], cwd);
+    if (result.exitCode !== 0) throw new GitError(firstLine(result.stderr) || "git checkout failed");
+    // Also clean untracked changes if any (for partially staged)
+    await runGit(["clean", "-f", "--", target], cwd).catch(() => undefined);
+  } else {
+    const result = await runGit(["clean", "-f", "--", target], cwd);
+    if (result.exitCode !== 0) throw new GitError(firstLine(result.stderr) || "git clean failed");
+    // Remove the file if it's an untracked file not covered by clean (e.g. nested)
+    await runGit(["rm", "--cached", "--", target], cwd).catch(() => undefined);
+  }
+}
+
+export async function stageHunk(cwd: string, file: string, patch: string): Promise<void> {
+  const target = file.replace(/\/+$/, "").trim();
+  if (!target || !patch.trim()) throw new GitError("invalid hunk");
+  const tmpFile = join(tmpdir(), `pideck-hunk-${randomUUID()}.patch`);
+  try {
+    await fsp.writeFile(tmpFile, patch, "utf8");
+    const result = await runGit(["apply", "--cached", "--", tmpFile], cwd);
+    if (result.exitCode !== 0) throw new GitError(firstLine(result.stderr) || "git apply failed");
+  } finally {
+    await fsp.rm(tmpFile, { force: true }).catch(() => undefined);
+  }
+}
+
+export async function discardHunk(cwd: string, file: string, patch: string): Promise<void> {
+  const target = file.replace(/\/+$/, "").trim();
+  if (!target || !patch.trim()) throw new GitError("invalid hunk");
+  const tmpFile = join(tmpdir(), `pideck-hunk-${randomUUID()}.patch`);
+  try {
+    await fsp.writeFile(tmpFile, patch, "utf8");
+    const result = await runGit(["apply", "-R", "--", tmpFile], cwd);
+    if (result.exitCode !== 0) {
+      // Fallback to checkout for the hunk via apply reverse
+      const fallback = await runGit(["checkout", "-p", "HEAD", "--", target], cwd).catch(() => null);
+      if (!fallback || fallback.exitCode !== 0) throw new GitError(firstLine(result.stderr) || "git apply reverse failed");
+    }
+  } finally {
+    await fsp.rm(tmpFile, { force: true }).catch(() => undefined);
+  }
 }
 
 function truncateDiff(text: string): string {

@@ -17,6 +17,16 @@ export interface Attachment {
   url: string;
 }
 
+interface ComposerDialog {
+  id: string;
+  method: "select" | "confirm" | "input" | "editor";
+  title?: string;
+  message?: string;
+  options?: string[];
+  placeholder?: string;
+  prefill?: string;
+}
+
 interface Props {
   streaming: boolean;
   steering: string[];
@@ -33,6 +43,8 @@ interface Props {
   onSetModel(provider: string, modelId: string): void;
   onSetThinking(level: string): void;
   onCompact(): void;
+  dialogs?: ComposerDialog[];
+  onDialogDismiss?: (id: string) => void;
 }
 
 function trunc(s: string, n = 42): string {
@@ -54,6 +66,7 @@ function readAsBase64(file: Blob): Promise<string> {
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const MAX_IMAGE_EDGE = 1280;
+const MAX_PASTE_TEXT_CHARS = 2000;
 
 async function prepareImage(file: File): Promise<{ blob: Blob; mimeType: string }> {
   // Preserve animated GIFs; drawing one to canvas would silently drop frames.
@@ -83,7 +96,7 @@ async function prepareImage(file: File): Promise<{ blob: Blob; mimeType: string 
   }
 }
 
-const Composer = memo(function Composer({ streaming, steering, followUp, commands, agentState, stats, models, thinkingLevels, draftRequest, toast, onSend, onAbort, onSetModel, onSetThinking, onCompact }: Props) {
+const Composer = memo(function Composer({ streaming, steering, followUp, commands, agentState, stats, models, thinkingLevels, draftRequest, toast, onSend, onAbort, onSetModel, onSetThinking, onCompact, dialogs, onDialogDismiss }: Props) {
   const [text, setText] = useState("");
   const [mode, setMode] = useState<"steer" | "followUp">("steer");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -152,6 +165,20 @@ const Composer = memo(function Composer({ streaming, steering, followUp, command
     if (files.length) {
       e.preventDefault();
       void addFiles(files);
+      return;
+    }
+    const pastedText = e.clipboardData?.getData("text/plain") ?? "";
+    if (pastedText.length > MAX_PASTE_TEXT_CHARS) {
+      e.preventDefault();
+      const fileName = `pasted-text-${Date.now().toString().slice(-6)}.txt`;
+      const blob = new Blob([pastedText], { type: "text/plain" });
+      void (async () => {
+        const data = await readAsBase64(blob);
+        const url = URL.createObjectURL(blob);
+        setAttachments((a) => [...a, { name: fileName, mimeType: "text/plain", data, url }]);
+        setAttachmentError(null);
+        toast("info", `Pasted text (${pastedText.length} chars) added as ${fileName}`);
+      })();
     }
   };
 
@@ -159,22 +186,34 @@ const Composer = memo(function Composer({ streaming, steering, followUp, command
     const t = text.trim();
     if (!t && attachments.length === 0) return;
     if (sending && !streaming) return;
-    const outgoing = attachments;
+    const imageAttachments = attachments.filter((a) => a.mimeType.startsWith("image/"));
+    const textAttachments = attachments.filter((a) => a.mimeType.startsWith("text/"));
+    let messageText = t;
+    if (textAttachments.length) {
+      const decoded = textAttachments.map((a) => {
+        try {
+          return atob(a.data);
+        } catch {
+          return "";
+        }
+      });
+      const fileBlocks = decoded.map((content, idx) => `[File: ${textAttachments[idx].name}]\n${content}`).join("\n\n");
+      messageText = messageText ? `${messageText}\n\n${fileBlocks}` : fileBlocks;
+    }
+    const outgoing = imageAttachments;
     const isStreamingSubmit = streaming;
     if (!isStreamingSubmit) setSending(true);
-    // Clear optimistically: the sent text must leave the box the moment the
-    // user submits, not when the (possibly slow) prompt pipeline resolves.
     setText("");
     try {
-      const accepted = await onSend(t, outgoing.length ? outgoing : undefined, isStreamingSubmit ? mode : undefined);
+      const accepted = await onSend(messageText, outgoing.length ? outgoing : undefined, isStreamingSubmit ? mode : undefined);
       if (!accepted) {
-        setText(t); // restore the draft on failure
+        setText(t);
         return;
       }
     } finally {
       if (!isStreamingSubmit) setSending(false);
     }
-    for (const attachment of outgoing) URL.revokeObjectURL(attachment.url);
+    for (const attachment of attachments) URL.revokeObjectURL(attachment.url);
     setAttachments([]);
   };
 
@@ -188,7 +227,38 @@ const Composer = memo(function Composer({ streaming, steering, followUp, command
     });
   };
 
+  const hasBlockingDialog = !!dialogs?.[0] && (dialogs[0].method === "select" || dialogs[0].method === "input" || dialogs[0].method === "editor");
+
+  useEffect(() => {
+    if (!hasBlockingDialog || !dialogs?.[0]?.options?.length) return;
+    const onNumber = async (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (!/^[1-9]$/.test(e.key)) return;
+      const idx = Number(e.key) - 1;
+      const opts = dialogs[0].options as string[];
+      if (idx < 0 || idx >= opts.length || idx >= 9) return;
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+      e.preventDefault();
+      const id = dialogs[0].id;
+      const value = opts[idx];
+      onDialogDismiss?.(id);
+      try {
+        const { bridge: b } = await import("../bridge");
+        await b.uiRespond({ id, value });
+      } catch (err: any) {
+        toast?.("error", (err as Error)?.message ?? "failed");
+      }
+    };
+    window.addEventListener("keydown", onNumber);
+    return () => window.removeEventListener("keydown", onNumber);
+  }, [hasBlockingDialog, dialogs, onDialogDismiss, toast]);
+
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (hasBlockingDialog) {
+      e.preventDefault();
+      return;
+    }
     if (commandMatches.length && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
       e.preventDefault();
       setSelectedCommand((index) =>
@@ -218,7 +288,7 @@ const Composer = memo(function Composer({ streaming, steering, followUp, command
 
   return (
     <div
-      className={`composer-dock shrink-0 px-7 pb-5 pt-3 ${dragOver ? "is-dragging" : ""}`}
+      className={`composer-dock shrink-0 overflow-hidden px-4 pb-4 pt-3 sm:px-7 sm:pb-5 ${dragOver ? "is-dragging" : ""}`}
       onDragOver={(e) => {
         e.preventDefault();
         setDragOver(true);
@@ -230,7 +300,7 @@ const Composer = memo(function Composer({ streaming, steering, followUp, command
         void addFiles(e.dataTransfer?.files ?? []);
       }}
     >
-      <div className="relative mx-auto max-w-[760px]">
+      <div className="relative mx-auto w-full max-w-[760px] min-w-0">
         <CommandMenu
           commands={commandMatches}
           selected={selectedCommand}
@@ -255,33 +325,90 @@ const Composer = memo(function Composer({ streaming, steering, followUp, command
         {attachmentError ? <p className="mb-2 text-[13px] text-err">{attachmentError}</p> : null}
         {attachments.length > 0 && (
           <div className="mb-2 flex flex-wrap gap-2">
-            {attachments.map((a, i) => (
-              <div key={i} className="group relative">
-                <img
-                  src={a.url}
-                  alt={a.name}
-                  title={a.name}
-                  className="h-14 w-14 rounded-lg border border-line object-cover"
-                />
-                <button
-                  onClick={() =>
-                    setAttachments((list) => {
-                      URL.revokeObjectURL(list[i]?.url ?? "");
-                      return list.filter((_, j) => j !== i);
-                    })
-                  }
-                  aria-label={`Remove attachment ${a.name}`}
-                  className="absolute -right-2 -top-2 grid h-6 w-6 place-items-center rounded-full bg-fg text-bg opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
-                >
-                  <XIcon size={9} />
-                </button>
-              </div>
-            ))}
+            {attachments.map((a, i) => {
+              const isText = a.mimeType.startsWith("text/");
+              return (
+                <div key={i} className="group relative">
+                  {isText ? (
+                    <div className="flex h-14 min-w-[120px] items-center gap-2 rounded-lg border border-line bg-inset px-3" title={a.name}>
+                      <span className="grid h-7 w-7 place-items-center rounded bg-accent-soft text-accent text-[10px] font-bold">TXT</span>
+                      <span className="min-w-0 flex-1 truncate text-[12px] font-medium">{a.name}</span>
+                      <span className="text-[11px] text-dim">{Math.round((a.data.length * 3) / 4 / 1024)}KB</span>
+                    </div>
+                  ) : (
+                    <img src={a.url} alt={a.name} title={a.name} className="h-14 w-14 rounded-lg border border-line object-cover" />
+                  )}
+                  <button
+                    onClick={() =>
+                      setAttachments((list) => {
+                        URL.revokeObjectURL(list[i]?.url ?? "");
+                        return list.filter((_, j) => j !== i);
+                      })
+                    }
+                    aria-label={`Remove attachment ${a.name}`}
+                    className="absolute -right-2 -top-2 grid h-6 w-6 place-items-center rounded-full bg-fg text-bg opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
+                  >
+                    <XIcon size={9} />
+                  </button>
+                </div>
+              );
+            })}
           </div>
         )}
 
         <div className="composer-surface">
-          <div className="flex items-end gap-1.5 px-2 pt-2 pb-1">
+          {dialogs?.[0] ? (
+            <div className="border-b border-line/60 bg-raised/40 px-4 py-3">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <p className="text-[13.5px] font-semibold leading-snug tracking-tight">{dialogs[0].title ?? "Question"}</p>
+                  {dialogs[0].message && <p className="mt-1 text-[12.5px] leading-relaxed text-dim">{dialogs[0].message}</p>}
+                </div>
+                <button
+                  onClick={async () => {
+                    const id = dialogs[0].id;
+                    onDialogDismiss?.(id);
+                    try {
+                      const { bridge: b } = await import("../bridge");
+                      await b.uiRespond({ id, cancelled: true });
+                    } catch {}
+                  }}
+                  className="shrink-0 rounded-md p-1 text-dim hover:bg-inset hover:text-fg"
+                  aria-label="Dismiss — deny the question"
+                >
+                  ✕
+                </button>
+              </div>
+              {dialogs[0].method === "select" && Array.isArray(dialogs[0].options) ? (
+                <div className="mt-3 flex flex-col gap-1">
+                  {dialogs[0].options!.map((o: string, idx: number) => (
+                    <button
+                      key={o}
+                      onClick={async () => {
+                        const id = dialogs[0].id;
+                        onDialogDismiss?.(id);
+                        try {
+                          const { bridge: b } = await import("../bridge");
+                          await b.uiRespond({ id, value: o });
+                        } catch (e: any) {
+                          toast?.("error", e?.message ?? "failed");
+                        }
+                      }}
+                      className="flex w-full items-center justify-between rounded-lg border border-line bg-bg px-3 py-2 text-left text-[13px] hover:border-accent/50 hover:bg-accent/5 hover:text-accent transition-colors"
+                    >
+                      <span className="flex items-center gap-2"><span className="grid h-5 w-5 place-items-center rounded bg-inset text-[11px] font-medium text-dim">{idx + 1}</span>{o}</span>
+                      <span className="text-[11px] text-dim">{idx + 1} ↩</span>
+                    </button>
+                  ))}
+                </div>
+              ) : dialogs[0].method === "input" || dialogs[0].method === "editor" ? (
+                <ComposerDialogInput dialog={dialogs[0]} onDismiss={onDialogDismiss!} toast={toast} />
+              ) : null}
+              <p className="mt-2 text-[11px] text-dim">Press 1–{Math.min(9, dialogs[0].options?.length ?? 0)} to choose, or deny with ✕ / Esc.</p>
+            </div>
+          ) : null}
+          {!hasBlockingDialog && (
+            <div className="flex items-end gap-1.5 px-2 pt-2 pb-1">
           <input
             ref={fileRef}
             type="file"
@@ -296,7 +423,8 @@ const Composer = memo(function Composer({ streaming, steering, followUp, command
           <button
             onClick={() => fileRef.current?.click()}
             title="Attach images (or paste / drag & drop)"
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-dim hover:bg-inset hover:text-fg"
+            disabled={hasBlockingDialog}
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-dim hover:bg-inset hover:text-fg disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <PaperclipIcon size={15} />
           </button>
@@ -307,6 +435,7 @@ const Composer = memo(function Composer({ streaming, steering, followUp, command
             onKeyDown={onKeyDown}
             onPaste={onPaste}
             rows={1}
+            disabled={hasBlockingDialog}
             placeholder={
               streaming
                 ? mode === "steer"
@@ -355,18 +484,64 @@ const Composer = memo(function Composer({ streaming, steering, followUp, command
             </button>
           )}
           </div>
-          <div className="composer-meta">
-            <div className="flex min-w-0 items-center gap-1.5">
-              <PermissionModePicker />
-              <ModelPicker models={models} current={agentState?.model ?? null} disabled={!models.length} onSelect={onSetModel} />
-              <ThinkingPicker current={agentState?.thinkingLevel ?? "off"} available={thinkingLevels.length ? thinkingLevels : undefined} disabled={!agentState} onSelect={onSetThinking} />
-              <StatsPopover stats={stats} hasSession={!!agentState} onCompact={onCompact} />
+          )}
+          {!hasBlockingDialog && (
+            <div className="composer-meta">
+              <div className="flex min-w-0 items-center gap-1.5">
+                <PermissionModePicker />
+                <ModelPicker models={models} current={agentState?.model ?? null} disabled={!models.length} onSelect={onSetModel} />
+                <ThinkingPicker current={agentState?.thinkingLevel ?? "off"} available={thinkingLevels.length ? thinkingLevels : undefined} disabled={!agentState} onSelect={onSetThinking} />
+                <StatsPopover stats={stats} hasSession={!!agentState} onCompact={onCompact} />
+              </div>
             </div>
-          </div>
+          )}
         </div>
       </div>
     </div>
   );
 });
+
+function ComposerDialogInput({ dialog, onDismiss, toast }: { dialog: ComposerDialog; onDismiss: (id: string) => void; toast: Props["toast"] }) {
+  const [value, setValue] = useState(dialog.prefill ?? "");
+  const respond = async (payload: Record<string, unknown>) => {
+    onDismiss(dialog.id);
+    try {
+      const { bridge } = await import("../bridge");
+      await bridge.uiRespond({ id: dialog.id, ...payload });
+    } catch (e: any) {
+      toast("error", e?.message ?? "failed to answer");
+    }
+  };
+  return (
+    <div className="mt-2 flex flex-col gap-2">
+      {dialog.method === "input" ? (
+        <input
+          autoFocus
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder={dialog.placeholder}
+          onKeyDown={(e) => e.key === "Enter" && void respond({ value })}
+          className="rounded-lg border border-line bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent"
+        />
+      ) : (
+        <textarea
+          autoFocus
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          rows={4}
+          className="resize-y rounded-lg border border-line bg-bg px-3 py-2 font-mono text-[12px] outline-none focus:border-accent"
+        />
+      )}
+      <div className="flex justify-end gap-2">
+        <button onClick={() => void respond({ cancelled: true })} className="rounded-lg border border-line px-3 py-1.5 text-[12.5px]">
+          Cancel
+        </button>
+        <button onClick={() => void respond({ value })} className="rounded-lg bg-accent px-3 py-1.5 text-[12.5px] font-semibold text-bg">
+          Submit
+        </button>
+      </div>
+    </div>
+  );
+}
 
 export default Composer;

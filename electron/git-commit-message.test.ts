@@ -13,6 +13,7 @@ const context: PreparedCommitContext = {
   deletions: 0,
   areas: ["src"],
   requiresBody: false,
+  stagedBefore: [],
 };
 
 describe("git commit message generation", () => {

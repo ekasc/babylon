@@ -12,6 +12,7 @@
 // extension_ui_request, ...), same command semantics.
 
 import { randomUUID } from "node:crypto";
+import { promises as fsp } from "node:fs";
 import { join, resolve } from "node:path";
 import { flattenSessionTree } from "./session-tree";
 import { projectHistory } from "./session-history";
@@ -26,6 +27,8 @@ import { buildGitCommitPrompt, extractModelText, parseGeneratedCommitMessage, ty
 import type { PreparedCommitContext } from "./git";
 import { buildRecapPrompt, normalizeRecapText, pickRecapDelta, recapDue, recapWorthy, RECAP_INTERVAL_MS, type Recap } from "./recap";
 import { ManagedSubagents, type ManagedSubagentRecord, type SubagentControlAction, type SubagentParentEvent } from "./subagents";
+import { createAskQuestionTool } from "./ask-question";
+import { createBabylonBashTool } from "./bash-tool";
 import { installAgentGuards } from "./permission-hook";
 import { mapToolToAction } from "./permission-agent";
 import type { BabylonPermissionController } from "./permissions";
@@ -252,8 +255,12 @@ export class PiHost {
         services,
         sessionManager: input.sessionManager,
         sessionStartEvent: input.sessionStartEvent,
-        customTools: [this.managedSubagents.tool()],
+        customTools: [this.managedSubagents.tool(), createAskQuestionTool(), createBabylonBashTool(runtimeCwd)],
       });
+      try {
+        const hasAsk = !!(result.session as any).getToolDefinition?.("ask_question");
+        console.log(`[Babylon] ask_question registered: ${hasAsk} — tools:`, (() => { try { return (result.session as any).getToolDefinitions?.() ? Object.keys((result.session as any).getToolDefinitions()) : "unknown"; } catch { return "err"; } })());
+      } catch {}
       const out: CreateAgentSessionRuntimeResult = {
         session: result.session,
         services,
@@ -611,6 +618,9 @@ export class PiHost {
     const session = this.runtime?.session;
     const file = session?.sessionFile;
     if (!file || !session.sessionManager) return;
+    if (session.isStreaming) return;
+    if (this.managedSubagents?.hasActiveForSession(session.sessionId)) return;
+    if (await this.hasActiveThreadsForSession(session.sessionId)) return;
     const intervalMs = Number(process.env.PIDECK_RECAP_MS) || RECAP_INTERVAL_MS;
     const cached = this.lastMessageAt.get(file);
     if (!cached || Date.now() - cached < intervalMs) return;
@@ -619,6 +629,9 @@ export class PiHost {
 
   private async maybeRecap(session: AgentSession, file: string): Promise<void> {
     if (this.recapping.has(file)) return;
+    if (session.isStreaming) return;
+    if (this.managedSubagents?.hasActiveForSession(session.sessionId)) return;
+    if (await this.hasActiveThreadsForSession(session.sessionId)) return;
     this.recapping.add(file);
     try {
       // The in-memory session manager keeps message content out of getEntries()
@@ -1456,6 +1469,25 @@ export class PiHost {
 
   async promoteSubagent(runId: string): Promise<{ sessionFile: string; cwd: string; parentSessionFile: string | null }> {
     return this.managedSubagents.promote(this.cwd, runId);
+  }
+
+  private async hasActiveThreadsForSession(sessionId: string): Promise<boolean> {
+    try {
+      const dir = join(this.cwd, ".pi", "state", "threads");
+      const entries: any[] = (await (fsp as any).readdir(dir, { withFileTypes: true }).catch(() => [])) as any[];
+      for (const entry of entries) {
+        if (!entry.isDirectory?.()) continue;
+        const path = join(dir, entry.name, "thread.json");
+        try {
+          const raw = await fsp.readFile(path, "utf8");
+          const state = JSON.parse(raw);
+          if (state?.parentSessionId !== sessionId) continue;
+          const status = state?.status as string | undefined;
+          if (status && !["completed", "failed", "stopped"].includes(status)) return true;
+        } catch {}
+      }
+    } catch {}
+    return false;
   }
 
   /** Deliver newly-introduced diagnostics to the active Pi session as visible context.

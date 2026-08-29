@@ -270,6 +270,20 @@ export class ManagedSubagents {
     return { sessionFile: record.sessionFile, cwd: record.cwd, parentSessionFile: record.parentSessionFile };
   }
 
+  hasActiveForSession(sessionId: string): boolean {
+    for (const rt of this.runtimes.values()) {
+      if (rt.record.parentSessionId !== sessionId) continue;
+      if (rt.running) return true;
+      if (rt.record.status === "running" || rt.record.status === "starting") return true;
+    }
+    return false;
+  }
+
+  hasAnyActive(): boolean {
+    for (const rt of this.runtimes.values()) if (rt.running || rt.record.status === "running" || rt.record.status === "starting") return true;
+    return false;
+  }
+
   async dispose(): Promise<void> {
     await Promise.all([...this.runtimes.values()].map(async (runtime) => {
       const wasRunning = Boolean(runtime.running);

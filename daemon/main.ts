@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { startDaemonServer } from "../src/daemon-server";
 import { PiHost } from "../electron/pi-host";
 import { HookManager } from "../electron/hook-manager";
+import { PermissionEngine, type AgentAction, type Risk } from "../electron/permissions";
 import { listSessions } from "../electron/sessions";
 
 function fail(message: string): never {
@@ -42,11 +43,27 @@ const defaultProject = process.env.BABYLON_DAEMON_DEFAULT_PROJECT ?? "";
 const sessionGroups = await listSessions(defaultProject || undefined).catch(() => []);
 const initialCwd = sessionGroups[0]?.cwd ?? (defaultProject || homedir());
 const hookManager = new HookManager();
+const permissionDir = process.env.BABYLON_DAEMON_PERMISSIONS_DIR ?? join(babylonDir, "pideck-state", "permissions");
+const permissionEngine = new PermissionEngine({ dir: permissionDir });
+await permissionEngine.load();
+
+// Approvals raised by the daemon-owned PiHost are routed to connected clients
+// through the daemon server once it is listening. Until then (no client can
+// prompt yet), fail closed.
+let approvalRequester: ((action: AgentAction, risk: Risk) => Promise<boolean>) | null = null;
+const requestApproval = (action: AgentAction, risk: Risk): Promise<boolean> =>
+  approvalRequester ? approvalRequester(action, risk) : Promise.resolve(false);
+
 const piHost = new PiHost({
   cwd: initialCwd,
   agentDir: process.env.BABYLON_DAEMON_AGENT_DIR,
   stateDir: process.env.BABYLON_DAEMON_STATE_DIR ?? join(babylonDir, "pideck-state"),
   hookManager,
+  permission: {
+    evaluate: (action) => permissionEngine.evaluate(action),
+    requestApproval,
+    clearSessionRules: () => permissionEngine.clearSessionRules(),
+  },
   onEvent: () => {},
   onStatus: () => {},
 });
@@ -57,8 +74,10 @@ const server = await startDaemonServer({
   snapshotPath,
   ...(policyTickMs !== undefined ? { policyTickMs } : {}),
   piHost,
+  permissionEngine,
   log: (message) => console.log(`babylon-daemon: ${message}`),
 });
+approvalRequester = (action, risk) => server.requestApproval(action, risk);
 
 const address = server.address();
 const addressLabel =

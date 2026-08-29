@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createHookRegistry, registerHook } from "./hooks";
 import { dispatchHooks, type HookContext } from "./hook-dispatcher";
 
@@ -76,5 +76,38 @@ describe("hook dispatcher", () => {
     );
     expect(out.rewrittenArgs).toEqual({ cmd: "echo bye" });
     expect(out.collectedMetadata).toEqual({ a: 1, b: 2 });
+  });
+
+  it("leaves no pending timers after a successful dispatch", async () => {
+    vi.useFakeTimers();
+    try {
+      let r = createHookRegistry();
+      r = registerHook(r, { id: "a", event: "pre_tool_use", enabled: true, timeoutMs: 1000 });
+      r = registerHook(r, { id: "b", event: "pre_tool_use", enabled: true, timeoutMs: 1000 });
+      const pending = dispatchHooks(r, "pre_tool_use", ctx, async (def) => ({
+        metadata: { [def.id]: 1 },
+      }));
+      await vi.advanceTimersByTimeAsync(0);
+      const out = await pending;
+      expect(out.results).toHaveLength(2);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears its timeout timer when a hook times out", async () => {
+    vi.useFakeTimers();
+    try {
+      let r = createHookRegistry();
+      r = registerHook(r, { id: "slow", event: "pre_tool_use", enabled: true, timeoutMs: 15 });
+      const pending = dispatchHooks(r, "pre_tool_use", ctx, async () => new Promise(() => {}));
+      await vi.advanceTimersByTimeAsync(20);
+      const out = await pending;
+      expect(out.errors.some((e) => e.id === "slow" && e.timedOut)).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

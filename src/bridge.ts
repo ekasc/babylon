@@ -449,6 +449,7 @@ export interface PiSettings {
   gitCommitModel?: ModelRef;
   gitCommitPrompt?: string;
   contextWindowOverrides?: Record<string, number>;
+  appearance?: { useSystemFonts?: boolean; monoFontFamily?: string };
 }
 
 export interface Bridge {
@@ -482,11 +483,17 @@ export interface Bridge {
   gitPrContext(cwd: string): Promise<GitPrContext>;
   gitPrSuggest(cwd: string): Promise<{ title: string; body: string; baseBranch: string; headBranch: string }>;
   gitPrCreate(cwd: string, input: { title: string; body?: string }): Promise<GitPrCreateResult>;
+  gitStageFile(cwd: string, file: string): Promise<void>;
+  gitUnstageFile(cwd: string, file: string): Promise<void>;
+  gitDiscardFile(cwd: string, file: string): Promise<void>;
+  gitStageHunk(cwd: string, file: string, patch: string): Promise<void>;
+  gitDiscardHunk(cwd: string, file: string, patch: string): Promise<void>;
   getModels(): Promise<any[]>;
   getCommands(): Promise<CommandInfo[]>;
   setModel(provider: string, modelId: string): Promise<any>;
   setThinking(level: string): Promise<any>;
   getThinkingLevels(): Promise<string[]>;
+  listFonts(): Promise<string[]>;
   setSessionName(name: string): Promise<any>;
   compact(): Promise<any>;
 
@@ -665,11 +672,17 @@ export const bridge: Bridge = window.pideck ?? {
   gitPrContext: () => Promise.resolve({ provider: "unknown", tool: null, openPr: null }),
   gitPrSuggest: () => Promise.reject(new Error("bridge unavailable")),
   gitPrCreate: () => Promise.reject(new Error("bridge unavailable")),
+  gitStageFile: () => Promise.reject(new Error("bridge unavailable")),
+  gitUnstageFile: () => Promise.reject(new Error("bridge unavailable")),
+  gitDiscardFile: () => Promise.reject(new Error("bridge unavailable")),
+  gitStageHunk: () => Promise.reject(new Error("bridge unavailable")),
+  gitDiscardHunk: () => Promise.reject(new Error("bridge unavailable")),
   getModels: () => Promise.resolve([]),
   getCommands: () => Promise.resolve([]),
   setModel: () => Promise.resolve(),
   setThinking: () => Promise.resolve(),
   getThinkingLevels: () => Promise.resolve([]),
+  listFonts: () => Promise.resolve([]),
   setSessionName: () => Promise.resolve(),
   compact: () => Promise.resolve(),
 
