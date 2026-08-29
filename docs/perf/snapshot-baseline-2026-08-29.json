@@ -1,0 +1,15 @@
+{
+  "ts": "2026-08-29T23:48:43.613Z",
+  "implementation": "pre-change (27e0bf0)",
+  "machine": "Apple Silicon, node v26.7.0, tmpfs-backed tempdir",
+  "scales": [10, 500, 2000, 10000],
+  "iterations_per_scale": 5,
+  "dirty_files_per_capture": 1,
+  "results": [
+    { "scale": 10, "firstCaptureMs": 78.593, "hotMedianMs": 28.996, "hotMinMs": 27.304, "hotMaxMs": 29.779, "noopMedianMs": 28.157 },
+    { "scale": 500, "firstCaptureMs": 106.262, "hotMedianMs": 40.943, "hotMinMs": 39.702, "hotMaxMs": 42.808, "noopMedianMs": 40.582 },
+    { "scale": 2000, "firstCaptureMs": 194.439, "hotMedianMs": 110.493, "hotMinMs": 108.537, "hotMaxMs": 113.053, "noopMedianMs": 105.114 },
+    { "scale": 10000, "firstCaptureMs": 2155.699, "hotMedianMs": 1165.881, "hotMinMs": 1152.201, "hotMaxMs": 1212.151, "noopMedianMs": 1164.006 }
+  ],
+  "notes": "noop path matches hot path; algorithm restates every tracked file via git ls-files, lstat, and git add --force from a pathspec of the full set. This is the O(total) work the audit described."
+}
