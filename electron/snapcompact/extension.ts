@@ -229,7 +229,13 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
       const summary = `Recap: snapcompact archive generation=${result.archive.compactionGenerationId} frames=${result.archive.frames.length}`;
       const compaction: CompactionResult = {
         summary,
-        firstKeptEntryId: result.archive.firstKeptEntryId ?? result.archive.lastKeptEntryId ?? preparation.firstKeptEntryId,
+        // Pi's cut point is authoritative: the compaction entry must
+        // reference the same first-kept entry Pi prepared, or the
+        // session tree would keep entries the archive omits (or vice
+        // versa). The archive's own coverage fields
+        // (firstKeptEntryId/omittedTrailing) describe what the
+        // archive contains and live in its manifest, not here.
+        firstKeptEntryId: preparation.firstKeptEntryId,
         tokensBefore: preparation.tokensBefore,
         details: { snapcompactGeneration: result.archive.compactionGenerationId, snapcompactProfile: result.archive.profileId } as any,
       };
