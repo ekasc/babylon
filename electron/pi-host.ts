@@ -1520,6 +1520,9 @@ export class PiHost {
 
   async dispose(): Promise<void> {
     this.rejectAllUi(new Error("host disposed"));
+    // Stop the recursive fs.watch watchers before anything else; leaving them
+    // running leaks file descriptors for every tracked worktree.
+    this.snapshots.dispose();
     await this.managedSubagents?.dispose().catch(() => undefined);
     this.unsubscribeEvents?.();
     this.unsubscribeEvents = null;
