@@ -7,6 +7,7 @@ import {
 } from "./daemon-host";
 import { createEnvelope, parseEnvelope, serializeEnvelope } from "./daemon-protocol";
 import { createTask } from "./tasks";
+import { createContract } from "./completion-contracts";
 import type { AttentionItem } from "./attention";
 import type { RuntimeState } from "./runtime";
 
@@ -154,5 +155,104 @@ describe("babylon daemon host", () => {
     expect(dup.response.type).toBe("error");
     const ping = dispatchRequest(rt, request("ping", null));
     expect(ping.response.type).toBe("pong");
+  });
+
+  it("registers a contract on contract.registered", () => {
+    const rt = createDaemonRuntime();
+    const contract = createContract({ id: "c1", title: "Ship it", checks: [{ kind: "tests", label: "tests pass", required: true }] });
+    const res = dispatchRequest(rt, request("contract.registered", contract));
+    expect(res.response.type).toBe("contract.registered");
+    expect(res.runtime.contracts.c1).toEqual(contract);
+  });
+
+  it("replaces a known contract id on re-registration", () => {
+    let rt = createDaemonRuntime();
+    const first = createContract({ id: "c1", title: "Ship it", checks: [{ kind: "tests", label: "tests pass", required: true }] });
+    rt = dispatchRequest(rt, request("contract.registered", first)).runtime;
+    const second = createContract({ id: "c1", title: "Ship it harder", checks: [{ kind: "lint", label: "lint clean", required: true }] });
+    const res = dispatchRequest(rt, request("contract.registered", second));
+    expect(res.response.type).toBe("contract.registered");
+    expect(res.runtime.contracts.c1.title).toBe("Ship it harder");
+  });
+
+  it("rejects malformed contract.registered payloads", () => {
+    const rt = createDaemonRuntime();
+    for (const payload of [{ id: "c1", title: "no checks" }, { id: "c1", checks: [] }, { title: "no id", checks: [] }, { id: "c1", title: 5, checks: [] }]) {
+      const res = dispatchRequest(rt, request("contract.registered", payload));
+      expect(res.response.type).toBe("error");
+      expect(res.runtime).toBe(rt);
+    }
+  });
+
+  it("serves contract.get and contract.list", () => {
+    let rt = createDaemonRuntime();
+    const a = createContract({ id: "c1", title: "A", checks: [] });
+    const b = createContract({ id: "c2", title: "B", checks: [] });
+    rt = dispatchRequest(rt, request("contract.registered", a)).runtime;
+    rt = dispatchRequest(rt, request("contract.registered", b)).runtime;
+    expect(dispatchRequest(rt, request("contract.get", { id: "c1" })).response.payload).toEqual({ contract: a });
+    expect(dispatchRequest(rt, request("contract.get", { id: "nope" })).response.payload).toEqual({ contract: null });
+    expect(dispatchRequest(rt, request("contract.list", {})).response.payload).toEqual({ contracts: [a, b] });
+    expect(dispatchRequest(rt, request("contract.get", {})).response.type).toBe("error");
+  });
+
+  it("task.complete without a contract marks the task completed", () => {
+    let rt = createDaemonRuntime();
+    rt = dispatchRequest(rt, request("task.created", createTask({ id: "t1", title: "x" }))).runtime;
+    const res = dispatchRequest(rt, request("task.complete", { id: "t1", results: [] }));
+    expect(res.response.type).toBe("task.complete");
+    expect(res.response.payload).toMatchObject({ blocked: false });
+    expect(res.runtime.tasks.tasks.t1.status).toBe("completed");
+  });
+
+  it("task.complete passes when the contract checks pass", () => {
+    let rt = createDaemonRuntime();
+    const contract = createContract({ id: "c1", title: "Ship it", checks: [{ kind: "tests", label: "tests pass", required: true }] });
+    rt = dispatchRequest(rt, request("contract.registered", contract)).runtime;
+    rt = dispatchRequest(
+      rt,
+      request("task.created", { ...createTask({ id: "t1", title: "x" }), contractId: "c1" }),
+    ).runtime;
+    const res = dispatchRequest(rt, request("task.complete", { id: "t1", results: [{ kind: "tests", passed: true }] }));
+    expect(res.response.payload).toMatchObject({ blocked: false });
+    const evaluation = (res.response.payload as { evaluation?: { passed: boolean } }).evaluation;
+    expect(evaluation?.passed).toBe(true);
+    expect(res.runtime.tasks.tasks.t1.status).toBe("completed");
+    expect(res.runtime.attention.items).toEqual({});
+  });
+
+  it("task.complete blocks on a failing contract, raising failed_task attention", () => {
+    let rt = createDaemonRuntime();
+    const contract = createContract({ id: "c1", title: "Ship it", checks: [{ kind: "tests", label: "tests pass", required: true }] });
+    rt = dispatchRequest(rt, request("contract.registered", contract)).runtime;
+    rt = dispatchRequest(
+      rt,
+      request("task.created", { ...createTask({ id: "t1", title: "x" }), contractId: "c1" }),
+    ).runtime;
+    const res = dispatchRequest(rt, request("task.complete", { id: "t1", results: [{ kind: "tests", passed: false }] }));
+    expect(res.response.payload).toMatchObject({ blocked: true, reason: "contract failed: tests pass" });
+    expect(res.runtime.tasks.tasks.t1.status).not.toBe("completed");
+    const item = Object.values(res.runtime.attention.items)[0];
+    expect(item).toMatchObject({ type: "failed_task", title: "Completion blocked: Ship it", source: "t1", resolved: false });
+    expect((res.response.payload as { attention?: { id: string } }).attention?.id).toBe(item.id);
+  });
+
+  it("task.complete fails loudly when the contract is missing", () => {
+    let rt = createDaemonRuntime();
+    rt = dispatchRequest(
+      rt,
+      request("task.created", { ...createTask({ id: "t1", title: "x" }), contractId: "ghost" }),
+    ).runtime;
+    const res = dispatchRequest(rt, request("task.complete", { id: "t1", results: [] }));
+    expect(res.response.type).toBe("error");
+    expect(res.response.payload).toMatchObject({ error: "contract ghost not found for task t1" });
+    expect(res.runtime).toBe(rt);
+  });
+
+  it("task.complete rejects unknown tasks and missing ids", () => {
+    const rt = createDaemonRuntime();
+    expect(dispatchRequest(rt, request("task.complete", { id: "nope", results: [] })).response.type).toBe("error");
+    expect(dispatchRequest(rt, request("task.complete", { results: [] })).response.type).toBe("error");
+    expect(rt.attention.items).toEqual({});
   });
 });

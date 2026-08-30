@@ -13,6 +13,10 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { startDaemonServer } from "../src/daemon-server";
+import { PiHost } from "../electron/pi-host";
+import { HookManager } from "../electron/hook-manager";
+import { PermissionEngine, type AgentAction, type Risk } from "../electron/permissions";
+import { listSessions } from "../electron/sessions";
 
 function fail(message: string): never {
   console.error(`babylon-daemon: ${message}`);
@@ -35,12 +39,46 @@ const babylonDir = join(homedir(), ".babylon");
 const listen = port !== undefined ? { port, host: "127.0.0.1" } : { socketPath: process.env.BABYLON_DAEMON_SOCKET ?? join(babylonDir, "daemon.sock") };
 const snapshotPath = process.env.BABYLON_DAEMON_SNAPSHOT ?? join(babylonDir, "daemon-state.json");
 
+const defaultProject = process.env.BABYLON_DAEMON_DEFAULT_PROJECT ?? "";
+const sessionGroups = await listSessions(defaultProject || undefined).catch(() => []);
+const initialCwd = sessionGroups[0]?.cwd ?? (defaultProject || homedir());
+const hookManager = new HookManager();
+const permissionDir = process.env.BABYLON_DAEMON_PERMISSIONS_DIR ?? join(babylonDir, "pideck-state", "permissions");
+const permissionEngine = new PermissionEngine({ dir: permissionDir });
+await permissionEngine.load();
+
+// Approvals raised by the daemon-owned PiHost are routed to connected clients
+// through the daemon server once it is listening. Until then (no client can
+// prompt yet), fail closed.
+let approvalRequester: ((action: AgentAction, risk: Risk) => Promise<boolean>) | null = null;
+const requestApproval = (action: AgentAction, risk: Risk): Promise<boolean> =>
+  approvalRequester ? approvalRequester(action, risk) : Promise.resolve(false);
+
+const piHost = new PiHost({
+  cwd: initialCwd,
+  agentDir: process.env.BABYLON_DAEMON_AGENT_DIR,
+  stateDir: process.env.BABYLON_DAEMON_STATE_DIR ?? join(babylonDir, "pideck-state"),
+  hookManager,
+  permission: {
+    evaluate: (action) => permissionEngine.evaluate(action),
+    requestApproval,
+    clearSessionRules: () => permissionEngine.clearSessionRules(),
+  },
+  onEvent: () => {},
+  onStatus: () => {},
+});
+await piHost.start();
+
 const server = await startDaemonServer({
   listen,
   snapshotPath,
   ...(policyTickMs !== undefined ? { policyTickMs } : {}),
+  piHost,
+  permissionEngine,
+  hookManager,
   log: (message) => console.log(`babylon-daemon: ${message}`),
 });
+approvalRequester = (action, risk) => server.requestApproval(action, risk);
 
 const address = server.address();
 const addressLabel =
@@ -53,6 +91,7 @@ async function stop(): Promise<void> {
   if (stopping) return;
   stopping = true;
   await server.close();
+  await piHost.dispose();
   process.exit(0);
 }
 process.on("SIGINT", () => void stop());

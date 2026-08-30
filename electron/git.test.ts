@@ -1,16 +1,19 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import {
   commitAll,
+  commitStaged,
   createBranch,
+  prepareCommitContext,
   detectProviderFromRemoteUrl,
   listBranches,
   pullCurrentBranch,
   pushCurrentBranch,
+  resetStaged,
   statusDetails,
   suggestPrContent,
   switchBranch,
@@ -93,6 +96,26 @@ describe("statusDetails", () => {
     expect(details.files.find((file) => file.path === "visible/new.txt")).toMatchObject({ insertions: 2, status: "?" });
   });
 
+  it("prepares staged context that includes untracked file contents", async () => {
+    const root = await makeRepoWithCommit();
+    await writeFile(join(root, "file.txt"), "one\ntwo\n");
+    await writeFile(join(root, "new.txt"), "new content\n");
+
+    const context = await prepareCommitContext(root);
+    expect(context.stagedSummary).toContain("file.txt");
+    expect(context.stagedSummary).toContain("new.txt");
+    expect(context.stagedPatch).toContain("+two");
+    expect(context.stagedPatch).toContain("+new content");
+    expect(context.recentSubjects).toContain("initial");
+    await expect(commitStaged(root, "Add prepared context test")).resolves.toMatchObject({ subject: "Add prepared context test" });
+  });
+
+  it("marks large staged changes as requiring a body", async () => {
+    const root = await makeRepoWithCommit();
+    await writeFile(join(root, "large.txt"), `${Array.from({ length: 501 }, (_, index) => `line ${index}`).join("\n")}\n`);
+    expect((await prepareCommitContext(root)).requiresBody).toBe(true);
+  });
+
   it("counts unpushed commits against the default branch", async () => {
     const root = await makeRepoWithCommit();
     await git(root, ["checkout", "-b", "feature"]);
@@ -115,6 +138,37 @@ describe("statusDetails", () => {
     expect(details.hasChanges).toBe(true);
     expect(details.files.map((f) => f.path)).toContain("file.txt");
     expect(details.insertions).toBe(1);
+  });
+});
+
+describe("resetStaged", () => {
+  it("preserves both the staged diff and unstaged working-tree edits when generation fails", async () => {
+    const root = await makeRepoWithCommit();
+    // 1. partially stage file.ts: index has 2 lines, HEAD has 1
+    await writeFile(join(root, "file.ts"), "one\ntwo\n");
+    await git(root, ["add", "file.ts"]);
+    // 2. make additional unstaged edits on top of the staged set
+    await writeFile(join(root, "file.ts"), "one\ntwo\nthree\n");
+
+    const stagedBefore = await git(root, ["diff", "--cached", "file.ts"]);
+    const workingBefore = await git(root, ["diff", "file.ts"]);
+    const fileBefore = await readFile(join(root, "file.ts"), "utf8");
+
+    const context = await prepareCommitContext(root);
+    // Sanity: prepareCommitContext ran git add -A, so the working-tree diff
+    // should now be empty.
+    expect(await git(root, ["diff", "file.ts"])).toBe("");
+    expect(context.indexTreeBefore).toBeDefined();
+
+    await resetStaged(root, context);
+
+    const stagedAfter = await git(root, ["diff", "--cached", "file.ts"]);
+    const workingAfter = await git(root, ["diff", "file.ts"]);
+    const fileAfter = await readFile(join(root, "file.ts"), "utf8");
+
+    expect(stagedAfter).toBe(stagedBefore);
+    expect(workingAfter).toBe(workingBefore);
+    expect(fileAfter).toBe(fileBefore);
   });
 });
 

@@ -11,7 +11,7 @@ import {
   type ExtensionContext,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { installPermissionHook } from "./permission-hook";
+import { installAgentGuards } from "./permission-hook";
 import type { BabylonPermissionController } from "./permissions";
 
 export type SubagentDelivery = "steer" | "follow-up";
@@ -55,7 +55,7 @@ interface ManagedRuntime {
   timeout: NodeJS.Timeout | null;
 }
 
-export interface ManagedSubagentStart {
+interface SubagentParams {
   task: string;
   model?: string;
   profile?: ManagedSubagentRecord["profile"];
@@ -111,13 +111,11 @@ export class ManagedSubagents {
       onParentMessage?: (record: ManagedSubagentRecord, action: SubagentParentEvent, message?: string) => void | Promise<void>;
       /** Babylon permission controller, if enabled. Gates the subagent's tools. */
       permission?: BabylonPermissionController;
+      hookManager?: import("./hook-manager").HookManager;
+      onLaunch?: (ev: { type: "babylon_launch_started" | "babylon_launch_terminated"; runId: string; runKind: "subagent" | "thread" | "workflow"; label?: string; status?: string }) => void;
     }
   ) {
     void this.recoverPersistent();
-  }
-
-  async start(params: ManagedSubagentStart, ctx: ExtensionContext): Promise<ManagedSubagentRecord> {
-    return (await this.create(params, ctx)).record;
   }
 
   tool(): ToolDefinition<any, any> {
@@ -148,7 +146,7 @@ export class ManagedSubagents {
       } as any,
       execute: async (_toolCallId, raw, signal, onUpdate, ctx) => {
         try {
-          const runtime = await this.create(raw as ManagedSubagentStart, ctx);
+          const runtime = await this.create(raw as SubagentParams, ctx);
           onUpdate?.({
             content: [{ type: "text", text: `Subagent ${runtime.record.runId} started. It can receive steer and follow-up messages from Activity.` }],
             details: { runId: runtime.record.runId, status: "running", controllable: true },
@@ -273,6 +271,20 @@ export class ManagedSubagents {
     return { sessionFile: record.sessionFile, cwd: record.cwd, parentSessionFile: record.parentSessionFile };
   }
 
+  hasActiveForSession(sessionId: string): boolean {
+    for (const rt of this.runtimes.values()) {
+      if (rt.record.parentSessionId !== sessionId) continue;
+      if (rt.running) return true;
+      if (rt.record.status === "running" || rt.record.status === "starting") return true;
+    }
+    return false;
+  }
+
+  hasAnyActive(): boolean {
+    for (const rt of this.runtimes.values()) if (rt.running || rt.record.status === "running" || rt.record.status === "starting") return true;
+    return false;
+  }
+
   async dispose(): Promise<void> {
     await Promise.all([...this.runtimes.values()].map(async (runtime) => {
       const wasRunning = Boolean(runtime.running);
@@ -292,7 +304,7 @@ export class ManagedSubagents {
     this.runtimes.clear();
   }
 
-  private async create(params: ManagedSubagentStart, ctx: ExtensionContext): Promise<ManagedRuntime> {
+  private async create(params: SubagentParams, ctx: ExtensionContext): Promise<ManagedRuntime> {
     const task = params.task?.trim();
     if (!task) throw new Error("Subagent task is required");
     const requestedModel = params.model?.trim() || (ctx.model ? exactModel(ctx.model) : "");
@@ -335,6 +347,7 @@ export class ManagedSubagents {
     this.addMessage(record, "user", task);
     const runtime = await this.createRuntime(record);
     this.runtimes.set(runId, runtime);
+    this.options.onLaunch?.({ type: "babylon_launch_started", runId, runKind: "subagent", label: record.name ?? task.slice(0, 80), status: "running" });
     void this.runTurn(runtime, task, params.timeoutMs);
     return runtime;
   }
@@ -476,7 +489,15 @@ export class ManagedSubagents {
     // Gate the subagent's tool calls through the same Babylon permission policy
     // as the parent session, so isolated agents can't bypass it.
     if (this.options.permission) {
-      installPermissionHook(created.session.agent, this.options.permission, record.cwd);
+      if (this.options.permission) {
+        installAgentGuards(created.session.agent as any, {
+          controller: this.options.permission,
+          cwd: record.cwd,
+          hookManager: this.options.hookManager,
+          sessionId: created.session.sessionId,
+          taskId: undefined,
+        });
+      }
     }
     const runtime: ManagedRuntime = { record, session: created.session, running: null, unsubscribe: null, timeout: null };
     record.sessionFile = created.session.sessionFile ?? manager.getSessionFile() ?? null;
@@ -537,6 +558,8 @@ export class ManagedSubagents {
       runtime.timeout = null;
       runtime.running = null;
       await this.save(record);
+      const terminal = (record.status as string) === "failed" ? "failed" : (record.status as string) === "stopped" ? "stopped" : "completed";
+      this.options.onLaunch?.({ type: "babylon_launch_terminated", runId: record.runId, runKind: "subagent", status: terminal });
     }
   }
 
@@ -556,6 +579,7 @@ export class ManagedSubagents {
     runtime.unsubscribe = null;
     runtime.session.dispose();
     this.runtimes.delete(runtime.record.runId);
+    this.options.onLaunch?.({ type: "babylon_launch_terminated", runId: runtime.record.runId, runKind: "subagent", status: "stopped" });
   }
 
   private addMessage(record: ManagedSubagentRecord, role: ManagedSubagentRecord["recentMessages"][number]["role"], text: string): void {

@@ -1,3 +1,5 @@
+import type { Task } from "./tasks";
+
 export interface SessionMeta {
   id: string;
   path: string;
@@ -76,6 +78,20 @@ export interface GitBranchInfo {
   name: string;
   current: boolean;
   committedAt: number;
+}
+
+export type GitCommitPushPhase = "preparing" | "generating" | "committing" | "pushing" | "done" | "error";
+
+export interface GitCommitPushProgress {
+  requestId: string;
+  phase: GitCommitPushPhase;
+  message: string;
+}
+
+export interface GitCommitPushResult {
+  generated: { subject: string; body: string; message: string };
+  commit: { commitSha: string; subject: string };
+  push: { status: "pushed" | "skipped_up_to_date"; branch: string; upstreamBranch?: string };
 }
 
 export interface GitPrSummary {
@@ -433,6 +449,7 @@ export interface PiSettings {
   gitCommitModel?: ModelRef;
   gitCommitPrompt?: string;
   contextWindowOverrides?: Record<string, number>;
+  appearance?: { useSystemFonts?: boolean; monoFontFamily?: string };
 }
 
 export interface Bridge {
@@ -458,18 +475,25 @@ export interface Bridge {
   gitBranches(cwd: string): Promise<{ branches: GitBranchInfo[]; current: string | null }>;
   gitBranchCreate(cwd: string, name: string, switchTo: boolean): Promise<{ branch: string }>;
   gitBranchSwitch(cwd: string, name: string, options?: { stash?: boolean }): Promise<{ branch: string | null; stashed?: boolean }>;
-  gitStartCommitPush(cwd: string): Promise<{ runId: string; model: string }>;
+  gitCommitPush(cwd: string, requestId: string): Promise<GitCommitPushResult>;
+  onGitCommitPushProgress(cb: (progress: GitCommitPushProgress) => void): () => void;
   gitCommit(cwd: string, message: string): Promise<{ commitSha: string; subject: string }>;
   gitPush(cwd: string): Promise<{ status: "pushed" | "skipped_up_to_date"; branch: string; upstreamBranch?: string }>;
   gitPull(cwd: string): Promise<{ status: "pulled" | "skipped_up_to_date"; branch: string; upstreamRef: string | null }>;
   gitPrContext(cwd: string): Promise<GitPrContext>;
   gitPrSuggest(cwd: string): Promise<{ title: string; body: string; baseBranch: string; headBranch: string }>;
   gitPrCreate(cwd: string, input: { title: string; body?: string }): Promise<GitPrCreateResult>;
+  gitStageFile(cwd: string, file: string): Promise<void>;
+  gitUnstageFile(cwd: string, file: string): Promise<void>;
+  gitDiscardFile(cwd: string, file: string): Promise<void>;
+  gitStageHunk(cwd: string, file: string, patch: string): Promise<void>;
+  gitDiscardHunk(cwd: string, file: string, patch: string): Promise<void>;
   getModels(): Promise<any[]>;
   getCommands(): Promise<CommandInfo[]>;
   setModel(provider: string, modelId: string): Promise<any>;
   setThinking(level: string): Promise<any>;
   getThinkingLevels(): Promise<string[]>;
+  listFonts(): Promise<string[]>;
   setSessionName(name: string): Promise<any>;
   compact(): Promise<any>;
 
@@ -484,14 +508,32 @@ export interface Bridge {
   fork(entryId: string): Promise<{ text?: string; cancelled?: boolean }>;
   clone(): Promise<{ cancelled?: boolean }>;
 
+  taskList(): Promise<Task[]>;
+  taskGet(id: string): Promise<Task | null>;
+  taskSpawn(taskId: string, command: string, cwd: string): Promise<ProcessSnapshot>;
+  taskSetContract(taskId: string, contract: import("./completion-contracts").CompletionContract): Promise<import("./completion-contracts").CompletionContract>;
+  taskComplete(taskId: string, results: import("./completion-contracts").CheckResult[]): Promise<{ blocked: boolean; reason?: string; hookId?: string; evaluation?: import("./completion-contracts").ContractEvaluation }>;
+  onTaskUpdate(cb: (tasks: Task[]) => void): () => void;
+  hooksList(): Promise<import("./hooks").HookDefinition[]>;
+  hooksRegister(hook: import("./hooks").HookDefinition): Promise<import("./hooks").HookDefinition[]>;
+  hooksRemove(id: string): Promise<import("./hooks").HookDefinition[]>;
+  onHooksUpdate(cb: (registry: import("./hooks").HookRegistry) => void): () => void;
+  contractsList(): Promise<import("./completion-contracts").CompletionContract[]>;
+  contractsGet(id: string): Promise<import("./completion-contracts").CompletionContract | null>;
+  attentionList(): Promise<import("./attention").AttentionRegistry>;
+  attentionResolve(id: string): Promise<import("./attention").AttentionRegistry>;
+  onAttentionUpdate(cb: (registry: import("./attention").AttentionRegistry) => void): () => void;
   worktreeInfo(): Promise<{
     isWorktree: boolean;
     sessionFile?: string;
     parentSession?: string;
     cwd?: string;
+    task?: Task;
     git: { isRepo: boolean; root?: string; branch?: string; isLinkedWorktree?: boolean };
   }>;
   worktreeCreate(opts: { name: string; description?: string; useGit?: boolean }): Promise<{
+    task: Task;
+    taskId: string;
     worktreePath: string;
     originalPath: string;
     gitWorktree?: { path: string; branch: string; baseBranch?: string } | null;
@@ -500,6 +542,8 @@ export interface Bridge {
     originalPath: string;
     kept: boolean;
     gitRemoved: boolean;
+    task?: Task;
+    removed?: boolean;
   }>;
 
   uiRespond(resp: Record<string, unknown>): Promise<void>;
@@ -542,10 +586,43 @@ export interface Bridge {
    onApprovalResolved(cb: (payload: { id: string; choice: ApprovalChoice }) => void): () => void;
   onPermissionsChanged(cb: (state: PermissionState) => void): () => void;
 
+  lspGetSnapshot(cwd: string): Promise<LspProjectSnapshot | null>;
+  lspListSnapshots(): Promise<LspProjectSnapshot[]>;
+  lspSetProject(cwd: string | null): Promise<LspProjectSnapshot | null>;
+  lspRefresh(cwd: string): Promise<LspProjectSnapshot>;
+  onLspUpdate(cb: (snapshots: LspProjectSnapshot[]) => void): () => void;
+
   processList(): Promise<ProcessSnapshot[]>;
   processSpawn(opts: { command: string; cwd: string; owner?: string; ownerSession?: string }): Promise<ProcessSnapshot>;
   processKill(id: string): Promise<ProcessSnapshot>;
   onProcessUpdate(cb: (snapshots: ProcessSnapshot[]) => void): () => void;
+}
+
+export type LspServerStatus = "unavailable" | "starting" | "running" | "crashed" | "stopped";
+export interface LspDiagnostic {
+  file: string;
+  line: number;
+  character: number;
+  severity: "error" | "warning" | "info" | "hint";
+  message: string;
+  source?: string;
+  code?: number | string;
+}
+export interface LspServerSnapshot {
+  language: string;
+  command: string;
+  args: string[];
+  pid?: number;
+  status: LspServerStatus;
+  message?: string;
+  restartCount: number;
+  diagnostics: LspDiagnostic[];
+}
+export interface LspProjectSnapshot {
+  cwd: string;
+  updatedAt: number;
+  diagnostics: LspDiagnostic[];
+  servers: LspServerSnapshot[];
 }
 
 declare global {
@@ -587,18 +664,25 @@ export const bridge: Bridge = window.pideck ?? {
   gitBranches: () => Promise.resolve({ branches: [], current: null }),
   gitBranchCreate: () => Promise.reject(new Error("bridge unavailable")),
   gitBranchSwitch: () => Promise.reject(new Error("bridge unavailable")),
-  gitStartCommitPush: () => Promise.reject(new Error("bridge unavailable")),
+  gitCommitPush: () => Promise.reject(new Error("bridge unavailable")),
+  onGitCommitPushProgress: () => () => undefined,
   gitCommit: () => Promise.reject(new Error("bridge unavailable")),
   gitPush: () => Promise.reject(new Error("bridge unavailable")),
   gitPull: () => Promise.reject(new Error("bridge unavailable")),
   gitPrContext: () => Promise.resolve({ provider: "unknown", tool: null, openPr: null }),
   gitPrSuggest: () => Promise.reject(new Error("bridge unavailable")),
   gitPrCreate: () => Promise.reject(new Error("bridge unavailable")),
+  gitStageFile: () => Promise.reject(new Error("bridge unavailable")),
+  gitUnstageFile: () => Promise.reject(new Error("bridge unavailable")),
+  gitDiscardFile: () => Promise.reject(new Error("bridge unavailable")),
+  gitStageHunk: () => Promise.reject(new Error("bridge unavailable")),
+  gitDiscardHunk: () => Promise.reject(new Error("bridge unavailable")),
   getModels: () => Promise.resolve([]),
   getCommands: () => Promise.resolve([]),
   setModel: () => Promise.resolve(),
   setThinking: () => Promise.resolve(),
   getThinkingLevels: () => Promise.resolve([]),
+  listFonts: () => Promise.resolve([]),
   setSessionName: () => Promise.resolve(),
   compact: () => Promise.resolve(),
 
@@ -612,6 +696,21 @@ export const bridge: Bridge = window.pideck ?? {
   getForkMessages: () => Promise.resolve([]),
   fork: () => Promise.resolve({ cancelled: true }),
   clone: () => Promise.resolve({ cancelled: true }),
+  taskList: () => Promise.resolve([]),
+  taskGet: () => Promise.resolve(null),
+  taskSpawn: () => Promise.reject(new Error("bridge unavailable")),
+  taskSetContract: () => Promise.reject(new Error("bridge unavailable")),
+  taskComplete: () => Promise.reject(new Error("bridge unavailable")),
+  onTaskUpdate: () => () => {},
+  hooksList: () => Promise.resolve([]),
+  hooksRegister: () => Promise.reject(new Error("bridge unavailable")),
+  hooksRemove: () => Promise.resolve([]),
+  onHooksUpdate: () => () => {},
+  contractsList: () => Promise.resolve([]),
+  contractsGet: () => Promise.resolve(null),
+  attentionList: () => Promise.resolve({ items: {} }),
+  attentionResolve: () => Promise.resolve({ items: {} }),
+  onAttentionUpdate: () => () => {},
   worktreeInfo: () =>
     Promise.resolve({
       isWorktree: false,
@@ -652,6 +751,12 @@ export const bridge: Bridge = window.pideck ?? {
   onApprovalCleared: () => () => {},
   onApprovalResolved: () => () => {},
   onPermissionsChanged: () => () => {},
+
+  lspGetSnapshot: () => Promise.resolve(null),
+  lspListSnapshots: () => Promise.resolve([]),
+  lspSetProject: () => Promise.resolve(null),
+  lspRefresh: () => Promise.reject(new Error("bridge unavailable")),
+  onLspUpdate: () => () => {},
 
   processList: () => Promise.resolve([]),
   processSpawn: () => Promise.reject(new Error("bridge unavailable")),

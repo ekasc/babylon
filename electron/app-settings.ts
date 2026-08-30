@@ -1,5 +1,5 @@
-import { app } from "electron";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 /**
@@ -38,11 +38,22 @@ export interface PiSettings {
   daemon?: {
     enabled?: boolean;
   };
+  /** Appearance preferences. */
+  appearance?: {
+    useSystemFonts?: boolean;
+    /** Selected monospace font for inline code and blocks. "system" = ui-monospace stack. */
+    monoFontFamily?: string;
+  };
 }
 
 export const DEFAULT_GIT_COMMIT_MODEL: ModelRef = {
-  provider: "openai-codex",
-  modelId: "gpt-5.6-luna",
+  provider: "opencode-go",
+  modelId: "muse-spark-1.2-contributor",
+};
+
+export const DEFAULT_CHAT_MODEL: ModelRef = {
+  provider: "opencode-go",
+  modelId: "muse-spark-1.2-contributor",
 };
 
 export const DEFAULT_GIT_COMMIT_PROMPT =
@@ -50,14 +61,25 @@ export const DEFAULT_GIT_COMMIT_PROMPT =
 
 const EMPTY: PiSettings = {
   contextWindowOverrides: {},
+  chatModel: DEFAULT_CHAT_MODEL,
+  titleModel: DEFAULT_GIT_COMMIT_MODEL,
   gitCommitModel: DEFAULT_GIT_COMMIT_MODEL,
   gitCommitPrompt: DEFAULT_GIT_COMMIT_PROMPT,
+  appearance: { useSystemFonts: true, monoFontFamily: "system" },
 };
 
 let cache: PiSettings | null = null;
 
 function settingsPath(): string {
-  return join(app.getPath("userData"), "pideck-settings.json");
+  if (process.env.BABYLON_SETTINGS_PATH) return process.env.BABYLON_SETTINGS_PATH;
+  try {
+    const { app } = require("electron") as typeof import("electron");
+    if (app && typeof app.getPath === "function") {
+      return join(app.getPath("userData"), "pideck-settings.json");
+    }
+  } catch {}
+  const base = join(homedir(), ".babylon", "pideck-settings.json");
+  return base;
 }
 
 /** Read the current settings (cached; reads disk once). */
@@ -71,6 +93,7 @@ export function getSettings(): PiSettings {
         ...EMPTY,
         ...parsed,
         contextWindowOverrides: parsed.contextWindowOverrides ?? {},
+        appearance: { ...EMPTY.appearance, ...(parsed.appearance ?? {}) },
       };
       return cache;
     }
@@ -90,6 +113,10 @@ export function saveSettings(patch: Partial<PiSettings>): PiSettings {
     contextWindowOverrides: {
       ...(current.contextWindowOverrides ?? {}),
       ...(patch.contextWindowOverrides ?? {}),
+    },
+    appearance: {
+      ...(current.appearance ?? {}),
+      ...(patch.appearance ?? {}),
     },
   };
   cache = next;

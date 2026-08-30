@@ -1,6 +1,6 @@
 # Babylon Roadmap
 
-> Audited 2026-08-27 against the actual runtime. 1 of 16 features is genuinely Done; 10 are Partial; 5 are Foundation. 426 tests pass, `tsc` clean. Previous status language overstated integration; this version states what actually works.
+> Audited 2026-08-27 against the actual runtime. 1 of 16 features is genuinely Done; 11 are Partial; 4 are Foundation. 447 tests pass, `tsc` clean. Previous status language overstated integration; this version states what actually works.
 
 ## Integration priority
 
@@ -58,9 +58,9 @@ Statuses: **DONE** (real, end-to-end, user-exercisable) · **PARTIAL** (meaningf
 
 ## Phase 2: Coding Intelligence
 
-- [ ] **FOUNDATION · 2. LSP integration** — `electron/lsp.ts` implements Content-Length framing, `encodeLspMessage`/`decodeLspMessages`, and diagnostic mapping, with tests. Nothing imports it. No server is ever spawned, initialized, or restarted; no document sync; no project association; no diagnostics in the UI; no feedback loop to Pi.
+- [ ] **PARTIAL · 2. LSP integration** — Electron owns project-scoped TypeScript, Python, Go, and Rust language-server processes. The service discovers source files, initializes stdio servers, synchronizes `didOpen`/`didChange`/`didSave`/`didClose`, normalizes diagnostics, retries bounded crashes, reports unavailable servers, and disposes children and watchers on project switch or app quit. The Problems panel shows real server state, PID, restart count, and grouped diagnostics. Newly introduced errors and warnings reach the active Pi session as bounded `babylon_diagnostics` context. A live Electron probe verified initial diagnostics, document version 2 after a file change, Pi delivery, project-switch cleanup, and app-quit cleanup.
 
-  Missing integration: a project-scoped LSP service in the main process (spawn → initialize → didOpen/didChange/didSave → publishDiagnostics → crash restart), a workspace diagnostics surface, and a post-edit hook that returns new relevant diagnostics to the active Pi session. Narrow the promised capabilities (hover/rename/code actions) until each has a live server behind it.
+  Missing integration: daemon ownership so language servers can survive desktop closure, broader workspace-folder/configuration behavior for monorepos, and editor actions such as hover, rename, and code actions. Linux fallback watching also needs dynamic directory discovery beyond the initially observed directories.
 
 ## Phase 3: Runtime Workspace
 
@@ -78,9 +78,9 @@ Statuses: **DONE** (real, end-to-end, user-exercisable) · **PARTIAL** (meaningf
 
 ## Phase 4: Parallel Work
 
-- [ ] **PARTIAL · 6. Task-owned worktrees** — real Git worktrees exist and are user-exercisable (`pideck:worktree-create/info`, BranchPanel, WorktreeBanner in `electron/main.ts`). What does not exist: the Task primitive. `src/tasks.ts` is imported by nothing outside its own tests and the never-connected `runtime.ts`; no execution path creates a task, links a session/branch/worktree to it, or promotes/merges through it.
+- [ ] **PARTIAL · 6. Task-owned worktrees** — Electron now owns task lifecycle via `TaskManager` (`src/tasks.ts` registry plus `electron/process-manager.ts`). `pideck:worktree-create` provisions one running task that owns the cloned Pi session, optional git branch/worktree, and later processes; `pideck:task-spawn` / task-stamped `process-spawn` validates cwd, stamps `owner`/`ownerSession`, and records `terminalIds`; `pideck:worktree-exit` goes through `TaskManager.exit` which refuses discard of a dirty worktree, kills owned processes before git/file cleanup, and rejects concurrent exits. A live Electron probe verified session-only create → process ownership → keep (paused + killed) → session reopen (running) → discard (removed). Renderer can list/get tasks and subscribe to `pideck:task-update`.
 
-  Missing integration: make the task the unit of execution — creating a task provisions session + branch + worktree, its terminals/preview/diff/checkpoints hang off the task id, and removal guards dirty worktrees at the runtime layer, not just in the pure model.
+  Missing integration: daemon persistence so tasks survive app quit and worktree recovery on restart, plus attachment of preview/diff/checkpoints to the task id (still panel-local).
 
 - [ ] **PARTIAL · 7. Structured subagent graph** — real subagents exist and work: `ManagedSubagents` spawns bounded and persistent agents, gates them through permissions, relays parent messages, and surfaces activity in the transcript. `src/subagent-graph.ts` (parent/child tree, goals, results, summaries) is imported by nothing and represents none of those real agents.
 
@@ -92,23 +92,23 @@ Statuses: **DONE** (real, end-to-end, user-exercisable) · **PARTIAL** (meaningf
 
 ## Phase 5: Attention and Completion
 
-- [ ] **PARTIAL · 9. Attention inbox** — real source: permission requests (raised on `onApprovalRequested`, cleared when the approval resolves). Synthetic source: automation failures from the placeholder executor. None of the other promised sources exist: no agent questions, blocked tasks, merge conflicts, missing credentials, environment failures, or review requests feed it.
+- [ ] **PARTIAL · 9. Attention inbox** — real sources: permission requests plus `blocked_task` (hook `before_stop` block) and `failed_task` (contract-gated `task.complete` fail) via `AttentionManager` (or `runtime.attention` when `daemon.enabled`) and `pideck:attention-*` IPC with `pideck:attention-update` broadcast. When `daemon.enabled`, `blocked_task`/`failed_task` are `attention.raised` on the daemon and survive quit via `daemon-state.json`. Automation failures still feed it synthetically. Live probes verified hook block and contract fail each created an unresolved item.
 
-  Missing integration: emit attention from real conditions — workflow/worktree conflicts, failed sessions, contract failures once contracts gate real work, review requests — and resolve them when the condition clears.
+  Missing integration: workflow/worktree conflicts, failed sessions, missing credentials, environment failures, and review requests; plus `attention_required` hook dispatch.
 
-- [ ] **FOUNDATION · 10. Completion contracts** — `src/completion-contracts.ts` evaluates required vs optional checks; `automation-runner` applies it, but only to the placeholder executor's synthetic runs. No real task or agent lifecycle consults a contract; "agent finished" and "contract passed" are never distinguished in a real flow.
+- [ ] **PARTIAL · 10. Completion contracts** — `src/completion-contracts.ts` evaluator is real and now gates task completion: `pideck:task-complete` checks required checks, fails closed on missing results, blocks `completed` and raises `failed_task` attention with the contract title/detail; passing checks marks the task `completed`. `automation-runner` also uses the same evaluator. Live Electron probe verified a task with a typecheck/tests contract failing then passing.
 
-  Missing integration: hook contract evaluation into before_stop/task completion (depends on Features 11 and 6), surface unsatisfied checks, and drive repair passes.
+  Missing integration: automatic check execution (typecheck/tests/lint/diagnostics) rather than supplied `CheckResult`s, and surfacing unsatisfied checks for a repair pass.
 
-- [ ] **FOUNDATION · 11. Hook system** — `src/hooks.ts` is a registry (pre/post_tool_use, before_stop, attention_required slots, ordering, timeout fields) with copy-on-insert semantics. There is no dispatcher: nothing executes hooks, enforces timeouts, isolates failures, or can block/rewrite a tool call. Pi's real pre-tool interception exists separately inside the permission hook.
+- [ ] **PARTIAL · 11. Hook system** — registry plus `src/hook-dispatcher.ts` (timeout via `Promise.race`, `AbortSignal`, error isolation, block short-circuit, `rewriteArgs` threading, metadata collection) wired into `pre_tool_use` via `installAgentGuards` (composed with the permission hook) and `post_tool_use`/`before_stop` via `HookManager`. `pideck:hooks-*` IPC and `pideck:hooks-update` exist. Live probe verified `before_stop` block → `blocked_task` attention, then contract fail → `failed_task` attention, then pass → `completed`.
 
-  Missing integration: a hook runner with timeouts and error isolation, wired to the same lifecycle points the permission hook uses, plus before_stop tied to completion contracts.
+  Missing integration: richer `rewrite_args`/`attach_metadata` actions, `attention_required` dispatch, and hook persistence for the future daemon owner.
 
 ## Phase 6: Control Plane
 
-- [ ] **PARTIAL · 12. Babylon daemon** — the transport story is real and tested: framed protocol, `daemon-server.ts` (multi-client, atomic persistence, event broadcast, policy ticks), `daemon-client.ts` (correlated requests, reconnect, queued calls), `daemon/main.ts` standalone entry, and Electron can spawn it when `daemon.enabled` is set. The extraction itself has not happened: Electron still creates and owns `PiHost` directly; the daemon holds an empty parallel `RuntimeState`; nothing ever connects a `DaemonClient`; closing the app still takes agent work down with it.
+- [ ] **PARTIAL · 12. Babylon daemon** — transport, persistence, and task + attention ownership are real: framed protocol (now with `pi.*` and `pi.notifyDiagnostics`), `daemon-server.ts` (multi-client, atomic persistence, event broadcast for `task.*`/`attention.*`/`pi.event`/`pi.session.status`, policy ticks), `daemon-client.ts` (reconnect with backoff, queued calls), `daemon/main.ts` owns a `PiHost` (with `HookManager`) and `pi.*` handlers, and Electron is a thin client for `task.*`/`pi.*` when `daemon.enabled` (spawn + `connectDaemonClient`, `state.get` warm cache, `task.*` through daemon, `pideck:task-update`/`attention-update`/`agent-events`/`session-status` from daemon events). Tasks and `blocked_task`/`failed_task` attention survive Electron quit via `daemon-state.json`; `PiHost` sessions are daemon-owned for prompt/streaming. `LspManager`/`ProcessManager` remain Electron-owned.
 
-  Missing integration: move PiHost/session/approval/process ownership into the daemon, make the desktop a thin client over `DaemonClient`, prove close-and-reopen reconnects to live state, and delete the competing in-app sources of truth.
+  Missing integration: move `LspManager`/`ProcessManager` into the daemon, delete the remaining competing in-process `host`/`taskManager` code paths when `daemon.enabled`, and prove close-and-reopen reconnects to live `Lsp` and process state.
 
 - [ ] **PARTIAL · 13. Background execution policies** — `canRunInBackground` gating is real wherever the tick runs (daemon timer, App scheduler loop): mode/battery/sleep/concurrency/cost/per-project checks produce truthful block reasons. What the policies govern is not: the only schedulable work is the placeholder executor that always fails. No real background agent execution exists to pause or resume.
 

@@ -62,6 +62,23 @@ export interface GitCommitResult {
   subject: string;
 }
 
+export interface PreparedCommitContext {
+  branch: string | null;
+  stagedSummary: string;
+  stagedPatch: string;
+  truncatedPatch: boolean;
+  recentSubjects: string;
+  fileCount: number;
+  insertions: number;
+  deletions: number;
+  areas: string[];
+  requiresBody: boolean;
+  /** Tree SHA of the index before `git add -A`, for exact hunk-level restore. */
+  indexTreeBefore?: string;
+  /** Fallback: paths that were staged before, for unborn HEAD where write-tree fails. */
+  stagedBefore: string[];
+}
+
 export type GitProviderKind = "github" | "gitlab" | "unknown";
 
 export interface GitPrSummary {
@@ -262,7 +279,8 @@ const NON_REPO_STATUS: GitStatusDetails = {
 export async function statusDetails(cwd: string): Promise<GitStatusDetails> {
   // -uall lists untracked files individually instead of collapsing whole
   // directories, so every entry is a concrete diffable file.
-  const status = await runGit(["status", "--porcelain=2", "--branch", "-uall"], cwd);
+  // core.quotepath=false keeps unicode filenames literal (no octal \303\274 quoting).
+  const status = await runGit(["-c", "core.quotepath=false", "status", "--porcelain=2", "--branch", "-uall"], cwd);
   if (status.exitCode !== 0) {
     if (isNotRepoStderr(status.stderr)) return NON_REPO_STATUS;
     throw new GitError(firstLine(status.stderr) || "git status failed");
@@ -303,13 +321,13 @@ export async function statusDetails(cwd: string): Promise<GitStatusDetails> {
   }
 
   let numstatStdout = "";
-  const numstat = await runGit(["diff", "HEAD", "--numstat", "--"], cwd);
+  const numstat = await runGit(["-c", "core.quotepath=false", "diff", "HEAD", "--numstat", "--"], cwd);
   if (numstat.exitCode === 0) {
     numstatStdout = numstat.stdout;
   } else if (isUnbornHeadStderr(numstat.stderr)) {
     const [unstaged, staged] = await Promise.all([
-      gitStdout(["diff", "--numstat"], cwd).catch(() => ""),
-      gitStdout(["diff", "--cached", "--numstat"], cwd).catch(() => ""),
+      gitStdout(["-c", "core.quotepath=false", "diff", "--numstat"], cwd).catch(() => ""),
+      gitStdout(["-c", "core.quotepath=false", "diff", "--cached", "--numstat"], cwd).catch(() => ""),
     ]);
     const merged = new Map<string, { insertions: number; deletions: number }>();
     for (const entry of [...parseNumstatEntries(staged), ...parseNumstatEntries(unstaged)]) {
@@ -392,23 +410,104 @@ export async function statusDetails(cwd: string): Promise<GitStatusDetails> {
 // Commit / push / pull
 // ---------------------------------------------------------------------------
 
-export async function commitAll(cwd: string, message: string): Promise<GitCommitResult> {
-  const normalized = message.replace(/\r\n/g, "\n").trim();
-  if (!normalized) throw new GitError("commit message is required");
-  const [subject, ...rest] = normalized.split("\n");
-  const body = rest.join("\n").trim();
+const PREPARED_COMMIT_PATCH_CHARS = 49_000;
 
+export async function prepareCommitContext(cwd: string): Promise<PreparedCommitContext> {
   const details = await statusDetails(cwd);
   if (!details.isRepo) throw new GitError("not a git repository");
   if (!details.hasChanges) throw new GitError("no changes to commit");
 
+  // Snapshot the index exactly (hunk-level) before `git add -A` so a failed
+  // generation/commit can restore the user's staged selection exactly, not just
+  // the set of files. For unborn HEAD, write-tree fails, so keep the old
+  // filename fallback.
+  const stagedBefore = (await gitStdout(["-c", "core.quotepath=false", "diff", "--cached", "--name-only", "-z"], cwd))
+    .split("\0")
+    .filter(Boolean);
+  let indexTreeBefore: string | undefined;
+  try {
+    const tree = await gitStdout(["write-tree"], cwd);
+    if (/^[0-9a-f]{40}$/.test(tree.trim())) indexTreeBefore = tree.trim();
+  } catch {}
   await gitStdout(["add", "-A"], cwd);
+  const [stagedSummary, patchResult, numstatResult, recentResult] = await Promise.all([
+    gitStdout(["-c", "core.quotepath=false", "diff", "--cached", "--name-status"], cwd),
+    runGit(["-c", "core.quotepath=false", "diff", "--no-ext-diff", "--cached", "--patch", "--minimal"], cwd),
+    runGit(["-c", "core.quotepath=false", "diff", "--cached", "--numstat"], cwd),
+    runGit(["log", "-8", "--pretty=%s"], cwd),
+  ]);
+  if (!stagedSummary.trim()) throw new GitError("no staged changes to commit");
+  if (patchResult.exitCode !== 0) throw new GitError(firstLine(patchResult.stderr) || "git diff failed");
+  if (numstatResult.exitCode !== 0) throw new GitError(firstLine(numstatResult.stderr) || "git numstat failed");
+
+  const stats = parseNumstatEntries(numstatResult.stdout);
+  const insertions = stats.reduce((total, entry) => total + entry.insertions, 0);
+  const deletions = stats.reduce((total, entry) => total + entry.deletions, 0);
+  const areas = [...new Set(stats.map((entry) => entry.path.includes("/") ? entry.path.split("/", 1)[0] : "repository root"))];
+  const truncatedPatch = patchResult.stdout.length > PREPARED_COMMIT_PATCH_CHARS;
+  const patch = truncatedPatch
+    ? `${patchResult.stdout.slice(0, PREPARED_COMMIT_PATCH_CHARS)}\n[patch truncated at ${PREPARED_COMMIT_PATCH_CHARS} characters]`
+    : patchResult.stdout;
+
+  return {
+    branch: details.branch,
+    stagedSummary: stagedSummary.trim(),
+    stagedPatch: patch,
+    truncatedPatch,
+    recentSubjects: recentResult.exitCode === 0 ? recentResult.stdout.trim() : "",
+    fileCount: stats.length,
+    insertions,
+    deletions,
+    areas,
+    requiresBody: stats.length >= 10 || insertions + deletions >= 500 || areas.length >= 3,
+    indexTreeBefore,
+    stagedBefore,
+  };
+}
+
+/**
+ * Undo what prepareCommitContext staged. Prefers the exact index tree snapshot
+ * (hunk-level) when available; otherwise falls back to the filename list for
+ * unborn HEAD. Restores the index only — never touches the working tree, so
+ * the user's unstaged edits are preserved. Best-effort: never throws.
+ */
+export async function resetStaged(cwd: string, context?: PreparedCommitContext | readonly string[]): Promise<void> {
+  const indexTreeBefore = !Array.isArray(context) ? (context as PreparedCommitContext | undefined)?.indexTreeBefore : undefined;
+  const stagedBefore = Array.isArray(context) ? context : (context as PreparedCommitContext | undefined)?.stagedBefore;
+  if (indexTreeBefore && /^[0-9a-f]{40}$/.test(indexTreeBefore)) {
+    const read = await runGit(["read-tree", indexTreeBefore], cwd).catch(() => null);
+    if (read && read.exitCode === 0) return;
+  }
+  await runGit(["reset", "HEAD", "--"], cwd).catch(() => undefined);
+  if (stagedBefore && stagedBefore.length > 0) {
+    await runGit(["add", "--", ...stagedBefore], cwd).catch(() => undefined);
+  }
+}
+
+export async function commitStaged(cwd: string, message: string): Promise<GitCommitResult> {
+  const normalized = message.replace(/\r\n/g, "\n").trim();
+  if (!normalized) throw new GitError("commit message is required");
+  const [subject, ...rest] = normalized.split("\n");
+  const body = rest.join("\n").trim();
+  const staged = await runGit(["diff", "--cached", "--quiet"], cwd);
+  if (staged.exitCode === 0) throw new GitError("no staged changes to commit");
+  if (staged.exitCode !== 1) throw new GitError(firstLine(staged.stderr) || "could not read staged changes");
+
   const args = ["commit", "-m", subject.trim()];
   if (body.length > 0) args.push("-m", body);
   const result = await runGit(args, cwd, COMMIT_TIMEOUT_MS);
   if (result.exitCode !== 0) throw new GitError(firstLine(result.stderr) || "git commit failed");
   const commitSha = await gitStdout(["rev-parse", "HEAD"], cwd);
   return { commitSha, subject: subject.trim() };
+}
+
+export async function commitAll(cwd: string, message: string): Promise<GitCommitResult> {
+  if (!message.replace(/\r\n/g, "\n").trim()) throw new GitError("commit message is required");
+  const details = await statusDetails(cwd);
+  if (!details.isRepo) throw new GitError("not a git repository");
+  if (!details.hasChanges) throw new GitError("no changes to commit");
+  await gitStdout(["add", "-A"], cwd);
+  return commitStaged(cwd, message);
 }
 
 async function resolveCurrentUpstream(cwd: string, upstreamRef: string): Promise<{ remoteName: string; branchName: string } | null> {
@@ -799,18 +898,17 @@ const MAX_DIFF_BYTES = 512 * 1024;
  * all-added, git-style.
  */
 export async function diffForFile(cwd: string, file: string): Promise<string> {
-  const target = file.replace(/\/+$/, "");
-  if (!target) return ""; // bare directory paths have no diff
-
-  try {
-    const st = await fsp.stat(join(cwd, target));
-    if (st.isDirectory()) return "";
-  } catch {
-    // Not present in the working tree — let the git calls below decide.
-  }
+  const rawTarget = file.replace(/\/+$/, "").trim();
+  if (!rawTarget) return ""; // bare directory paths have no diff
+  // Guard against git flag injection and null bytes. Git treats ` -- ` as the
+  // path separator, but a file literally named "-p" would still be interpreted
+  // as a flag if we ever drop the separator, so reject leading dashes early.
+  if (rawTarget.startsWith("-") || rawTarget.includes("\u0000")) return "";
+  if (rawTarget.includes("//") || rawTarget.split("/").some((segment) => segment === "..")) return "";
+  const target = rawTarget;
 
   // Changed tracked files are the common path: one git process, no preflight.
-  const tracked = await runGit(["diff", "HEAD", "--", target], cwd);
+  const tracked = await runGit(["-c", "core.quotepath=false", "diff", "HEAD", "--", target], cwd);
   if (tracked.stdout.length > 0) return truncateDiff(tracked.stdout);
   if (tracked.exitCode !== 0) throw new GitError(firstLine(tracked.stderr) || "git diff failed");
 
@@ -820,10 +918,73 @@ export async function diffForFile(cwd: string, file: string): Promise<string> {
   if (trackedCheck.exitCode === 0 && trackedCheck.stdout.trim().length > 0) return "";
 
   const nullDevice = process.platform === "win32" ? "NUL" : "/dev/null";
-  const untracked = await runGit(["diff", "--no-index", "--", nullDevice, target], cwd, 15_000);
+  const untracked = await runGit(["-c", "core.quotepath=false", "diff", "--no-index", "--", nullDevice, target], cwd, 15_000);
   if (untracked.stdout.length > 0) return truncateDiff(untracked.stdout);
   if (!isNotRepoStderr(untracked.stderr)) throw new GitError(firstLine(untracked.stderr) || "git diff failed");
   return "";
+}
+
+export async function stageFile(cwd: string, file: string): Promise<void> {
+  const target = file.replace(/\/+$/, "").trim();
+  if (!target || target.startsWith("-") || target.includes("\0")) throw new GitError("invalid file path");
+  const result = await runGit(["add", "--", target], cwd);
+  if (result.exitCode !== 0) throw new GitError(firstLine(result.stderr) || "git add failed");
+}
+
+export async function unstageFile(cwd: string, file: string): Promise<void> {
+  const target = file.replace(/\/+$/, "").trim();
+  if (!target || target.startsWith("-") || target.includes("\0")) throw new GitError("invalid file path");
+  const result = await runGit(["reset", "HEAD", "--", target], cwd);
+  if (result.exitCode !== 0) throw new GitError(firstLine(result.stderr) || "git reset failed");
+}
+
+export async function discardFile(cwd: string, file: string): Promise<void> {
+  const target = file.replace(/\/+$/, "").trim();
+  if (!target || target.startsWith("-") || target.includes("\0")) throw new GitError("invalid file path");
+  // Try checkout for tracked files, clean for untracked
+  const ls = await runGit(["ls-files", "--", target], cwd);
+  const isTracked = ls.exitCode === 0 && ls.stdout.trim().length > 0;
+  if (isTracked) {
+    const result = await runGit(["checkout", "--", target], cwd);
+    if (result.exitCode !== 0) throw new GitError(firstLine(result.stderr) || "git checkout failed");
+    // Also clean untracked changes if any (for partially staged)
+    await runGit(["clean", "-f", "--", target], cwd).catch(() => undefined);
+  } else {
+    const result = await runGit(["clean", "-f", "--", target], cwd);
+    if (result.exitCode !== 0) throw new GitError(firstLine(result.stderr) || "git clean failed");
+    // Remove the file if it's an untracked file not covered by clean (e.g. nested)
+    await runGit(["rm", "--cached", "--", target], cwd).catch(() => undefined);
+  }
+}
+
+export async function stageHunk(cwd: string, file: string, patch: string): Promise<void> {
+  const target = file.replace(/\/+$/, "").trim();
+  if (!target || !patch.trim()) throw new GitError("invalid hunk");
+  const tmpFile = join(tmpdir(), `pideck-hunk-${randomUUID()}.patch`);
+  try {
+    await fsp.writeFile(tmpFile, patch, "utf8");
+    const result = await runGit(["apply", "--cached", "--", tmpFile], cwd);
+    if (result.exitCode !== 0) throw new GitError(firstLine(result.stderr) || "git apply failed");
+  } finally {
+    await fsp.rm(tmpFile, { force: true }).catch(() => undefined);
+  }
+}
+
+export async function discardHunk(cwd: string, file: string, patch: string): Promise<void> {
+  const target = file.replace(/\/+$/, "").trim();
+  if (!target || !patch.trim()) throw new GitError("invalid hunk");
+  const tmpFile = join(tmpdir(), `pideck-hunk-${randomUUID()}.patch`);
+  try {
+    await fsp.writeFile(tmpFile, patch, "utf8");
+    const result = await runGit(["apply", "-R", "--", tmpFile], cwd);
+    if (result.exitCode !== 0) {
+      // Fallback to checkout for the hunk via apply reverse
+      const fallback = await runGit(["checkout", "-p", "HEAD", "--", target], cwd).catch(() => null);
+      if (!fallback || fallback.exitCode !== 0) throw new GitError(firstLine(result.stderr) || "git apply reverse failed");
+    }
+  } finally {
+    await fsp.rm(tmpFile, { force: true }).catch(() => undefined);
+  }
 }
 
 function truncateDiff(text: string): string {

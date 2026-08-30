@@ -14,9 +14,12 @@ export interface Task {
   status: TaskStatus;
   /** Parent session/agent that owns this task. */
   ownerSession?: string;
-  /** Associated Pi session id. */
+  /** Associated Pi session identity and persisted session files. */
   sessionId?: string;
-  /** Git branch and worktree path created for the task. */
+  sessionFile?: string;
+  parentSessionFile?: string;
+  /** Project cwd plus optional isolated Git branch/worktree. */
+  cwd?: string;
   branch?: string;
   worktreePath?: string;
   /** Whether the worktree has uncommitted changes (guards deletion). */
@@ -24,6 +27,8 @@ export interface Task {
   terminalIds: string[];
   previewId?: string;
   checkpointIds: string[];
+  /** Optional completion contract id that must pass before the task is considered done. */
+  contractId?: string;
   createdAt: number;
 }
 

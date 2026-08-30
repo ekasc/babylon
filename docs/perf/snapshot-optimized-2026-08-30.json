@@ -1,0 +1,16 @@
+{
+  "ts": "2026-08-30T01:33:03.430Z",
+  "implementation": "watcher-gated incremental snapshot (worktree watcher short-circuits noop captures)",
+  "machine": "Apple Silicon, node v26.7.0, tmpfs-backed tempdir",
+  "scales": [10, 500, 2000, 10000],
+  "iterations_per_scale": 5,
+  "dirty_files_per_capture": 1,
+  "results": [
+    { "scale": 10, "firstCaptureMs": 91.785, "hotMedianMs": 67.149, "hotMinMs": 57.428, "hotMaxMs": 78.968, "noopMedianMs": 0.007 },
+    { "scale": 500, "firstCaptureMs": 127.652, "hotMedianMs": 75.07, "hotMinMs": 68.299, "hotMaxMs": 104.821, "noopMedianMs": 0.004 },
+    { "scale": 2000, "firstCaptureMs": 232.552, "hotMedianMs": 177.701, "hotMinMs": 173.375, "hotMaxMs": 191.97, "noopMedianMs": 0.004 },
+    { "scale": 10000, "firstCaptureMs": 2768.831, "hotMedianMs": 1413.246, "hotMinMs": 1406.58, "hotMaxMs": 4751.583, "noopMedianMs": 0.003 }
+  ],
+  "notes": "noopMedianMs is now O(1) (~0.003ms) at every scale: when the worktree watcher reports no change since the last capture, capture() returns the cached tree without spawning git. This is the fix for prompt-start latency (the audit's 15s was O(total) enumeration on every capture). hotMedianMs is the unavoidable O(N) full enumeration that only runs when files actually change (turn-end, after the model responds). firstCaptureMs is the one-time cold cost to init the shadow repo + watcher.",
+  "compare_to": "snapshot-baseline-2026-08-29.json"
+}

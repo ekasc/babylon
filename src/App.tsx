@@ -5,7 +5,7 @@ import { shouldAcceptEvent } from "./sessionLifecycle";
 import { insertCommand } from "./commands";
 import Sidebar from "./components/Sidebar";
 import SettingsPage from "./components/SettingsPage";
-import { applyTheme, loadThemePref, type ThemePref } from "./lib/theme";
+import { applyMonoFont, applySystemFonts, applyTheme, loadMonoFontPref, loadSystemFontsPref, loadThemePref, type ThemePref } from "./lib/theme";
 import ProjectFilter from "./components/ProjectFilter";
 import ChatView from "./components/ChatView";
 import Composer, { type Attachment } from "./components/Composer";
@@ -16,7 +16,7 @@ import WorkspacePane from "./components/WorkspacePane";
 import { RollbackConfirm, RollbackDock } from "./components/Rollback";
 import { WorktreeBanner, WorktreeModal, type WorktreeInfo } from "./components/Worktree";
 import { ApprovalGate } from "./components/ApprovalGate";
-import GitView from "./components/GitView";
+import GitCommitPopover from "./components/GitCommitPopover";
 // Overlay panels are rarely needed at boot; lazy-load them so they stay out
 // of the startup bundle.
 const ProcessPanel = lazy(() => import("./components/ProcessPanel").then((m) => ({ default: m.ProcessPanel })));
@@ -25,6 +25,7 @@ const AttentionPanel = lazy(() => import("./components/AttentionPanel").then((m)
 const DevicesPanel = lazy(() => import("./components/DevicesPanel").then((m) => ({ default: m.DevicesPanel })));
 const AutomationPanel = lazy(() => import("./components/AutomationPanel").then((m) => ({ default: m.AutomationPanel })));
 const DiagnosticsPanel = lazy(() => import("./components/DiagnosticsPanel").then((m) => ({ default: m.DiagnosticsPanel })));
+import { ProblemsPanel } from "./components/ProblemsPanel";
 import { collectDiagnostics } from "./diagnostics";
 import { PromptHost, confirmAction, promptText } from "./lib/prompts";
 import { createDeviceRegistry, type DeviceRegistry } from "./device-pairing";
@@ -207,7 +208,7 @@ export default function App() {
   const [worktreeInfo, setWorktreeInfo] = useState<WorktreeInfo | null>(null);
   const [showWorktreeModal, setShowWorktreeModal] = useState(false);
   const [showBranchPanel, setShowBranchPanel] = useState(false);
-  const [showGitView, setShowGitView] = useState(false);
+  const [showCommitPopover, setShowCommitPopover] = useState(false);
   const [showWorkflowsPanel, setShowWorkflowsPanel] = useState(false);
   const [showCommandPalette, setShowCommandPalette] = useState(false);
 
@@ -224,6 +225,8 @@ export default function App() {
   const [schedule, setSchedule] = useState<ScheduledTaskRegistry>(createScheduledTaskRegistry);
   const [automationHistory, setAutomationHistory] = useState<AutomationHistory>(createAutomationHistory);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [showProblems, setShowProblems] = useState(false);
+  const [lspSnapshots, setLspSnapshots] = useState<import("./bridge").LspProjectSnapshot[]>([]);
   const [eventLog, setEventLog] = useState<EventLog>(createEventLog);
 
   // Append a batch of Babylon events to the diagnostics log. Invalid events
@@ -277,13 +280,7 @@ export default function App() {
     const stored = Number(localStorage.getItem("pideck:context-width"));
     return Number.isFinite(stored) && stored >= 360 && stored <= 1100 ? stored : 520;
   });
-  // Give Git enough room on first open, then trust the user's resize exactly.
-  // This effect runs once per closed→open transition; it never fights dragging.
-  useEffect(() => {
-    if (!showGitView) return;
-    const initial = Math.min(760, Math.max(520, window.innerWidth - 560));
-    setContextWidth((width) => Math.max(width, initial));
-  }, [showGitView]);
+
   const [sidebarMinimized, setSidebarMinimized] = useState(() => localStorage.getItem("pideck:sidebar-minimized") === "1");
   const [draftRequest, setDraftRequest] = useState<{ id: number; text: string } | null>(null);
   const [promotedParent, setPromotedParent] = useState<{ path: string; cwd: string } | null>(null);
@@ -511,6 +508,18 @@ export default function App() {
       off();
     };
   }, []);
+
+  // LSP: keep active project and problem list in sync
+  useEffect(() => {
+    const off = bridge.onLspUpdate((snapshots) => setLspSnapshots(snapshots));
+    bridge.lspListSnapshots().then(setLspSnapshots).catch(() => undefined);
+    return off;
+  }, []);
+  useEffect(() => {
+    const cwd = status.cwd;
+    if (!cwd) return;
+    bridge.lspSetProject(cwd).catch(() => undefined);
+  }, [status.cwd]);
 
   // Attention Inbox: raise an item when the agent needs the user (here, a
   // permission request). The id is keyed to the approval id so repeats of the
@@ -1108,6 +1117,19 @@ export default function App() {
     applyTheme(themePref);
   }, [themePref]);
 
+  useEffect(() => {
+    applySystemFonts(loadSystemFontsPref());
+    applyMonoFont(loadMonoFontPref());
+    void bridge.getSettings().then((s) => {
+      const enabled = s?.appearance?.useSystemFonts ?? true;
+      const family = s?.appearance?.monoFontFamily ?? "system";
+      applySystemFonts(enabled);
+      applyMonoFont(family);
+      localStorage.setItem("pideck:useSystemFonts", String(enabled));
+      localStorage.setItem("pideck:monoFont", family);
+    }).catch(() => undefined);
+  }, []);
+
   const compact = useCallback(async () => {
     try {
       await bridge.compact();
@@ -1222,7 +1244,7 @@ export default function App() {
     workflowRuns.filter((run) => run.status === "pending" || run.status === "running" || run.status === "paused").length +
     activity.threads.filter((thread) => ["queued", "starting", "running", "interrupting"].includes(thread.status)).length +
     activity.subagents.filter((run) => run.status === "running").length;
-  const contextOpen = showWorkflowsPanel || showBranchPanel || showGitView;
+  const contextOpen = showWorkflowsPanel || showBranchPanel;
   const activeDirtyCount = status.cwd ? gitStatuses[status.cwd]?.dirty.length ?? 0 : 0;
   const unresolvedAttention = listAttention(attention).length;
 
@@ -1358,9 +1380,10 @@ export default function App() {
                 onNeedEarlier={() => void loadEarlier()}
                 streaming={state.streaming}
                 chromeTop={bannerVisible ? 110 : 72}
-                chromeBottom={composerHeight - 28}
+                chromeBottom={composerHeight + 24}
                 historyTurns={history.turns}
                 onRollback={(entryId) => void prepareRollback(entryId)}
+                onOpenLaunch={() => setShowWorkflowsPanel(true)}
               />
             ) : (
               <Hero status={status} groups={groups} onOpen={(path, cwd) => { setPromotedParent(null); void openSession(path, cwd); }} onNew={newSession} />
@@ -1412,16 +1435,11 @@ export default function App() {
                 </button>
               ) : null}
               <button
-                onClick={() => {
-                  setShowGitView((open) => !open);
-                  setShowWorkflowsPanel(false);
-                  setShowBranchPanel(false);
-                }}
-                title="Git — changes and diffs"
-                aria-pressed={showGitView}
-                className={`thread-action thread-action-text ${showGitView ? "is-active" : ""}`}
+                onClick={() => setShowCommitPopover(true)}
+                title="Commit and push — stages all changes, generates a message, and pushes"
+                className="thread-action thread-action-text"
               >
-                Git{activeDirtyCount > 0 ? ` ${activeDirtyCount}` : ""}
+                Commit{activeDirtyCount > 0 ? ` ${activeDirtyCount}` : ""}
               </button>
               <button
                 onClick={() => setShowPreview((open) => !open)}
@@ -1436,6 +1454,7 @@ export default function App() {
                 onOpenChange={setPanelsMenuOpen}
                 items={[
                   { label: "Terminals", open: showProcesses, onToggle: () => setShowProcesses((v) => !v) },
+                  { label: "Problems", open: showProblems, onToggle: () => setShowProblems((v) => !v), badge: lspSnapshots.find((s) => s.cwd === status.cwd)?.diagnostics.length ?? 0 },
                   { label: "Attention inbox", open: showAttention, onToggle: () => setShowAttention((v) => !v), badge: unresolvedAttention },
                   { label: "Paired devices", open: showDevices, onToggle: () => setShowDevices((v) => !v) },
                   { label: "Scheduled tasks", open: showAutomation, onToggle: () => setShowAutomation((v) => !v) },
@@ -1477,6 +1496,8 @@ export default function App() {
                 onSetModel={setModel}
                 onSetThinking={setThinking}
                 onCompact={compact}
+                dialogs={state.dialogs}
+                onDialogDismiss={(id) => dispatch({ type: "dialog-dismiss", id })}
               />
             </div>
           ) : null}
@@ -1485,15 +1506,7 @@ export default function App() {
         <Suspense fallback={null}>
           {ready && contextOpen ? (
             <WorkspacePane width={contextWidth} onResizeStart={beginContextResize}>
-              {showGitView ? (
-                <GitView
-                  cwd={status.cwd}
-                  sidebarStatus={status.cwd ? gitStatuses[status.cwd] ?? null : null}
-                  onChanged={refreshGitStatuses}
-                  onClose={() => setShowGitView(false)}
-                  toast={toast}
-                />
-              ) : showBranchPanel ? (
+              {showBranchPanel ? (
                 <BranchPanel
                   onClose={() => setShowBranchPanel(false)}
                   refreshToken={historyRevision}
@@ -1597,6 +1610,16 @@ export default function App() {
             onClose={() => setShowDiagnostics(false)}
           />
         ) : null}
+        {showProblems ? (
+          <ProblemsPanel
+            snapshot={lspSnapshots.find((s) => s.cwd === status.cwd) ?? null}
+            cwd={status.cwd}
+            onRefresh={() => {
+              if (status.cwd) bridge.lspRefresh(status.cwd).catch(() => undefined);
+            }}
+            onClose={() => setShowProblems(false)}
+          />
+        ) : null}
       </Suspense>
       <ApprovalGate />
       {rollbackPlan ? (
@@ -1608,6 +1631,9 @@ export default function App() {
         />
       ) : null}
 
+      {showCommitPopover && (
+        <GitCommitPopover cwd={status.cwd} onClose={() => setShowCommitPopover(false)} toast={toast} onChanged={refreshGitStatuses} />
+      )}
       <DialogHost
         dialogs={state.dialogs}
         onDismiss={(id) => dispatch({ type: "dialog-dismiss", id })}

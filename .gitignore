@@ -2,6 +2,7 @@
 node_modules/
 dist/
 dist-electron/
+dist-bench/
 
 # Local Pi/agent state and research material
 .pi/

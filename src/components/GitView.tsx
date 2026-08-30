@@ -1,7 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   bridge,
-  type ActivityUpdate,
   type GitBranchInfo,
   type GitChangedFile,
   type GitPrContext,
@@ -23,25 +22,12 @@ type Busy = null | "commit" | "commit-push" | "push" | "pull" | "switch" | "crea
 
 type CommitPushProgress =
   | { phase: "idle" }
+  | { phase: "preparing"; message: string }
   | { phase: "generating"; message: string }
   | { phase: "committing"; message: string }
   | { phase: "pushing"; message: string }
   | { phase: "done"; message: string }
   | { phase: "error"; message: string };
-
-function subagentProgress(activity: string | null | undefined): { phase: "generating" | "committing" | "pushing"; message: string } {
-  const message = activity?.trim() || "Inspecting repository changes";
-  const lower = message.toLowerCase();
-  if (lower.includes("git push") || lower.includes("pushing")) return { phase: "pushing", message };
-  if (lower.includes("git commit") || lower.includes("git add") || lower.includes("committing")) {
-    return { phase: "committing", message };
-  }
-  return { phase: "generating", message };
-}
-
-function lastReportLine(output: string | undefined): string {
-  return output?.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).at(-1)?.slice(0, 500) ?? "";
-}
 
 // ---------------------------------------------------------------------------
 // File tree: group changed paths into a nested directory structure.
@@ -201,12 +187,12 @@ const DiffRowView = memo(function DiffRowView({ row }: { row: DiffRow }) {
 export default function GitView({ cwd, sidebarStatus, onChanged, onClose, toast }: Props) {
   const [details, setDetails] = useState<GitStatusDetails | null>(null);
   const [branches, setBranches] = useState<GitBranchInfo[]>([]);
+  const [branchesLoading, setBranchesLoading] = useState(false);
   const [prCtx, setPrCtx] = useState<GitPrContext | null>(null);
   const [busy, setBusy] = useState<Busy>(null);
   const [error, setError] = useState<string | null>(null);
   const [commitMsg, setCommitMsg] = useState("");
   const [commitPushProgress, setCommitPushProgress] = useState<CommitPushProgress>({ phase: "idle" });
-  const [commitPushRunId, setCommitPushRunId] = useState<string | null>(null);
   const [newBranchName, setNewBranchName] = useState("");
   const [creatingBranch, setCreatingBranch] = useState(false);
   const [prForm, setPrForm] = useState<null | { title: string; body: string; baseBranch: string }>(null);
@@ -217,6 +203,7 @@ export default function GitView({ cwd, sidebarStatus, onChanged, onClose, toast 
   const [rowsLoading, setRowsLoading] = useState(false);
   const [loadingDetails, setLoadingDetails] = useState(true);
   const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set());
+  const [query, setQuery] = useState("");
   const [treeWidth, setTreeWidth] = useState(() => {
     const stored = Number(localStorage.getItem("pideck:git-tree-width"));
     return Number.isFinite(stored) && stored >= 180 && stored <= 420 ? stored : 300;
@@ -226,23 +213,28 @@ export default function GitView({ cwd, sidebarStatus, onChanged, onClose, toast 
   const refresh = useCallback(async () => {
     if (!cwd) return;
     setLoadingDetails(true);
+    setBranchesLoading(true);
     // Fast path first: render the tree/diff as soon as status lands (~50ms).
-    const d = await bridge.gitStatusDetails(cwd).catch(() => null);
-    setDetails(d);
-    setLoadingDetails(false);
+    try {
+      const d = await bridge.gitStatusDetails(cwd).catch(() => null);
+      if (d) setDetails(d);
+      else setError("Unable to read git status — is this still a git repository?");
+    } finally {
+      setLoadingDetails(false);
+    }
     onChanged();
     // Branches are cheap enough to fill after the tree paints.
     bridge
       .gitBranches(cwd)
       .then((b) => setBranches(b.branches))
-      .catch(() => undefined);
+      .catch(() => setError("Failed to load branch list"))
+      .finally(() => setBranchesLoading(false));
   }, [cwd, onChanged]);
 
   useEffect(() => {
     setPrForm(null);
     setCreatingBranch(false);
     setCommitPushProgress({ phase: "idle" });
-    setCommitPushRunId(null);
     setError(null);
     setPrCtx(null);
     setSelectedPath(null);
@@ -320,61 +312,6 @@ export default function GitView({ cwd, sidebarStatus, onChanged, onClose, toast 
   }, [cwd, selectedPath, toast]);
 
   useEffect(() => {
-    if (!commitPushRunId || !cwd) return;
-    let active = true;
-    let settled = false;
-
-    const apply = async (update: ActivityUpdate) => {
-      if (!active || settled) return;
-      const run = update.subagents.find((item) => item.runId === commitPushRunId);
-      if (!run) return;
-
-      if (run.status === "starting" || run.status === "running") {
-        setCommitPushProgress(subagentProgress(run.latestActivity));
-        return;
-      }
-
-      if (run.status === "idle" || run.status === "completed") {
-        settled = true;
-        const current = await bridge.gitStatusDetails(cwd).catch(() => null);
-        if (!active) return;
-        const report = lastReportLine(run.output);
-        if (current?.isRepo && !current.hasChanges && current.hasUpstream && current.ahead === 0) {
-          const message = report || `Committed and pushed ${current.branch ?? "current branch"}`;
-          setCommitPushProgress({ phase: "done", message });
-          toast("info", message);
-        } else if (current?.hasChanges) {
-          setCommitPushProgress({ phase: "error", message: report || "Subagent stopped with uncommitted changes" });
-        } else {
-          setCommitPushProgress({ phase: "error", message: report || "Commit was created but the branch was not pushed" });
-        }
-        setBusy(null);
-        setCommitPushRunId(null);
-        await refresh().catch(() => undefined);
-        return;
-      }
-
-      if (run.status === "failed" || run.status === "stopped" || run.status === "interrupted" || run.status === "routing_mismatch") {
-        settled = true;
-        setCommitPushProgress({
-          phase: "error",
-          message: run.stderr || lastReportLine(run.output) || run.latestActivity || `Subagent ${run.status}`,
-        });
-        setBusy(null);
-        setCommitPushRunId(null);
-        await refresh().catch(() => undefined);
-      }
-    };
-
-    const unsubscribe = bridge.onActivityUpdate((update) => void apply(update));
-    void bridge.activityList().then(apply).catch(() => undefined);
-    return () => {
-      active = false;
-      unsubscribe();
-    };
-  }, [commitPushRunId, cwd, refresh, toast]);
-
-  useEffect(() => {
     const onKey = (event: KeyboardEvent) => event.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -398,7 +335,12 @@ export default function GitView({ cwd, sidebarStatus, onChanged, onClose, toast 
   const behind = details?.behind ?? sidebarStatus?.behind ?? 0;
   const isRepo = details ? details.isRepo : sidebarStatus?.isRepo ?? false;
 
-  const tree = useMemo(() => buildTree(files), [files]);
+  const filteredFiles = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return files;
+    return files.filter((f) => f.path.toLowerCase().includes(q));
+  }, [files, query]);
+  const tree = useMemo(() => buildTree(filteredFiles), [filteredFiles]);
   const selectedFile = useMemo(() => files.find((file) => file.path === selectedPath) ?? null, [files, selectedPath]);
 
   const toggleDir = (path: string) =>
@@ -446,6 +388,8 @@ export default function GitView({ cwd, sidebarStatus, onChanged, onClose, toast 
 
   const onCommit = () =>
     void run("commit", async () => {
+      if (!details?.isRepo) throw new Error("Not a git repository");
+      if (!commitMsg.trim()) throw new Error("Commit message is required");
       await bridge.gitCommit(cwd!, commitMsg);
       setCommitMsg("");
       toast("info", "Changes committed");
@@ -459,16 +403,41 @@ export default function GitView({ cwd, sidebarStatus, onChanged, onClose, toast 
 
   const onCommitPush = async () => {
     if (!cwd || busy !== null || files.length === 0) return;
+    if (!details?.isRepo) {
+      setError("Not a git repository — cannot commit");
+      return;
+    }
+    if (details.branch === null) {
+      setError("Cannot commit in detached HEAD — create or switch to a branch first");
+      return;
+    }
+    const requestId = crypto.randomUUID();
+    let progressError = "";
     setBusy("commit-push");
     setError(null);
-    setCommitPushProgress({ phase: "generating", message: "Starting commit subagent" });
+    setCommitPushProgress({ phase: "preparing", message: "Staging all changes and preparing diff" });
+    const unsubscribe = bridge.onGitCommitPushProgress((progress) => {
+      if (progress.requestId !== requestId) return;
+      if (progress.phase === "error") progressError = progress.message;
+      setCommitPushProgress({ phase: progress.phase, message: progress.message });
+    });
     try {
-      const result = await bridge.gitStartCommitPush(cwd);
-      setCommitPushRunId(result.runId);
-      setCommitPushProgress({ phase: "generating", message: `Subagent running with ${result.model}` });
+      const result = await bridge.gitCommitPush(cwd, requestId);
+      setCommitMsg(result.generated.message);
+      const pushed = result.push.status === "skipped_up_to_date";
+      const message = pushed ? `Committed ${result.commit.subject} — already up to date on ${result.push.branch}` : `Committed and pushed ${result.push.branch}`;
+      setCommitPushProgress({ phase: "done", message });
+      toast("info", message);
     } catch (cause) {
+      const fallback = cause instanceof Error ? cause.message : String(cause);
+      const msg = progressError || fallback;
+      setError(msg);
+      setCommitPushProgress({ phase: "error", message: msg });
+      toast("error", msg);
+    } finally {
+      unsubscribe();
       setBusy(null);
-      setCommitPushProgress({ phase: "error", message: cause instanceof Error ? cause.message : String(cause) });
+      await refresh().catch(() => undefined);
     }
   };
 
@@ -563,16 +532,24 @@ export default function GitView({ cwd, sidebarStatus, onChanged, onClose, toast 
             <select
               value={branch ?? ""}
               onChange={(e) => e.target.value && e.target.value !== branch && onSwitch(e.target.value)}
-              disabled={busy !== null || branches.length === 0}
-              title="Switch branch"
+              disabled={busy !== null || (branchesLoading && branches.length === 0)}
+              title={branch ? `Current branch: ${branch}${details?.isDefaultBranch ? " (default)" : ""}` : "No branch — detached HEAD"}
+              aria-label="Git branch"
               className="min-w-0 max-w-[180px] truncate rounded-md border border-transparent bg-transparent px-1 py-0.5 text-[15px] font-semibold tracking-tight outline-none hover:border-line disabled:opacity-50"
             >
-              {branch && !branches.some((b) => b.name === branch) && <option value={branch}>{branch}</option>}
-              {branches.map((b) => (
-                <option key={b.name} value={b.name}>
-                  {b.name}
-                </option>
-              ))}
+              {branchesLoading && branches.length === 0 ? (
+                <option value="">Loading branches…</option>
+              ) : (
+                <>
+                  {branch && !branches.some((b) => b.name === branch) && <option value={branch}>{branch} — detached / not in list</option>}
+                  {branches.length === 0 && !branch ? <option value="">No branches</option> : null}
+                  {branches.map((b) => (
+                    <option key={b.name} value={b.name}>
+                      {b.name}{b.current ? " — current" : ""}
+                    </option>
+                  ))}
+                </>
+              )}
             </select>
             <button
               onClick={() => setCreatingBranch(true)}
@@ -607,9 +584,16 @@ export default function GitView({ cwd, sidebarStatus, onChanged, onClose, toast 
       </div>
 
       {!isRepo && !loadingDetails ? (
-        <div className="grid flex-1 place-items-center px-6 text-center text-[13px] text-dim">Not a git repository</div>
+        <div className="grid flex-1 place-items-center gap-3 px-6 py-12 text-center" role="status" aria-live="polite">
+          <p className="text-[14px] font-medium text-fg">Not a git repository</p>
+          <p className="max-w-[36ch] text-[12.5px] leading-relaxed text-dim">This folder is not inside a git repository. Initialize one with <code className="rounded bg-inset px-1 py-0.5 font-mono text-[11.5px]">git init</code> or open a different project.</p>
+          <p className="text-[12px] text-dim/80 truncate max-w-[40ch]" title={cwd}>{cwd}</p>
+        </div>
       ) : loadingDetails && !files.length ? (
-        <div className="grid flex-1 place-items-center px-6 text-[13px] text-dim">Reading status…</div>
+        <div className="grid flex-1 place-items-center gap-2 px-6 py-12 text-[13px] text-dim" role="status" aria-busy="true" aria-live="polite">
+          <span className="inline-flex items-center gap-2"><span className="h-2 w-2 animate-pulse rounded-full bg-accent" aria-hidden />Reading git status…</span>
+          <span className="text-[11.5px] text-dim/70">Large repositories may take a moment</span>
+        </div>
       ) : (
         <>
           <div ref={bodyRef} className="flex min-h-0 flex-1">
@@ -619,16 +603,17 @@ export default function GitView({ cwd, sidebarStatus, onChanged, onClose, toast 
               style={{ width: treeWidth, maxWidth: "calc(100% - 180px)" }}
             >
               <div className="h-full overflow-y-auto">
-                <div className="sticky top-0 z-10 flex h-9 items-center justify-between border-b border-line/50 bg-[var(--context)] px-3 text-[11.5px] text-dim">
-                <span>{files.length > 0 ? `Changes (${files.length})` : "Changes"}</span>
-                {files.length > 0 && (
-                  <span className="tabular-nums">
-                    <span className="text-ok">+{details?.insertions ?? 0}</span>{" "}
-                    <span className="text-err">−{details?.deletions ?? 0}</span>
-                  </span>
-                )}
-              </div>
-                {files.length > 0 ? (
+                <div className="sticky top-0 z-10 border-b border-line/50 bg-[var(--context)] px-2 py-1.5">
+                  <div className="flex h-7 items-center gap-1.5">
+                    <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Filter files…" aria-label="Filter changed files" className="min-w-0 flex-1 rounded-md border border-transparent bg-inset/50 px-2 py-1 text-[12px] placeholder:text-dim/60 focus:border-accent/50 focus:bg-inset outline-none" />
+                    {query && <button onClick={() => setQuery("")} className="rounded px-1 text-dim hover:text-fg" aria-label="Clear filter"><XIcon size={10} /></button>}
+                  </div>
+                  <div className="mt-1 flex items-center justify-between text-[11px] text-dim/70">
+                    <span>{filteredFiles.length !== files.length ? `${filteredFiles.length} / ${files.length}` : files.length > 0 ? `Changes (${files.length})` : "Changes"}</span>
+                    {files.length > 0 && <span className="tabular-nums"><span className="text-ok/70">+{details?.insertions ?? 0}</span> <span className="text-err/70">−{details?.deletions ?? 0}</span></span>}
+                  </div>
+                </div>
+                {filteredFiles.length > 0 ? (
                   <FileTree
                     node={tree}
                     prefix=""
@@ -638,8 +623,14 @@ export default function GitView({ cwd, sidebarStatus, onChanged, onClose, toast 
                     onToggleDir={toggleDir}
                     onSelect={(file) => setSelectedPath(file.path)}
                   />
+                ) : query ? (
+                  <div className="px-3 py-6 text-center text-[12px] text-dim">No files match “{query}”</div>
                 ) : (
-                  <p className="px-3 py-2 text-[12.5px] text-dim">Working tree clean</p>
+                  <div className="px-3 py-6 text-center">
+                    <p className="text-[13px] font-medium text-fg/80">Working tree clean</p>
+                    <p className="mt-1 text-[11.5px] leading-relaxed text-dim">No modified, added, or deleted files — everything is committed.</p>
+                    {details?.ahead ? <p className="mt-2 text-[11.5px] text-dim">{details.ahead} commit{details.ahead===1?"":"s"} ahead of upstream — ready to push.</p> : null}
+                  </div>
                 )}
               </div>
               <div
@@ -665,15 +656,25 @@ export default function GitView({ cwd, sidebarStatus, onChanged, onClose, toast 
               <div className={`min-h-0 flex-1 overflow-x-hidden overflow-y-auto py-2 transition-opacity duration-150 ${rowsLoading && rows ? "opacity-55" : ""}`}>
                 {selectedPath ? (
                   rows === null ? (
-                    <p className="px-3 py-2 font-mono text-[11.5px] text-dim">{rowsLoading ? "Loading diff…" : "No textual changes."}</p>
+                    <p className="px-3 py-2 font-mono text-[11.5px] text-dim" role="status" aria-busy="true">{rowsLoading ? "Loading diff…" : "No textual changes."}</p>
                   ) : rows.length === 0 ? (
-                    <p className="px-3 py-2 font-mono text-[11.5px] text-dim">No textual changes.</p>
-                  ) : (
-                    <div className="min-w-full font-mono">
-                      {rows.map((row, i) => (
-                        <DiffRowView key={i} row={row} />
-                      ))}
+                    <div className="px-3 py-6 text-center">
+                      <p className="font-mono text-[11.5px] text-dim">No textual changes.</p>
+                      <p className="mt-1 text-[11px] text-dim/70">Binary, renamed without edits, or empty — nothing to preview.</p>
                     </div>
+                  ) : (
+                    <>
+                      {rows.some((r) => r.html.includes("diff truncated")) && (
+                        <div className="mx-3 mb-2 rounded-md bg-warn/10 px-2.5 py-1.5 text-[11px] leading-relaxed text-warn" role="note">
+                          Diff truncated at 512 KB — open the file to see remaining changes.
+                        </div>
+                      )}
+                      <div className="min-w-full font-mono">
+                        {rows.map((row, i) => (
+                          <DiffRowView key={i} row={row} />
+                        ))}
+                      </div>
+                    </>
                   )
                 ) : (
                   <p className="px-3 py-2 text-[12.5px] text-dim">Select a file to see its diff.</p>
@@ -690,15 +691,20 @@ export default function GitView({ cwd, sidebarStatus, onChanged, onClose, toast 
               onKeyDown={(e) => {
                 if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && commitMsg.trim() && files.length > 0) onCommit();
               }}
-              rows={1}
-              placeholder="Commit message (⌘↵)"
+              rows={commitPushProgress.phase === "error" ? 2 : 1}
+              placeholder="Commit message — subject line, blank line, then bullet body (⌘↵)"
               aria-label="Commit message"
-              className="h-9 w-full resize-none rounded-md border border-line bg-inset px-2.5 py-2 text-[12.5px] outline-none placeholder:text-dim focus:border-accent"
+              aria-invalid={commitMsg.length > 2000 ? "true" : undefined}
+              maxLength={20000}
+              className="h-auto min-h-9 w-full resize-none rounded-md border border-line bg-inset px-2.5 py-2 text-[12.5px] leading-relaxed outline-none placeholder:text-dim focus:border-accent"
             />
-            <div className="mt-1.5 flex items-center gap-1.5">
+            {commitMsg.length > 1500 && <p className="mt-1 text-[10.5px] text-dim">{commitMsg.length.toLocaleString()} / 20,000 characters</p>}
+            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
               <button
                 onClick={() => void onCommitPush()}
-                disabled={busy !== null || files.length === 0}
+                disabled={busy !== null || files.length === 0 || branch === null}
+                title={files.length === 0 ? "No changes to commit" : branch === null ? "Detached HEAD — switch to a branch" : `Stage all ${files.length} file${files.length===1?"":"s"} (${details?.insertions ?? 0}+/${details?.deletions ?? 0}-) and push`}
+                aria-label={files.length ? `Commit and push ${files.length} changed files` : "Commit and push — no changes"}
                 className="flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[12px] font-semibold text-bg disabled:opacity-40"
               >
                 <ArrowUpIcon size={10} />
@@ -766,7 +772,15 @@ export default function GitView({ cwd, sidebarStatus, onChanged, onClose, toast 
                         : "animate-pulse bg-accent"
                   }`}
                 />
-                <span className="min-w-0 break-words">{commitPushProgress.message}</span>
+                <span className="min-w-0 flex-1 break-words leading-relaxed">{commitPushProgress.message}</span>
+                {commitPushProgress.phase === "error" && busy === null && files.length > 0 && (
+                  <button onClick={() => void onCommitPush()} className="ml-auto shrink-0 rounded-md bg-err px-2 py-1 text-[11px] font-medium text-bg hover:bg-err/80">
+                    Retry
+                  </button>
+                )}
+                {commitPushProgress.phase !== "error" && commitPushProgress.phase !== "done" && commitPushProgress.message.toLowerCase().includes("truncated") && (
+                  <span className="ml-auto shrink-0 rounded bg-warn/20 px-1.5 py-0.5 text-[10px] font-medium text-warn">truncated</span>
+                )}
               </div>
             ) : null}
 
@@ -796,7 +810,17 @@ export default function GitView({ cwd, sidebarStatus, onChanged, onClose, toast 
               </div>
             ) : null}
 
-            {error && <div className="mt-2 rounded-md border border-err/30 bg-err/10 px-3 py-1.5 text-[12px] text-err">{error}</div>}
+            {error && (
+              <div className="mt-2 flex items-start gap-2 rounded-md border border-err/30 bg-err/10 px-3 py-2 text-[12px] leading-relaxed text-err" role="alert">
+                <span className="min-w-0 flex-1 break-words">{error}</span>
+                <button onClick={() => setError(null)} aria-label="Dismiss error" className="shrink-0 rounded p-0.5 hover:bg-err/20"><XIcon size={10} /></button>
+              </div>
+            )}
+            {!error && details?.branch === null && files.length > 0 && (
+              <div className="mt-2 rounded-md border border-warn/30 bg-warn/10 px-3 py-2 text-[12px] leading-relaxed text-warn" role="note">
+                Detached HEAD — commits land without a branch and cannot be pushed until you create one. Use <span className="font-medium">New branch</span> above.
+              </div>
+            )}
             {stashOffer && (
               <div className="mt-2 flex items-center gap-2 rounded-md border border-warn/40 bg-warn/10 px-3 py-1.5 text-[12px]">
                 <span className="min-w-0 flex-1 text-warn">Local changes block switching to “{stashOffer}”.</span>

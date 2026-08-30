@@ -7,6 +7,15 @@
 // promotion requires the thread to be stopped first: while it is queued,
 // running, or even idle, the extension still owns the session file, and opening
 // it in the center would create a dual-writer race.
+//
+// Hook/permission semantics: the agent-facing `spawn_thread`/`workflow` tools
+// fire through the center session's `beforeToolCall` (pre_tool_use) and
+// `tool_execution_end` (post_tool_use), so launches are supervised exactly like
+// any other tool. Subagent child sessions get an explicit installAgentGuards
+// call (subagents.ts) because Babylon creates them; threads do NOT, because the
+// thread's interior runtime is owned by the extension and is never created via
+// pi-host.bindSession. The gate therefore applies at the spawn boundary, not
+// inside the thread — this is an architecture limit, not an unguarded path.
 
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";

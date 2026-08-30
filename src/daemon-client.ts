@@ -32,19 +32,39 @@ export interface DaemonClientOptions {
   /** false disables reconnection. Defaults to capped exponential backoff. */
   reconnect?: { initialDelayMs?: number; maxDelayMs?: number } | false;
   requestTimeoutMs?: number;
+  /** Response deadline for long-running prompts (streamed model output).
+   *  Defaults to PROMPT_TIMEOUT_MS. Connection establishment and all other
+   *  calls always use requestTimeoutMs. */
+  promptTimeoutMs?: number;
   log?: (message: string) => void;
 }
 
 export interface DaemonClient {
   request(type: ProtocolMessageType, payload: unknown, timeoutMs?: number): Promise<ProtocolEnvelope>;
   onEvent(handler: (envelope: ProtocolEnvelope) => void): () => void;
+  /** Subscribe to socket-level connect/disconnect transitions. Callers use this
+   *  for transient liveness (`daemonConnected`); authoritative runtime ownership
+   *  is decided once at startup and must not be reverted on a blip. */
+  onConnectionChange(handler: (state: "connected" | "disconnected") => void): () => void;
   connected(): boolean;
   close(): void;
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+// Connection establishment must fail fast (a missing daemon surfaces as an
+// immediate socket error, not after the long prompt deadline). Only the
+// response wait is allowed to be long; never the connection wait.
+const CONNECTION_TIMEOUT_MS = DEFAULT_REQUEST_TIMEOUT_MS;
 const DEFAULT_INITIAL_DELAY_MS = 100;
 const DEFAULT_MAX_DELAY_MS = 5_000;
+// Prompts stream a model response and can legitimately run for many minutes,
+// so they must not be killed by the short deadline used for control/state
+// calls. Connection establishment still uses the short request timeout so a
+// missing daemon fails fast; only the response wait is extended.
+const PROMPT_TIMEOUT_MS = 10 * 60 * 1000;
+// Operations whose response wait uses the long prompt deadline. Kept small on
+// purpose: only genuinely unbounded work (model generation) belongs here.
+const LONG_RUNNING_OPERATIONS = new Set<ProtocolMessageType>(["pi.prompt"]);
 
 interface PendingCall {
   resolve: (envelope: ProtocolEnvelope) => void;
@@ -55,6 +75,9 @@ interface PendingCall {
 export function connectDaemonClient(options: DaemonClientOptions): DaemonClient {
   const log = options.log ?? (() => {});
   const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const promptTimeoutMs = options.promptTimeoutMs ?? PROMPT_TIMEOUT_MS;
+  const operationTimeoutMs = (type: ProtocolMessageType): number =>
+    LONG_RUNNING_OPERATIONS.has(type) ? promptTimeoutMs : requestTimeoutMs;
   const reconnectEnabled = options.reconnect !== false;
   const initialDelayMs = (options.reconnect && options.reconnect.initialDelayMs) || DEFAULT_INITIAL_DELAY_MS;
   const maxDelayMs = (options.reconnect && options.reconnect.maxDelayMs) || DEFAULT_MAX_DELAY_MS;
@@ -68,6 +91,7 @@ export function connectDaemonClient(options: DaemonClientOptions): DaemonClient 
   const pending = new Map<string, PendingCall>();
   const connectionWaiters: { resolve: (s: net.Socket) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }[] = [];
   const eventHandlers = new Set<(envelope: ProtocolEnvelope) => void>();
+  const connectionHandlers = new Set<(state: "connected" | "disconnected") => void>();
 
   const failPending = (message: string): void => {
     for (const call of pending.values()) {
@@ -132,6 +156,7 @@ export function connectDaemonClient(options: DaemonClientOptions): DaemonClient 
         clearTimeout(waiter.timer);
         waiter.resolve(next);
       }
+      for (const handler of connectionHandlers) handler("connected");
     });
     next.on("data", (chunk: Buffer) => {
       let frames: string[];
@@ -159,6 +184,9 @@ export function connectDaemonClient(options: DaemonClientOptions): DaemonClient 
       if (wasLive) live = null;
       if (wasCurrent) socket = null;
       if (!wasLive && !wasCurrent) return;
+      if (wasLive) {
+        for (const handler of connectionHandlers) handler("disconnected");
+      }
 
       // In-flight calls fail loudly. Requests waiting for a (re)connection
       // stay queued while reconnection continues; they die only when the
@@ -199,9 +227,14 @@ export function connectDaemonClient(options: DaemonClientOptions): DaemonClient 
   };
 
   return {
-    async request(type, payload, timeoutMs = requestTimeoutMs): Promise<ProtocolEnvelope> {
+    async request(type, payload, timeoutMs = operationTimeoutMs(type)): Promise<ProtocolEnvelope> {
       if (closed) throw new DaemonRequestError("client is closed");
-      const conn = await waitForConnection(timeoutMs);
+      // Connection acquisition uses a short deadline, capped at the fixed
+      // connection timeout so a prompt's long response deadline never leaks
+      // into the connection wait. A missing daemon surfaces as an immediate
+      // socket error rather than after a long prompt timeout. Only the
+      // response wait below is allowed to be long.
+      const conn = await waitForConnection(Math.min(timeoutMs, CONNECTION_TIMEOUT_MS));
       // The connection can drop while this call waited its turn; writing to
       // the dead socket would hang until timeout instead of failing now.
       if (live !== conn) throw new DaemonRequestError("daemon connection lost");
@@ -220,6 +253,14 @@ export function connectDaemonClient(options: DaemonClientOptions): DaemonClient 
     onEvent(handler): () => void {
       eventHandlers.add(handler);
       return () => eventHandlers.delete(handler);
+    },
+
+    onConnectionChange(handler): () => void {
+      connectionHandlers.add(handler);
+      // Report the current state so a late subscriber does not miss an
+      // already-connected or already-disconnected socket.
+      handler(live ? "connected" : "disconnected");
+      return () => connectionHandlers.delete(handler);
     },
 
     connected(): boolean {

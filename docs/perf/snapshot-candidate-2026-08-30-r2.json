@@ -1,0 +1,59 @@
+{
+  "benchmark": "SnapshotStore.capture (candidate algorithm, post-correctness)",
+  "ts": "2026-08-30T04:47:24.909Z",
+  "scales": [10000, 50000, 100000],
+  "iterations": 3,
+  "linkedWorktreeScale": 5000,
+  "machine": "local developer machine (not CI)",
+  "results": [
+    {
+      "scale": 10000,
+      "coldInitMs": 172.006,
+      "warmCleanMedianMs": 62.773,
+      "warmCleanMinMs": 54.728,
+      "warm1ModMedianMs": 162.746,
+      "warm1ModMinMs": 148.146,
+      "warm1DelMedianMs": 160.748,
+      "warm1DelMinMs": 147.571,
+      "warm1NewMedianMs": 210.018,
+      "warm1NewMinMs": 179.217
+    },
+    {
+      "scale": 50000,
+      "coldInitMs": 276.319,
+      "warmCleanMedianMs": 137.197,
+      "warmCleanMinMs": 137.016,
+      "warm1ModMedianMs": 536.526,
+      "warm1ModMinMs": 525.747,
+      "warm1DelMedianMs": 585.338,
+      "warm1DelMinMs": 499.996,
+      "warm1NewMedianMs": 483.991,
+      "warm1NewMinMs": 469.747
+    },
+    {
+      "scale": 100000,
+      "coldInitMs": 873.715,
+      "warmCleanMedianMs": 299.995,
+      "warmCleanMinMs": 273.751,
+      "warm1ModMedianMs": 3878.788,
+      "warm1ModMinMs": 3872.589,
+      "warm1DelMedianMs": 4835.548,
+      "warm1DelMinMs": 4495.186,
+      "warm1NewMedianMs": 21004.243,
+      "warm1NewMinMs": 17921.531
+    },
+    {
+      "scale": 5000,
+      "linkedWorktree": true,
+      "coldInitMs": 286.811,
+      "warmCleanMedianMs": 62.866,
+      "warmCleanMinMs": 59.039
+    }
+  ],
+  "interpretation": {
+    "warmClean": "The verification discovery runs after write-tree. 63ms at 10k, 137ms at 50k, 300ms at 100k. Roughly 2x the prior (no-verification) numbers because the loop now runs the discovery twice; the cost is still candidate-free when nothing changed.",
+    "warm1Mod_warm1Del": "Dominated by `git diff-files`'s O(N) stat walk on the shadow index, plus a second stat walk in the verification discovery. ~3.9s at 100k. The 100k numbers are slightly higher than the prior run (which ran discovery once) because the loop now runs it twice; the 10k/50k numbers are comparable.",
+    "warm1New": "`git ls-files --others` on the shadow walks the worktree to find untracked paths. At 100k this is ~17-21s. Note: the benchmark recreates the shadow for each scale, so the shadow's untracked cache (`core.untrackedCache=true`) starts cold. In production, the shadow persists across captures and the untracked cache warms, so the steady-state cost of `--others` is much lower. The prior benchmark (with `--others` on the source) benefited from the source's warm untracked cache during seedRepo; switching to the shadow removed that incidental benefit in the benchmark but is required for the persistent-incremental correctness model.",
+    "followUp": "Per the reviewer's instruction, no fsmonitor/split-index optimization in this pass. The cold-shadow-untracked-cache cost is the next investigation target."
+  }
+}

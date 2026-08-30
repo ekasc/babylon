@@ -12,6 +12,7 @@
 // extension_ui_request, ...), same command semantics.
 
 import { randomUUID } from "node:crypto";
+import { promises as fsp } from "node:fs";
 import { join, resolve } from "node:path";
 import { flattenSessionTree } from "./session-tree";
 import { projectHistory } from "./session-history";
@@ -20,13 +21,18 @@ import { SnapshotStore, type RestoreChange, type SnapshotCapture } from "./snaps
 import { toPiImages } from "./prompt-images";
 import { clampToolOutput, readSessionTail, readToolOutput } from "./sessions";
 import { RecapStore } from "./recap-store";
-import { DEFAULT_GIT_COMMIT_MODEL, getSettings, saveSettings, type PiSettings } from "./app-settings";
-import { buildCommitPushTask } from "./git-commit-subagent";
+import { DEFAULT_GIT_COMMIT_MODEL, type PiSettings } from "./app-settings";
+import { getSettings as defaultGetSettings, saveSettings as defaultSaveSettings } from "./app-settings";
+import { buildGitCommitPrompt, extractModelText, parseGeneratedCommitMessage, type GeneratedCommitMessage } from "./git-commit-message";
+import type { PreparedCommitContext } from "./git";
 import { buildRecapPrompt, normalizeRecapText, pickRecapDelta, recapDue, recapWorthy, RECAP_INTERVAL_MS, type Recap } from "./recap";
 import { ManagedSubagents, type ManagedSubagentRecord, type SubagentControlAction, type SubagentParentEvent } from "./subagents";
-import { installPermissionHook } from "./permission-hook";
+import { createAskQuestionTool } from "./ask-question";
+import { createBabylonBashTool } from "./bash-tool";
+import { installAgentGuards } from "./permission-hook";
 import { mapToolToAction } from "./permission-agent";
 import type { BabylonPermissionController } from "./permissions";
+import type { HookManager } from "./hook-manager";
 import { ThreadManager } from "./threads";
 import {
   AgentSessionRuntime,
@@ -84,6 +90,12 @@ export interface HostOptions {
   onProjectTrust?: (cwd: string) => Promise<{ trusted: boolean; remember?: boolean }>;
   /** Babylon permission system controller, if enabled. */
   permission?: BabylonPermissionController;
+  /** Hook registry owner for pre/post tool use and before_stop. */
+  hookManager?: HookManager;
+  /** Resolve the owning task id for a session file, if any. */
+  getTaskIdForSessionFile?: (sessionFile: string | null) => string | undefined;
+  /** Settings provider for daemon vs Electron. */
+  settingsProvider?: { getSettings(): PiSettings; saveSettings(patch: Partial<PiSettings>): PiSettings };
 }
 
 export class PiHost {
@@ -124,6 +136,13 @@ export class PiHost {
     createdAt: number;
   }>();
 
+  private _getSettings(): PiSettings {
+    return this.opts.settingsProvider?.getSettings() ?? defaultGetSettings();
+  }
+  private _saveSettings(patch: Partial<PiSettings>): PiSettings {
+    return this.opts.settingsProvider?.saveSettings(patch) ?? defaultSaveSettings(patch);
+  }
+
   constructor(opts: HostOptions) {
     this.opts = opts;
     this._cwd = opts.cwd;
@@ -161,6 +180,8 @@ export class PiHost {
       onUpdate: () => this.opts.onEvent({ type: "pideck_subagents_changed" }),
       onParentMessage: (record, action, message) => this.notifySubagentParent(record, action, message),
       permission: this.opts.permission,
+      hookManager: this.opts.hookManager,
+      onLaunch: (ev) => this.opts.onEvent({ ...ev, sessionId: this.runtime?.session?.sessionId, sessionFile: this.runtime?.session?.sessionFile }),
     });
     this.threads = new ThreadManager({
       runTool: async (toolName, args) => {
@@ -235,8 +256,12 @@ export class PiHost {
         services,
         sessionManager: input.sessionManager,
         sessionStartEvent: input.sessionStartEvent,
-        customTools: [this.managedSubagents.tool()],
+        customTools: [this.managedSubagents.tool(), createAskQuestionTool(), createBabylonBashTool(runtimeCwd)],
       });
+      try {
+        const hasAsk = !!(result.session as any).getToolDefinition?.("ask_question");
+        console.log(`[Babylon] ask_question registered: ${hasAsk} — tools:`, (() => { try { return (result.session as any).getToolDefinitions?.() ? Object.keys((result.session as any).getToolDefinitions()) : "unknown"; } catch { return "err"; } })());
+      } catch {}
       const out: CreateAgentSessionRuntimeResult = {
         session: result.session,
         services,
@@ -384,16 +409,51 @@ export class PiHost {
       },
     });
     this.unsubscribeEvents?.();
-    // Babylon permission system: intercept every agent tool call before it
-    // runs. installPermissionHook wraps the SDK's hook so extensions like
-    // managed-subagents keep working underneath us.
     if (this.opts.permission) {
       this.opts.permission.clearSessionRules();
-      installPermissionHook(session.agent as any, this.opts.permission, this.cwd);
+      installAgentGuards(session.agent as any, {
+        controller: this.opts.permission,
+        cwd: this.cwd,
+        hookManager: this.opts.hookManager,
+        sessionId: session.sessionId,
+        taskId: this.opts.getTaskIdForSessionFile?.(session.sessionFile ?? null),
+      });
+    } else if (this.opts.hookManager) {
+      installAgentGuards(session.agent as any, {
+        controller: { evaluate: () => ({ decision: "allow" as const }), requestApproval: async () => true, clearSessionRules: () => {}, getMode: () => "auto" as const, listRules: () => [] } as unknown as BabylonPermissionController,
+        cwd: this.cwd,
+        hookManager: this.opts.hookManager,
+        sessionId: session.sessionId,
+        taskId: this.opts.getTaskIdForSessionFile?.(session.sessionFile ?? null),
+      });
     }
 
     this.unsubscribeEvents = session.subscribe((event) => {
       this.opts.onEvent({ ...event, sessionId: session.sessionId, sessionFile: session.sessionFile });
+      if (event.type === "tool_execution_end" && ((event as any).toolName === "spawn_thread" || (event as any).toolName === "workflow")) {
+        const details = (event as any).result?.details ?? {};
+        const runId = details.threadId ?? details.runId ?? (event as any).toolCallId;
+        if (runId) {
+          const status = (event as any).isError ? "failed" : "running";
+          const args = (event as any).args ?? {};
+          const label = args.name?.trim() || args.goal?.trim()?.slice(0, 80) || details.threadId || details.runId || (event as any).toolName;
+          this.opts.onEvent({ type: "babylon_launch_started", runId, runKind: (event as any).toolName === "spawn_thread" ? "thread" : "workflow", label, status: "running", sessionId: session.sessionId, sessionFile: session.sessionFile });
+          if (status === "failed") this.opts.onEvent({ type: "babylon_launch_terminated", runId, status: "failed", sessionId: session.sessionId, sessionFile: session.sessionFile });
+        }
+      }
+      if (event.type === "tool_execution_end") {
+        const toolName = (event as any).toolName ?? (event as any).toolCall?.name ?? "";
+        void this.opts.hookManager?.dispatch(
+          "post_tool_use",
+          {
+            toolName,
+            args: (event as any).args ?? (event as any).result,
+            sessionId: session.sessionId,
+            taskId: this.opts.getTaskIdForSessionFile?.(session.sessionFile ?? null),
+          },
+          async () => ({})
+        );
+      }
       if (event.type === "message_end" && event.message?.role === "assistant") {
         void this.relayPromotedSubagentReply(session, messageText(event.message));
       }
@@ -445,55 +505,100 @@ export class PiHost {
     const prompt =
       "You are naming a coding-agent conversation. Reply with ONLY a short title (3-6 words, no quotes, no period) that captures the intent of this conversation:\n\n" +
       sample;
-    const text = await this.askCheap(prompt, 200);
+    const text = await this.askCheap(prompt, 1024);
     if (!text) return null;
     return text.replace(/^["'“”]+|["'“”]+$/g, "").slice(0, 60);
   }
 
-  async startGitCommitPush(cwd: string): Promise<{ runId: string; model: string }> {
-    await this.ensureSession();
-    if (resolve(cwd) !== resolve(this.cwd)) throw new Error("Git action cwd does not match the active project");
-    const settings = getSettings();
+  async generateGitCommitMessage(context: PreparedCommitContext): Promise<GeneratedCommitMessage> {
+    const settings = this._getSettings();
     const ref = settings.gitCommitModel ?? DEFAULT_GIT_COMMIT_MODEL;
-    const model = `${ref.provider}/${ref.modelId}`;
-    const record = await this.managedSubagents.start(
-      {
-        task: buildCommitPushTask(settings.gitCommitPrompt ?? ""),
+    const model = this.modelRuntime.getModel(ref.provider, ref.modelId);
+    if (!model) {
+      throw new Error(
+        `Commit model is unavailable: ${ref.provider}/${ref.modelId}. ` +
+          `Select an installed model in Settings → Pi → Git commit model.`
+      );
+    }
+    if (context.fileCount === 0) throw new Error("No staged files to describe — commit context is empty");
+    if (context.stagedPatch.trim().length === 0 && context.stagedSummary.trim().length === 0) {
+      throw new Error("Staged patch is empty — nothing to commit");
+    }
+
+    const complete = (prompt: string) =>
+      this.modelRuntime.completeSimple(
         model,
-        profile: "write",
-        thinking: "low",
-        timeoutMs: 10 * 60_000,
-        name: "Commit & push",
-      },
-      this.runtime.session.extensionRunner.createContext()
-    );
-    return { runId: record.runId, model: record.sessionModel };
+        { messages: [{ role: "user", content: prompt }] } as any,
+        { reasoning: "low", maxTokens: 4_096 }
+      );
+    const read = async (prompt: string): Promise<string> => {
+      let response: any;
+      try {
+        response = await complete(prompt);
+      } catch (cause) {
+        throw new Error(`commit model request failed: ${cause instanceof Error ? cause.message : String(cause)}`);
+      }
+      if (response.stopReason === "error") {
+        throw new Error(response.errorMessage?.trim() || "commit model failed");
+      }
+      const text = extractModelText(response);
+      if (!text) throw new Error(`commit model returned no text (stop reason: ${response.stopReason})`);
+      return text;
+    };
+
+    const first = await read(buildGitCommitPrompt(context, settings.gitCommitPrompt ?? ""));
+    try {
+      return parseGeneratedCommitMessage(first, context.requiresBody);
+    } catch (cause) {
+      const correction = cause instanceof Error ? cause.message : String(cause);
+      const retry = await read(buildGitCommitPrompt(context, settings.gitCommitPrompt ?? "", correction));
+      try {
+        return parseGeneratedCommitMessage(retry, context.requiresBody);
+      } catch (retryCause) {
+        const detail = retryCause instanceof Error ? retryCause.message : String(retryCause);
+        throw new Error(`commit message still invalid after retry: ${detail} (first error: ${correction})`);
+      }
+    }
   }
 
   /** One cheap model call shared by naming and recaps. The model + reasoning
    *  level are configurable (Settings → Pi → Title generation), falling back
    *  to the previous hardcoded cheap model when unset. */
   private async askCheap(prompt: string, maxTokens: number): Promise<string | null> {
-    const settings = getSettings();
+    const settings = this._getSettings();
     const titleModel = settings.titleModel
       ? this.modelRuntime.getModel(settings.titleModel.provider, settings.titleModel.modelId)
       : undefined;
     const model =
       titleModel ??
-      this.modelRuntime.getModel("opencode-go", "deepseek-v4-flash") ??
+      this.modelRuntime.getModel("opencode-go", "muse-spark-1.2-contributor") ??
       this.runtime.session.model;
     if (!model) return null;
     const reasoning = (settings.titleReasoning as any) || "low";
+    const effectiveMaxTokens = reasoning === "low" ? Math.max(maxTokens, 1024) : maxTokens;
     try {
       const response = await this.modelRuntime.completeSimple(
         model,
         { messages: [{ role: "user", content: prompt }] } as any,
-        { reasoning, maxTokens }
+        { reasoning, maxTokens: effectiveMaxTokens }
       );
-      return (response?.content ?? [])
+      const text = (response?.content ?? [])
         .map((block: any) => (block?.type === "text" ? block.text ?? "" : ""))
         .join("")
         .trim();
+      if (text) return text;
+      if (response?.stopReason === "length") {
+        const retry = await this.modelRuntime.completeSimple(
+          model,
+          { messages: [{ role: "user", content: prompt }] } as any,
+          { reasoning: "minimal", maxTokens: Math.max(effectiveMaxTokens, 1024) }
+        );
+        return (retry?.content ?? [])
+          .map((block: any) => (block?.type === "text" ? block.text ?? "" : ""))
+          .join("")
+          .trim() || null;
+      }
+      return null;
     } catch {
       return null;
     }
@@ -514,6 +619,9 @@ export class PiHost {
     const session = this.runtime?.session;
     const file = session?.sessionFile;
     if (!file || !session.sessionManager) return;
+    if (session.isStreaming) return;
+    if (this.managedSubagents?.hasActiveForSession(session.sessionId)) return;
+    if (await this.hasActiveThreadsForSession(session.sessionId)) return;
     const intervalMs = Number(process.env.PIDECK_RECAP_MS) || RECAP_INTERVAL_MS;
     const cached = this.lastMessageAt.get(file);
     if (!cached || Date.now() - cached < intervalMs) return;
@@ -522,6 +630,9 @@ export class PiHost {
 
   private async maybeRecap(session: AgentSession, file: string): Promise<void> {
     if (this.recapping.has(file)) return;
+    if (session.isStreaming) return;
+    if (this.managedSubagents?.hasActiveForSession(session.sessionId)) return;
+    if (await this.hasActiveThreadsForSession(session.sessionId)) return;
     this.recapping.add(file);
     try {
       // The in-memory session manager keeps message content out of getEntries()
@@ -541,7 +652,7 @@ export class PiHost {
       const delta = pickRecapDelta(messages, recaps[recaps.length - 1]?.coveredEntryId ?? null);
       if (!recapWorthy(delta.messages) || !delta.coveredEntryId) return;
       const deltaText = delta.messages.map((m) => messageText(m)).join("\n").slice(0, 8000);
-      const text = await this.askCheap(buildRecapPrompt(deltaText), 320);
+      const text = await this.askCheap(buildRecapPrompt(deltaText), 1024);
       const line = normalizeRecapText(text ?? "");
       if (!line) return;
       const recap: Recap = {
@@ -828,7 +939,10 @@ export class PiHost {
     const session = this.runtime.session;
     const sessionFile = session.sessionFile ?? session.sessionManager.getSessionFile();
     if (!sessionFile || session.isStreaming) return null;
-    const before = await this.snapshots.capture(this.cwd).catch(() => null);
+    // The pre-turn checkpoint is the rollback boundary: it MUST reflect the
+    // worktree at this instant, so it is an authoritative capture that reads
+    // Git/FS directly and never trusts the eventually-consistent watcher.
+    const before = await this.snapshots.capture(this.cwd, { authoritative: true }).catch(() => null);
     if (!before) return null;
     const entries = session.sessionManager.getEntries();
     return {
@@ -856,7 +970,12 @@ export class PiHost {
     );
     const finalLeafId = session.sessionManager.getLeafId();
     if (!user || !finalLeafId) return;
-    const after = await this.snapshots.capture(this.cwd).catch(() => null);
+    // The post-turn snapshot must also be authoritative. `prepareRollback`
+    // restores files only for the paths in `changedPaths`, which is derived
+    // from this snapshot; a watcher-backed capture that missed the agent's
+    // edit would yield an incomplete diff and leave the change in place after
+    // a rollback. Reading Git/FS directly guarantees a complete diff.
+    const after = await this.snapshots.capture(this.cwd, { authoritative: true }).catch(() => null);
     if (!after || after.root !== start.before.root) return;
     const changedPaths = await this.snapshots.changedFiles(this.cwd, start.before.tree, after.tree);
     const exclusions = changedExclusions(start.before.excluded, after.excluded);
@@ -966,7 +1085,7 @@ export class PiHost {
   async getModels(): Promise<any[]> {
     await this.ensureSession();
     const available = await this.runtime.services.modelRuntime.getAvailable();
-    const overrides = getSettings().contextWindowOverrides ?? {};
+    const overrides = this._getSettings().contextWindowOverrides ?? {};
     return [...available].map((m) => {
       const key = `${m.provider}/${m.id}`;
       const override = overrides[key];
@@ -993,11 +1112,11 @@ export class PiHost {
   }
   /** Read the user's Babylon preferences (model + reasoning + overrides). */
   async getSettings(): Promise<PiSettings> {
-    return getSettings();
+    return this._getSettings();
   }
   /** Merge + persist a patch of the user's Babylon preferences. */
   async setSettings(patch: Partial<PiSettings>): Promise<PiSettings> {
-    return saveSettings(patch);
+    return this._saveSettings(patch);
   }
   async getThinkingLevels(): Promise<string[]> {
     await this.ensureSession();
@@ -1101,7 +1220,10 @@ export class PiHost {
     if (checkpoints.some((checkpoint) => !checkpoint!.complete)) throw new Error("This filesystem checkpoint is incomplete");
     const previousLeafId = session.sessionManager.getLeafId();
     if (!previousLeafId) throw new Error("No active session position");
-    const redo = await this.snapshots.capture(this.cwd);
+    // The redo snapshot is what an "undo" later restores from. If it is stale
+    // (watcher hadn't fired when the user clicked Rollback), undo will silently
+    // revert to the wrong content. Destructive, so authoritative.
+    const redo = await this.snapshots.capture(this.cwd, { authoritative: true });
     if (!redo) throw new Error("Rollback requires a Git project");
     const restoreMap: Record<string, string> = Object.create(null);
     for (const checkpoint of checkpoints as TurnCheckpoint[]) {
@@ -1155,7 +1277,10 @@ export class PiHost {
       if (manager.getLeafId() !== plan.expectedLeafId || entryDigest(manager.getEntries()) !== plan.entryDigest) {
         throw new Error("The session changed; review the rollback again");
       }
-      const current = await this.snapshots.capture(this.cwd);
+      // Drift guard. A stale cache would compare equal to the redo snapshot
+      // and let the restore overwrite the user's manual edit. Destructive, so
+      // authoritative.
+      const current = await this.snapshots.capture(this.cwd, { authoritative: true });
       if (!current || current.tree !== plan.redo.tree) throw new Error("Project files changed; review the rollback again");
       await this.snapshots.restore(this.cwd, plan.restoreMap);
       let navigated = false;
@@ -1221,7 +1346,10 @@ export class PiHost {
         await this.rollbacks.clearActive(session.sessionId);
         throw new Error("Undo rollback is no longer available because the session continued");
       }
-      const current = await this.snapshots.capture(this.cwd);
+      // Undo restores the redo tree. The drift check below must see the real
+      // current worktree; a stale cache could report no drift and let the
+      // restore silently overwrite a manual edit made after the rollback.
+      const current = await this.snapshots.capture(this.cwd, { authoritative: true });
       if (!current) throw new Error("Rollback snapshots are unavailable");
       const drift = await this.snapshots.preview(this.cwd, current.tree, active.restoreMap);
       if (drift.length) {
@@ -1361,8 +1489,54 @@ export class PiHost {
     return this.managedSubagents.promote(this.cwd, runId);
   }
 
+  private async hasActiveThreadsForSession(sessionId: string): Promise<boolean> {
+    try {
+      const dir = join(this.cwd, ".pi", "state", "threads");
+      const entries: any[] = (await (fsp as any).readdir(dir, { withFileTypes: true }).catch(() => [])) as any[];
+      for (const entry of entries) {
+        if (!entry.isDirectory?.()) continue;
+        const path = join(dir, entry.name, "thread.json");
+        try {
+          const raw = await fsp.readFile(path, "utf8");
+          const state = JSON.parse(raw);
+          if (state?.parentSessionId !== sessionId) continue;
+          const status = state?.status as string | undefined;
+          if (status && !["completed", "failed", "stopped"].includes(status)) return true;
+        } catch {}
+      }
+    } catch {}
+    return false;
+  }
+
+  /** Deliver newly-introduced diagnostics to the active Pi session as visible context.
+   *  Bounded to 20 items; uses a custom message so the model can repair post-edit
+   *  failures without being interrupted or prompted automatically. */
+  async notifyDiagnostics(diagnostics: Array<{ file: string; line: number; character: number; severity: string; message: string; source?: string; code?: string | number }>): Promise<void> {
+    if (!diagnostics.length) return;
+    const bounded = diagnostics.slice(0, 20);
+    const lines = bounded.map((d) => `${d.file}:${d.line}:${d.character} [${d.severity}]${d.source ? ` (${d.source}${d.code ? `/${d.code}` : ""})` : ""} ${d.message}`);
+    const content = `[Babylon Diagnostics]\nNew problems detected:\n${lines.join("\n")}`;
+    try {
+      await this.runtime.session.sendCustomMessage({
+        customType: "babylon_diagnostics",
+        content,
+        display: true,
+        details: { diagnostics: bounded },
+      } as unknown as Parameters<(typeof this.runtime.session)["sendCustomMessage"]>[0]);
+      this.opts.onEvent({
+        type: "message_start",
+        message: { role: "custom", customType: "babylon_diagnostics", content, display: true },
+      });
+    } catch {
+      // Best-effort; diagnostics should never break the session.
+    }
+  }
+
   async dispose(): Promise<void> {
     this.rejectAllUi(new Error("host disposed"));
+    // Stop the recursive fs.watch watchers before anything else; leaving them
+    // running leaks file descriptors for every tracked worktree.
+    this.snapshots.dispose();
     await this.managedSubagents?.dispose().catch(() => undefined);
     this.unsubscribeEvents?.();
     this.unsubscribeEvents = null;

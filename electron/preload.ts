@@ -29,7 +29,12 @@ const api = {
     ipcRenderer.invoke("pideck:git-branch-create", cwd, name, switchTo),
   gitBranchSwitch: (cwd: string, name: string, options?: { stash?: boolean }): Promise<any> =>
     ipcRenderer.invoke("pideck:git-branch-switch", cwd, name, options),
-  gitStartCommitPush: (cwd: string): Promise<any> => ipcRenderer.invoke("pideck:git-start-commit-push", cwd),
+  gitCommitPush: (cwd: string, requestId: string): Promise<any> => ipcRenderer.invoke("pideck:git-commit-push", cwd, requestId),
+  onGitCommitPushProgress: (cb: (progress: any) => void): (() => void) => {
+    const listener = (_e: unknown, progress: any) => cb(progress);
+    ipcRenderer.on("pideck:git-commit-push-progress", listener);
+    return () => ipcRenderer.removeListener("pideck:git-commit-push-progress", listener);
+  },
   gitCommit: (cwd: string, message: string): Promise<any> => ipcRenderer.invoke("pideck:git-commit", cwd, message),
   gitPush: (cwd: string): Promise<any> => ipcRenderer.invoke("pideck:git-push", cwd),
   gitPull: (cwd: string): Promise<any> => ipcRenderer.invoke("pideck:git-pull", cwd),
@@ -37,12 +42,18 @@ const api = {
   gitPrSuggest: (cwd: string): Promise<any> => ipcRenderer.invoke("pideck:git-pr-suggest", cwd),
   gitPrCreate: (cwd: string, input: { title: string; body?: string }): Promise<any> =>
     ipcRenderer.invoke("pideck:git-pr-create", cwd, input),
+  gitStageFile: (cwd: string, file: string): Promise<void> => ipcRenderer.invoke("pideck:git-stage-file", cwd, file),
+  gitUnstageFile: (cwd: string, file: string): Promise<void> => ipcRenderer.invoke("pideck:git-unstage-file", cwd, file),
+  gitDiscardFile: (cwd: string, file: string): Promise<void> => ipcRenderer.invoke("pideck:git-discard-file", cwd, file),
+  gitStageHunk: (cwd: string, file: string, patch: string): Promise<void> => ipcRenderer.invoke("pideck:git-stage-hunk", cwd, file, patch),
+  gitDiscardHunk: (cwd: string, file: string, patch: string): Promise<void> => ipcRenderer.invoke("pideck:git-discard-hunk", cwd, file, patch),
   getModels: (): Promise<any[]> => ipcRenderer.invoke("pideck:get-models"),
   getCommands: (): Promise<any[]> => ipcRenderer.invoke("pideck:get-commands"),
   setModel: (provider: string, modelId: string): Promise<any> =>
     ipcRenderer.invoke("pideck:set-model", provider, modelId),
   setThinking: (level: string): Promise<any> => ipcRenderer.invoke("pideck:set-thinking", level),
   getThinkingLevels: (): Promise<string[]> => ipcRenderer.invoke("pideck:get-thinking-levels"),
+  listFonts: (): Promise<string[]> => ipcRenderer.invoke("pideck:list-fonts"),
   setSessionName: (name: string): Promise<any> => ipcRenderer.invoke("pideck:set-session-name", name),
   compact: (): Promise<any> => ipcRenderer.invoke("pideck:compact"),
   getSettings: (): Promise<any> => ipcRenderer.invoke("pideck:get-settings"),
@@ -60,6 +71,36 @@ const api = {
   getForkMessages: (): Promise<any[]> => ipcRenderer.invoke("pideck:get-fork-messages"),
   fork: (entryId: string): Promise<any> => ipcRenderer.invoke("pideck:fork", entryId),
   clone: (): Promise<any> => ipcRenderer.invoke("pideck:clone"),
+  taskList: (): Promise<any[]> => ipcRenderer.invoke("pideck:task-list"),
+  taskGet: (id: string): Promise<any> => ipcRenderer.invoke("pideck:task-get", id),
+  taskSpawn: (taskId: string, command: string, cwd: string): Promise<any> =>
+    ipcRenderer.invoke("pideck:task-spawn", taskId, command, cwd),
+  taskSetContract: (taskId: string, contract: any): Promise<any> =>
+    ipcRenderer.invoke("pideck:task-set-contract", taskId, contract),
+  taskComplete: (taskId: string, results: any[]): Promise<any> =>
+    ipcRenderer.invoke("pideck:task-complete", taskId, results),
+  onTaskUpdate: (cb: (tasks: any[]) => void): (() => void) => {
+    const listener = (_e: unknown, tasks: any[]) => cb(tasks);
+    ipcRenderer.on("pideck:task-update", listener);
+    return () => ipcRenderer.removeListener("pideck:task-update", listener);
+  },
+  hooksList: (): Promise<any[]> => ipcRenderer.invoke("pideck:hooks-list"),
+  hooksRegister: (hook: any): Promise<any[]> => ipcRenderer.invoke("pideck:hooks-register", hook),
+  hooksRemove: (id: string): Promise<any[]> => ipcRenderer.invoke("pideck:hooks-remove", id),
+  onHooksUpdate: (cb: (hooks: any) => void): (() => void) => {
+    const listener = (_e: unknown, hooks: any) => cb(hooks);
+    ipcRenderer.on("pideck:hooks-update", listener);
+    return () => ipcRenderer.removeListener("pideck:hooks-update", listener);
+  },
+  contractsList: (): Promise<any[]> => ipcRenderer.invoke("pideck:contracts-list"),
+  contractsGet: (id: string): Promise<any> => ipcRenderer.invoke("pideck:contracts-get", id),
+  attentionList: (): Promise<any> => ipcRenderer.invoke("pideck:attention-list"),
+  attentionResolve: (id: string): Promise<any> => ipcRenderer.invoke("pideck:attention-resolve", id),
+  onAttentionUpdate: (cb: (attention: any) => void): (() => void) => {
+    const listener = (_e: unknown, attention: any) => cb(attention);
+    ipcRenderer.on("pideck:attention-update", listener);
+    return () => ipcRenderer.removeListener("pideck:attention-update", listener);
+  },
   worktreeInfo: (): Promise<any> => ipcRenderer.invoke("pideck:worktree-info"),
   worktreeCreate: (opts: { name: string; description?: string; useGit?: boolean }): Promise<any> =>
     ipcRenderer.invoke("pideck:worktree-create", opts),
@@ -148,6 +189,16 @@ const api = {
     const listener = (_e: unknown, state: any) => cb(state);
     ipcRenderer.on("pideck:permissions-changed", listener);
     return () => ipcRenderer.removeListener("pideck:permissions-changed", listener);
+  },
+
+  lspGetSnapshot: (cwd: string): Promise<any> => ipcRenderer.invoke("pideck:lsp-get-snapshot", cwd),
+  lspListSnapshots: (): Promise<any[]> => ipcRenderer.invoke("pideck:lsp-list-snapshots"),
+  lspSetProject: (cwd: string | null): Promise<any> => ipcRenderer.invoke("pideck:lsp-set-project", cwd),
+  lspRefresh: (cwd: string): Promise<any> => ipcRenderer.invoke("pideck:lsp-refresh", cwd),
+  onLspUpdate: (cb: (snapshots: any[]) => void): (() => void) => {
+    const listener = (_e: unknown, snaps: any[]) => cb(snaps);
+    ipcRenderer.on("pideck:lsp-update", listener);
+    return () => ipcRenderer.removeListener("pideck:lsp-update", listener);
   },
 
   onStatus: (cb: (status: any) => void): (() => void) => {

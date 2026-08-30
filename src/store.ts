@@ -31,9 +31,31 @@ export type ChatItem =
       details?: any;
       /** Output was clamped at the wire; a "show full" fetch is available. */
       truncated?: boolean;
+      /** Babylon-wrapped tool metadata (e.g. babylon_bash command chips, exit code, duration). */
+      babylon?: {
+        kind: "babylon_bash";
+        version: 1;
+        callId: string;
+        command: string;
+        argv: string[];
+        head: string;
+        headBase: string;
+        startedAt: number;
+        endedAt?: number;
+        exitCode?: number;
+        exitSignal?: string;
+        status: "running" | "completed" | "exited" | "signaled" | "timeout" | "aborted" | "failed";
+        cwd: string;
+        truncated: boolean;
+        fullOutputPath?: string;
+        unsafe?: string | null;
+        hints: Array<{ kind: "explain"; label: string; description: string }>;
+        durationMs?: number;
+      };
     }
   | { kind: "system"; key: string; text: string }
-  | { kind: "recap"; key: string; text: string; at: number };
+  | { kind: "recap"; key: string; text: string; at: number }
+  | { kind: "launch"; key: string; runKind: "subagent" | "thread" | "workflow"; runId: string; label: string; status: "running" | "completed" | "failed" | "stopped" };
 
 export type DialogMethod = "select" | "confirm" | "input" | "editor";
 
@@ -244,14 +266,22 @@ export function reducer(state: State, action: Action): State {
   switch (action.type) {
     case "reset":
       return { ...initialState, toasts: state.toasts };
-    case "rebuild":
+    case "rebuild": {
+      const fromMessages = messagesToItems(action.messages);
+      // Launch cards are not part of the agent's session file; preserve any
+      // live rows so the user doesn't lose sight of running work after a
+      // session-rebuild (e.g. settings change, agent_settled replay).
+      const preserved = state.items.filter(
+        (it) => it.kind === "launch" && !fromMessages.some((row) => row.key === it.key)
+      );
       return {
         ...state,
-        items: reconcileItems(state.items, messagesToItems(action.messages)),
+        items: reconcileItems(state.items, [...fromMessages, ...preserved]),
         streaming: false,
         steering: [],
         followUp: [],
       };
+    }
     case "local-user":
       return {
         ...state,
@@ -296,6 +326,32 @@ function applyEvent(state: State, ev: any): State {
         ...state,
         items: [...state.items, { kind: "recap", key: nextKey("c"), text, at: Date.parse(ev.recap?.at ?? "") || Date.now() }],
       };
+    }
+
+    case "babylon_launch_started": {
+      const { runId, runKind, label } = ev;
+      if (!runId || !runKind) return state;
+      const items = state.items.slice();
+      // Reuse the row on re-emit (e.g. session rehydrate) so the same key sticks.
+      const existing = items.findIndex((it) => it.kind === "launch" && it.runId === runId);
+      const next = { kind: "launch" as const, key: `l:${runKind}:${runId}`, runKind, runId, label: label ?? runId, status: "running" as const };
+      if (existing >= 0) items[existing] = { ...items[existing], ...next };
+      else items.push(next);
+      return { ...state, items };
+    }
+
+    case "babylon_launch_terminated": {
+      const { runId, status } = ev;
+      if (!runId) return state;
+      const items = state.items.slice();
+      const idx = items.findIndex((it) => it.kind === "launch" && it.runId === runId);
+      if (idx < 0) return state;
+      const current = items[idx];
+      if (current.kind !== "launch") return state;
+      const allowed = new Set(["completed", "failed", "stopped"]);
+      const next = allowed.has(status) ? status : "completed";
+      items[idx] = { ...current, status: next };
+      return { ...state, items };
     }
 
     case "pideck_history_changed":
@@ -394,6 +450,7 @@ function applyEvent(state: State, ev: any): State {
         args: ev.args,
         status: "running",
         output: base?.output,
+        babylon: base?.babylon,
       };
       if (at >= 0) items[at] = item;
       else items.push(item);
@@ -405,6 +462,7 @@ function applyEvent(state: State, ev: any): State {
       return mapTool(state, ev.toolCallId, (t) => ({
         ...t,
         output: textOf(ev.partialResult?.content),
+        babylon: ev.partialResult?.details?.babylon ?? t.babylon,
       }));
 
     case "tool_execution_end":
@@ -413,6 +471,7 @@ function applyEvent(state: State, ev: any): State {
         status: ev.isError ? "error" : "done",
         output: textOf(ev.result?.content),
         details: ev.result?.details,
+        babylon: ev.result?.details?.babylon ?? t.babylon,
       }));
 
     case "queue_update":
@@ -530,6 +589,9 @@ function sameItem(a: ChatItem, b: ChatItem): boolean {
   }
   if (a.kind === "system" && b.kind === "system") return a.text === b.text;
   if (a.kind === "recap" && b.kind === "recap") return a.text === b.text && a.at === b.at;
+  if (a.kind === "launch" && b.kind === "launch") {
+    return a.runId === b.runId && a.status === b.status && a.label === b.label;
+  }
   return false;
 }
 

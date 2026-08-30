@@ -17,13 +17,16 @@ interface Props {
  * never cancels, so a typed draft cannot be lost by an accidental click-away.
  */
 export default function DialogHost({ dialogs, onDismiss, toast }: Props) {
-  if (!dialogs.length) return null;
+  // Composer now handles select/input/editor (ask_question) inline — only
+  // render confirm and other non-inline dialogs here to avoid blocking chat.
+  const filtered = dialogs.filter((d) => d.method !== "select" && d.method !== "input" && d.method !== "editor");
+  if (!filtered.length) return null;
   return (
     <div
       className="pointer-events-none fixed inset-x-0 z-40 flex flex-col items-center px-6"
       style={{ bottom: "var(--dock-bottom, 188px)" }}
     >
-      <DialogCard key={dialogs[0].id} dialog={dialogs[0]} onDismiss={onDismiss} toast={toast} />
+      <DialogCard key={filtered[0].id} dialog={filtered[0]} onDismiss={onDismiss} toast={toast} />
     </div>
   );
 }

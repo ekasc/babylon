@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Babylon intentionally links @earendil-works/pi-coding-agent from an
+      # existing Pi installation instead of declaring it in package.json,
+      # because Pi ships with workspace dependencies. Pin the exact version
+      # Babylon is built and tested against so CI is reproducible.
+      PI_CODING_AGENT_VERSION: 0.84.3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Several tests run `git commit` against ephemeral repos. A
+      # fresh runner has no git identity, which fails those tests.
+      # Set a global identity as a belt-and-suspenders measure; the
+      # tests that need a specific identity set it locally.
+      - name: Configure git identity
+        run: |
+          git config --global user.email "ci@babylon.local"
+          git config --global user.name  "Babylon CI"
+      # Babylon imports @earendil-works/pi-coding-agent but does not
+      # declare it as a dependency. Install the pinned version globally
+      # (--ignore-scripts skips Pi's lifecycle hooks, which expect a Pi
+      # environment) and then link it into the project's node_modules.
+      - name: Install pinned Pi
+        run: npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${{ env.PI_CODING_AGENT_VERSION }}"
+      - name: Link Pi into node_modules
+        run: node scripts/link-pi.mjs
+      - name: typecheck
+        run: pnpm run typecheck
+      - name: test
+        run: pnpm run test
+      - name: build
+        run: pnpm run build
