@@ -84,12 +84,21 @@ describe("snapcompact renderer", () => {
     expect(r.frames[0].png.length).toBeGreaterThan(0);
     expect(r.frames[0].png.subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]));
   });
-  it("truncates frame count to profile.maxFrames and sets truncated", () => {
+  it("truncates frame count to profile.maxFrames and sets truncated, with an omission marker frame (no silent holes)", () => {
     const small: FrameProfile = { ...profile, maxFrames: 2 };
     const text = "a".repeat(20_000);
     const r = renderFrames({ sourceText: text, rawSymbols: [], profile: small });
     expect(r.frames.length).toBe(2);
     expect(r.truncated).toBe(true);
+    // No silent holes: the plan records exactly which lines were
+    // omitted, and an omission-marker frame is emitted so the model
+    // sees an honest note rather than content that simply disappeared.
+    const lastEntry = r.plan.entries[r.plan.entries.length - 1];
+    const omissionEntry = r.plan.entries.find((e) => e.carriesOmission);
+    expect(omissionEntry).toBeDefined();
+    expect(omissionEntry).toBe(lastEntry);
+    // Every line in the plan is accounted for.
+    expect(r.plan.linesAssigned).toBeLessThanOrEqual(r.plan.totalLines);
   });
   it("preserves exact-token dictionary as raw text alongside rasterized source", () => {
     const symbols = [{ value: "/repo/electron/snapshot-store.ts", kind: "path" as const }];
@@ -105,6 +114,27 @@ describe("snapcompact renderer", () => {
     const text = "word ".repeat(200);
     const r = renderFrames({ sourceText: text, rawSymbols: [], profile });
     expect(r.frames.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("the frame plan covers every line exactly once (or records omission)", () => {
+    const small: FrameProfile = { ...profile, maxFrames: 2 };
+    const text = "a\n".repeat(5_000);
+    const r = renderFrames({ sourceText: text, rawSymbols: [], profile: small });
+    // No two entries overlap; together they cover the whole source
+    // (body frames cover the head, the omission-marker frame covers
+    // the tail, so totalCovered === totalLines).
+    const ranges = r.plan.entries.map((e) => [e.lineStart, e.lineEnd] as const);
+    ranges.sort((a, b) => a[0] - b[0]);
+    for (let i = 0; i < ranges.length - 1; i++) {
+      expect(ranges[i][1] + 1).toBeLessThanOrEqual(ranges[i + 1][0]);
+    }
+    const totalCovered = ranges.reduce((n, [a, b]) => n + (b - a + 1), 0);
+    expect(totalCovered).toBe(r.plan.totalLines);
+    // Body frames alone cover exactly linesAssigned lines.
+    const bodyCovered = r.plan.entries
+      .filter((e) => !e.carriesOmission)
+      .reduce((n, e) => n + (e.lineEnd - e.lineStart + 1), 0);
+    expect(bodyCovered).toBe(r.plan.linesAssigned);
   });
   it("does not crash on Unicode / control characters", () => {
     const text = "line1 \u4e2d\u6587 ok\nline2\t\tabc\nline3 \u2603 \u00e9";
