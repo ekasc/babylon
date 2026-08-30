@@ -42,8 +42,9 @@ export interface DaemonClientOptions {
 export interface DaemonClient {
   request(type: ProtocolMessageType, payload: unknown, timeoutMs?: number): Promise<ProtocolEnvelope>;
   onEvent(handler: (envelope: ProtocolEnvelope) => void): () => void;
-  /** Subscribe to socket-level connect/disconnect transitions. Used by callers
-   *  to flip authoritative runtime ownership (e.g. `daemonActive`). */
+  /** Subscribe to socket-level connect/disconnect transitions. Callers use this
+   *  for transient liveness (`daemonConnected`); authoritative runtime ownership
+   *  is decided once at startup and must not be reverted on a blip. */
   onConnectionChange(handler: (state: "connected" | "disconnected") => void): () => void;
   connected(): boolean;
   close(): void;

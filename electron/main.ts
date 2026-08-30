@@ -165,10 +165,15 @@ const hookManager = new HookManager();
 const attentionManager = new AttentionManager();
 const contracts = new Map<string, CompletionContract>();
 let daemonClient: DaemonClient | null = null;
-/** True only after a successful handshake with the daemon. The setting
- *  `daemon.enabled` alone is not enough — a process crash, missing binary, or
- *  refused connection must fall back to the local host. */
-let daemonActive = false;
+/** Authoritative runtime ownership. "daemon" only after a successful startup
+ *  handshake; "local" when the daemon is disabled, missing, or unreachable at
+ *  startup. This is intentionally NOT flipped by a transient disconnect — a
+ *  daemon that blips and reconnects stays daemon-owned, it just can't be
+ *  reached for a moment (`daemonConnected`). */
+let runtimeOwner: "local" | "daemon" = "local";
+/** Liveness of the daemon socket. Transient: drops on a blip, restored on
+ *  reconnect. Never changes `runtimeOwner`. */
+let daemonConnected = false;
 
 function daemonPaths() {
   return {
@@ -187,14 +192,14 @@ function isDaemonEnabled(): boolean {
 }
 
 function getRuntime(): RuntimeFacade {
-  if (daemonActive && daemonClient) return createDaemonRuntime(daemonClient);
+  if (runtimeOwner === "daemon" && daemonClient) return createDaemonRuntime(daemonClient);
   // Fallback to local runtime — host may be null during early startup, so guard
   const hostForLocal = host ?? ({ open: async () => ({}), prompt: async () => ({}), abort: async () => ({}), getState: async () => ({}), getMessages: async () => [] } as unknown as PiHost);
   return createLocalRuntime({ taskManager, attentionManager, hookManager, piHost: hostForLocal, contracts });
 }
 
 function daemonOnly(): DaemonClient | null {
-  return daemonActive && daemonClient ? daemonClient : null;
+  return runtimeOwner === "daemon" && daemonConnected && daemonClient ? daemonClient : null;
 }
 
 async function daemonClientTasks(): Promise<import("../src/tasks").Task[]> {
@@ -1486,14 +1491,16 @@ async function ensureDaemon(): Promise<boolean> {
   }
   if (!daemonClient) {
     daemonClient = connectDaemonClient({ listen: { socketPath }, reconnect: { initialDelayMs: 100, maxDelayMs: 5000 } });
-    // Track authoritative daemon state. The socket-level connection change
-    // callback is the source of truth (not a protocol event), and is what
-    // flips `daemonActive` on connect/disconnect. We do not flip the flag
-    // here — ensureDaemon() awaits the initial handshake below — but we
-    // keep the connection observer so runtime ownership transitions on
-    // later disconnects.
+    // Track daemon liveness. The socket-level connection callback is the
+    // source of truth (not a protocol event). It only flips `daemonConnected`;
+    // `runtimeOwner` is set once by the startup handshake and is never
+    // surrendered on a transient blip. We keep the observer so `daemonOnly()`
+    // and the UI stop reaching the daemon during an outage and resume on
+    // reconnect without ever concluding we are in local mode.
     daemonClient.onConnectionChange((state) => {
-      if (state === "disconnected") daemonActive = false;
+      // A blip must not surrender runtime ownership to the local host; it
+      // only marks the socket unreachable until the client reconnects.
+      daemonConnected = state === "connected";
     });
     daemonClient.onEvent((envelope) => {
       if (envelope.type === "task.created" || envelope.type === "task.updated" || envelope.type === "task.removed") {
@@ -1538,7 +1545,7 @@ async function ensureDaemon(): Promise<boolean> {
 /** Awaitable handshake: resolves to true once the daemon is connected and
  *  round-trips a ping. Resolves to false (does not throw) when the daemon
  *  is disabled, the binary is missing, the socket is refused, or the ping
- *  times out. Either way, on return the caller can read `daemonActive` and
+ *  times out. Either way, on return the caller can read `runtimeOwner` and
  *  `daemonOnly()` and pick local vs. daemon ownership without racing. */
 async function handshakeDaemon(): Promise<boolean> {
   if (!isDaemonEnabled() || !daemonClient) return false;
@@ -1547,7 +1554,8 @@ async function handshakeDaemon(): Promise<boolean> {
   } catch {
     return false;
   }
-  daemonActive = true;
+  runtimeOwner = "daemon";
+  daemonConnected = true;
   // Warm the task cache so the UI has something to render immediately.
   daemonClient
     .request("state.get", {})
@@ -1568,10 +1576,11 @@ app.whenReady().then(async () => {
   registerIpc();
   createWindow();
   // ensureDaemon() awaits the initial ping handshake, so by the time it
-  // returns, `daemonActive` is authoritative (true only when the daemon
-  // round-tripped a ping; false on a missing binary, refused socket, or
+  // returns, `runtimeOwner` is authoritative ("daemon" only when the daemon
+  // round-tripped a ping; "local" on a missing binary, refused socket, or
   // timed-out ping). No split-brain: we choose local vs daemon ownership
-  // here, once, and start exactly one host.
+  // here, once, and start exactly one host. A later transient disconnect
+  // flips `daemonConnected` but never reverts `runtimeOwner`.
   await ensureDaemon();
   if (daemonOnly()) {
     // Daemon owns tasks and attention when active — thin client, no local subscriptions
