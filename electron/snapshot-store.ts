@@ -7,6 +7,11 @@ const MAX_OUTPUT = 32 * 1024 * 1024;
 const MAX_UNTRACKED_BYTES = 2 * 1024 * 1024;
 const MAX_DIFF_BYTES = 200 * 1024;
 const GIT_TIMEOUT_MS = 120_000;
+/** Bounded reconciliation passes. If the worktree mutates continuously
+ *  (a build writing files in a loop, a `git clean` in progress, etc.) the
+ *  capture refuses to return rather than pretending a stable checkpoint was
+ *  reached. Three passes is enough to clear ordinary concurrent edits. */
+const MAX_RECONCILE_PASSES = 3;
 
 export interface SnapshotCapture {
   root: string;
@@ -37,18 +42,17 @@ interface ExclusionMap {
 
 interface RepoWatch {
   watcher: FSWatcher | null;
-  /** Paths the kernel reported as changed since the last full capture. An
+  /** Paths the kernel reported as changed since the last completed pass. An
    *  empty string is a sentinel meaning "assume the whole repo changed". */
   dirty: Set<string>;
-  /** Changes observed while a capture was in flight; merged into `dirty`
-   *  afterwards so a concurrent edit is never lost. */
+  /** Changes observed while a capture was in flight; merged into `dirty` so
+   *  a concurrent edit is never lost. */
   pending: Set<string>;
   capturing: boolean;
-  /** Last fully-computed snapshot, returned verbatim while `dirty` is empty. */
+  /** Last fully-computed snapshot. Returned verbatim when a capture's
+   *  authoritative candidate discovery finds no changes. */
   last: SnapshotCapture | null;
   root: string;
-  /** Number of consecutive noop fast-path returns since the last full capture. */
-  since: number;
 }
 
 interface GitResult {
@@ -160,16 +164,11 @@ export class SnapshotStore {
    *  this store. */
   private rootCache = new Map<string, string | null>();
 
-  /** Per-repo worktree watchers. A watcher feeds a dirty-path set; when it
-   *  is empty the worktree is unchanged since the last capture and `capture`
-   *  returns the cached snapshot without touching git. This is what keeps
-   *  prompt-start latency flat on large repos instead of re-enumerating the
-   *  whole worktree on every turn. */
+  /** Per-repo worktree watchers. The watcher is a concurrent-mutation
+   *  detector only: it does not feed a fast path. Every capture runs the
+   *  authoritative Git candidate discovery; the watcher exists to force an
+   *  additional reconciliation pass if a write lands during the capture. */
   private watches = new Map<string, RepoWatch>();
-
-  /** Full reconciliations are forced this often to bound staleness from any
-   *  event the kernel watcher missed (atomic renames, ignore-rule edits). */
-  private readonly reconcileEvery = 50;
 
   private async sourceRoot(cwd: string): Promise<string | null> {
     const cached = this.rootCache.get(cwd);
@@ -210,13 +209,13 @@ export class SnapshotStore {
    *  index, HEAD) do not alter the worktree tree we capture, and the shadow
    *  object store lives outside the worktree. The watcher therefore ignores
    *  `.git` and the snapshot storage directory, and only ever marks the repo
-   *  dirty so the next capture re-enumerates. */
+   *  dirty so the next reconciliation pass is forced. */
   private ensureWatch(repo: Repository): RepoWatch {
     const id = key(repo.root);
     let w = this.watches.get(id);
     if (w && w.watcher) return w;
     if (!w) {
-      w = { watcher: null, dirty: new Set(), pending: new Set(), capturing: false, last: null, root: repo.root, since: 0 };
+      w = { watcher: null, dirty: new Set(), pending: new Set(), capturing: false, last: null, root: repo.root };
       this.watches.set(id, w);
     }
     const stateAbs = resolve(this.stateDir);
@@ -239,8 +238,9 @@ export class SnapshotStore {
         }
       );
       w.watcher.on("error", () => {
-        // The kernel watcher dropped; fall back to a full capture and stop
-        // trusting it until the next real capture recreates it.
+        // The kernel watcher dropped. Mark everything dirty so the next
+        // capture runs the full reconciliation; the next capture will also
+        // try to reattach the watcher.
         try {
           w!.watcher?.close();
         } catch {
@@ -250,8 +250,9 @@ export class SnapshotStore {
         w!.dirty.add("");
       });
     } catch {
-      // Watching is unavailable (e.g. too many open files); capture stays
-      // correct via the full enumeration path, just never gets the fast path.
+      // Watching is unavailable; capture stays correct via the candidate
+      // discovery, it just never gets to merge a concurrent write into the
+      // current pass.
       w.watcher = null;
     }
     return w;
@@ -295,36 +296,34 @@ export class SnapshotStore {
           // Object reuse is an optimization; snapshots remain independently valid.
         }
       }
-      // Seed the shadow index ONCE, here, at creation time only. The shadow
-      // index is a persistent incremental store: it must never be reset on an
-      // ordinary repository lookup, or a concurrent read-only history call
-      // (changedFiles/turnChanges/preview) would mutate the same index a
-      // capture is mid-flight staging. An unborn-HEAD repo has no tree to
-      // seed from, which is fine — the first capture scans the source index.
-      await this.seedShadowIndex({ root, gitDir }, root).catch(() => undefined);
+      // One-time shadow initialization: copy the source's active index into
+      // the shadow gitDir so the shadow starts life in lock-step with the
+      // worktree. The source index's path must be resolved for the current
+      // cwd because linked worktrees do not share the main repository's
+      // `.git/index` file. After this point the shadow index evolves
+      // incrementally through `git add`/`git rm --cached` and is never reset.
+      await this.initShadowIndex({ root, gitDir }, root).catch(() => undefined);
     }
 
     return { root, gitDir };
   }
 
-  /** Seed the shadow index from the source worktree's HEAD tree. Uses
-   *  `git read-tree` so the shadow index has no stat-cache entries that
-   *  would make a noop worktree look like a full diff. Best-effort. */
-  private async seedShadowIndex(repo: Repository, sourceRoot: string): Promise<void> {
-    const tree = await run("git", ["rev-parse", "--verify", "-q", "HEAD^{tree}"], sourceRoot);
-    if (tree.code !== 0) return;
-    const treeSha = tree.stdout.toString("utf8").trim();
-    if (!/^[0-9a-f]{40,64}$/i.test(treeSha)) return;
-    await run(
-      "git",
-      [
-        "-c", "core.autocrlf=false",
-        "--git-dir", repo.gitDir,
-        "--work-tree", repo.root,
-        "read-tree", treeSha,
-      ],
-      sourceRoot
-    );
+  /** Initialize the shadow index from the source's active index. Runs once
+   *  per shadow gitDir, at creation time. Best-effort: an unborn-HEAD repo
+   *  or an unreadable source index leaves the shadow index empty, and the
+   *  first capture will discover the whole worktree as untracked. */
+  private async initShadowIndex(repo: Repository, sourceRoot: string): Promise<void> {
+    const path = await run("git", ["rev-parse", "--path-format=absolute", "--git-path", "index"], sourceRoot);
+    if (path.code !== 0) return;
+    const sourceIndex = path.stdout.toString("utf8").trim();
+    if (!sourceIndex) return;
+    try {
+      const data = await fsp.readFile(sourceIndex);
+      await fsp.writeFile(join(repo.gitDir, "index"), data, { mode: 0o600 });
+    } catch {
+      // Best-effort. The shadow will start empty and the first capture will
+      // discover all current worktree paths as candidates.
+    }
   }
 
   private args(repo: Repository, args: string[]): string[] {
@@ -386,72 +385,70 @@ export class SnapshotStore {
   }
 
   async capture(cwd: string, opts?: { authoritative?: boolean }): Promise<SnapshotCapture | null> {
-    // Fast path: if a live worktree watcher exists for this repo and has not
-    // observed any change since the last capture, return the cached snapshot
-    // without spawning git at all. This is what keeps post-turn snapshot cost
-    // flat on large repos; the full enumeration below only runs when the
-    // worktree actually changed (or every `reconcileEvery` captures).
-    //
-    // This fast path is NEVER taken for an authoritative capture. The
-    // pre-turn rollback checkpoint (captureTurnStart) must represent the
-    // worktree at the instant before the agent runs, so it reads Git/FS
-    // directly and cannot trust the eventually-consistent watcher: a change
-    // the kernel has not yet reported would otherwise be missing from the
-    // checkpoint and a later rollback would destroy the user's edit. The
-    // watcher is a performance hint for the post-turn / noop path only.
-    if (!opts?.authoritative) {
-      const cachedRoot = this.rootCache.get(cwd);
-      if (cachedRoot) {
-        const w = this.watches.get(key(cachedRoot));
-        if (w && w.watcher && w.last && w.last.root === cachedRoot && w.dirty.size === 0 && w.since < this.reconcileEvery) {
-          w.since += 1;
-          return w.last;
-        }
-      }
-    }
     const result = await this.withRepoLockForCwd(cwd, async () => {
-    const repo = await this.repository(cwd);
-    if (!repo) return null;
-    const w = this.ensureWatch(repo);
-    w.capturing = true;
-    try {
-      const stateRoot = resolve(this.stateDir);
-      const isInternal = (candidate: string) => {
-        const absolute = resolve(repo.root, candidate);
-        const rel = relative(stateRoot, absolute);
-        return !rel.startsWith("..") && !isAbsolute(rel);
-      };
+      const repo = await this.repository(cwd);
+      if (!repo) return null;
+      const w = this.ensureWatch(repo);
+      w.capturing = true;
+      try {
+        return await this.captureInner(repo, w);
+      } finally {
+        w.capturing = false;
+      }
+    });
+    return result;
+  }
 
-      // 1. Discover candidates concurrently. `git diff-files` reports
-      //    paths in the shadow index whose worktree content differs (or
-      //    whose stat data is stale, e.g. right after a fresh seed).
-      //    `git ls-files --others` is the untracked set the source repo's
-      //    ignore rules already filtered. `git ls-files --deleted` reports
-      //    paths in the shadow index that the worktree no longer has.
-      //    Finally, `git ls-files --cached` on the *source* repo gives us
-      //    the full tracked set; subtracting the shadow's own entries
-      //    yields the paths the source has tracked but the shadow has not
-      //    yet learned about. Together these commands cover the full
-      //    candidate set without ever enumerating the whole tracked
-      //    worktree once the shadow is in steady state.
-      const [dirtyResult, untrackedResult, deletedResult, shadowResult, sourceCachedResult] = await Promise.all([
+  /** Inner capture loop. The lock and `capturing` flag are managed by the
+   *  outer `capture`. The watcher feeds `w.dirty` while the capture is in
+   *  flight (events go to `w.pending` because `w.capturing` is true); after
+   *  each pass we re-check `w.dirty` and if it grew, we reconcile again,
+   *  bounded by `MAX_RECONCILE_PASSES`. If we cannot obtain a stable
+   *  checkpoint, fail closed. */
+  private async captureInner(repo: Repository, w: RepoWatch): Promise<SnapshotCapture | null> {
+    const stateRoot = resolve(this.stateDir);
+    const isInternal = (candidate: string) => {
+      const absolute = resolve(repo.root, candidate);
+      const rel = relative(stateRoot, absolute);
+      return !rel.startsWith("..") && !isAbsolute(rel);
+    };
+
+    const exclusions = await this.loadExclusionState(repo);
+    let liveExcluded: Record<string, { size: number; mtimeMs: number }> = {};
+    let lastTree: string | null = w.last?.tree ?? null;
+    let lastExcluded: Array<{ path: string; size: number; mtimeMs: number }> = w.last?.excluded ?? [];
+
+    for (let pass = 0; pass < MAX_RECONCILE_PASSES; pass++) {
+      // Snapshot the dirty set at pass start so we can tell, at the end of
+      // the pass, whether a new mutation arrived during the pass. Events
+      // that arrive during the pass go to w.pending (because w.capturing is
+      // true); we promote them into the comparison set at the end.
+      const dirtyAtStart = new Set(w.dirty);
+
+      // 1. Authoritative candidate discovery. Two Git calls run
+      //    concurrently:
+      //      - `git diff-files --name-only -z` returns tracked paths whose
+      //        worktree content differs from the shadow index (covers
+      //        modified AND deleted tracked files).
+      //      - `git ls-files --others --exclude-standard -z` returns
+      //        untracked paths in the worktree, with the source's
+      //        .gitignore already applied.
+      //    Babylon's JS never iterates the whole tracked set; the only
+      //    iteration is over the (small) candidate set returned by Git.
+      const [dirtyResult, untrackedResult] = await Promise.all([
         run("git", this.args(repo, ["diff-files", "-z", "--name-only"]), repo.root),
         run("git", ["-c", "core.quotepath=false", "ls-files", "-z", "--others", "--exclude-standard"], repo.root),
-        run("git", this.args(repo, ["ls-files", "-z", "--deleted"]), repo.root),
-        run("git", this.args(repo, ["ls-files", "-z"]), repo.root),
-        run("git", ["-c", "core.quotepath=false", "ls-files", "-z", "--cached"], repo.root),
       ]);
       if (dirtyResult.code !== 0) throw new Error("failed to enumerate dirty snapshot paths");
       if (untrackedResult.code !== 0) throw new Error("failed to enumerate untracked snapshot paths");
-      if (deletedResult.code !== 0) throw new Error("failed to enumerate deleted snapshot paths");
-      if (shadowResult.code !== 0) throw new Error("failed to read snapshot index");
-      if (sourceCachedResult.code !== 0) throw new Error("failed to enumerate source tracked paths");
 
-      const shadowSet = new Set(splitNul(shadowResult.stdout));
+      // 2. Union candidates. Tracked-mod/del from diff-files, untracked from
+      //    ls-files --others. No need for `git ls-files` of the shadow, no
+      //    need for `git ls-files --cached` of the source, no separate
+      //    `git ls-files --deleted` enumeration: diff-files already reports
+      //    deleted tracked entries, and the shadow's tracked set is
+      //    implicit in what diff-files + the index know.
       const candidates = new Set<string>();
-      // Untracked candidates are the only ones the oversize cutoff may drop;
-      // a tracked file the user modifies must always stay in the snapshot so
-      // a rollback can restore it.
       const untracked = new Set<string>();
       for (const path of splitNul(dirtyResult.stdout)) {
         if (!path || isInternal(path)) continue;
@@ -463,126 +460,121 @@ export class SnapshotStore {
         candidates.add(rel);
         untracked.add(rel);
       }
-      // Tracked in the source but not yet in the shadow (first capture
-      // after init, or after the user `git add`s a new file). We do not
-      // add the full source set every capture: only paths the shadow does
-      // not already know about become candidates.
-      for (const path of splitNul(sourceCachedResult.stdout)) {
-        if (!path || isInternal(path)) continue;
-        if (shadowSet.has(path)) continue;
-        candidates.add(safeRelative(repo.root, path));
-      }
 
-      // 2. Reconcile the candidate set against the live worktree, including
-      //    re-applying the oversize-file rule and updating the persisted
-      //    exclusion map so unchanged-but-excluded paths remain truthful.
-      const exclusions = await this.loadExclusionState(repo);
-      const liveExcluded: Record<string, { size: number; mtimeMs: number }> = {};
+      // 3. Apply the oversize-file policy candidate-only. A tracked file the
+      //    user edits is never excluded by size; a freshly-untracked
+      //    oversize file (build artifact, log) is excluded so it cannot
+      //    inflate the snapshot.
+      const passExcluded: Record<string, { size: number; mtimeMs: number }> = {};
       const finalCandidates: string[] = [];
       for (const rel of candidates) {
         try {
           const stat = await fsp.lstat(join(repo.root, rel));
-          // The oversize cutoff protects against huge *untracked* files (build
-          // artifacts, logs). It must not drop a tracked file the user edits,
-          // or a rollback could silently fail to restore that file.
           if (untracked.has(rel) && stat.isFile() && stat.size > MAX_UNTRACKED_BYTES) {
-            liveExcluded[rel] = { size: stat.size, mtimeMs: stat.mtimeMs };
+            passExcluded[rel] = { size: stat.size, mtimeMs: stat.mtimeMs };
             continue;
           }
           finalCandidates.push(rel);
-        } catch {
-          // A concurrently removed candidate is expressed by `git rm` below
-          // (it is in the shadow index but no longer in the worktree); do
-          // not stage it and do not keep it in the exclusion set.
+        } catch (error: any) {
+          if (error?.code !== "ENOENT") throw error;
+          // The candidate no longer exists in the worktree. A diff-files
+          // entry here is a deletion that `git add -A` must stage as a
+          // removal; an `--others` entry that vanished is a raced delete of
+          // an untracked file, with nothing to stage.
+          if (!untracked.has(rel)) finalCandidates.push(rel);
         }
       }
 
-      // 3. Compute the set of paths to remove from the shadow index. Only
-      //    paths the worktree no longer has should be removed; paths that
-      //    are clean against the shadow index stay put. The two
-      //    contributing sources are: shadow entries that no longer appear
-      //    in the worktree (deleted from the worktree) and shadow entries
-      //    that exceed the oversize-file limit (size changed since last
-      //    capture).
-      const shadowPaths = new Set(splitNul(shadowResult.stdout));
-      const deleted = splitNul(deletedResult.stdout);
+      // 4. Stage ONLY the candidate set into the shadow index. `git add -A`
+      //    updates (modifications), removes (deletions of tracked entries),
+      //    and adds (new candidates) — all scoped to the candidate pathspec
+      //    so the rest of the index stays put. This is what handles
+      //    `diff-files` deletions and `ls-files --others` additions in a
+      //    single candidate-scoped command, matching OpenCode's
+      //    candidate-only staging.
+      if (finalCandidates.length) {
+        const staged = await run(
+          "git",
+          this.args(repo, ["add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"]),
+          repo.root,
+          pathspec(finalCandidates)
+        );
+        if (staged.code !== 0) throw new Error("failed to capture project snapshot");
+      }
+      // Also drop shadow entries for paths that are now oversize-or-gone.
       const oversizeRemovals: string[] = [];
-      for (const shadowPath of shadowPaths) {
-        if (exclusions.paths[shadowPath]) {
-          // Previously excluded; if it no longer matches the live
-          // exclusion entry, drop it from the shadow so the next capture
-          // reconsiders it.
-          try {
-            const stat = await fsp.lstat(join(repo.root, shadowPath));
-            if (!stat.isFile() || stat.size <= MAX_UNTRACKED_BYTES) {
-              oversizeRemovals.push(shadowPath);
-            }
-          } catch {
+      for (const [shadowPath, entry] of Object.entries(exclusions.paths)) {
+        if (passExcluded[shadowPath]) continue; // still excluded
+        try {
+          const stat = await fsp.lstat(join(repo.root, shadowPath));
+          if (!stat.isFile() || stat.size <= MAX_UNTRACKED_BYTES) {
             oversizeRemovals.push(shadowPath);
+            delete exclusions.paths[shadowPath];
           }
+        } catch {
+          oversizeRemovals.push(shadowPath);
+          delete exclusions.paths[shadowPath];
         }
       }
-      const removed = [...new Set([...deleted, ...oversizeRemovals])].filter((path) => !isInternal(path));
-      for (const path of removed) {
-        if (exclusions.paths[path]) delete exclusions.paths[path];
-      }
-      for (const path of Object.keys(exclusions.paths)) {
-        if (!shadowPaths.has(path)) delete exclusions.paths[path];
-      }
-
-      // 4. Apply the candidate set to the shadow index using --sparse so
-      //    the rest of the index stays put. We use a NUL-delimited literal
-      //    pathspec list scoped to the candidate set, never an unscoped
-      //    `git add -A` over the whole worktree.
-      if (removed.length) {
+      if (oversizeRemovals.length) {
         const dropped = await run(
           "git",
           this.args(repo, ["rm", "--cached", "-f", "--ignore-unmatch", "--pathspec-from-file=-", "--pathspec-file-nul"]),
           repo.root,
-          pathspec(removed.map((p) => safeRelative(repo.root, p)))
+          pathspec(oversizeRemovals)
         );
         if (dropped.code !== 0) throw new Error("failed to update snapshot index");
       }
-      if (finalCandidates.length) {
-        const staged = await run(
-          "git",
-          this.args(repo, ["add", "--pathspec-from-file=-", "--pathspec-file-nul"]),
-          repo.root,
-          pathspec(finalCandidates.map((p) => safeRelative(repo.root, p)))
-        );
-        if (staged.code !== 0) throw new Error("failed to capture project snapshot");
-      }
+      liveExcluded = { ...exclusions.paths, ...passExcluded };
 
-      // 5. Persist the merged exclusion map so restarts keep the truth.
-      const merged: ExclusionMap = { paths: { ...exclusions.paths, ...liveExcluded } };
-      await this.saveExclusionState(repo, merged);
-
-      // 6. Materialize the tree.
+      // 5. Materialize the tree.
       const tree = await run("git", this.args(repo, ["write-tree"]), repo.root);
       if (tree.code !== 0) throw new Error("failed to write project snapshot");
       const hash = tree.stdout.toString("utf8").trim();
       if (!/^[0-9a-f]{40,64}$/i.test(hash)) throw new Error("invalid project snapshot");
 
-      const snapshot: SnapshotCapture = {
-        root: repo.root,
-        tree: hash,
-        excluded: Object.entries(merged.paths).map(([path, info]) => ({
-          path,
-          size: info.size,
-          mtimeMs: info.mtimeMs,
-        })),
-      };
-      w.last = snapshot;
-      w.root = repo.root;
-      w.dirty = w.pending;
-      w.pending = new Set();
-      w.since = 0;
-      return snapshot;
-    } finally {
-      w.capturing = false;
+      // 6. If a watcher event landed during this pass, we cannot claim a
+      //    stable checkpoint. Drain pending into dirty and loop. If this
+      //    was the last allowed pass and a mutation is still pending,
+      //    refuse to return rather than silently drop a concurrent write.
+      const dirtyAtEnd = new Set(w.dirty);
+      // Promote events that arrived during the pass into the dirty set so
+      // the next pass's discovery picks them up.
+      for (const pending of w.pending) w.dirty.add(pending);
+      w.pending.clear();
+      const grew = dirtyAtEnd.size !== dirtyAtStart.size || [...dirtyAtEnd].some((p) => !dirtyAtStart.has(p));
+      if (!grew) {
+        // Stable checkpoint. Persist the merged exclusion map and return.
+        await this.saveExclusionState(repo, { paths: liveExcluded });
+        const snapshot: SnapshotCapture = {
+          root: repo.root,
+          tree: hash,
+          excluded: Object.entries(liveExcluded).map(([path, info]) => ({
+            path,
+            size: info.size,
+            mtimeMs: info.mtimeMs,
+          })),
+        };
+        w.last = snapshot;
+        w.root = repo.root;
+        w.dirty.clear();
+        return snapshot;
+      }
+      // The pass observed a concurrent mutation; remember this tree and
+      // try again, bounded.
+      lastTree = hash;
+      lastExcluded = Object.entries(liveExcluded).map(([path, info]) => ({
+        path,
+        size: info.size,
+        mtimeMs: info.mtimeMs,
+      }));
+      // Continue the loop.
     }
-    });
-    return result;
+    // Failed to converge. The worktree is mutating faster than we can
+    // reconcile. Refuse to return a potentially-stale snapshot.
+    void lastTree;
+    void lastExcluded;
+    throw new Error("project snapshot could not reach a stable checkpoint; the worktree is mutating continuously");
   }
 
   /** Resolve the worktree once so the lock key matches the eventual shadow

@@ -222,12 +222,15 @@ describe("SnapshotStore", () => {
 
     const store = new SnapshotStore(join(base, "state"));
     const a = await store.capture(root, { authoritative: true });
-    // Drain watcher events from the capture's own git operations, then take a
-    // non-authoritative capture of an unchanged worktree: it must short-circuit
-    // to the cached tree (the performance path), not re-enumerate git.
+    // Drain watcher events from the capture's own git operations. A second
+    // capture of the unchanged worktree still runs the two Git discovery
+    // commands (no watcher short-circuit), but they return empty, no
+    // candidate is staged, and the produced tree OID is stable.
     await settle();
     const b = await store.capture(root);
-    expect(b).toBe(a);
+    expect(b).not.toBeNull();
+    expect(b!.tree).toBe(a!.tree);
+    expect(b!.excluded).toEqual(a!.excluded);
   });
 
   it("authoritative capture immediately after an external write sees the new content (rollback boundary)", async () => {
