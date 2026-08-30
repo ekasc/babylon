@@ -696,10 +696,9 @@ function registerIpc(): void {
   });
   handle("pideck:refresh-session", async (_e, path: string) => {
     const p = await validateSessionPath(PI_SESSIONS_ROOT, path);
-    const client = daemonOnly(); if (client) {
-      const res = await client.request("pi.getState", { path: p });
-      return res.payload;
-    }
+    // Route through the runtime facade so local and daemon modes behave the
+    // same: the daemon returns { refreshed: boolean } via pi.refreshFromDisk,
+    // not a raw pi.getState payload.
     return getRuntime().refreshFromDisk(p);
   });
   handle("pideck:get-messages", async () => {
@@ -1526,6 +1525,12 @@ async function ensureDaemon(): Promise<boolean> {
         win?.webContents.send("pideck:agent-events", [envelope.payload]);
       }
       if (envelope.type === "pi.session.status") {
+        // In daemon mode there is no local PiHost whose onStatus would call
+        // applyCwd, so the thin client must sync the active cwd (and thus LSP
+        // + git, which the Electron process still owns) from the daemon's
+        // status broadcast before forwarding it to the renderer.
+        const status = envelope.payload as { cwd?: string };
+        if (status.cwd) applyCwd(status.cwd);
         win?.webContents.send("pideck:session-status", envelope.payload);
       }
       if (envelope.type === "approval.requested") {

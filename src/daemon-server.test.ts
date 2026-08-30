@@ -112,6 +112,20 @@ describe("babylon daemon server", () => {
     expect(snap.payload).toMatchObject({ version: 1, runtime: { version: 1 } });
   });
 
+  it("wraps pi.getCommands in { commands } for the thin client", async () => {
+    const piHost = {
+      opts: { onEvent: () => {}, onStatus: () => {} },
+      getCommands: async () => [{ name: "ls", description: "list", source: "shell" }],
+    } as any;
+    const server = await start({ piHost });
+    const port = (server.address() as { port: number }).port;
+    const socket = await connect(port);
+    const r = reader(socket);
+    await request(socket, "pi.getCommands", {});
+    const res = await r.next("pi.getCommands");
+    expect(res.payload).toEqual({ commands: [{ name: "ls", description: "list", source: "shell" }] });
+  });
+
   it("applies task requests, persists them, and broadcasts events to other clients", async () => {
     const server = await start();
     const port = (server.address() as { port: number }).port;

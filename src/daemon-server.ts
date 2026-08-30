@@ -456,7 +456,9 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
               payload = await piHost.getStats();
               break;
             case "pi.getCommands":
-              payload = await (piHost as any).getCommands();
+              // The thin client's getCommands() reads payload.commands, so the
+              // daemon must wrap the array rather than send it bare.
+              payload = { commands: await (piHost as any).getCommands() };
               break;
             case "pi.openSession": {
               const { path, cwd, requestId } = request.payload as { path?: string; cwd: string; requestId?: number };
