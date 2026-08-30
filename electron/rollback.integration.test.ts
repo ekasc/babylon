@@ -141,4 +141,65 @@ describe("PiHost rollback integration", () => {
     void assistantEntryId;
     await host.dispose();
   }, 30_000);
+
+  it("marks the turn incomplete when the agent deletes an oversized untracked file (rollback completeness)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pideck-rollback-excl-deleted-"));
+    roots.push(root);
+    const cwd = join(root, "project");
+    const agentDir = join(root, "agent");
+    const stateDir = join(root, "state");
+    const sessionDir = join(root, "sessions");
+    await mkdir(cwd);
+    await mkdir(agentDir);
+    await git(cwd, ["init"]);
+    await writeFile(join(cwd, "f.txt"), "f\n");
+    await git(cwd, ["add", "f.txt"]);
+
+    // Create a 3MB untracked file BEFORE the pre-turn checkpoint so
+    // the snapshot records it as excluded (cannot be restored).
+    const huge = join(cwd, "huge.log");
+    await writeFile(huge, Buffer.alloc(3 * 1024 * 1024, "x"));
+
+    const host = new PiHost({ cwd, agentDir, stateDir, onEvent: () => undefined, onStatus: () => undefined });
+    await host.start();
+    await host.open({ cwd });
+    const isolated = (await import("@earendil-works/pi-coding-agent")).SessionManager.create(cwd, sessionDir);
+    await host.switchTo(isolated.getSessionFile()!, { cwdOverride: cwd });
+
+    const start = await (host as any).captureTurnStart();
+    expect(start).not.toBeNull();
+    expect(start.before.excluded.map((e: any) => e.path)).toContain("huge.log");
+
+    const userEntryId = host.session.sessionManager.appendMessage({
+      role: "user",
+      content: [{ type: "text", text: "delete the log" }],
+      timestamp: Date.now(),
+    } as any);
+    host.session.sessionManager.appendMessage({
+      role: "assistant",
+      content: [{ type: "text", text: "done" }],
+      api: "test",
+      provider: "test",
+      model: "test",
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: "stop",
+      timestamp: Date.now(),
+    } as any);
+
+    // "Agent" deletes the oversized untracked file. Babylon cannot
+    // restore it, so the post-turn capture must reflect that.
+    await rm(huge);
+    await (host as any).captureTurnEnd(start);
+
+    const history = await host.getHistory();
+    const turn = history.turns.find((t: any) => t.entryId === userEntryId);
+    expect(turn).toBeDefined();
+    // The deletion of an excluded path must surface as an exclusion
+    // change, so the turn is NOT advertised as fully restorable.
+    // rollbackAvailable and checkpointAvailable are the user-facing
+    // signals: both must be false.
+    expect(turn.rollbackAvailable).toBe(false);
+    expect(turn.checkpointAvailable).toBe(false);
+    await host.dispose();
+  }, 30_000);
 });

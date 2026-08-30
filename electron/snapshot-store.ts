@@ -410,6 +410,38 @@ export class SnapshotStore {
     await fsp.writeFile(path, JSON.stringify({ version: 1, paths: map.paths }), { mode: 0o600 });
   }
 
+  /** Reconcile the persisted exclusion map against the live worktree.
+   *  A path recorded as excluded may have been deleted since the last
+   *  capture. If the stale entry survived, the before/after
+   *  `excluded` lists would be identical and a turn that deleted an
+   *  oversized untracked file would advertise a complete rollback
+   *  even though the file cannot be restored. ENOENT removes the
+   *  entry. A still-oversize file has its size/mtime refreshed so the
+   *  next `changedExclusions` comparison sees the current value. A
+   *  present-but-no-longer-oversize file is left in the map: the
+   *  candidate loop will report it as newly untracked in this same
+   *  capture and admit it. */
+  private async reconcileExclusions(repo: Repository, map: ExclusionMap): Promise<void> {
+    for (const rel of Object.keys(map.paths)) {
+      let stat;
+      try {
+        stat = await fsp.lstat(join(repo.root, rel));
+      } catch (error: any) {
+        if (error?.code === "ENOENT") {
+          delete map.paths[rel];
+          continue;
+        }
+        throw error;
+      }
+      if (stat.isFile() && stat.size > MAX_UNTRACKED_BYTES) {
+        map.paths[rel] = { size: stat.size, mtimeMs: stat.mtimeMs };
+      }
+      // Present but not oversize (or not a file): leave the entry;
+      // the candidate loop in the same capture will report it as
+      // newly untracked and admit it (removing the entry).
+    }
+  }
+
   async capture(cwd: string, opts?: { authoritative?: boolean }): Promise<SnapshotCapture | null> {
     const result = await this.withRepoLockForCwd(cwd, async () => {
       const repo = await this.repository(cwd);
@@ -446,6 +478,16 @@ export class SnapshotStore {
     };
 
     const exclusions = await this.loadExclusionState(repo);
+    // Reconcile the persisted exclusion map against the live worktree
+    // once per capture. A path recorded as excluded may have been
+    // deleted since the last capture; if the stale entry survived,
+    // `before.excluded` and `after.excluded` would both contain the
+    // path, `changedExclusions` would return [], and a turn that
+    // deleted an oversized untracked file would be advertised as
+    // having a complete rollback. ENOENT removes the entry. A
+    // still-oversize file has its size/mtime refreshed so the next
+    // `changedExclusions` comparison sees the current value.
+    await this.reconcileExclusions(repo, exclusions);
 
     for (let pass = 0; pass < MAX_RECONCILE_PASSES; pass++) {
       // At pass start, merge any events the watcher buffered (w.pending)

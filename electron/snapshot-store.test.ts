@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
@@ -290,6 +290,91 @@ describe("SnapshotStore", () => {
     // be wrong.)
     const restored = await store.capture(root, { authoritative: true });
     expect(restored!.tree).toBe(preTurn!.tree);
+  });
+
+  it("reconciles the exclusion map when an excluded file is deleted (rollback completeness)", async () => {
+    const base = await mkdtemp(join(tmpdir(), "pideck-snapshot-excl-deleted-"));
+    roots.push(base);
+    const root = join(base, "project");
+    await mkdir(root);
+    await git(root, ["init"]);
+    await git(root, ["config", "user.email", "test@example.com"]);
+    await git(root, ["config", "user.name", "Test"]);
+    await writeFile(join(root, "f.txt"), "f\n");
+    await git(root, ["add", "f.txt"]);
+
+    const store = new SnapshotStore(join(base, "state"));
+    // Create a 3MB untracked file. First capture: it is excluded.
+    await writeFile(join(root, "huge.log"), Buffer.alloc(3 * 1024 * 1024, "x"));
+    const before = await store.capture(root, { authoritative: true });
+    expect(before).not.toBeNull();
+    expect(before!.excluded.map((e) => e.path)).toContain("huge.log");
+
+    // Delete the excluded file. The next capture must remove the stale
+    // exclusion entry; otherwise `before.excluded` and `after.excluded`
+    // would both contain `huge.log` and `changedExclusions` would
+    // return [], making a turn that deleted an oversized untracked
+    // file silently advertise a complete rollback.
+    await rm(join(root, "huge.log"));
+    const after = await store.capture(root, { authoritative: true });
+    expect(after).not.toBeNull();
+    expect(after!.excluded.map((e) => e.path)).not.toContain("huge.log");
+    expect(after!.excluded).toEqual([]);
+  });
+
+  it("reconciles the exclusion map when an excluded file is renamed (delete-old + create-new)", async () => {
+    const base = await mkdtemp(join(tmpdir(), "pideck-snapshot-excl-rename-"));
+    roots.push(base);
+    const root = join(base, "project");
+    await mkdir(root);
+    await git(root, ["init"]);
+    await git(root, ["config", "user.email", "test@example.com"]);
+    await git(root, ["config", "user.name", "Test"]);
+    await writeFile(join(root, "f.txt"), "f\n");
+    await git(root, ["add", "f.txt"]);
+
+    const store = new SnapshotStore(join(base, "state"));
+    await writeFile(join(root, "huge.log"), Buffer.alloc(3 * 1024 * 1024, "x"));
+    const before = await store.capture(root, { authoritative: true });
+    expect(before!.excluded.map((e) => e.path)).toContain("huge.log");
+
+    // Rename: the old name is gone, a new oversized file appears
+    // under a different name. The old exclusion entry must be
+    // dropped, and the new name must be excluded fresh.
+    await rename(join(root, "huge.log"), join(root, "renamed.log"));
+    const after = await store.capture(root, { authoritative: true });
+    expect(after!.excluded.map((e) => e.path)).not.toContain("huge.log");
+    expect(after!.excluded.map((e) => e.path)).toContain("renamed.log");
+  });
+
+  it("refreshes size/mtime of a still-oversize excluded file", async () => {
+    const base = await mkdtemp(join(tmpdir(), "pideck-snapshot-excl-refresh-"));
+    roots.push(base);
+    const root = join(base, "project");
+    await mkdir(root);
+    await git(root, ["init"]);
+    await git(root, ["config", "user.email", "test@example.com"]);
+    await git(root, ["config", "user.name", "Test"]);
+    await writeFile(join(root, "f.txt"), "f\n");
+    await git(root, ["add", "f.txt"]);
+
+    const store = new SnapshotStore(join(base, "state"));
+    const initial = Buffer.alloc(3 * 1024 * 1024, "x");
+    await writeFile(join(root, "huge.log"), initial);
+    const before = await store.capture(root, { authoritative: true });
+    const beforeEntry = before!.excluded.find((e) => e.path === "huge.log")!;
+    expect(beforeEntry).toBeDefined();
+
+    // Rewrite the file at a different size, still over the limit. The
+    // exclusion entry must reflect the new size so a later
+    // `changedExclusions` comparison sees the real current value.
+    const grown = Buffer.alloc(4 * 1024 * 1024, "y");
+    await writeFile(join(root, "huge.log"), grown);
+    const after = await store.capture(root, { authoritative: true });
+    const afterEntry = after!.excluded.find((e) => e.path === "huge.log")!;
+    expect(afterEntry).toBeDefined();
+    expect(afterEntry.size).toBe(grown.length);
+    expect(afterEntry.size).not.toBe(beforeEntry.size);
   });
 
 
