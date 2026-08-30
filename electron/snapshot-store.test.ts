@@ -182,6 +182,118 @@ describe("SnapshotStore", () => {
     expect(excludedPaths).not.toContain("tracked-big.txt");
   });
 
+  it("admits a previously-excluded untracked file when it shrinks below the limit (same capture)", async () => {
+    const base = await mkdtemp(join(tmpdir(), "pideck-snapshot-shrink-"));
+    roots.push(base);
+    const root = join(base, "project");
+    await mkdir(root);
+    await git(root, ["init"]);
+    await git(root, ["config", "user.email", "test@example.com"]);
+    await git(root, ["config", "user.name", "Test"]);
+    await writeFile(join(root, "f.txt"), "f\n");
+    await git(root, ["add", "f.txt"]);
+    await git(root, ["commit", "-m", "init"]);
+
+    const store = new SnapshotStore(join(base, "state"));
+    // Create a 3MB untracked file. First capture: it is excluded.
+    await writeFile(join(root, "shrinking.bin"), Buffer.alloc(3 * 1024 * 1024, "x"));
+    const excludedSnap = await store.capture(root, { authoritative: true });
+    expect(excludedSnap).not.toBeNull();
+    expect(excludedSnap!.excluded.map((e) => e.path)).toContain("shrinking.bin");
+
+    // Shrink the file to 1KB and capture again. The same (single)
+    // capture must admit it: the candidate loop sees it as newly
+    // untracked (not in the shadow), re-stats, finds it under the
+    // limit, stages it, and the snapshot tree contains its current
+    // 1KB content. The exclusion map entry is removed.
+    await writeFile(join(root, "shrinking.bin"), "small content\n");
+    const admitted = await store.capture(root, { authoritative: true });
+    expect(admitted).not.toBeNull();
+    expect(admitted!.excluded.map((e) => e.path)).not.toContain("shrinking.bin");
+    // The file is in the snapshot: a diff from the excluded-snapshot
+    // tree to the admitted-snapshot tree includes the path.
+    const diff = await store.changedFiles(root, excludedSnap!.tree, admitted!.tree);
+    expect(diff).toContain("shrinking.bin");
+  });
+
+  it("an admitted untracked file that later grows above the limit stays in the snapshot", async () => {
+    const base = await mkdtemp(join(tmpdir(), "pideck-snapshot-grow-"));
+    roots.push(base);
+    const root = join(base, "project");
+    await mkdir(root);
+    await git(root, ["init"]);
+    await git(root, ["config", "user.email", "test@example.com"]);
+    await git(root, ["config", "user.name", "Test"]);
+    await writeFile(join(root, "f.txt"), "f\n");
+    await git(root, ["add", "f.txt"]);
+    await git(root, ["commit", "-m", "init"]);
+
+    const store = new SnapshotStore(join(base, "state"));
+    // First: a small untracked file gets admitted.
+    await writeFile(join(root, "growing.bin"), "small\n");
+    const before = await store.capture(root, { authoritative: true });
+    expect(before).not.toBeNull();
+    expect(before!.excluded.map((e) => e.path)).not.toContain("growing.bin");
+
+    // Now grow it to 3MB. The cutoff applies only at admission: once
+    // a path is in the shadow index, the size limit no longer drops
+    // it. The file stays in the snapshot as a normal modified entry.
+    await writeFile(join(root, "growing.bin"), Buffer.alloc(3 * 1024 * 1024, "x"));
+    const after = await store.capture(root, { authoritative: true });
+    expect(after).not.toBeNull();
+    expect(after!.excluded.map((e) => e.path)).not.toContain("growing.bin");
+    const diff = await store.changedFiles(root, before!.tree, after!.tree);
+    expect(diff).toContain("growing.bin");
+  });
+
+  it("rollback regression: a previously-excluded file that becomes eligible before Send is preserved by a later rollback", async () => {
+    const base = await mkdtemp(join(tmpdir(), "pideck-snapshot-rollback-eligible-"));
+    roots.push(base);
+    const root = join(base, "project");
+    await mkdir(root);
+    await git(root, ["init"]);
+    await git(root, ["config", "user.email", "test@example.com"]);
+    await git(root, ["config", "user.name", "Test"]);
+    await writeFile(join(root, "f.txt"), "f\n");
+    await git(root, ["add", "f.txt"]);
+    await git(root, ["commit", "-m", "init"]);
+
+    const store = new SnapshotStore(join(base, "state"));
+    // 3MB untracked -> excluded.
+    await writeFile(join(root, "blob.bin"), Buffer.alloc(3 * 1024 * 1024, "x"));
+    const beforeTurn = await store.capture(root, { authoritative: true });
+    expect(beforeTurn).not.toBeNull();
+
+    // The "user" edits: shrinks the file to 1KB. This is the pre-Send
+    // state and must be captured by the pre-turn checkpoint.
+    await writeFile(join(root, "blob.bin"), "small now\n");
+    const preTurn = await store.capture(root, { authoritative: true });
+    expect(preTurn).not.toBeNull();
+
+    // "Agent" runs: writes a different value.
+    await writeFile(join(root, "blob.bin"), "agent wrote this\n");
+    const postTurn = await store.capture(root, { authoritative: true });
+    expect(postTurn).not.toBeNull();
+
+    // Rollback to the pre-turn tree must restore blob.bin to its
+    // pre-turn (1KB) content. If a previous pass had staged the
+    // excluded-then-eligible file and then `git rm --cached` it in
+    // the same capture, the restore would fail or leave the file
+    // wrong. The rollback restores the file's pre-turn content.
+    await store.restore(root, { "blob.bin": preTurn!.tree });
+    expect(await readFile(join(root, "blob.bin"), "utf8")).toBe("small now\n");
+    // A follow-up capture produces the same tree as the pre-turn
+    // checkpoint, proving the snapshot reflects the restored content.
+    // (If a prior pass had staged the excluded-then-eligible file
+    // and then `git rm --cached` it in the same capture, the restore
+    // could not bring it back to pre-turn content, or the tree would
+    // be wrong.)
+    const restored = await store.capture(root, { authoritative: true });
+    expect(restored!.tree).toBe(preTurn!.tree);
+  });
+
+
+
   it("captures the worktree at the instant of an authoritative capture, even before the watcher fires (rollback boundary)", async () => {
     const base = await mkdtemp(join(tmpdir(), "pideck-snapshot-authoritative-"));
     roots.push(base);
@@ -389,7 +501,7 @@ describe("SnapshotStore", () => {
     expect(diff).toEqual(["f.txt"]);
   });
 
-  it("reconverges when a watcher event lands during an authoritative capture", async () => {
+  it("the same in-flight capture includes a file written during the capture (no stale return)", async () => {
     const base = await mkdtemp(join(tmpdir(), "pideck-snapshot-reconverge-"));
     roots.push(base);
     const root = join(base, "project");
@@ -397,44 +509,43 @@ describe("SnapshotStore", () => {
     await git(root, ["init"]);
     await git(root, ["config", "user.email", "test@example.com"]);
     await git(root, ["config", "user.name", "Test"]);
-    await writeFile(join(root, "file.txt"), "v1\n");
-    await git(root, ["add", "file.txt"]);
+    // Use a non-trivial tracked set so the initial discovery takes long
+    // enough that a setTimeout fired shortly after the capture call
+    // reliably lands during the capture (rather than after it).
+    for (let i = 0; i < 2000; i++) {
+      await writeFile(join(root, `f${String(i).padStart(5, "0")}.txt`), `${i}\n`);
+    }
+    await git(root, ["add", "-A"]);
     await git(root, ["commit", "-m", "init"]);
 
     const store = new SnapshotStore(join(base, "state"));
-    // Seed the shadow and watch.
     await store.capture(root, { authoritative: true });
     await settle();
+    const pre = await store.capture(root, { authoritative: true });
+    expect(pre).not.toBeNull();
 
-    // Mutate the worktree, then capture. During the capture's git
-    // invocations, the event loop will run a concurrent writer that
-    // creates a new file. The capture must resolve (bounded reconciliation
-    // must not loop forever on a quiet repo), and the next capture must
-    // reflect the worktree state.
-    await writeFile(join(root, "file.txt"), "v2\n");
+    // Start the in-flight capture, then write a new untracked file
+    // while it is running. The setTimeout fires from the event loop
+    // after the capture's first awaited git spawn, so the write lands
+    // during the capture (either the initial discovery sees it, or
+    // the verification discovery forces a reconciliation pass that
+    // picks it up). Either way, the returned in-flight tree must
+    // contain the file. A subsequent capture with no further writes
+    // must produce the same tree, proving the in-flight capture was
+    // the one that incorporated the write, not a follow-up.
     const capturePromise = store.capture(root, { authoritative: true });
-    // Race a concurrent untracked-file write against the in-flight
-    // capture. The capture runs spawn()'d git processes, so the event
-    // loop runs and this setTimeout fires during the capture.
-    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
     await writeFile(join(root, "late.txt"), "late\n");
     const snap = await capturePromise;
     expect(snap).not.toBeNull();
 
-    // The next capture must include the late file (whether the in-flight
-    // capture folded it via reconciliation or the next capture picks it
-    // up; either way the worktree state is observed).
-    await settle();
-    const after = await store.capture(root, { authoritative: true });
-    expect(after).not.toBeNull();
-    // A marker write after the in-flight capture must show up as the only
-    // (or at least an) entry in the diff from the in-flight tree. This
-    // proves the shadow is healthy and the bounded reconciliation left
-    // it in a consistent state.
-    await writeFile(join(root, "marker.txt"), "m\n");
-    await settle();
-    const afterMarker = await store.capture(root, { authoritative: true });
-    const diff = await store.changedFiles(root, after!.tree, afterMarker!.tree);
-    expect(diff).toContain("marker.txt");
+    // The same in-flight capture's tree must contain the late file.
+    const diff = await store.changedFiles(root, pre!.tree, snap!.tree);
+    expect(diff).toContain("late.txt");
+    // The tree is final: a follow-up capture (no further writes)
+    // produces the same tree, proving the in-flight capture itself
+    // incorporated the write.
+    const follow = await store.capture(root, { authoritative: true });
+    expect(follow!.tree).toBe(snap!.tree);
   });
 });
