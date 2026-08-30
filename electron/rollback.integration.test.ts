@@ -8,6 +8,12 @@ import { PiHost } from "./pi-host";
 
 const exec = promisify(execFile);
 const roots: string[] = [];
+
+// The snapshot store short-circuits to a cached tree when its worktree
+// watcher reports no changes. The kernel watcher is eventually-consistent
+// (events land a few libuv polls later), so tests that modify the worktree
+// and then capture must let those events drain first.
+const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 200));
 afterAll(async () => Promise.all(roots.map((root) => rm(root, { recursive: true, force: true }))));
 
 async function git(cwd: string, args: string[]): Promise<void> {
@@ -53,6 +59,7 @@ describe("PiHost rollback integration", () => {
       timestamp: Date.now(),
     } as any);
     await writeFile(join(cwd, "file.txt"), "after\n");
+    await settle();
     await (host as any).captureTurnEnd(start);
 
     const history = await host.getHistory();

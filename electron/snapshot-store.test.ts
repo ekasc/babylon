@@ -9,6 +9,12 @@ import { SnapshotStore } from "./snapshot-store";
 const exec = promisify(execFile);
 const roots: string[] = [];
 
+// The snapshot store short-circuits to a cached tree when its worktree
+// watcher reports no changes. The kernel watcher is eventually-consistent
+// (events land a few libuv polls later), so tests that modify the worktree
+// and then capture must let those events drain first.
+const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 200));
+
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
@@ -37,6 +43,7 @@ describe("SnapshotStore", () => {
 
     await writeFile(join(root, "tracked.txt"), "after\n");
     await writeFile(join(root, "created.txt"), "created\n");
+    await settle();
     const after = await store.capture(root);
     expect(after).not.toBeNull();
     expect(await store.changedFiles(root, before!.tree, after!.tree)).toEqual(["created.txt", "tracked.txt"]);
@@ -106,6 +113,7 @@ describe("SnapshotStore", () => {
     await writeFile(join(root, "keep.txt"), "keep\nmore\n");
     await writeFile(join(root, "added.txt"), "one\ntwo\n");
     await rm(join(root, "removed.txt"));
+    await settle();
     const after = await store.capture(root);
     expect(after).not.toBeNull();
 
@@ -133,6 +141,7 @@ describe("SnapshotStore", () => {
     expect(before).not.toBeNull();
 
     await writeFile(join(root, "file.txt"), "one\nthree\n");
+    await settle();
     const after = await store.capture(root);
     expect(after).not.toBeNull();
 

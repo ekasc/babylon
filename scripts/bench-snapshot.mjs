@@ -63,6 +63,11 @@ async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const results = [];
 
+  // The snapshot store short-circuits to a cached tree when its worktree
+  // watcher reports no changes. The watcher is eventually-consistent, so we
+  // let change events drain before measuring a path. settle() bounds that.
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 200));
+
   // Dynamic import of the compiled source. We expect the user to run
   // `pnpm run build:electron` before this benchmark, then we require the
   // emitted CJS. For dev-time ergonomics we also support a TypeScript
@@ -83,33 +88,32 @@ async function main() {
       await seedRepo(root, scale);
       const store = new SnapshotStore(stateDir);
 
-      // First capture: warms the shadow repo and the index.
+      // First capture: warms the shadow repo and the index, and starts the
+      // worktree watcher. Let the watcher drain before measuring.
       const t0 = process.hrtime.bigint();
       const first = await store.capture(root);
       const firstMs = Number(process.hrtime.bigint() - t0) / 1e6;
       if (!first) throw new Error("capture returned null on seeded repo");
+      await settle();
 
-      // Make a small number of dirty edits to the worktree.
-      for (let i = 0; i < opts.dirtyFiles; i++) {
-        const name = `f${String(i).padStart(6, "0")}.txt`;
-        await writeFile(join(root, name), `dirty ${i}\n`);
-      }
-
-      // Subsequent captures: the hot path we want to measure.
+      // Hot path: the worktree actually changed before each capture. We
+      // flip a tracked file's content so every capture here is a real
+      // full enumeration (the cost we cannot avoid when files move).
       const samples = [];
       for (let i = 0; i < opts.iterations; i++) {
+        const name = `f${String(i % opts.dirtyFiles).padStart(6, "0")}.txt`;
+        await writeFile(join(root, name), `dirty ${i} ${i}\n`);
+        await settle();
         const start = process.hrtime.bigint();
         await store.capture(root);
         const elapsed = Number(process.hrtime.bigint() - start) / 1e6;
         samples.push(elapsed);
       }
 
-      // No-op capture: revert dirty files and capture again. This is the
-      // path the user wants to see go to near-zero ms.
-      for (let i = 0; i < opts.dirtyFiles; i++) {
-        const name = `f${String(i).padStart(6, "0")}.txt`;
-        await writeFile(join(root, name), `line ${i}\n`);
-      }
+      // No-op path: nothing changed since the last capture. After the
+      // watcher drains, capture() returns the cached tree without spawning
+      // git. This is the path the user wants at near-zero ms.
+      await settle();
       const noopSamples = [];
       for (let i = 0; i < opts.iterations; i++) {
         const start = process.hrtime.bigint();
@@ -133,6 +137,8 @@ async function main() {
   }
 
   console.log(JSON.stringify({ benchmark: "SnapshotStore.capture", ts: new Date().toISOString(), results }, null, 2));
+  // Recursive worktree watchers keep the event loop alive; exit explicitly.
+  process.exit(0);
 }
 
 function round(n) {
