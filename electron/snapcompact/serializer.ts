@@ -1,10 +1,19 @@
 // Deterministic transcript serializer for Snapcompact.
 //
-// Given projected Pi messages, produces:
-//   - a compact source text with explicit structural markers that a vision
+// Given projected messages (typically CompactionPreparation.messagesToSummarize
+// + turnPrefixMessages), produces:
+//   - a compact source text with explicit structural markers a vision
 //     model can visually parse (¶user / ¶assistant / ¶thinking / ¶tool / ¶result / ¶custom)
-//   - a list of exact high-value tokens (paths, shas, ...) and IDs that the
-//     symbol dictionary will later assign (handled by symbol-dictionary.ts)
+//   - truthful coverage metadata derived from what was actually retained
+//   - a list of exact high-value tokens (paths, shas, ...) that the symbol
+//     dictionary will later assign (handled by symbol-dictionary.ts)
+//
+// Coverage contract: the source text contains exactly the kept-message
+// texts in order. When the total source budget forces entries to be
+// dropped, the dropped entries are recorded in `omittedTrailing` and the
+// kept range is reported via `firstKeptEntryId` / `lastKeptEntryId`. The
+// serializer never truncates the middle of a kept entry's text and never
+// claims coverage of an entry that was not serialized.
 //
 // Rules enforced here (no LLM, deterministic):
 //   - chronological order, one block per role
@@ -14,12 +23,12 @@
 //   - embedded image / base64 payloads are stripped
 //   - pathological individual tool results are deterministically truncated
 //     with an explicit marker
-//   - no individual tool result may exceed a per-result char budget
+//   - the total source budget is applied by dropping whole messages
+//     (chronological: drop newest first) so coverage is honest
 //   - never let one command output consume the entire archive
 
 import { extractHighValueTokens, type RawSymbol } from "./symbol-dictionary";
 
-/** Marker prefixes used in the serialized transcript. */
 export const MARKER = {
   user: "\u00b6user",
   assistant: "\u00b6assistant",
@@ -29,33 +38,31 @@ export const MARKER = {
   custom: "\u00b6custom",
 } as const;
 
-/** Per-tool-result character budget before truncation. */
 export const PER_TOOL_RESULT_BUDGET = 4_000;
-
-/** Total serialized text budget. */
 export const TOTAL_BUDGET_CHARS = 60_000;
+export const OMITTED_TAIL_LINES = 0;
 
 export interface SerializeInput {
   messages: any[];
-  /** Optional override for the per-tool-result budget. */
   perToolResultBudget?: number;
-  /** Optional override for the total character budget. */
   totalBudget?: number;
+}
+
+export interface OmittedEntry {
+  entryId: string;
+  role: string;
+  reason: "tool-result-image-only" | "total-budget";
 }
 
 export interface SerializeOutput {
   sourceText: string;
   rawSymbols: RawSymbol[];
-  /** True iff some content was truncated to fit the budget. */
   truncated: boolean;
-  /** Count of messages that were skipped (e.g. raw image-only). */
   skipped: number;
-}
-
-interface ToolCallInfo {
-  id: string;
-  name: string;
-  args: string;
+  firstKeptEntryId: string | null;
+  lastKeptEntryId: string | null;
+  keptCount: number;
+  omittedTrailing: OmittedEntry[];
 }
 
 function textOf(content: any): string {
@@ -102,7 +109,7 @@ function serializeAssistant(msg: any): string {
   } else if (typeof msg.content === "string" && msg.content.trim()) {
     blocks.push(msg.content.trimEnd());
   }
-  const tools: ToolCallInfo[] = [];
+  const tools: { id: string; name: string; args: string }[] = [];
   if (Array.isArray(msg.toolCalls)) {
     for (const tc of msg.toolCalls) {
       if (!tc?.id) continue;
@@ -148,22 +155,41 @@ function serializeCustom(msg: any): string {
   return `${label}\n${textOf(msg.content).trimEnd()}`;
 }
 
+function entryIdOf(msg: any): string {
+  if (typeof msg?.entryId === "string" && msg.entryId) return msg.entryId;
+  return "?";
+}
+
+function entryRoleOf(msg: any): string {
+  return typeof msg?.role === "string" ? msg.role : "?";
+}
+
+/**
+ * Serialize a list of projected messages. The total source budget is
+ * applied by dropping whole messages from the END (chronologically) so
+ * coverage is honest: every line of `sourceText` corresponds to a real
+ * entry, and the dropped entries are reported in `omittedTrailing`.
+ */
 export function serializeTranscript(input: SerializeInput): SerializeOutput {
   const perTool = input.perToolResultBudget ?? PER_TOOL_RESULT_BUDGET;
   const totalBudget = input.totalBudget ?? TOTAL_BUDGET_CHARS;
   const messages = Array.isArray(input.messages) ? input.messages : [];
-  const blocks: string[] = [];
+
+  // First pass: compute the would-be block for every message (or the
+  // reason it's skipped). We do this before budgeting so we can drop
+  // whole messages from the end instead of slicing a single string.
+  const perMessage: Array<{ msg: any; block: string; skipped: boolean }> = [];
   const toolIndex = new Map<string, string>();
-  const skipped: string[] = [];
-  let truncated = false;
+  let skippedCount = 0;
 
   for (const m of messages) {
     if (!m) continue;
     const role = m.role;
     let block = "";
+    let skipped = false;
     if (role === "user") {
       block = serializeUser(m);
-      if (!block) { skipped.push(m.entryId ?? "?"); continue; }
+      if (!block) skipped = true;
     } else if (role === "assistant") {
       block = serializeAssistant(m);
       if (Array.isArray(m.toolCalls)) {
@@ -173,24 +199,80 @@ export function serializeTranscript(input: SerializeInput): SerializeOutput {
       }
     } else if (role === "toolResult") {
       const r = serializeToolResult(m, perTool);
-      if (r.skipped) { skipped.push(m.entryId ?? m.toolCallId ?? "?"); continue; }
-      const name = toolIndex.get(String(m.toolCallId)) ?? "tool";
-      block = `${MARKER.tool} ${name}\n${r.text}`;
+      if (r.skipped) skipped = true;
+      else {
+        const name = toolIndex.get(String(m.toolCallId)) ?? "tool";
+        block = `${MARKER.tool} ${name}\n${r.text}`;
+      }
     } else if (role === "custom") {
       block = serializeCustom(m);
     } else {
-      continue;
+      skipped = true;
     }
-    blocks.push(block);
+    if (skipped) skippedCount += 1;
+    perMessage.push({ msg: m, block, skipped });
   }
 
-  let sourceText = blocks.join("\n\n");
-
-  if (sourceText.length > totalBudget) {
-    truncated = true;
-    sourceText = sourceText.slice(0, Math.max(0, totalBudget - 80)) + "\n\u2026 [truncated " + (sourceText.length - totalBudget) + " chars]";
+  // Second pass: keep a tail of messages whose joined text fits the
+  // total budget. We include the separator length in the running total.
+  let totalLen = 0;
+  let firstIdx = -1;
+  let lastIdx = -1;
+  for (let i = 0; i < perMessage.length; i++) {
+    const item = perMessage[i];
+    if (item.skipped) continue;
+    const sep = firstIdx === -1 ? 0 : 2; // "\n\n"
+    const added = item.block.length + sep;
+    if (totalLen + added > totalBudget) break;
+    totalLen += added;
+    if (firstIdx === -1) firstIdx = i;
+    lastIdx = i;
   }
+
+  // If nothing fits, return empty coverage.
+  if (firstIdx < 0) {
+    const rawSymbols = extractHighValueTokens("");
+    return {
+      sourceText: "",
+      rawSymbols,
+      truncated: false,
+      skipped: skippedCount,
+      firstKeptEntryId: null,
+      lastKeptEntryId: null,
+      keptCount: 0,
+      omittedTrailing: [],
+    };
+  }
+
+  const kept: string[] = [];
+  for (let i = firstIdx; i <= lastIdx; i++) {
+    if (!perMessage[i].skipped) kept.push(perMessage[i].block);
+  }
+  const sourceText = kept.join("\n\n");
+  const omittedTrailing: OmittedEntry[] = [];
+  for (let i = lastIdx + 1; i < perMessage.length; i++) {
+    const item = perMessage[i];
+    omittedTrailing.push({ entryId: entryIdOf(item.msg), role: entryRoleOf(item.msg), reason: "total-budget" });
+  }
+  // Also record image-only / empty messages as omitted (skipped before budgeting).
+  for (const item of perMessage) {
+    if (item.skipped) {
+      omittedTrailing.push({ entryId: entryIdOf(item.msg), role: entryRoleOf(item.msg), reason: "tool-result-image-only" });
+    }
+  }
+  // Tool-result-image-only omissions were counted in `skipped`; total-budget
+  // omissions are signalled via `truncated`.
+  const truncated = perMessage.some((it, i) => !it.skipped && i > lastIdx) || lastIdx < perMessage.length - 1;
 
   const rawSymbols = extractHighValueTokens(sourceText);
-  return { sourceText, rawSymbols, truncated, skipped: skipped.length };
+  return {
+    sourceText,
+    rawSymbols,
+    truncated,
+    skipped: skippedCount,
+    firstKeptEntryId: entryIdOf(perMessage[firstIdx].msg),
+    lastKeptEntryId: entryIdOf(perMessage[lastIdx].msg),
+    keptCount: kept.length,
+    omittedTrailing,
+  };
 }

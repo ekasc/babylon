@@ -80,12 +80,45 @@ describe("snapcompact serializer", () => {
     expect(out.sourceText.length).toBeLessThan(huge.length);
   });
 
-  it("truncates the overall transcript to the total budget and reports truncated=true", () => {
+  it("truncates by dropping whole messages from the end and reports truthful coverage", () => {
     const many = Array.from({ length: 200 }, (_, i) => user(`message ${i} ${"y".repeat(500)}`, `u${i}`));
     const out = serializeTranscript({ messages: many, totalBudget: 2000 });
     expect(out.truncated).toBe(true);
+    // Coverage: kept range is the head, omitted trailing names the rest.
+    expect(out.firstKeptEntryId).toBe("u0");
+    expect(out.lastKeptEntryId).not.toBe("u199");
+    expect(out.omittedTrailing.length).toBeGreaterThan(0);
+    // Every omitted trailing entry is one of the dropped ones.
+    for (const o of out.omittedTrailing) {
+      const n = Number(o.entryId.replace("u", ""));
+      expect(n).toBeGreaterThanOrEqual(out.keptCount);
+    }
+    // Source text length respects the budget plus a small seam.
     expect(out.sourceText.length).toBeLessThanOrEqual(2000);
-    expect(out.sourceText).toMatch(/\[truncated/);
+    // The kept block contains early messages and ends with the omission
+    // marker for the truncated archive.
+    expect(out.sourceText).toMatch(/message 0/);
+  });
+
+  it("preserves first/last kept entry IDs from the input array (not the last input)", () => {
+    const msgs = [user("a", "u0"), user("b", "u1"), user("c", "u2"), user("d", "u3")];
+    const out = serializeTranscript({ messages: msgs, totalBudget: 50 });
+    expect(out.firstKeptEntryId).toBe("u0");
+    if (out.keptCount < 4) {
+      expect(out.lastKeptEntryId).not.toBe("u3");
+      expect(out.omittedTrailing.some((o) => o.entryId === "u3")).toBe(true);
+    }
+  });
+
+  it("records image-only tool results as omitted entries (skipped, not in the total-budget tail)", () => {
+    const messages = [
+      { role: "user", content: "hi", entryId: "u0", timestamp: 0 },
+      { role: "toolResult", toolCallId: "tc1", content: [{ type: "image", data: "B64", mimeType: "image/png" }], entryId: "tr-img", timestamp: 0 },
+    ];
+    const out = serializeTranscript({ messages });
+    expect(out.sourceText).toContain("hi");
+    expect(out.sourceText).not.toContain("B64");
+    expect(out.omittedTrailing.some((o) => o.entryId === "tr-img" && o.reason === "tool-result-image-only")).toBe(true);
   });
 
   it("serializes thinking blocks under the ¶thinking marker", () => {
