@@ -51,6 +51,10 @@ export interface DaemonClient {
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+// Connection establishment must fail fast (a missing daemon surfaces as an
+// immediate socket error, not after the long prompt deadline). Only the
+// response wait is allowed to be long; never the connection wait.
+const CONNECTION_TIMEOUT_MS = DEFAULT_REQUEST_TIMEOUT_MS;
 const DEFAULT_INITIAL_DELAY_MS = 100;
 const DEFAULT_MAX_DELAY_MS = 5_000;
 // Prompts stream a model response and can legitimately run for many minutes,
@@ -225,11 +229,12 @@ export function connectDaemonClient(options: DaemonClientOptions): DaemonClient 
   return {
     async request(type, payload, timeoutMs = operationTimeoutMs(type)): Promise<ProtocolEnvelope> {
       if (closed) throw new DaemonRequestError("client is closed");
-      // The connection attempt fails fast on a dead daemon (ECONNREFUSED),
-      // so the operation deadline only really bounds the response wait.
-      // Prompts therefore survive long model generations instead of being
-      // killed by the 10s control-call deadline.
-      const conn = await waitForConnection(timeoutMs);
+      // Connection acquisition uses a short deadline, capped at the fixed
+      // connection timeout so a prompt's long response deadline never leaks
+      // into the connection wait. A missing daemon surfaces as an immediate
+      // socket error rather than after a long prompt timeout. Only the
+      // response wait below is allowed to be long.
+      const conn = await waitForConnection(Math.min(timeoutMs, CONNECTION_TIMEOUT_MS));
       // The connection can drop while this call waited its turn; writing to
       // the dead socket would hang until timeout instead of failing now.
       if (live !== conn) throw new DaemonRequestError("daemon connection lost");
