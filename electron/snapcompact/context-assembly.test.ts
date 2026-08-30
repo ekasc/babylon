@@ -32,6 +32,11 @@ function makeArchive(sourceText: string): SnapcompactArchive {
     frameHeight: 32,
     profileId: "generic-vision",
     frameBytes: frames.reduce((n, f) => n + f.png.length, 0),
+    compactionGenerationId: "gen-test",
+    firstKeptEntryId: "m1",
+    lastKeptEntryId: "m1",
+    keptCount: 1,
+    omittedTrailing: [],
   };
 }
 

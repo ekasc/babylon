@@ -42,6 +42,11 @@ function fakeArchive(sessionFile: string, count: number, withSymbols = false): O
     frameWidth: 64,
     frameHeight: 32,
     profileId: "test",
+    compactionGenerationId: "gen-test",
+    firstKeptEntryId: "m1",
+    lastKeptEntryId: "m1",
+    keptCount: 1,
+    omittedTrailing: [],
   };
 }
 

@@ -98,6 +98,13 @@ interface PersistedArchive {
   coveredThroughMessageId: string | null;
   coveredThroughTimestamp: number | null;
   frameBytes: number;
+  // Optional for forward compatibility with older manifests; the loader
+  // supplies safe defaults.
+  compactionGenerationId?: string;
+  firstKeptEntryId?: string | null;
+  lastKeptEntryId?: string | null;
+  keptCount?: number;
+  omittedTrailing?: Array<{ entryId: string; role: string; reason: string }>;
 }
 
 async function readJson(path: string): Promise<unknown> {
@@ -172,6 +179,11 @@ export class ArchiveStore {
       frameHeight: gen.frameHeight,
       profileId: gen.profileId,
       frameBytes: raw.frameBytes,
+      compactionGenerationId: raw.compactionGenerationId ?? gen.id,
+      firstKeptEntryId: raw.firstKeptEntryId ?? raw.coveredThroughMessageId,
+      lastKeptEntryId: raw.lastKeptEntryId ?? raw.coveredThroughMessageId,
+      keptCount: raw.keptCount ?? frames.length,
+      omittedTrailing: raw.omittedTrailing ?? [],
     };
     this.cache.set(k, archive);
     return archive;
@@ -229,6 +241,11 @@ export class ArchiveStore {
         coveredThroughMessageId: archive.coveredThroughMessageId,
         coveredThroughTimestamp: archive.coveredThroughTimestamp,
         frameBytes,
+        compactionGenerationId: archive.compactionGenerationId,
+        firstKeptEntryId: archive.firstKeptEntryId,
+        lastKeptEntryId: archive.lastKeptEntryId,
+        keptCount: archive.keptCount,
+        omittedTrailing: archive.omittedTrailing,
       };
       // Write the manifest last. A crash before this point leaves the
       // previous generation referenced by the old manifest, which is

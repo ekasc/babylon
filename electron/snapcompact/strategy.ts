@@ -5,6 +5,11 @@
 // `pickStrategy({ ... })` and receive either "snapcompact" or "summary".
 // No other module reads settings, model capabilities, or archive
 // availability to make this decision.
+//
+// All three modes ("automatic", "summary", "snapcompact") go through
+// the same gate checks. "summary" always returns summary. The other
+// two run the safety gates and either select snapcompact or fall back
+// to summary with a diagnostic reason.
 
 import { modelSupportsImages } from "./model-profiles";
 import type { SnapcompactArchive } from "./types";
@@ -21,6 +26,8 @@ export interface PickStrategyInput {
   archiveProducible: boolean;
   /** True when an archive is already loaded and the session is the same. */
   archiveMatchesSession: boolean;
+  /** Optional: explicit guard that budget enforcement has run. */
+  budgetsOk?: boolean;
 }
 
 export interface PickStrategyResult {
@@ -29,25 +36,27 @@ export interface PickStrategyResult {
   reason: string;
 }
 
-const FALLBACK_REASONS = {
+const REASONS = {
   AUTOMATIC: "automatic",
-  MODE_DISABLED: "mode is not snapcompact",
+  MODE_SUMMARY: "mode is summary",
   NO_MODEL: "no active model",
   MODEL_VISIONLESS: "active model does not support image input",
   ARCHIVE_NOT_PRODUCIBLE: "snapcompact archive cannot be produced safely",
   ARCHIVE_MISSING: "no current snapcompact archive for this session",
   ARCHIVE_SESSION_MISMATCH: "existing archive is for a different session",
+  BUDGETS_EXCEEDED: "snapcompact budgets exceeded",
 } as const;
 
 export function pickStrategy(input: PickStrategyInput): PickStrategyResult {
-  if (input.mode === "summary") return { strategy: "summary", reason: FALLBACK_REASONS.MODE_DISABLED };
-  if (input.mode === "automatic") {
-    if (!input.model) return { strategy: "summary", reason: FALLBACK_REASONS.NO_MODEL };
-    if (!modelSupportsImages(input.model)) return { strategy: "summary", reason: FALLBACK_REASONS.MODEL_VISIONLESS };
-    if (!input.archiveProducible) return { strategy: "summary", reason: FALLBACK_REASONS.ARCHIVE_NOT_PRODUCIBLE };
-    if (!input.archive) return { strategy: "summary", reason: FALLBACK_REASONS.ARCHIVE_MISSING };
-    if (!input.archiveMatchesSession) return { strategy: "summary", reason: FALLBACK_REASONS.ARCHIVE_SESSION_MISMATCH };
-    return { strategy: "snapcompact", reason: FALLBACK_REASONS.AUTOMATIC };
+  if (input.mode === "summary") {
+    return { strategy: "summary", reason: REASONS.MODE_SUMMARY };
   }
-  return { strategy: "summary", reason: FALLBACK_REASONS.MODE_DISABLED };
+  // Both "automatic" and explicit "snapcompact" run the same gates.
+  if (!input.model) return { strategy: "summary", reason: REASONS.NO_MODEL };
+  if (!modelSupportsImages(input.model)) return { strategy: "summary", reason: REASONS.MODEL_VISIONLESS };
+  if (!input.archiveProducible) return { strategy: "summary", reason: REASONS.ARCHIVE_NOT_PRODUCIBLE };
+  if (input.budgetsOk === false) return { strategy: "summary", reason: REASONS.BUDGETS_EXCEEDED };
+  if (!input.archive) return { strategy: "summary", reason: REASONS.ARCHIVE_MISSING };
+  if (!input.archiveMatchesSession) return { strategy: "summary", reason: REASONS.ARCHIVE_SESSION_MISMATCH };
+  return { strategy: "snapcompact", reason: REASONS.AUTOMATIC };
 }

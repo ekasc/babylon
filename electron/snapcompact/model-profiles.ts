@@ -19,6 +19,12 @@ export interface SnapcompactModelProfile {
   maxFrames: number;
   imageTokenEstimate: number;
   maxArchiveBytes: number;
+  /** Hard cap on the number of symbols in the exact-token dictionary. */
+  maxSymbolCount: number;
+  /** Hard cap on the rendered size of the symbol dictionary in characters. */
+  maxDictChars: number;
+  /** Hard cap on the serialized source text (chars). */
+  maxSourceChars: number;
 }
 
 /** Generic, OCR-friendly defaults. Works for any vision model. */
@@ -33,6 +39,9 @@ const GENERIC: SnapcompactModelProfile = {
   maxFrames: 8,
   imageTokenEstimate: 765,
   maxArchiveBytes: 6 * 1024 * 1024,
+  maxSymbolCount: 256,
+  maxDictChars: 6000,
+  maxSourceChars: 60_000,
 };
 
 /** OpenAI / GPT-4o / Codex family. */
@@ -47,6 +56,9 @@ const OPENAI: SnapcompactModelProfile = {
   maxFrames: 8,
   imageTokenEstimate: 765,
   maxArchiveBytes: 6 * 1024 * 1024,
+  maxSymbolCount: 256,
+  maxDictChars: 6000,
+  maxSourceChars: 60_000,
 };
 
 /** Anthropic / Claude family. */
@@ -61,6 +73,9 @@ const ANTHROPIC: SnapcompactModelProfile = {
   maxFrames: 8,
   imageTokenEstimate: 1600,
   maxArchiveBytes: 5 * 1024 * 1024,
+  maxSymbolCount: 256,
+  maxDictChars: 6000,
+  maxSourceChars: 60_000,
 };
 
 const PROFILES: readonly SnapcompactModelProfile[] = Object.freeze([GENERIC, OPENAI, ANTHROPIC]);

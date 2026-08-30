@@ -65,6 +65,18 @@ export interface SnapcompactArchive {
   profileId: string;
   /** Approximate number of bytes for the PNG frames on disk. */
   frameBytes: number;
+  /** Unique id for this archive generation. Used to detect a stale
+   *  archive: a snapcompact context projection from a previous
+   *  compaction must not be used for a later LLM call. */
+  compactionGenerationId: string;
+  /** First covered entry id (the kept-range head). */
+  firstKeptEntryId: string | null;
+  /** Last covered entry id (the kept-range tail). */
+  lastKeptEntryId: string | null;
+  /** Number of messages actually represented in the archive. */
+  keptCount: number;
+  /** Entries that were dropped to fit the source budget. */
+  omittedTrailing: Array<{ entryId: string; role: string; reason: string }>;
 }
 
 /** Compaction strategy the runtime may select. */
