@@ -49,16 +49,22 @@ export interface BuildArchiveResult {
 
 function capRawSymbols(symbols: RawSymbol[], maxCount: number, maxDictChars: number): RawSymbol[] {
   let out = symbols.length > maxCount ? symbols.slice(0, maxCount) : symbols.slice();
-  // Enforce maxDictChars regardless of count — a few very long values can
-  // still exceed the budget even when count is under maxCount.
   let joined = out.map((s) => s.value).join("|");
-  while (out.length > 1 && joined.length > maxDictChars) {
+  while (out.length > 0 && joined.length > maxDictChars) {
+    // Hard cap: even a single oversized symbol must not survive.
+    // Discard the longest value first so the dictionary stays within
+    // budget. If the last symbol alone exceeds, drop it — the budget
+    // is a hard limit, not advisory.
+    if (out.length === 1) {
+      // Single symbol exceeds maxDictChars — discard it entirely
+      // rather than violating the cap. The source text still contains
+      // the raw value verbatim on first occurrence.
+      out = [];
+      break;
+    }
     out.pop();
     joined = out.map((s) => s.value).join("|");
   }
-  // Single remaining symbol that alone exceeds maxDictChars is kept as-is
-  // (it was still extracted as high-value); caller may still enforce
-  // tighter limits via symbol filtering if desired.
   return out;
 }
 
@@ -92,6 +98,7 @@ export function buildArchive(input: BuildArchiveInput): BuildArchiveResult {
   if (estimatedRequestBytes > profile.maxRequestBytes) {
     throw new ArchiveBudgetError("maxRequestBytes", estimatedRequestBytes, profile.maxRequestBytes);
   }
+  const textFallback = buildTextFallback(serialized.sourceText, rendered.symbols, rendered.adjustedSourceText);
   const archive: SnapcompactArchive = {
     version: 1,
     sessionId: input.sessionId,
@@ -112,6 +119,7 @@ export function buildArchive(input: BuildArchiveInput): BuildArchiveResult {
     lastKeptEntryId: serialized.lastKeptEntryId,
     keptCount: serialized.keptCount,
     omittedTrailing: serialized.omittedTrailing,
+    textFallback,
   };
   return {
     archive,
@@ -122,6 +130,22 @@ export function buildArchive(input: BuildArchiveInput): BuildArchiveResult {
     frameBytes,
     symbolCount: rendered.symbols.length,
   };
+}
+
+function buildTextFallback(sourceText: string, symbols: import("./types").SnapcompactSymbol[], adjusted: string): string {
+  const dict = symbols.length ? symbols.map((s) => `${s.id}=${s.value}`).join("\n") : "(no symbols)";
+  const head = adjusted.length > 1200 ? adjusted.slice(0, 1200) : adjusted;
+  const tail = adjusted.length > 1200 ? adjusted.slice(Math.max(0, adjusted.length - 1200)) : "";
+  return [
+    "[Snapcompact text fallback]",
+    "--- archive head ---",
+    head,
+    "--- archive tail ---",
+    tail || "(empty)",
+    "--- exact-token dictionary ---",
+    dict,
+    "--- end snapcompact ---",
+  ].join("\n");
 }
 
 export function imageTokenEstimateFor(archive: SnapcompactArchive, profile: SnapcompactModelProfile): number {

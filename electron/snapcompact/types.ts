@@ -77,6 +77,12 @@ export interface SnapcompactArchive {
   keptCount: number;
   /** Entries that were dropped to fit the source budget. */
   omittedTrailing: Array<{ entryId: string; role: string; reason: string }>;
+  /** Deterministic textual fallback for text-only models. Stored
+   *  alongside the bitmap generation so a session compacted under
+   *  a vision model remains usable after switching to a text model.
+   *  Optional for backwards compat with archives written before this
+   *  field existed. */
+  textFallback?: string;
 }
 
 /** Compaction strategy the runtime may select. */

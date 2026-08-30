@@ -102,6 +102,7 @@ interface PersistedArchive {
   lastKeptEntryId?: string | null;
   keptCount?: number;
   omittedTrailing?: Array<{ entryId: string; role: string; reason: string }>;
+  textFallback?: string;
 }
 
 async function readJson(path: string): Promise<unknown> {
@@ -164,6 +165,7 @@ export class ArchiveStore {
       lastKeptEntryId: raw.lastKeptEntryId ?? raw.coveredThroughMessageId,
       keptCount: raw.keptCount ?? frames.length,
       omittedTrailing: raw.omittedTrailing ?? [],
+      textFallback: (raw as any).textFallback ?? "",
     };
   }
 

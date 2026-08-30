@@ -97,38 +97,18 @@ function deriveSessionFile(opts: SnapcompactExtensionOptions): string {
 function findSnapcompactCompactionEntry(sessionManager: any): any | null {
   if (!sessionManager) return null;
   try {
+    // Only the active branch matters. buildContextEntries returns
+    // exactly the entries Pi considers for the current LLM context
+    // (compaction-aware, branch-following). Never fall back to
+    // getEntries() which scans all branches and would contaminate
+    // branch B with branch A's archive.
     const entries: any[] = typeof sessionManager.buildContextEntries === "function"
       ? sessionManager.buildContextEntries()
-      : typeof sessionManager.getEntries === "function"
-        ? sessionManager.getEntries()
-        : [];
-    // Walk backward to find the most recent compaction entry that is
-    // from our hook and carries a snapcompact generation.
+      : [];
     for (let i = entries.length - 1; i >= 0; i--) {
       const e = entries[i];
       if (e?.type === "compaction" && e.fromHook === true && e.details?.snapcompactGeneration) {
         return e;
-      }
-    }
-    // Fallback: scan all entries even if buildContextEntries filtered
-    if (typeof sessionManager.getEntries === "function") {
-      const all = sessionManager.getEntries();
-      for (let i = all.length - 1; i >= 0; i--) {
-        const e = all[i];
-        if (e?.type === "compaction" && e.fromHook === true && e.details?.snapcompactGeneration) {
-          // Ensure it's on the current branch (reachable via leaf)
-          // Check if buildContextEntries would include it — but if
-          // getEntries has it and leaf path diverged, it's still
-          // reachable check via buildContextEntries length; simplest:
-          // only return if it's also reachable. For now return it
-          // if buildContextEntries didn't have it but getEntries does,
-          // we still check: if leaf diverged, buildContextEntries
-          // already returned null above, so this is older branch.
-          // Return the latest overall for now; caller will try
-          // loadGeneration which handles branch mismatch by still
-          // loading (archive is per-generation addressable).
-          return e;
-        }
       }
     }
   } catch { /* fall through */ }
@@ -226,9 +206,17 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
       if (archive.sessionId !== sessionId) return undefined;
       if (archive.version !== 1) return undefined;
       if (archive.frames.length === 0) return undefined;
-      // Re-check vision capability on every projection — switching
-      // from a vision model to a text-only model after compaction
-      // must not inject images the new model cannot consume.
+      if (mode === "summary") return undefined;
+      // Vision model: full bitmap projection. Text-only model after
+      // snapcompact compaction must still get history — inject the
+      // durable textFallback stored alongside the generation instead
+      // of PNGs. Without it the session would be empty after
+      // compaction (Pi summary is just "Recap: generation=...").
+      if (!modelSupportsImages(model)) {
+        const fb = (archive as any).textFallback as string | undefined;
+        if (!fb) return undefined;
+        return { messages: [...event.messages, { role: "user", content: [{ type: "text", text: fb }] }] };
+      }
       const decision = pickStrategy({
         model,
         mode,
@@ -236,9 +224,11 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
         archiveProducible: true,
         archiveMatchesSession: archive.sessionId === sessionId,
       });
-      if (decision.strategy !== "snapcompact") return undefined;
-      // Extra guard: if pickStrategy drifted, still ensure vision.
-      if (!modelSupportsImages(model)) return undefined;
+      if (decision.strategy !== "snapcompact") {
+        const fb2 = (archive as any).textFallback as string | undefined;
+        if (fb2) return { messages: [...event.messages, { role: "user", content: [{ type: "text", text: fb2 }] }] };
+        return undefined;
+      }
       const profile = profileForModel(model);
       const { messages: projection } = buildProjectionMessages(archive, profile);
       const rebuilt = [...event.messages, ...projection];

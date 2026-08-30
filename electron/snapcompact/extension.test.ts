@@ -146,31 +146,31 @@ describe("snapcompact Pi extension (session_before_compact + context)", () => {
     expect(headerText).toContain("E001=/repo/electron/snapshot-store.ts");
   });
 
-  it("context event: does not inject when model is visionless (switching models after compaction)", async () => {
+  it("context event: text-only model after snapcompact compaction receives durable text fallback (no images)", async () => {
     const ext = buildExt();
     const beforeHandler = ext.handlers.get("session_before_compact")![0] as any;
     const sm = makeSessionManager();
     sm.appendMessage({ role: "user", content: "hello" } as any);
     const compaction = await beforeHandler({
-      preparation: { firstKeptEntryId: "u1", messagesToSummarize: [userMsg("discuss /repo/electron/snapshot-store.ts")], turnPrefixMessages: [], tokensBefore: 100 },
+      preparation: { firstKeptEntryId: "u1", messagesToSummarize: [userMsg("discuss /repo/electron/snapshot-store.ts with secret")], turnPrefixMessages: [], tokensBefore: 100 },
     }, { sessionManager: sm });
     sm.appendCompaction(compaction.compaction.summary, compaction.compaction.firstKeptEntryId, compaction.compaction.tokensBefore, compaction.compaction.details as any, true);
     const ctx = sm.buildSessionContext();
-    // Switch to text-only model
+    // Switch to text-only model — must still get history via textFallback, not empty
     getModel = () => ({ provider: "openai", id: "gpt-3.5", input: ["text"] });
-    const ext2 = buildExt();
-    // Need to re-attach store with same state — use original store
-    // but new extension reads new getModel. Simpler: reuse ext but
-    // mutate getModel reference — buildExt captured closure, so
-    // we need to create new ext with same store.
-    const ctxHandler = ext2.handlers.get("context")![0] as any;
-    // Copy archive from original ext's store is same instance (stateDir)
-    // The archive was written to same stateDir, so new ext can load it.
-    // But we need to ensure getMode still snapcompact
     getMode = () => "snapcompact";
-    const ctxHandler2 = createSnapcompactExtension({ archiveStore: store, getMode, getModel, getSessionId, getSessionFile }).handlers.get("context")![0] as any;
+    const visionlessExt = createSnapcompactExtension({ archiveStore: store, getMode, getModel, getSessionId, getSessionFile });
+    const ctxHandler2 = visionlessExt.handlers.get("context")![0] as any;
     const result = await ctxHandler2({ messages: ctx.messages }, { sessionManager: sm });
-    expect(result).toBeUndefined();
+    expect(result).toBeDefined();
+    expect(result.messages.length).toBeGreaterThan(ctx.messages.length);
+    // Must NOT contain images
+    const hasImage = result.messages.some((m: any) => Array.isArray(m.content) && m.content.some((b: any) => b?.type === "image"));
+    expect(hasImage).toBe(false);
+    // Must contain the textual fallback with history
+    const text = result.messages.map((m: any) => Array.isArray(m.content) ? m.content.map((b: any) => b.text ?? "").join("") : "").join("\n");
+    expect(text).toContain("Snapcompact text fallback");
+    expect(text.length).toBeGreaterThan(50);
   });
 
   it("context event: the archive remains present across multiple LLM calls (multi-step tool turn)", async () => {
@@ -208,29 +208,23 @@ describe("snapcompact Pi extension (session_before_compact + context)", () => {
     const c1 = await beforeHandler({
       preparation: { firstKeptEntryId: "x", messagesToSummarize: [userMsg("branch A content /repo/a.ts")], turnPrefixMessages: [], tokensBefore: 10 },
     }, { sessionManager: sm });
-    const id1 = sm.appendCompaction(c1.compaction.summary, c1.compaction.firstKeptEntryId, c1.compaction.tokensBefore, c1.compaction.details as any, true);
+    sm.appendCompaction(c1.compaction.summary, c1.compaction.firstKeptEntryId, c1.compaction.tokensBefore, c1.compaction.details as any, true);
     const gen1 = String(c1.compaction.details.snapcompactGeneration);
-    // Simulate branch: create second generation
     sm.appendMessage({ role: "user", content: "branch B continuation" } as any);
     const c2 = await beforeHandler({
       preparation: { firstKeptEntryId: "y", messagesToSummarize: [userMsg("branch B content /repo/b.ts")], turnPrefixMessages: [], tokensBefore: 10 },
     }, { sessionManager: sm });
     sm.appendCompaction(c2.compaction.summary, c2.compaction.firstKeptEntryId, c2.compaction.tokensBefore, c2.compaction.details as any, true);
     const gen2 = String(c2.compaction.details.snapcompactGeneration);
-    // Both generations should be loadable
     const a1 = await store.loadGeneration(sessionFile, gen1);
     expect(a1).not.toBeNull();
     expect(a1!.compactionGenerationId).toBe(gen1);
     const a2 = await store.loadGeneration(sessionFile, gen2);
     expect(a2).not.toBeNull();
     expect(a2!.compactionGenerationId).toBe(gen2);
-    // Active manifest points at B
     const active = await store.load(sessionFile);
     expect(active!.compactionGenerationId).toBe(gen2);
-    // But navigating back to branch A: we can still load gen1 via
-    // loadGeneration even though manifest points at gen2
     const ctxHandler = ext.handlers.get("context")![0] as any;
-    // Simulate being on branch A: create a fresh SM that only has gen1
     const smA = makeSessionManager();
     smA.appendMessage({ role: "user", content: "branch A start" } as any);
     smA.appendCompaction(c1.compaction.summary, c1.compaction.firstKeptEntryId, c1.compaction.tokensBefore, c1.compaction.details as any, true);
@@ -238,6 +232,28 @@ describe("snapcompact Pi extension (session_before_compact + context)", () => {
     const resultA = await ctxHandler({ messages: ctxA.messages }, { sessionManager: smA });
     expect(resultA).toBeDefined();
     expect(resultA.messages.length).toBeGreaterThan(ctxA.messages.length);
+  });
+
+  it("branch isolation: branch B without snapcompact does not leak branch A archive", async () => {
+    const ext = buildExt();
+    const beforeHandler = ext.handlers.get("session_before_compact")![0] as any;
+    // Build branch A with snapcompact
+    const smA = makeSessionManager();
+    const rootId = smA.appendMessage({ role: "user", content: "root" } as any);
+    const cA = await beforeHandler({
+      preparation: { firstKeptEntryId: "x", messagesToSummarize: [userMsg("branch A secret /repo/secret.ts")], turnPrefixMessages: [], tokensBefore: 10 },
+    }, { sessionManager: smA });
+    smA.appendCompaction(cA.compaction.summary, cA.compaction.firstKeptEntryId, cA.compaction.tokensBefore, cA.compaction.details as any, true);
+    // Branch B diverges from root without any snapcompact compaction
+    const smB = makeSessionManager();
+    smB.appendMessage({ role: "user", content: "root" } as any);
+    smB.appendMessage({ role: "user", content: "branch B ordinary message" } as any);
+    const ctxB = smB.buildSessionContext();
+    expect(ctxB.messages.some((m: any) => m.role === "compactionSummary")).toBe(false);
+    const ctxHandler = ext.handlers.get("context")![0] as any;
+    const resultB = await ctxHandler({ messages: ctxB.messages }, { sessionManager: smB });
+    // Must NOT inject branch A's archive into branch B
+    expect(resultB).toBeUndefined();
   });
 
   it("split-turn ordering: archive built from messagesToSummarize before turnPrefixMessages", async () => {

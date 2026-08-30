@@ -38,4 +38,37 @@ describe("snapcompact build budgets", () => {
     expect(r.archive.lastKeptEntryId).toBe("u2");
     expect(r.archive.keptCount).toBe(2);
   });
+
+  it("hard-caps maxDictChars even for a single oversized symbol (drops it)", () => {
+    const profile = { ...profileForModel({ id: "generic-vision" }), maxDictChars: 100 };
+    const longUrl = "https://example.com/" + "a".repeat(5000);
+    const messages = [user(`see ${longUrl} please`, "u1")];
+    const r = buildArchive({ sessionId: "s", sessionFile: "/s.jsonl", messages, profile });
+    // Single huge URL exceeds 100 char dict budget -> discarded
+    expect(r.archive.symbols.find((s) => s.value === longUrl)).toBeUndefined();
+    // Budget still enforced: total dict chars within limit
+    const dictChars = r.archive.symbols.reduce((n, s) => n + s.value.length, 0);
+    expect(dictChars).toBeLessThanOrEqual(100);
+  });
+
+  it("enforces maxImageTokens", () => {
+    const profile = { ...profileForModel({ id: "generic-vision" }), maxImageTokens: 1 };
+    const messages = [user("hello world", "u1")];
+    expect(() => buildArchive({ sessionId: "s", sessionFile: "/s.jsonl", messages, profile })).toThrow(ArchiveBudgetError);
+  });
+
+  it("enforces maxRequestBytes", () => {
+    const profile = { ...profileForModel({ id: "generic-vision" }), maxRequestBytes: 1 };
+    const messages = [user("hello world", "u1")];
+    expect(() => buildArchive({ sessionId: "s", sessionFile: "/s.jsonl", messages, profile })).toThrow(ArchiveBudgetError);
+  });
+
+  it("stores a durable textFallback for text-only fallback", () => {
+    const messages = [user("hello /repo/a.ts", "u1")];
+    const profile = profileForModel({ id: "generic-vision" });
+    const r = buildArchive({ sessionId: "s", sessionFile: "/s.jsonl", messages, profile });
+    expect(typeof r.archive.textFallback).toBe("string");
+    expect(r.archive.textFallback!.length).toBeGreaterThan(0);
+    expect(r.archive.textFallback!).toContain("[Snapcompact text fallback]");
+  });
 });
