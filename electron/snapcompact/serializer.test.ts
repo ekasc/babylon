@@ -80,33 +80,32 @@ describe("snapcompact serializer", () => {
     expect(out.sourceText.length).toBeLessThan(huge.length);
   });
 
-  it("truncates by dropping whole messages from the end and reports truthful coverage", () => {
+  it("truncates by keeping the most-recent suffix and reports truthful coverage", () => {
     const many = Array.from({ length: 200 }, (_, i) => user(`message ${i} ${"y".repeat(500)}`, `u${i}`));
     const out = serializeTranscript({ messages: many, totalBudget: 2000 });
     expect(out.truncated).toBe(true);
-    // Coverage: kept range is the head, omitted trailing names the rest.
-    expect(out.firstKeptEntryId).toBe("u0");
-    expect(out.lastKeptEntryId).not.toBe("u199");
+    // Coverage: kept range is the recent suffix, omitted are the oldest.
+    expect(out.lastKeptEntryId).toBe("u199");
+    expect(out.firstKeptEntryId).not.toBe("u0");
     expect(out.omittedTrailing.length).toBeGreaterThan(0);
-    // Every omitted trailing entry is one of the dropped ones.
     for (const o of out.omittedTrailing) {
-      const n = Number(o.entryId.replace("u", ""));
-      expect(n).toBeGreaterThanOrEqual(out.keptCount);
+      if (o.reason === "total-budget") {
+        const n = Number(o.entryId.replace("u", ""));
+        expect(n).toBeLessThan(Number(out.firstKeptEntryId!.replace("u", "")));
+      }
     }
-    // Source text length respects the budget plus a small seam.
     expect(out.sourceText.length).toBeLessThanOrEqual(2000);
-    // The kept block contains early messages and ends with the omission
-    // marker for the truncated archive.
-    expect(out.sourceText).toMatch(/message 0/);
+    expect(out.sourceText).toMatch(/message 199/);
+    expect(out.sourceText).not.toMatch(/message 0/);
   });
 
-  it("preserves first/last kept entry IDs from the input array (not the last input)", () => {
+  it("preserves last kept entry and drops oldest when budget exceeded", () => {
     const msgs = [user("a", "u0"), user("b", "u1"), user("c", "u2"), user("d", "u3")];
     const out = serializeTranscript({ messages: msgs, totalBudget: 50 });
-    expect(out.firstKeptEntryId).toBe("u0");
+    expect(out.lastKeptEntryId).toBe("u3");
     if (out.keptCount < 4) {
-      expect(out.lastKeptEntryId).not.toBe("u3");
-      expect(out.omittedTrailing.some((o) => o.entryId === "u3")).toBe(true);
+      expect(out.firstKeptEntryId).not.toBe("u0");
+      expect(out.omittedTrailing.some((o) => o.entryId === "u0" && o.reason === "total-budget")).toBe(true);
     }
   });
 

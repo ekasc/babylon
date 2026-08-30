@@ -48,15 +48,18 @@ export interface BuildArchiveResult {
 }
 
 function capRawSymbols(symbols: RawSymbol[], maxCount: number, maxDictChars: number): RawSymbol[] {
-  if (symbols.length <= maxCount) return symbols;
-  const sorted = symbols.slice(0, maxCount);
-  // Trim until the dictionary text (rough estimate) fits.
-  let joined = sorted.map((s) => s.value).join("|");
-  while (sorted.length > 1 && joined.length > maxDictChars) {
-    sorted.pop();
-    joined = sorted.map((s) => s.value).join("|");
+  let out = symbols.length > maxCount ? symbols.slice(0, maxCount) : symbols.slice();
+  // Enforce maxDictChars regardless of count — a few very long values can
+  // still exceed the budget even when count is under maxCount.
+  let joined = out.map((s) => s.value).join("|");
+  while (out.length > 1 && joined.length > maxDictChars) {
+    out.pop();
+    joined = out.map((s) => s.value).join("|");
   }
-  return sorted;
+  // Single remaining symbol that alone exceeds maxDictChars is kept as-is
+  // (it was still extracted as high-value); caller may still enforce
+  // tighter limits via symbol filtering if desired.
+  return out;
 }
 
 export function buildArchive(input: BuildArchiveInput): BuildArchiveResult {
@@ -80,6 +83,14 @@ export function buildArchive(input: BuildArchiveInput): BuildArchiveResult {
   const frameBytes = rendered.frames.reduce((n, f) => n + f.png.length, 0);
   if (frameBytes > profile.maxArchiveBytes) {
     throw new ArchiveBudgetError("maxArchiveBytes", frameBytes, profile.maxArchiveBytes);
+  }
+  const imageTokens = rendered.frames.length * profile.imageTokenEstimate;
+  if (imageTokens > profile.maxImageTokens) {
+    throw new ArchiveBudgetError("maxImageTokens", imageTokens, profile.maxImageTokens);
+  }
+  const estimatedRequestBytes = Math.ceil((frameBytes * 4) / 3) + rendered.adjustedSourceText.length + rendered.symbols.reduce((n, s) => n + s.id.length + 1 + s.value.length + 1, 0);
+  if (estimatedRequestBytes > profile.maxRequestBytes) {
+    throw new ArchiveBudgetError("maxRequestBytes", estimatedRequestBytes, profile.maxRequestBytes);
   }
   const archive: SnapcompactArchive = {
     version: 1,

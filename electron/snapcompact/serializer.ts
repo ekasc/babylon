@@ -166,9 +166,12 @@ function entryRoleOf(msg: any): string {
 
 /**
  * Serialize a list of projected messages. The total source budget is
- * applied by dropping whole messages from the END (chronologically) so
- * coverage is honest: every line of `sourceText` corresponds to a real
- * entry, and the dropped entries are reported in `omittedTrailing`.
+ * applied by keeping the most-recent suffix that fits and dropping
+ * the oldest entries, so coverage is honest: every line of
+ * `sourceText` corresponds to a real entry, and the dropped entries
+ * are reported in `omittedTrailing`. Recent context is prioritized
+ * because a context archive that drops the newest turns loses the
+ * information most likely to be queried next.
  */
 export function serializeTranscript(input: SerializeInput): SerializeOutput {
   const perTool = input.perToolResultBudget ?? PER_TOOL_RESULT_BUDGET;
@@ -213,20 +216,26 @@ export function serializeTranscript(input: SerializeInput): SerializeOutput {
     perMessage.push({ msg: m, block, skipped });
   }
 
-  // Second pass: keep a tail of messages whose joined text fits the
-  // total budget. We include the separator length in the running total.
+  // Second pass: keep the most-recent suffix that fits the total
+  // budget. For an agent context archive the recent boundary is more
+  // valuable; dropping prefers the oldest entries. We walk backwards.
   let totalLen = 0;
   let firstIdx = -1;
   let lastIdx = -1;
-  for (let i = 0; i < perMessage.length; i++) {
-    const item = perMessage[i];
-    if (item.skipped) continue;
-    const sep = firstIdx === -1 ? 0 : 2; // "\n\n"
-    const added = item.block.length + sep;
-    if (totalLen + added > totalBudget) break;
-    totalLen += added;
-    if (firstIdx === -1) firstIdx = i;
-    lastIdx = i;
+  // Find last non-skipped index
+  for (let i = perMessage.length - 1; i >= 0; i--) {
+    if (!perMessage[i].skipped) { lastIdx = i; break; }
+  }
+  if (lastIdx !== -1) {
+    for (let i = lastIdx; i >= 0; i--) {
+      const item = perMessage[i];
+      if (item.skipped) continue;
+      const sep = totalLen === 0 ? 0 : 2;
+      const added = item.block.length + sep;
+      if (totalLen + added > totalBudget) break;
+      totalLen += added;
+      firstIdx = i;
+    }
   }
 
   // If nothing fits, return empty coverage.
@@ -250,8 +259,10 @@ export function serializeTranscript(input: SerializeInput): SerializeOutput {
   }
   const sourceText = kept.join("\n\n");
   const omittedTrailing: OmittedEntry[] = [];
-  for (let i = lastIdx + 1; i < perMessage.length; i++) {
+  // Dropped due to budget: oldest non-skipped entries before firstIdx
+  for (let i = 0; i < firstIdx; i++) {
     const item = perMessage[i];
+    if (item.skipped) continue;
     omittedTrailing.push({ entryId: entryIdOf(item.msg), role: entryRoleOf(item.msg), reason: "total-budget" });
   }
   // Also record image-only / empty messages as omitted (skipped before budgeting).
@@ -260,9 +271,7 @@ export function serializeTranscript(input: SerializeInput): SerializeOutput {
       omittedTrailing.push({ entryId: entryIdOf(item.msg), role: entryRoleOf(item.msg), reason: "tool-result-image-only" });
     }
   }
-  // Tool-result-image-only omissions were counted in `skipped`; total-budget
-  // omissions are signalled via `truncated`.
-  const truncated = perMessage.some((it, i) => !it.skipped && i > lastIdx) || lastIdx < perMessage.length - 1;
+  const truncated = omittedTrailing.some((o) => o.reason === "total-budget");
 
   const rawSymbols = extractHighValueTokens(sourceText);
   return {

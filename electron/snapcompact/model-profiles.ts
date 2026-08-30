@@ -19,6 +19,10 @@ export interface SnapcompactModelProfile {
   maxFrames: number;
   imageTokenEstimate: number;
   maxArchiveBytes: number;
+  /** Ceiling for total image tokens (frames * per-frame estimate). */
+  maxImageTokens: number;
+  /** Ceiling for total request bytes (base64 frames + header + dictionary). */
+  maxRequestBytes: number;
   /** Hard cap on the number of symbols in the exact-token dictionary. */
   maxSymbolCount: number;
   /** Hard cap on the rendered size of the symbol dictionary in characters. */
@@ -39,6 +43,8 @@ const GENERIC: SnapcompactModelProfile = {
   maxFrames: 8,
   imageTokenEstimate: 765,
   maxArchiveBytes: 6 * 1024 * 1024,
+  maxImageTokens: 8 * 765,
+  maxRequestBytes: 8 * 1024 * 1024,
   maxSymbolCount: 256,
   maxDictChars: 6000,
   maxSourceChars: 60_000,
@@ -56,6 +62,8 @@ const OPENAI: SnapcompactModelProfile = {
   maxFrames: 8,
   imageTokenEstimate: 765,
   maxArchiveBytes: 6 * 1024 * 1024,
+  maxImageTokens: 8 * 765,
+  maxRequestBytes: 8 * 1024 * 1024,
   maxSymbolCount: 256,
   maxDictChars: 6000,
   maxSourceChars: 60_000,
@@ -73,6 +81,8 @@ const ANTHROPIC: SnapcompactModelProfile = {
   maxFrames: 8,
   imageTokenEstimate: 1600,
   maxArchiveBytes: 5 * 1024 * 1024,
+  maxImageTokens: 8 * 1600,
+  maxRequestBytes: 8 * 1024 * 1024,
   maxSymbolCount: 256,
   maxDictChars: 6000,
   maxSourceChars: 60_000,

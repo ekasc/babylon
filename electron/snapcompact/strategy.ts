@@ -28,6 +28,10 @@ export interface PickStrategyInput {
   archiveMatchesSession: boolean;
   /** Optional: explicit guard that budget enforcement has run. */
   budgetsOk?: boolean;
+  /** When true, the caller is deciding whether to *build* a new archive
+   *  (session_before_compact). In this mode an existing archive is not
+   *  required — archive null is allowed. */
+  forBuild?: boolean;
 }
 
 export interface PickStrategyResult {
@@ -51,12 +55,13 @@ export function pickStrategy(input: PickStrategyInput): PickStrategyResult {
   if (input.mode === "summary") {
     return { strategy: "summary", reason: REASONS.MODE_SUMMARY };
   }
-  // Both "automatic" and explicit "snapcompact" run the same gates.
   if (!input.model) return { strategy: "summary", reason: REASONS.NO_MODEL };
   if (!modelSupportsImages(input.model)) return { strategy: "summary", reason: REASONS.MODEL_VISIONLESS };
   if (!input.archiveProducible) return { strategy: "summary", reason: REASONS.ARCHIVE_NOT_PRODUCIBLE };
   if (input.budgetsOk === false) return { strategy: "summary", reason: REASONS.BUDGETS_EXCEEDED };
-  if (!input.archive) return { strategy: "summary", reason: REASONS.ARCHIVE_MISSING };
-  if (!input.archiveMatchesSession) return { strategy: "summary", reason: REASONS.ARCHIVE_SESSION_MISMATCH };
+  if (!input.forBuild) {
+    if (!input.archive) return { strategy: "summary", reason: REASONS.ARCHIVE_MISSING };
+    if (!input.archiveMatchesSession) return { strategy: "summary", reason: REASONS.ARCHIVE_SESSION_MISMATCH };
+  }
   return { strategy: "snapcompact", reason: REASONS.AUTOMATIC };
 }

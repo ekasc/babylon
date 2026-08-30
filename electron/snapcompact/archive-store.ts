@@ -8,22 +8,21 @@
 //     generations/
 //       <generation-id>/
 //         frame-0000.png
-//         frame-0001.png
 //
-// Crash safety:
+// Crash safety and branch addressability:
 //   - Each generation is written into a fresh directory under
 //     generations/, frame files first, manifest only after the
 //     frame set is complete and validated. The manifest is swapped
 //     atomically (rename(2)). A crash before the swap leaves the
 //     previous generation byte-for-byte loadable.
-//   - On load, the active generation's frame set is validated. Any
-//     missing or corrupt frame makes the archive invalid; the
-//     store throws so the caller can fall back to the existing
-//     textual compaction. The archive never loads partially.
-//
-// Versioning: persisted manifest declares version=1. A future
-// reader that sees a different version treats the archive as
-// missing (returns null) rather than mis-decoding.
+//   - Generations are immutable once written. Navigating back to an
+//     older Pi branch (which has an older CompactionEntry) can still
+//     load its generation via loadGeneration(sessionFile, genId) even
+//     after the active manifest has moved forward.
+//   - GC is reference-aware: it never deletes a generation still
+//     referenced by any reachable SessionEntry (compaction entry).
+//     Callers that know the reachable set pass it; otherwise GC keeps
+//     a bounded window.
 
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fsp } from "node:fs";
@@ -32,7 +31,7 @@ import type { SnapcompactArchive, SnapcompactFrame, SnapcompactSymbol } from "./
 
 const MANIFEST_VERSION = 1;
 const GENERATION_PREFIX = "gen-";
-const MAX_GENERATIONS_KEPT = 4;
+const MAX_GENERATIONS_KEPT = 8;
 
 function sessionKey(sessionFile: string): string {
   return createHash("sha256").update(sessionFile).digest("hex").slice(0, 24);
@@ -98,8 +97,6 @@ interface PersistedArchive {
   coveredThroughMessageId: string | null;
   coveredThroughTimestamp: number | null;
   frameBytes: number;
-  // Optional for forward compatibility with older manifests; the loader
-  // supplies safe defaults.
   compactionGenerationId?: string;
   firstKeptEntryId?: string | null;
   lastKeptEntryId?: string | null;
@@ -124,6 +121,8 @@ export interface ArchiveStoreOptions {
 
 export class ArchiveStore {
   private cache = new Map<string, SnapcompactArchive | null>();
+  // Generation-level cache: sessionKey -> generationId -> archive
+  private genCache = new Map<string, Map<string, SnapcompactArchive | null>>();
 
   constructor(private readonly opts: ArchiveStoreOptions) {}
 
@@ -131,40 +130,21 @@ export class ArchiveStore {
     return sessionKey(sessionFile);
   }
 
-  /** Read the active manifest and load the referenced generation. Throws
-   *  ArchiveIntegrityError if the manifest or the active generation is
-   *  missing, corrupt, or has any missing frame file. Returns null when
-   *  no archive exists. */
-  async load(sessionFile: string): Promise<SnapcompactArchive | null> {
-    const k = this.keyFor(sessionFile);
-    if (this.cache.has(k)) return this.cache.get(k) ?? null;
-    const mpath = manifestPath(this.opts.stateDir, k);
-    let raw: PersistedArchive;
-    try {
-      const parsed = (await readJson(mpath)) as PersistedArchive;
-      if (parsed?.version !== MANIFEST_VERSION) return null;
-      if (!parsed.generation || !Array.isArray(parsed.generation.frames)) return null;
-      raw = parsed;
-    } catch {
-      return null;
-    }
+  private async loadFromPersisted(raw: PersistedArchive): Promise<SnapcompactArchive> {
+    const k = this.keyFor(raw.sessionFile);
     const gen = raw.generation;
     const gdir = generationDir(this.opts.stateDir, k, gen.id);
     const frames: SnapcompactFrame[] = [];
-    let frameBytes = 0;
     try {
       for (const meta of gen.frames) {
         const fp = join(gdir, meta.file);
         const buf = await fsp.readFile(fp);
-        frameBytes += buf.length;
         frames.push({ index: meta.index, width: meta.width, height: meta.height, png: buf, sourceOffset: meta.sourceOffset, sourceEnd: meta.sourceEnd });
       }
     } catch (err: any) {
-      // Missing or unreadable frame file: the archive is invalid.
-      this.cache.set(k, null);
       throw new ArchiveIntegrityError(`snapcompact archive frame file missing: ${err?.message ?? String(err)}`);
     }
-    const archive: SnapcompactArchive = {
+    return {
       version: MANIFEST_VERSION,
       sessionId: raw.sessionId,
       sessionFile: raw.sessionFile,
@@ -185,23 +165,114 @@ export class ArchiveStore {
       keptCount: raw.keptCount ?? frames.length,
       omittedTrailing: raw.omittedTrailing ?? [],
     };
-    this.cache.set(k, archive);
-    return archive;
   }
 
-  /** Atomically replace the archive for `sessionFile`. The previous
-   *  generation is left on disk until the new one is fully written and
-   *  the manifest is swapped. A crash before the swap leaves the
-   *  previous archive loadable. A crash after the swap leaves the new
-   *  archive loadable. */
-  async write(sessionFile: string, archive: Omit<SnapcompactArchive, "version" | "frameBytes">): Promise<SnapcompactArchive> {
+  /** Read the active manifest and load the referenced generation. */
+  async load(sessionFile: string): Promise<SnapcompactArchive | null> {
     const k = this.keyFor(sessionFile);
-    const adir = archiveDir(this.opts.stateDir, k);
+    if (this.cache.has(k)) return this.cache.get(k) ?? null;
+    const mpath = manifestPath(this.opts.stateDir, k);
+    let raw: PersistedArchive;
+    try {
+      const parsed = (await readJson(mpath)) as PersistedArchive;
+      if (parsed?.version !== MANIFEST_VERSION) return null;
+      if (!parsed.generation || !Array.isArray(parsed.generation.frames)) return null;
+      raw = parsed;
+    } catch {
+      return null;
+    }
+    try {
+      const archive = await this.loadFromPersisted(raw);
+      this.cache.set(k, archive);
+      // Also populate gen cache
+      const gmap = this.genCache.get(k) ?? new Map();
+      gmap.set(archive.compactionGenerationId, archive);
+      this.genCache.set(k, gmap);
+      return archive;
+    } catch (err: any) {
+      if (err instanceof ArchiveIntegrityError) {
+        this.cache.set(k, null);
+        throw err;
+      }
+      throw err;
+    }
+  }
+
+  private dirIdFor(generationId: string): string {
+    return generationId.startsWith(GENERATION_PREFIX) ? generationId : GENERATION_PREFIX + generationId;
+  }
+
+  /** Load a specific generation by compactionGenerationId, even if it is
+   *  no longer the active manifest. Returns null if the generation
+   *  directory does not exist or cannot be fully reconstructed.
+   *  Uses a per-generation manifest snapshot stored alongside frames
+   *  (generation.json) so older generations remain loadable after the
+   *  active manifest moves forward. */
+  async loadGeneration(sessionFile: string, generationId: string): Promise<SnapcompactArchive | null> {
+    const k = this.keyFor(sessionFile);
+    const gmap = this.genCache.get(k);
+    if (gmap?.has(generationId)) return gmap.get(generationId) ?? null;
+    // Accept both raw uuid and gen- prefixed form
+    const dirId = this.dirIdFor(generationId);
+    if (gmap?.has(dirId)) return gmap.get(dirId) ?? null;
+    const gdir = generationDir(this.opts.stateDir, k, dirId);
+    const genManifest = join(gdir, "generation.json");
+    let raw: PersistedArchive;
+    try {
+      raw = (await readJson(genManifest)) as PersistedArchive;
+    } catch {
+      // Fallback: if active manifest points at this generation, use it
+      const mpath = manifestPath(this.opts.stateDir, k);
+      try {
+        const parsed = (await readJson(mpath)) as PersistedArchive;
+        if (parsed?.version === MANIFEST_VERSION && (parsed.compactionGenerationId === generationId || parsed.generation?.id === generationId || parsed.generation?.id === dirId)) {
+          raw = parsed;
+        } else {
+          return null;
+        }
+      } catch {
+        return null;
+      }
+    }
+    if (raw.version !== MANIFEST_VERSION) return null;
+    try {
+      const archive = await this.loadFromPersisted(raw);
+      const map2 = this.genCache.get(k) ?? new Map();
+      map2.set(generationId, archive);
+      this.genCache.set(k, map2);
+      return archive;
+    } catch (err: any) {
+      if (err instanceof ArchiveIntegrityError) {
+        const map2 = this.genCache.get(k) ?? new Map();
+        map2.set(generationId, null);
+        this.genCache.set(k, map2);
+        throw err;
+      }
+      throw err;
+    }
+  }
+
+  async listGenerations(sessionFile: string): Promise<string[]> {
+    const k = this.keyFor(sessionFile);
+    const gdirRoot = generationsDir(this.opts.stateDir, k);
+    try {
+      const entries = await fsp.readdir(gdirRoot, { withFileTypes: true });
+      return entries.filter((e) => e.isDirectory() && e.name.startsWith(GENERATION_PREFIX)).map((e) => e.name);
+    } catch { return []; }
+  }
+
+  /** Atomically replace the archive for `sessionFile`. */
+  async write(sessionFile: string, archive: Omit<SnapcompactArchive, "version" | "frameBytes">, opts?: { referencedGenerationIds?: Set<string> }): Promise<SnapcompactArchive> {
+    const k = this.keyFor(sessionFile);
     const gdirRoot = generationsDir(this.opts.stateDir, k);
     await fsp.mkdir(gdirRoot, { recursive: true, mode: 0o700 });
 
-    const newGenId = GENERATION_PREFIX + randomUUID().slice(0, 12);
-    const staging = generationStagingDir(this.opts.stateDir, k, newGenId);
+    const newGenId = archive.compactionGenerationId;
+    // Ensure generation dir name matches compactionGenerationId for
+    // branch switching. If the id doesn't already look like a gen-
+    // prefixed id, prefix it.
+    const dirId = newGenId.startsWith(GENERATION_PREFIX) ? newGenId : GENERATION_PREFIX + newGenId;
+    const staging = generationStagingDir(this.opts.stateDir, k, dirId);
     await fsp.mkdir(staging, { recursive: true, mode: 0o700 });
 
     const frameMetas: PersistedFrameMeta[] = [];
@@ -214,16 +285,16 @@ export class ArchiveStore {
         frameBytes += f.png.length;
         frameMetas.push({ index: f.index, width: f.width, height: f.height, sourceOffset: f.sourceOffset, sourceEnd: f.sourceEnd, file: fileName });
       }
-      // Validate the staged generation before swap.
       for (const meta of frameMetas) {
         await fsp.access(join(staging, meta.file));
       }
-      // Atomically move the staged generation into the generations dir.
-      const finalGenDir = generationDir(this.opts.stateDir, k, newGenId);
+      const finalGenDir = generationDir(this.opts.stateDir, k, dirId);
+      // Remove any existing dir with same id (idempotent retry)
+      await fsp.rm(finalGenDir, { recursive: true, force: true }).catch(() => undefined);
       await fsp.rename(staging, finalGenDir);
 
       const generation: PersistedGeneration = {
-        id: newGenId,
+        id: dirId,
         createdAt: archive.createdAt,
         frameWidth: archive.frameWidth,
         frameHeight: archive.frameHeight,
@@ -247,35 +318,51 @@ export class ArchiveStore {
         keptCount: archive.keptCount,
         omittedTrailing: archive.omittedTrailing,
       };
-      // Write the manifest last. A crash before this point leaves the
-      // previous generation referenced by the old manifest, which is
-      // still byte-for-byte intact.
+      // Also write a per-generation snapshot so loadGeneration can
+      // reconstruct older branches without the active manifest.
+      await fsp.writeFile(join(finalGenDir, "generation.json"), JSON.stringify(persisted, null, 2), { mode: 0o600 });
       await atomicWriteJson(manifestPath(this.opts.stateDir, k), manifestTmpPath(this.opts.stateDir, k), persisted);
 
-      // After a successful swap, GC old generations beyond a small
-      // retention window so a previous crash leaving stale generations
-      // on disk cannot grow without bound.
-      await this.gcGenerations(k, newGenId);
+      await this.gcGenerations(k, dirId, opts?.referencedGenerationIds);
 
       const fullArchive: SnapcompactArchive = { version: MANIFEST_VERSION, ...archive, frameBytes };
       this.cache.set(k, fullArchive);
+      const gmap = this.genCache.get(k) ?? new Map();
+      gmap.set(archive.compactionGenerationId, fullArchive);
+      // Also map by dirId for listGenerations lookup
+      gmap.set(dirId, fullArchive);
+      this.genCache.set(k, gmap);
       return fullArchive;
     } catch (err) {
-      // Best-effort cleanup of the staging dir on failure.
       await fsp.rm(staging, { recursive: true, force: true }).catch(() => undefined);
       throw err;
     }
   }
 
-  private async gcGenerations(k: string, keep: string): Promise<void> {
+  private async gcGenerations(k: string, keep: string, referenced?: Set<string>): Promise<void> {
     const gdirRoot = generationsDir(this.opts.stateDir, k);
     let entries: { name: string }[];
     try { entries = (await fsp.readdir(gdirRoot, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => ({ name: e.name })); }
     catch { return; }
     const realGens = entries.map((e) => e.name).filter((n) => n.startsWith(GENERATION_PREFIX));
+    if (realGens.length <= MAX_GENERATIONS_KEPT) return;
     realGens.sort();
-    const toRemove = realGens.filter((n) => n !== keep).slice(0, Math.max(0, realGens.length - MAX_GENERATIONS_KEPT));
-    for (const name of toRemove) {
+    // Build set of ids that must never be deleted (still referenced)
+    const protectedIds = new Set<string>();
+    protectedIds.add(keep);
+    protectedIds.add(this.dirIdFor(keep));
+    if (referenced) {
+      for (const r of referenced) {
+        protectedIds.add(r);
+        protectedIds.add(this.dirIdFor(r));
+      }
+    }
+    const removable = realGens.filter((n) => !protectedIds.has(n));
+    if (!removable.length) return;
+    const keepNonRefCount = Math.max(0, MAX_GENERATIONS_KEPT - protectedIds.size);
+    // Keep newest keepNonRefCount among removable, delete the rest (oldest)
+    const toDelete = removable.slice(0, Math.max(0, removable.length - keepNonRefCount));
+    for (const name of toDelete) {
       await fsp.rm(join(gdirRoot, name), { recursive: true, force: true }).catch(() => undefined);
     }
   }
@@ -285,6 +372,7 @@ export class ArchiveStore {
     const adir = archiveDir(this.opts.stateDir, k);
     await fsp.rm(adir, { recursive: true, force: true });
     this.cache.delete(k);
+    this.genCache.delete(k);
   }
 
   async exists(sessionFile: string): Promise<boolean> {
