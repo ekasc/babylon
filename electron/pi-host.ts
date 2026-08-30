@@ -1220,7 +1220,10 @@ export class PiHost {
     if (checkpoints.some((checkpoint) => !checkpoint!.complete)) throw new Error("This filesystem checkpoint is incomplete");
     const previousLeafId = session.sessionManager.getLeafId();
     if (!previousLeafId) throw new Error("No active session position");
-    const redo = await this.snapshots.capture(this.cwd);
+    // The redo snapshot is what an "undo" later restores from. If it is stale
+    // (watcher hadn't fired when the user clicked Rollback), undo will silently
+    // revert to the wrong content. Destructive, so authoritative.
+    const redo = await this.snapshots.capture(this.cwd, { authoritative: true });
     if (!redo) throw new Error("Rollback requires a Git project");
     const restoreMap: Record<string, string> = Object.create(null);
     for (const checkpoint of checkpoints as TurnCheckpoint[]) {
@@ -1274,7 +1277,10 @@ export class PiHost {
       if (manager.getLeafId() !== plan.expectedLeafId || entryDigest(manager.getEntries()) !== plan.entryDigest) {
         throw new Error("The session changed; review the rollback again");
       }
-      const current = await this.snapshots.capture(this.cwd);
+      // Drift guard. A stale cache would compare equal to the redo snapshot
+      // and let the restore overwrite the user's manual edit. Destructive, so
+      // authoritative.
+      const current = await this.snapshots.capture(this.cwd, { authoritative: true });
       if (!current || current.tree !== plan.redo.tree) throw new Error("Project files changed; review the rollback again");
       await this.snapshots.restore(this.cwd, plan.restoreMap);
       let navigated = false;
@@ -1340,7 +1346,10 @@ export class PiHost {
         await this.rollbacks.clearActive(session.sessionId);
         throw new Error("Undo rollback is no longer available because the session continued");
       }
-      const current = await this.snapshots.capture(this.cwd);
+      // Undo restores the redo tree. The drift check below must see the real
+      // current worktree; a stale cache could report no drift and let the
+      // restore silently overwrite a manual edit made after the rollback.
+      const current = await this.snapshots.capture(this.cwd, { authoritative: true });
       if (!current) throw new Error("Rollback snapshots are unavailable");
       const drift = await this.snapshots.preview(this.cwd, current.tree, active.restoreMap);
       if (drift.length) {

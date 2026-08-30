@@ -229,4 +229,32 @@ describe("SnapshotStore", () => {
     const b = await store.capture(root);
     expect(b).toBe(a);
   });
+
+  it("authoritative capture immediately after an external write sees the new content (rollback boundary)", async () => {
+    const base = await mkdtemp(join(tmpdir(), "pideck-snapshot-auth-boundary-"));
+    roots.push(base);
+    const root = join(base, "project");
+    await mkdir(root);
+    await git(root, ["init"]);
+    await git(root, ["config", "user.email", "test@example.com"]);
+    await git(root, ["config", "user.name", "Test"]);
+    await writeFile(join(root, "file.txt"), "B\n");
+    await git(root, ["add", "file.txt"]);
+    await git(root, ["commit", "-m", "init"]);
+
+    const store = new SnapshotStore(join(base, "state"));
+    const before = await store.capture(root, { authoritative: true });
+    expect(before).not.toBeNull();
+
+    // Simulate the user editing the worktree the instant before a destructive
+    // rollback. The kernel watcher is eventually consistent; the next
+    // authoritative capture must read Git/FS directly and observe C, not
+    // return the cached B.
+    await writeFile(join(root, "file.txt"), "C\n");
+    const redo = await store.capture(root, { authoritative: true });
+    expect(redo).not.toBeNull();
+    expect(redo!.tree).not.toBe(before!.tree);
+    const diff = await store.changedFiles(root, before!.tree, redo!.tree);
+    expect(diff).toContain("file.txt");
+  });
 });

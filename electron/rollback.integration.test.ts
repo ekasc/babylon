@@ -86,4 +86,60 @@ describe("PiHost rollback integration", () => {
     expect((await reopened.getHistory()).activeRollback).toBeUndefined();
     await reopened.dispose();
   }, 30_000);
+
+  it("refuses rollback when the user edited the worktree between plan and commit (destructive boundary)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pideck-rollback-stale-"));
+    roots.push(root);
+    const cwd = join(root, "project");
+    const agentDir = join(root, "agent");
+    const stateDir = join(root, "state");
+    const sessionDir = join(root, "sessions");
+    await mkdir(cwd);
+    await mkdir(agentDir);
+    await git(cwd, ["init"]);
+    await writeFile(join(cwd, "file.txt"), "before\n");
+    await git(cwd, ["add", "file.txt"]);
+    await git(cwd, ["commit", "-m", "init"]);
+
+    const host = new PiHost({ cwd, agentDir, stateDir, onEvent: () => undefined, onStatus: () => undefined });
+    await host.start();
+    await host.open({ cwd });
+    const isolated = (await import("@earendil-works/pi-coding-agent")).SessionManager.create(cwd, sessionDir);
+    await host.switchTo(isolated.getSessionFile()!, { cwdOverride: cwd });
+
+    const start = await (host as any).captureTurnStart();
+    expect(start).not.toBeNull();
+    const userEntryId = host.session.sessionManager.appendMessage({
+      role: "user",
+      content: [{ type: "text", text: "make the bad change" }],
+      timestamp: Date.now(),
+    } as any);
+    const assistantEntryId = host.session.sessionManager.appendMessage({
+      role: "assistant",
+      content: [{ type: "text", text: "changed" }],
+      api: "test",
+      provider: "test",
+      model: "test",
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: "stop",
+      timestamp: Date.now(),
+    } as any);
+    await writeFile(join(cwd, "file.txt"), "after\n");
+    await (host as any).captureTurnEnd(start);
+
+    // Simulate: the agent finished and the file is "after" (call it B). The
+    // user now immediately edits to C with no settle() / no wait, and clicks
+    // Rollback. The drift guard inside commitRollback must see the changed
+    // worktree and refuse; the file must remain at C.
+    const plan = await host.prepareRollback(userEntryId);
+    expect(plan).toMatchObject({ abandonedCount: 1 });
+    await writeFile(join(cwd, "file.txt"), "manual-C\n");
+    await expect(host.commitRollback(plan.planId)).rejects.toThrow(/changed/i);
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("manual-C\n");
+    // The aborted plan must not have left the active rollback registered.
+    expect((await host.getHistory()).activeRollback).toBeUndefined();
+    expect(host.session.sessionManager.getLeafId()).not.toBe(userEntryId);
+    void assistantEntryId;
+    await host.dispose();
+  }, 30_000);
 });
