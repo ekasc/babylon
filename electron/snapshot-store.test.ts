@@ -37,14 +37,15 @@ describe("SnapshotStore", () => {
     const indexBefore = await git(root, ["diff", "--cached", "--name-status"]);
 
     const store = new SnapshotStore(join(base, "state"));
-    const before = await store.capture(root);
+    // Authoritative capture reads the worktree at this instant, so no settle
+    // is needed (or wanted) — an immediate edit must be reflected.
+    const before = await store.capture(root, { authoritative: true });
     expect(before?.tree).toMatch(/^[0-9a-f]{40,64}$/);
     expect(await git(root, ["diff", "--cached", "--name-status"])).toBe(indexBefore);
 
     await writeFile(join(root, "tracked.txt"), "after\n");
     await writeFile(join(root, "created.txt"), "created\n");
-    await settle();
-    const after = await store.capture(root);
+    const after = await store.capture(root, { authoritative: true });
     expect(after).not.toBeNull();
     expect(await store.changedFiles(root, before!.tree, after!.tree)).toEqual(["created.txt", "tracked.txt"]);
 
@@ -113,8 +114,7 @@ describe("SnapshotStore", () => {
     await writeFile(join(root, "keep.txt"), "keep\nmore\n");
     await writeFile(join(root, "added.txt"), "one\ntwo\n");
     await rm(join(root, "removed.txt"));
-    await settle();
-    const after = await store.capture(root);
+    const after = await store.capture(root, { authoritative: true });
     expect(after).not.toBeNull();
 
     const changes = await store.turnChanges(root, before!.tree, after!.tree);
@@ -141,13 +141,61 @@ describe("SnapshotStore", () => {
     expect(before).not.toBeNull();
 
     await writeFile(join(root, "file.txt"), "one\nthree\n");
-    await settle();
-    const after = await store.capture(root);
+    const after = await store.capture(root, { authoritative: true });
     expect(after).not.toBeNull();
 
     const { diff, truncated } = await store.fileDiff(root, before!.tree, after!.tree, "file.txt");
     expect(truncated).toBe(false);
     expect(diff).toContain("-two");
     expect(diff).toContain("+three");
+  });
+
+  it("captures the worktree at the instant of an authoritative capture, even before the watcher fires (rollback boundary)", async () => {
+    const base = await mkdtemp(join(tmpdir(), "pideck-snapshot-authoritative-"));
+    roots.push(base);
+    const root = join(base, "project");
+    await mkdir(root);
+    await git(root, ["init"]);
+    await git(root, ["config", "user.email", "test@example.com"]);
+    await git(root, ["config", "user.name", "Test"]);
+    await writeFile(join(root, "file.txt"), "before\n");
+    await git(root, ["add", "file.txt"]);
+    await git(root, ["commit", "-m", "init"]);
+
+    const store = new SnapshotStore(join(base, "state"));
+    const a = await store.capture(root, { authoritative: true });
+    expect(a).not.toBeNull();
+
+    // The user edits before pressing Send; the kernel watcher has not yet
+    // reported the change. An authoritative capture MUST still see it, or a
+    // later rollback would destroy the edit. No settle() — this is the
+    // regression that the watcher-as-source-of-truth fast path introduced.
+    await writeFile(join(root, "file.txt"), "after\n");
+    const b = await store.capture(root, { authoritative: true });
+    expect(b).not.toBeNull();
+    expect(b!.tree).not.toBe(a!.tree);
+    expect(await store.changedFiles(root, a!.tree, b!.tree)).toEqual(["file.txt"]);
+  });
+
+  it("returns the cached snapshot on a clean worktree without re-enumerating (noop fast path)", async () => {
+    const base = await mkdtemp(join(tmpdir(), "pideck-snapshot-noop-"));
+    roots.push(base);
+    const root = join(base, "project");
+    await mkdir(root);
+    await git(root, ["init"]);
+    await git(root, ["config", "user.email", "test@example.com"]);
+    await git(root, ["config", "user.name", "Test"]);
+    await writeFile(join(root, "file.txt"), "before\n");
+    await git(root, ["add", "file.txt"]);
+    await git(root, ["commit", "-m", "init"]);
+
+    const store = new SnapshotStore(join(base, "state"));
+    const a = await store.capture(root, { authoritative: true });
+    // Drain watcher events from the capture's own git operations, then take a
+    // non-authoritative capture of an unchanged worktree: it must short-circuit
+    // to the cached tree (the performance path), not re-enumerate git.
+    await settle();
+    const b = await store.capture(root);
+    expect(b).toBe(a);
   });
 });

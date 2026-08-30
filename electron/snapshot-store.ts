@@ -295,13 +295,14 @@ export class SnapshotStore {
           // Object reuse is an optimization; snapshots remain independently valid.
         }
       }
+      // Seed the shadow index ONCE, here, at creation time only. The shadow
+      // index is a persistent incremental store: it must never be reset on an
+      // ordinary repository lookup, or a concurrent read-only history call
+      // (changedFiles/turnChanges/preview) would mutate the same index a
+      // capture is mid-flight staging. An unborn-HEAD repo has no tree to
+      // seed from, which is fine — the first capture scans the source index.
+      await this.seedShadowIndex({ root, gitDir }, root).catch(() => undefined);
     }
-    // Best-effort seed: copy the source repo's current index into the
-    // shadow index so the first normal capture has something to diff against
-    // instead of always starting from an empty tree. Linked worktrees are
-    // handled by resolving the real index path with Git itself rather than
-    // assuming <git-common-dir>/index.
-    await this.seedShadowIndex({ root, gitDir }, root).catch(() => undefined);
 
     return { root, gitDir };
   }
@@ -384,24 +385,28 @@ export class SnapshotStore {
     await fsp.writeFile(path, JSON.stringify({ version: 1, paths: map.paths }), { mode: 0o600 });
   }
 
-  async capture(cwd: string): Promise<SnapshotCapture | null> {
+  async capture(cwd: string, opts?: { authoritative?: boolean }): Promise<SnapshotCapture | null> {
     // Fast path: if a live worktree watcher exists for this repo and has not
     // observed any change since the last capture, return the cached snapshot
-    // without spawning git at all. This is what keeps prompt-start latency
+    // without spawning git at all. This is what keeps post-turn snapshot cost
     // flat on large repos; the full enumeration below only runs when the
     // worktree actually changed (or every `reconcileEvery` captures).
     //
-    // The watcher is eventually-consistent: change events arrive on a later
-    // kernel poll, which in normal use has already drained by the time the
-    // next turn's capture runs (turns are async). It is only consulted when
-    // it is actually attached; if it failed to attach we fall through to a
-    // full capture rather than trusting a stale cache.
-    const cachedRoot = this.rootCache.get(cwd);
-    if (cachedRoot) {
-      const w = this.watches.get(key(cachedRoot));
-      if (w && w.watcher && w.last && w.last.root === cachedRoot && w.dirty.size === 0 && w.since < this.reconcileEvery) {
-        w.since += 1;
-        return w.last;
+    // This fast path is NEVER taken for an authoritative capture. The
+    // pre-turn rollback checkpoint (captureTurnStart) must represent the
+    // worktree at the instant before the agent runs, so it reads Git/FS
+    // directly and cannot trust the eventually-consistent watcher: a change
+    // the kernel has not yet reported would otherwise be missing from the
+    // checkpoint and a later rollback would destroy the user's edit. The
+    // watcher is a performance hint for the post-turn / noop path only.
+    if (!opts?.authoritative) {
+      const cachedRoot = this.rootCache.get(cwd);
+      if (cachedRoot) {
+        const w = this.watches.get(key(cachedRoot));
+        if (w && w.watcher && w.last && w.last.root === cachedRoot && w.dirty.size === 0 && w.since < this.reconcileEvery) {
+          w.since += 1;
+          return w.last;
+        }
       }
     }
     const result = await this.withRepoLockForCwd(cwd, async () => {
@@ -677,19 +682,24 @@ export class SnapshotStore {
   }
 
   async restore(cwd: string, restore: Record<string, string>): Promise<void> {
-    const repo = await this.repository(cwd);
-    if (!repo) throw new Error("rollback requires a Git project");
-    this.invalidate(repo.root);
-    for (const [input, tree] of Object.entries(restore)) {
-      const rel = safeRelative(repo.root, input);
-      const target = await assertSafeTarget(repo.root, rel);
-      const snapshot = safeTree(tree);
-      if (await this.existsIn(repo, snapshot, rel)) {
-        const result = await run("git", this.args(repo, ["checkout", snapshot, "--", `:(top,literal)${rel}`]), repo.root);
-        if (result.code !== 0) throw new Error(`failed to restore ${rel}`);
-      } else {
-        await fsp.rm(target, { recursive: true, force: true });
+    // Restore mutates the shadow index (git checkout writes into it), so it
+    // must run under the same per-repo lock as capture to avoid racing a
+    // concurrent staging operation.
+    await this.withRepoLockForCwd(cwd, async () => {
+      const repo = await this.repository(cwd);
+      if (!repo) throw new Error("rollback requires a Git project");
+      this.invalidate(repo.root);
+      for (const [input, tree] of Object.entries(restore)) {
+        const rel = safeRelative(repo.root, input);
+        const target = await assertSafeTarget(repo.root, rel);
+        const snapshot = safeTree(tree);
+        if (await this.existsIn(repo, snapshot, rel)) {
+          const result = await run("git", this.args(repo, ["checkout", snapshot, "--", `:(top,literal)${rel}`]), repo.root);
+          if (result.code !== 0) throw new Error(`failed to restore ${rel}`);
+        } else {
+          await fsp.rm(target, { recursive: true, force: true });
+        }
       }
-    }
+    });
   }
 }

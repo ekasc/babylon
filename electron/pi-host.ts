@@ -939,7 +939,10 @@ export class PiHost {
     const session = this.runtime.session;
     const sessionFile = session.sessionFile ?? session.sessionManager.getSessionFile();
     if (!sessionFile || session.isStreaming) return null;
-    const before = await this.snapshots.capture(this.cwd).catch(() => null);
+    // The pre-turn checkpoint is the rollback boundary: it MUST reflect the
+    // worktree at this instant, so it is an authoritative capture that reads
+    // Git/FS directly and never trusts the eventually-consistent watcher.
+    const before = await this.snapshots.capture(this.cwd, { authoritative: true }).catch(() => null);
     if (!before) return null;
     const entries = session.sessionManager.getEntries();
     return {
