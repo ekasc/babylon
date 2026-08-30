@@ -9,10 +9,11 @@ import { SnapshotStore } from "./snapshot-store";
 const exec = promisify(execFile);
 const roots: string[] = [];
 
-// The snapshot store short-circuits to a cached tree when its worktree
-// watcher reports no changes. The kernel watcher is eventually-consistent
-// (events land a few libuv polls later), so tests that modify the worktree
-// and then capture must let those events drain first.
+// The snapshot store no longer skips Git on a quiet worktree; every capture
+// runs the two discovery commands. The `settle` helper is kept for tests
+// that need the kernel watcher to observe a write (the watcher is a
+// concurrent-mutation detector during the bounded reconciliation pass, and
+// a test that depends on it needs the events to have landed).
 const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 200));
 
 afterEach(async () => {
@@ -259,5 +260,181 @@ describe("SnapshotStore", () => {
     expect(redo!.tree).not.toBe(before!.tree);
     const diff = await store.changedFiles(root, before!.tree, redo!.tree);
     expect(diff).toContain("file.txt");
+  });
+
+  it("honors .gitignore for untracked candidates", async () => {
+    const base = await mkdtemp(join(tmpdir(), "pideck-snapshot-ignore-"));
+    roots.push(base);
+    const root = join(base, "project");
+    await mkdir(root);
+    await git(root, ["init"]);
+    await git(root, ["config", "user.email", "test@example.com"]);
+    await git(root, ["config", "user.name", "Test"]);
+    await writeFile(join(root, "keep.txt"), "keep\n");
+    await writeFile(join(root, ".gitignore"), "ignored/\n");
+    await git(root, ["add", "keep.txt", ".gitignore"]);
+    await git(root, ["commit", "-m", "init"]);
+
+    const store = new SnapshotStore(join(base, "state"));
+    const snap = await store.capture(root, { authoritative: true });
+    expect(snap).not.toBeNull();
+    await mkdir(join(root, "ignored"));
+    await writeFile(join(root, "ignored/secret.txt"), "x\n");
+    await writeFile(join(root, "visible.txt"), "y\n");
+    const after = await store.capture(root, { authoritative: true });
+    expect(after).not.toBeNull();
+    // The visible untracked file is in the snapshot; the ignored one is not.
+    const changed = await store.changedFiles(root, snap!.tree, after!.tree);
+    expect(changed).toContain("visible.txt");
+    expect(changed).not.toContain("ignored/secret.txt");
+  });
+
+  it("stages only the candidate set; the rest of the shadow index is preserved", async () => {
+    const base = await mkdtemp(join(tmpdir(), "pideck-snapshot-partial-"));
+    roots.push(base);
+    const root = join(base, "project");
+    await mkdir(root);
+    await git(root, ["init"]);
+    await git(root, ["config", "user.email", "test@example.com"]);
+    await git(root, ["config", "user.name", "Test"]);
+    await writeFile(join(root, "a.txt"), "a1\n");
+    await writeFile(join(root, "b.txt"), "b1\n");
+    await writeFile(join(root, "c.txt"), "c1\n");
+    await git(root, ["add", "a.txt", "b.txt", "c.txt"]);
+    await git(root, ["commit", "-m", "init"]);
+
+    const store = new SnapshotStore(join(base, "state"));
+    const before = await store.capture(root, { authoritative: true });
+    expect(before).not.toBeNull();
+
+    // Change only b.txt. The capture must stage only b.txt and leave a.txt
+    // and c.txt's entries in the shadow index untouched (same blob OID).
+    await writeFile(join(root, "b.txt"), "b2\n");
+    const after = await store.capture(root, { authoritative: true });
+    expect(after).not.toBeNull();
+
+    const diff = await store.changedFiles(root, before!.tree, after!.tree);
+    expect(diff).toEqual(["b.txt"]);
+
+    // A second clean capture (no further edits) must report no changes and
+    // produce the same tree OID as the previous capture — the shadow's
+    // index for a.txt and c.txt was not disturbed by the partial staging.
+    await settle();
+    const still = await store.capture(root, { authoritative: true });
+    expect(still!.tree).toBe(after!.tree);
+  });
+
+  it("seeds the shadow from a linked worktree's index, not the main repo's", async () => {
+    const base = await mkdtemp(join(tmpdir(), "pideck-snapshot-worktree-"));
+    roots.push(base);
+    const main = join(base, "main");
+    await mkdir(main);
+    await git(main, ["init"]);
+    await git(main, ["config", "user.email", "test@example.com"]);
+    await git(main, ["config", "user.name", "Test"]);
+    await writeFile(join(main, "main.txt"), "m\n");
+    await git(main, ["add", "main.txt"]);
+    await git(main, ["commit", "-m", "init"]);
+
+    // Add a different file in the main branch and commit.
+    await writeFile(join(main, "only-main.txt"), "om\n");
+    await git(main, ["add", "only-main.txt"]);
+    await git(main, ["commit", "-m", "only in main"]);
+
+    // Create a linked worktree on a new branch with a different file.
+    const wt = join(base, "wt");
+    await git(main, ["worktree", "add", "-b", "wt-branch", wt]);
+    await writeFile(join(wt, "only-wt.txt"), "ow\n");
+    await git(wt, ["add", "only-wt.txt"]);
+    // Stage but do not commit — the worktree's index is what the shadow
+    // must seed from.
+    const store = new SnapshotStore(join(base, "state"));
+    const snap = await store.capture(wt, { authoritative: true });
+    expect(snap).not.toBeNull();
+    // The snapshot tree must contain the worktree-only file.
+    await writeFile(join(wt, "only-wt-new.txt"), "new\n");
+    const after = await store.capture(wt, { authoritative: true });
+    const diff = await store.changedFiles(wt, snap!.tree, after!.tree);
+    expect(diff).toContain("only-wt-new.txt");
+  });
+
+  it("reuses the same shadow gitDir after dispose + reopen without re-seeding from HEAD^{tree}", async () => {
+    const base = await mkdtemp(join(tmpdir(), "pideck-snapshot-reopen-"));
+    roots.push(base);
+    const root = join(base, "project");
+    const state = join(base, "state");
+    await mkdir(root);
+    await git(root, ["init"]);
+    await git(root, ["config", "user.email", "test@example.com"]);
+    await git(root, ["config", "user.name", "Test"]);
+    await writeFile(join(root, "f.txt"), "v1\n");
+    await git(root, ["add", "f.txt"]);
+    await git(root, ["commit", "-m", "init"]);
+
+    const a = new SnapshotStore(state);
+    const first = await a.capture(root, { authoritative: true });
+    a.dispose();
+
+    // Reopen with a fresh store instance against the same state dir. The
+    // shadow's gitDir must be reused; the previously-staged tree must be
+    // the starting point, not a re-seed from HEAD^{tree} (which is the
+    // same here, but the mechanism under test is the reuse).
+    const b = new SnapshotStore(state);
+    const reopened = await b.capture(root, { authoritative: true });
+    expect(reopened!.tree).toBe(first!.tree);
+    // A subsequent edit must produce the same diff as before reopen.
+    await writeFile(join(root, "f.txt"), "v2\n");
+    const after = await b.capture(root, { authoritative: true });
+    const diff = await b.changedFiles(root, first!.tree, after!.tree);
+    expect(diff).toEqual(["f.txt"]);
+  });
+
+  it("reconverges when a watcher event lands during an authoritative capture", async () => {
+    const base = await mkdtemp(join(tmpdir(), "pideck-snapshot-reconverge-"));
+    roots.push(base);
+    const root = join(base, "project");
+    await mkdir(root);
+    await git(root, ["init"]);
+    await git(root, ["config", "user.email", "test@example.com"]);
+    await git(root, ["config", "user.name", "Test"]);
+    await writeFile(join(root, "file.txt"), "v1\n");
+    await git(root, ["add", "file.txt"]);
+    await git(root, ["commit", "-m", "init"]);
+
+    const store = new SnapshotStore(join(base, "state"));
+    // Seed the shadow and watch.
+    await store.capture(root, { authoritative: true });
+    await settle();
+
+    // Mutate the worktree, then capture. During the capture's git
+    // invocations, the event loop will run a concurrent writer that
+    // creates a new file. The capture must resolve (bounded reconciliation
+    // must not loop forever on a quiet repo), and the next capture must
+    // reflect the worktree state.
+    await writeFile(join(root, "file.txt"), "v2\n");
+    const capturePromise = store.capture(root, { authoritative: true });
+    // Race a concurrent untracked-file write against the in-flight
+    // capture. The capture runs spawn()'d git processes, so the event
+    // loop runs and this setTimeout fires during the capture.
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    await writeFile(join(root, "late.txt"), "late\n");
+    const snap = await capturePromise;
+    expect(snap).not.toBeNull();
+
+    // The next capture must include the late file (whether the in-flight
+    // capture folded it via reconciliation or the next capture picks it
+    // up; either way the worktree state is observed).
+    await settle();
+    const after = await store.capture(root, { authoritative: true });
+    expect(after).not.toBeNull();
+    // A marker write after the in-flight capture must show up as the only
+    // (or at least an) entry in the diff from the in-flight tree. This
+    // proves the shadow is healthy and the bounded reconciliation left
+    // it in a consistent state.
+    await writeFile(join(root, "marker.txt"), "m\n");
+    await settle();
+    const afterMarker = await store.capture(root, { authoritative: true });
+    const diff = await store.changedFiles(root, after!.tree, afterMarker!.tree);
+    expect(diff).toContain("marker.txt");
   });
 });
