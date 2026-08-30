@@ -970,7 +970,12 @@ export class PiHost {
     );
     const finalLeafId = session.sessionManager.getLeafId();
     if (!user || !finalLeafId) return;
-    const after = await this.snapshots.capture(this.cwd).catch(() => null);
+    // The post-turn snapshot must also be authoritative. `prepareRollback`
+    // restores files only for the paths in `changedPaths`, which is derived
+    // from this snapshot; a watcher-backed capture that missed the agent's
+    // edit would yield an incomplete diff and leave the change in place after
+    // a rollback. Reading Git/FS directly guarantees a complete diff.
+    const after = await this.snapshots.capture(this.cwd, { authoritative: true }).catch(() => null);
     if (!after || after.root !== start.before.root) return;
     const changedPaths = await this.snapshots.changedFiles(this.cwd, start.before.tree, after.tree);
     const exclusions = changedExclusions(start.before.excluded, after.excluded);
