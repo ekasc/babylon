@@ -26,6 +26,12 @@ import { getSettings as defaultGetSettings, saveSettings as defaultSaveSettings 
 import { buildGitCommitPrompt, extractModelText, parseGeneratedCommitMessage, type GeneratedCommitMessage } from "./git-commit-message";
 import type { PreparedCommitContext } from "./git";
 import { buildRecapPrompt, normalizeRecapText, pickRecapDelta, recapDue, recapWorthy, RECAP_INTERVAL_MS, type Recap } from "./recap";
+import { ArchiveStore } from "./snapcompact/archive-store";
+import { buildArchive } from "./snapcompact/build";
+import { profileForModel, modelSupportsImages } from "./snapcompact/model-profiles";
+import { pickStrategy } from "./snapcompact/strategy";
+import { buildContextProjection, assembleUserMessage } from "./snapcompact/context-assembly";
+import type { SnapcompactArchive } from "./snapcompact/types";
 import { ManagedSubagents, type ManagedSubagentRecord, type SubagentControlAction, type SubagentParentEvent } from "./subagents";
 import { createAskQuestionTool } from "./ask-question";
 import { createBabylonBashTool } from "./bash-tool";
@@ -110,6 +116,8 @@ export class PiHost {
   private readonly rollbacks: RollbackStore;
   private readonly recaps: RecapStore;
   private readonly recapping = new Set<string>();
+  private readonly snapcompact: ArchiveStore;
+  private snapcompactInFlight = new Set<string>();
   /** Session file → last observed message timestamp (ms). Event-driven, so the
    *  sweep never reads the session file unless a recap might be due. */
   private readonly lastMessageAt = new Map<string, number>();
@@ -150,6 +158,7 @@ export class PiHost {
     this.snapshots = new SnapshotStore(join(stateDir, "snapshots"));
     this.rollbacks = new RollbackStore(join(stateDir, "rollbacks"));
     this.recaps = new RecapStore(join(stateDir, "recaps"));
+    this.snapcompact = new ArchiveStore({ stateDir });
     // Auto-recap: after a quiet period in the active chat, summarize the
     // stretch since the previous recap with a cheap model. The tick is bounded
     // by the recap interval (min 2s) so PIDECK_RECAP_MS fast-forward works for
@@ -625,6 +634,10 @@ export class PiHost {
     const intervalMs = Number(process.env.PIDECK_RECAP_MS) || RECAP_INTERVAL_MS;
     const cached = this.lastMessageAt.get(file);
     if (!cached || Date.now() - cached < intervalMs) return;
+    // Reuse the same trigger boundary for the snapcompact archive so we
+    // do not build a second independent context estimator. Snapcompact is
+    // best-effort and runs in parallel with the recap.
+    void this.maybeBuildSnapcompact(session, file);
     await this.maybeRecap(session, file);
   }
 
@@ -673,6 +686,51 @@ export class PiHost {
       // Recaps are best-effort; a failed model call must never surface.
     } finally {
       this.recapping.delete(file);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Snapcompact: deterministic bitmap archive of the projected transcript.
+  // Build/refresh rides the same trigger boundary as the existing recap
+  // sweep: when the recap boundary says "context reduction is required",
+  // the archive is rebuilt from the same message window. Manual compact
+  // also rebuilds it. The canonical Pi session is never mutated.
+  // -------------------------------------------------------------------------
+
+  /** Returns the current archive for the session, or null. */
+  async getSnapcompactArchive(sessionFile: string): Promise<SnapcompactArchive | null> {
+    return this.snapcompact.load(sessionFile);
+  }
+
+  /** Build and persist a fresh archive for the active session. No-op if
+   *  another build for the same session is already in flight, or if the
+   *  session has no messages. Errors are swallowed: the archive is a
+   *  best-effort projection and must never break the active chat. */
+  private async maybeBuildSnapcompact(session: AgentSession, file: string): Promise<void> {
+    if (this.snapcompactInFlight.has(file)) return;
+    if (session.isStreaming) return;
+    this.snapcompactInFlight.add(file);
+    try {
+      const { messages } = await readSessionTail(file);
+      if (!messages.length) return;
+      const model = this.runtime.session.model;
+      const profile = profileForModel(model);
+      const last = messages[messages.length - 1];
+      const coveredEntryId = typeof last?.entryId === "string" ? last.entryId : null;
+      const lastTs = typeof last?.timestamp === "number" ? last.timestamp : null;
+      const result = buildArchive({
+        sessionId: session.sessionId,
+        sessionFile: file,
+        messages,
+        profile,
+        coveredThroughMessageId: coveredEntryId,
+        coveredThroughTimestamp: lastTs,
+      });
+      await this.snapcompact.write(file, result.archive);
+    } catch {
+      // Snapcompact is a projection; a failed build must never surface.
+    } finally {
+      this.snapcompactInFlight.delete(file);
     }
   }
 
@@ -850,10 +908,36 @@ export class PiHost {
     // filesystem boundary. They remain part of the active checkpointed turn.
     const checkpoint = streamingBehavior ? null : await this.captureTurnStart();
     const opts: any = {};
-    opts.images = toPiImages(images);
-    if (streamingBehavior) opts.streamingBehavior = streamingBehavior;
+    const allImages: any[] = [];
+    // Snapcompact: the single owner (pickStrategy) decides whether the
+    // archive is used this prompt. When it is, attach the archive's
+    // frames to the user message alongside the user-supplied images
+    // and prepend a structured header so the model sees the exact-token
+    // dictionary as raw text near the images.
     try {
-      return await this.runtime.session.prompt(message, opts);
+      const mode = (this.opts.settingsProvider?.getSettings() ?? defaultGetSettings()).compaction?.mode ?? "summary";
+      const file = sessionAtStart.sessionFile;
+      const archive = file ? await this.snapcompact.load(file).catch(() => null) : null;
+      const session = sessionAtStart;
+      const matchesSession = archive ? archive.sessionId === session.sessionId : false;
+      const model = session.model;
+      const decision = pickStrategy({
+        model: model ? { provider: model.provider, id: model.id, input: (model as any).input } : null,
+        mode,
+        archive: archive && matchesSession ? archive : null,
+        archiveProducible: true,
+        archiveMatchesSession: matchesSession,
+      });
+      let finalMessage = message;
+      if (decision.strategy === "snapcompact" && archive && matchesSession) {
+        const projection = buildContextProjection(archive);
+        finalMessage = assembleUserMessage(message, projection);
+        for (const img of projection.images) allImages.push(img);
+      }
+      if (images?.length) allImages.push(...toPiImages(images)!);
+      if (allImages.length) opts.images = allImages;
+      if (streamingBehavior) opts.streamingBehavior = streamingBehavior;
+      return await this.runtime.session.prompt(finalMessage, opts);
     } finally {
       if (rollbackAtStart && this.runtime.session.sessionId === rollbackAtStart.sessionId) {
         const continued =
@@ -882,6 +966,11 @@ export class PiHost {
     return this.enqueueTransition(async () => {
       await this.ensureSession();
       const session = this.runtime.session;
+      // Manual compact also refreshes the snapcompact archive so a user
+      // who clicks Compact and selects "snapcompact" strategy sees a
+      // current archive on the next prompt. Non-destructive: the
+      // canonical session is untouched.
+      if (session.sessionFile) void this.maybeBuildSnapcompact(session, session.sessionFile);
       const before = entryDigest(session.sessionManager.getEntries());
       try {
         return await session.compact(customInstructions);
