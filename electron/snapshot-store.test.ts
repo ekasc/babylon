@@ -357,6 +357,85 @@ describe("SnapshotStore", () => {
     // The deletion was during the in-flight capture; the same
     // returned snapshot reflects it.
     expect(after!.excluded).toEqual([]);
+    store.dispose();
+  }, 15_000);
+
+  it("drops an excluded file when the delete lands after the verification Git calls but before the post-discovery reconcile", async () => {
+    // Deterministic test for the verification-window race. The test
+    // seam fires exactly between the verification Git discovery and
+    // the post-discovery exclusion reconcile. A setTimeout-based
+    // test cannot reliably hit that window because the verification
+    // Git calls can take up to ~21s in the cold-shadow 100k case.
+    const base = await mkdtemp(join(tmpdir(), "pideck-snapshot-excl-postverify-"));
+    roots.push(base);
+    const root = join(base, "project");
+    await mkdir(root);
+    await git(root, ["init"]);
+    await git(root, ["config", "user.email", "test@example.com"]);
+    await git(root, ["config", "user.name", "Test"]);
+    await writeFile(join(root, "f.txt"), "f\n");
+    await git(root, ["add", "f.txt"]);
+    const huge = join(root, "huge.log");
+    await writeFile(huge, Buffer.alloc(3 * 1024 * 1024, "x"));
+
+    const store = new SnapshotStore(join(base, "state"));
+    const before = await store.capture(root, { authoritative: true });
+    expect(before!.excluded.map((e) => e.path)).toContain("huge.log");
+
+    // Fire the delete exactly between the verification discovery and
+    // the post-discovery reconcile. The reconcile then observes the
+    // deletion and drops the exclusion entry; the returned snapshot
+    // does not list the path. The hook runs once per pass; guard so
+    // the second pass's call is a no-op rather than a second rm.
+    let deleted = false;
+    store.onBeforeVerifyReconcile = async () => {
+      if (deleted) return;
+      deleted = true;
+      await rm(huge);
+    };
+    try {
+      const after = await store.capture(root, { authoritative: true });
+      expect(after).not.toBeNull();
+      expect(after!.excluded.map((e) => e.path)).not.toContain("huge.log");
+      expect(after!.excluded).toEqual([]);
+    } finally {
+      store.onBeforeVerifyReconcile = null;
+    }
+  });
+
+  it("admits a previously-excluded untracked file that shrank after the verification Git calls", async () => {
+    const base = await mkdtemp(join(tmpdir(), "pideck-snapshot-shrink-postverify-"));
+    roots.push(base);
+    const root = join(base, "project");
+    await mkdir(root);
+    await git(root, ["init"]);
+    await git(root, ["config", "user.email", "test@example.com"]);
+    await git(root, ["config", "user.name", "Test"]);
+    await writeFile(join(root, "f.txt"), "f\n");
+    await git(root, ["add", "f.txt"]);
+    const huge = join(root, "huge.log");
+    await writeFile(huge, Buffer.alloc(3 * 1024 * 1024, "x"));
+
+    const store = new SnapshotStore(join(base, "state"));
+    const before = await store.capture(root, { authoritative: true });
+    expect(before!.excluded.map((e) => e.path)).toContain("huge.log");
+
+    // Shrink exactly between the verification discovery and the
+    // post-discovery reconcile. The reconcile drops the entry; the
+    // next pass admits the file; the returned snapshot reflects it.
+    // writeFile is naturally idempotent across passes.
+    store.onBeforeVerifyReconcile = async () => {
+      await writeFile(huge, "small now\n");
+    };
+    try {
+      const after = await store.capture(root, { authoritative: true });
+      expect(after).not.toBeNull();
+      expect(after!.excluded.map((e) => e.path)).not.toContain("huge.log");
+      const diff = await store.changedFiles(root, before!.tree, after!.tree);
+      expect(diff).toContain("huge.log");
+    } finally {
+      store.onBeforeVerifyReconcile = null;
+    }
   });
 
   it("admits a previously-excluded untracked file that shrank during the in-flight capture", async () => {
@@ -391,7 +470,8 @@ describe("SnapshotStore", () => {
     // The file is now in the snapshot tree.
     const diff = await store.changedFiles(root, before!.tree, after!.tree);
     expect(diff).toContain("shrinking.log");
-  });
+    store.dispose();
+  }, 15_000);
 
   it("reconciles the exclusion map when an excluded file is renamed (delete-old + create-new)", async () => {
     const base = await mkdtemp(join(tmpdir(), "pideck-snapshot-excl-rename-"));

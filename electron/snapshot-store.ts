@@ -164,6 +164,13 @@ export class SnapshotStore {
    *  this store. */
   private rootCache = new Map<string, string | null>();
 
+  /** Test-only seam: fired once per pass, between the verification
+   *  Git discovery and the post-discovery exclusion reconcile. A test
+   *  can set this to a function that mutates the worktree (e.g.
+   *  deletes an excluded file) so the reconcile observes the
+   *  mutation deterministically. Not part of the public API. */
+  onBeforeVerifyReconcile: (() => Promise<void>) | null = null;
+
   /** Per-repo worktree watchers. The watcher is a concurrent-mutation
    *  detector only: it does not feed a fast path. Every capture runs the
    *  authoritative Git candidate discovery; the watcher exists to force an
@@ -586,30 +593,24 @@ export class SnapshotStore {
       const hash = tree.stdout.toString("utf8").trim();
       if (!/^[0-9a-f]{40,64}$/i.test(hash)) throw new Error("invalid project snapshot");
 
-      // 6. Verification discovery. Re-run the same two commands against
-      //    the just-updated shadow index. If a concurrent write landed
-      //    during the pass, the second discovery will see it. If the
-      //    second discovery is empty, the checkpoint is stable.
-      //    Watcher delivery is not consulted here — the verification
-      //    is the only proof of stability. The `--others` result is
-      //    filtered against the exclusion map: an excluded file is a
-      //    known exclusion, not a concurrent write, and must not
-      //    force an unnecessary retry.
-      //
-      //    Reconcile the exclusion map again first: a delete or
-      //    shrink that landed during this in-flight capture must be
-      //    reflected in the returned snapshot, not deferred to the
-      //    next one. Without this re-reconcile, the stability check
-      //    can succeed against stale exclusion metadata and the
-      //    caller receives a snapshot whose `excluded` list still
-      //    names a path the worktree no longer has.
-      await this.reconcileExclusions(repo, exclusions);
+      // 6. Verification discovery. Re-run the same two commands
+      //    against the just-updated shadow index, then reconcile the
+      //    exclusion map against the live worktree, then filter the
+      //    `--others` result against the refreshed map. The order
+      //    matters: a delete or shrink that lands during the Git
+      //    calls must be observed by the reconcile, which runs after
+      //    the Git calls read the filesystem. If the reconcile ran
+      //    before the Git calls, a mutation during those calls would
+      //    leave stale exclusion metadata and the stability check
+      //    could pass against it.
       const [vDirty, vUntracked] = await Promise.all([
         run("git", this.args(repo, ["diff-files", "-z", "--name-only"]), repo.root),
         run("git", this.args(repo, ["ls-files", "-z", "--others", "--exclude-standard"]), repo.root),
       ]);
       if (vDirty.code !== 0) throw new Error("failed to verify snapshot stability");
       if (vUntracked.code !== 0) throw new Error("failed to verify snapshot stability");
+      if (this.onBeforeVerifyReconcile) await this.onBeforeVerifyReconcile();
+      await this.reconcileExclusions(repo, exclusions);
       const verifyDirty = splitNul(vDirty.stdout);
       const verifyUntracked = splitNul(vUntracked.stdout).filter((p) => !(p in exclusions.paths));
       if (verifyDirty.length === 0 && verifyUntracked.length === 0) {
