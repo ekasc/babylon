@@ -202,6 +202,25 @@ function daemonOnly(): DaemonClient | null {
   return runtimeOwner === "daemon" && daemonConnected && daemonClient ? daemonClient : null;
 }
 
+/** Authority (not connectivity): true when the daemon owns the runtime.
+ *  Use this for ownership decisions (which runtime/task/permission store is
+ *  authoritative). `daemonOnly()` additionally requires a live socket and is
+ *  only for operations that must execute on the daemon right now. */
+function isDaemonOwned(): boolean {
+  return runtimeOwner === "daemon";
+}
+
+/** Require a live daemon client when the daemon owns the runtime. If it is
+ *  temporarily disconnected, fail explicitly rather than silently falling
+ *  back to local state — local does not own the runtime and mutating it would
+ *  corrupt the daemon's authoritative view. */
+function requireDaemonClient(): DaemonClient {
+  if (runtimeOwner !== "daemon") throw new Error("not in daemon mode");
+  const client = daemonOnly();
+  if (!client) throw new Error("daemon is reconnecting — try again shortly");
+  return client;
+}
+
 async function daemonClientTasks(): Promise<import("../src/tasks").Task[]> {
   const client = daemonOnly();
   if (!client) return [];
@@ -535,17 +554,24 @@ async function startHost(): Promise<void> {
     const permissionDir = join(app.getPath("userData"), "pideck-state", "permissions");
     permissionEngine = new PermissionEngine({ dir: permissionDir });
     await permissionEngine.load();
-    const client = daemonOnly(); if (client) {
-      const alive = await new Promise<boolean>((resolve) => {
-        const probe = net.connect(daemonPaths().socketPath);
-        probe.once("connect", () => { probe.destroy(); resolve(true); });
-        probe.once("error", () => resolve(false));
-      });
-      if (alive) {
-        console.log("[pideck] pi host is daemon-owned (thin client)");
-        return;
+    if (isDaemonOwned()) {
+      const client = daemonOnly();
+      if (client) {
+        const alive = await new Promise<boolean>((resolve) => {
+          const probe = net.connect(daemonPaths().socketPath);
+          probe.once("connect", () => { probe.destroy(); resolve(true); });
+          probe.once("error", () => resolve(false));
+        });
+        if (alive) {
+          console.log("[pideck] pi host is daemon-owned (thin client)");
+          return;
+        }
       }
-      console.warn("[pideck] daemon enabled but not reachable; falling back to in-process host");
+      // Owned by the daemon but the socket is down. Do NOT fall back to an
+      // in-process host: a local host would shadow the daemon after reconnect
+      // and split task/attention state. Wait for the socket to re-establish.
+      console.warn("[pideck] daemon owns the runtime but the socket is down; awaiting reconnection, no local host");
+      return;
     }
     host = new PiHost({
       cwd,
@@ -1015,7 +1041,7 @@ function registerIpc(): void {
       const state = await getRuntime().getState() as any;
       const file = state?.sessionFile;
       const header = file ? await readSessionHeader(file) : null;
-      const task = daemonOnly()
+      const task = isDaemonOwned()
         ? await daemonTaskBySessionFile(file)
         : taskManager.findBySessionFile(file);
       const parentSession = header?.parentSession ?? task?.parentSessionFile;
@@ -1093,7 +1119,8 @@ function registerIpc(): void {
         const state: any = await getRuntime().getState();
         if (!state?.sessionId) throw new Error("cloned session has no runtime identity");
         let task: import("../src/tasks").Task;
-        const client = daemonOnly(); if (client) {
+        if (isDaemonOwned()) {
+          const client = requireDaemonClient();
           const payload = {
             id: randomUUID(),
             title: safeName,
@@ -1154,7 +1181,7 @@ function registerIpc(): void {
     const file = state?.sessionFile;
     if (!file) throw new Error("no active session");
     const header = await readSessionHeader(file);
-    const task = daemonOnly()
+    const task = isDaemonOwned()
       ? await daemonTaskBySessionFile(file)
       : taskManager.findBySessionFile(file);
     const originalPath = header?.parentSession ?? task?.parentSessionFile;
@@ -1230,7 +1257,9 @@ function registerIpc(): void {
   // ---------------------------------------------------------------------------
 
   handle("pideck:permissions:get", async () => {
-    const client = daemonOnly(); if (client) {
+    if (isDaemonOwned()) {
+      const client = daemonOnly();
+      if (!client) return { mode: "auto" as const, rules: [] };
       const res = await client.request("permissions.get", {});
       return res.payload;
     }
@@ -1241,7 +1270,8 @@ function registerIpc(): void {
     if (mode !== "supervised" && mode !== "auto" && mode !== "full_access") {
       throw new Error("invalid execution mode");
     }
-    const client = daemonOnly(); if (client) {
+    if (isDaemonOwned()) {
+      const client = requireDaemonClient();
       const res = await client.request("permissions.set-mode", { mode });
       return res.payload;
     }
@@ -1268,7 +1298,8 @@ function registerIpc(): void {
     if (input.scope !== "always" && input.scope !== "session") {
       throw new Error("invalid rule scope");
     }
-    const client = daemonOnly(); if (client) {
+    if (isDaemonOwned()) {
+      const client = requireDaemonClient();
       const res = await client.request("permissions.add-rule", input);
       return res.payload;
     }
@@ -1285,7 +1316,8 @@ function registerIpc(): void {
   });
   handle("pideck:permissions:remove-rule", async (_e, id: string) => {
     if (typeof id !== "string" || id.length < 1 || id.length > 200) throw new Error("invalid rule id");
-    const client = daemonOnly(); if (client) {
+    if (isDaemonOwned()) {
+      const client = requireDaemonClient();
       const res = await client.request("permissions.remove-rule", { id });
       return res.payload;
     }
@@ -1502,6 +1534,10 @@ async function ensureDaemon(): Promise<boolean> {
       daemonConnected = state === "connected";
     });
     daemonClient.onEvent((envelope) => {
+      // Only forward daemon events when the daemon actually owns the runtime.
+      // If Babylon fell back to local mode, a later daemon reconnect must not
+      // inject daemon state into the locally-owned UI (P1 #6).
+      if (!isDaemonOwned()) return;
       if (envelope.type === "task.created" || envelope.type === "task.updated" || envelope.type === "task.removed") {
         daemonClient
           ?.request("state.get", {})
@@ -1587,7 +1623,7 @@ app.whenReady().then(async () => {
   // here, once, and start exactly one host. A later transient disconnect
   // flips `daemonConnected` but never reverts `runtimeOwner`.
   await ensureDaemon();
-  if (daemonOnly()) {
+  if (isDaemonOwned()) {
     // Daemon owns tasks and attention when active — thin client, no local subscriptions
     sessionIndex.subscribe((update) => win?.webContents.send("pideck:sessions-update", update));
   } else {
@@ -1597,7 +1633,7 @@ app.whenReady().then(async () => {
     attentionManager.subscribe((registry) => win?.webContents.send("pideck:attention-update", registry));
     sessionIndex.subscribe((update) => win?.webContents.send("pideck:sessions-update", update));
   }
-  const notifierClient = daemonOnly(); if (notifierClient) {
+  const notifierClient = daemonOnly(); if (notifierClient && isDaemonOwned()) {
     lspManager.setPiNotifier((diagCwd, diagnostics) => {
       if (diagCwd !== activeCwd) return;
       notifierClient.request("pi.notifyDiagnostics", { diagnostics }).catch(() => {});
