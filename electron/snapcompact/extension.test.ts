@@ -332,13 +332,13 @@ describe("snapcompact Pi extension (session_before_compact + context)", () => {
     getModel = () => ({ provider: "openai", id: "gpt-3.5", input: ["text"] });
     getMode = () => "snapcompact";
     const freshExt = createSnapcompactExtension({ archiveStore: store, getMode, getModel, getSessionId, getSessionFile });
-    const result = await freshExt.handlers.get("context")![0]({ messages: ctx.messages }, { sessionManager: sm });
+    const result = await (freshExt.handlers.get("context")![0] as any)({ messages: ctx.messages }, { sessionManager: sm });
     expect(result).toBeDefined();
-    expect(result.messages.some((m: any) => m.role === "compactionSummary")).toBe(false);
+    expect((result as any).messages.some((m: any) => m.role === "compactionSummary")).toBe(false);
     const toText = (m: any) => Array.isArray(m.content) ? m.content.map((b: any) => b.text ?? "").join("") : typeof m.content === "string" ? m.content : m.summary ?? "";
-    const flat = result.messages.map(toText).join("\n");
+    const flat = (result as any).messages.map(toText).join("\n");
     expect(flat.indexOf("Snapcompact text fallback")).toBeLessThan(flat.indexOf("CURRENT TASK FALLBACK"));
-    const lastUser = [...result.messages].reverse().find((m: any) => m.role === "user");
+    const lastUser = [...(result as any).messages].reverse().find((m: any) => m.role === "user");
     expect(toText(lastUser)).toContain("CURRENT TASK FALLBACK");
     // Canonical not mutated
     expect(sm.getEntries().some((e: any) => e.type === "compaction" && e.details?.snapcompactGeneration)).toBe(true);
