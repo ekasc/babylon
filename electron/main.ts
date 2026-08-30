@@ -221,6 +221,27 @@ function requireDaemonClient(): DaemonClient {
   return client;
 }
 
+/** Install the LSP notifier that delivers diagnostics to the daemon-owned
+ *  PiHost. Called both at startup (when the socket is live) and on reconnect
+ *  (when the socket was down at startup but came back later). */
+function installDaemonNotifier(client: DaemonClient): void {
+  lspManager.setPiNotifier((diagCwd, diagnostics) => {
+    if (diagCwd !== activeCwd) return;
+    client.request("pi.notifyDiagnostics", { diagnostics }).catch(() => {});
+  });
+}
+
+/** Startup-time placeholder when the daemon owns the runtime but the socket
+ *  isn't up yet. Installs no notifier at all (the daemon will receive
+ *  diagnostics via the notifier that onConnectionChange wires up on
+ *  reconnect). Never installs a local notifier in daemon-owned mode. */
+function installDeferredDaemonNotifier(): void {
+  lspManager.setPiNotifier(() => {
+    // Drop diagnostics until the daemon socket is up. onConnectionChange
+    // replaces this with installDaemonNotifier on the next connected event.
+  });
+}
+
 async function daemonClientTasks(): Promise<import("../src/tasks").Task[]> {
   const client = daemonOnly();
   if (!client) return [];
@@ -678,7 +699,8 @@ function registerIpc(): void {
       if (!opts || typeof opts.cwd !== "string" || opts.cwd.length > 4096) throw new Error("invalid session options");
       if (hostReady) await hostReady;
       const path = opts.path === undefined ? undefined : await validateSessionPath(PI_SESSIONS_ROOT, opts.path);
-      const client = daemonOnly(); if (client) {
+      if (isDaemonOwned()) {
+        const client = requireDaemonClient();
         const res = await client.request("pi.openSession", { ...opts, path });
         const state = res.payload as { sessionFile?: string };
         const t = await daemonTaskBySessionFile(state?.sessionFile ?? null);
@@ -707,14 +729,16 @@ function registerIpc(): void {
         }
       }
     }
-    const client = daemonOnly(); if (client) {
+    if (isDaemonOwned()) {
+      const client = requireDaemonClient();
       const res = await client.request("pi.prompt", { message, images, streamingBehavior });
       return res.payload;
     }
     return getRuntime().prompt(message, images, streamingBehavior);
   });
   handle("pideck:abort", async () => {
-    const client = daemonOnly(); if (client) {
+    if (isDaemonOwned()) {
+      const client = requireDaemonClient();
       const res = await client.request("pi.abort", {});
       return res.payload;
     }
@@ -728,21 +752,24 @@ function registerIpc(): void {
     return getRuntime().refreshFromDisk(p);
   });
   handle("pideck:get-messages", async () => {
-    const client = daemonOnly(); if (client) {
+    if (isDaemonOwned()) {
+      const client = requireDaemonClient();
       const res = await client.request("pi.getMessages", {});
       return res.payload;
     }
     return getRuntime().getMessages();
   });
   handle("pideck:get-state", async () => {
-    const client = daemonOnly(); if (client) {
+    if (isDaemonOwned()) {
+      const client = requireDaemonClient();
       const res = await client.request("pi.getState", {});
       return res.payload;
     }
     return getRuntime().getState();
   });
   handle("pideck:get-stats", async () => {
-    const client = daemonOnly(); if (client) {
+    if (isDaemonOwned()) {
+      const client = requireDaemonClient();
       const res = await client.request("pi.getStats", {});
       return res.payload;
     }
@@ -1218,7 +1245,11 @@ function registerIpc(): void {
     };
 
     if (task) {
-      const client = daemonOnly(); if (client) {
+      if (isDaemonOwned()) {
+        // The task lives in the daemon. A local `taskManager.exit` would
+        // remove a task the daemon does not know we removed, and the
+        // task.updated/task.removed calls below need a live socket.
+        const client = requireDaemonClient();
         if (!opts.keep && dirty) throw new Error("Cannot discard a task worktree with uncommitted changes");
         await processManager.killByOwner(task.id).catch(() => {});
         const result = await cleanup();
@@ -1230,6 +1261,12 @@ function registerIpc(): void {
         return { ...result, task, removed: !opts.keep };
       }
       return taskManager.exit({ taskId: task.id, keep: opts.keep, dirty, cleanup });
+    }
+    if (isDaemonOwned() && !daemonOnly()) {
+      // No task resolved (daemon has none for this session, *or* the socket
+      // is down and we could not tell which). Refuse rather than run cleanup
+      // while the daemon still believes a task is running.
+      throw new Error("daemon is reconnecting — try again shortly");
     }
     if (!opts.keep && dirty) throw new Error("Cannot discard a task worktree with uncommitted changes");
     return cleanup();
@@ -1330,7 +1367,12 @@ function registerIpc(): void {
     if (!payload || typeof payload.id !== "string" || typeof payload.choice !== "string") {
       throw new Error("invalid approval resolution");
     }
-    const client = daemonOnly(); if (client) {
+    if (isDaemonOwned()) {
+      // Approvals are owned by the daemon in daemon mode. A local resolution
+      // here would return { ok: true } while the daemon never hears about
+      // the choice; the agent would then wait on a gate that no one will
+      // ever open. Refuse loudly when the socket is down rather than lie.
+      const client = requireDaemonClient();
       await client.request("approval.resolved", { id: payload.id, choice: payload.choice });
       win?.webContents.send("pideck:approval-resolved", { id: payload.id, choice: payload.choice });
       return { ok: true };
@@ -1426,24 +1468,33 @@ function registerIpc(): void {
   handle("pideck:process-spawn", async (_e, opts: unknown) => {
     const command = validateCommand((opts as { command?: unknown })?.command);
     const cwd = validateCwd((opts as { cwd?: unknown })?.cwd);
-    // The active session file lives in the daemon-owned PiHost when the
-    // daemon is actually active; the in-process host does not exist then.
-    // Use the runtime state, not the preference flag, so fallback mode
-    // (setting enabled but daemon failed) still finds the local session.
-    const activeFile = daemonOnly() ? await daemonActiveSessionFile() : host?.activeSessionFile ?? null;
-    const activeTask = daemonOnly()
-      ? await daemonTaskBySessionFile(activeFile)
-      : taskManager.findBySessionFile(activeFile);
-    if (activeTask) {
-      const client = daemonOnly(); if (client) {
+    if (isDaemonOwned()) {
+      // Tasks live in the daemon when it owns the runtime. Resolving them
+      // from the local TaskManager (which is empty in daemon mode) would
+      // produce an ownerless process that the daemon knows nothing about.
+      const client = requireDaemonClient();
+      const activeFile = await daemonActiveSessionFile();
+      const activeTask = await daemonTaskBySessionFile(activeFile);
+      if (activeTask) {
         const proc = processManager.spawn({ command, cwd, owner: activeTask.id, ownerSession: activeTask.sessionId });
-        // Keep daemon task's terminalIds in sync (best-effort)
-        await client?.request("task.updated", { id: activeTask.id, patch: { terminalIds: [...(activeTask.terminalIds ?? []), proc.id] } }).catch(() => {});
+        await client.request("task.updated", { id: activeTask.id, patch: { terminalIds: [...(activeTask.terminalIds ?? []), proc.id] } }).catch(() => {});
         return proc;
       }
+      // No daemon task to attach to. Spawn ownerless; the process itself is
+      // local (Electron owns the processManager), and there is no daemon
+      // state to mutate.
+      const owner = typeof (opts as { owner?: unknown })?.owner === "string" ? (opts as { owner: string }).owner.slice(0, 500) : undefined;
+      const ownerSession =
+        typeof (opts as { ownerSession?: unknown })?.ownerSession === "string"
+          ? (opts as { ownerSession: string }).ownerSession.slice(0, 500)
+          : undefined;
+      return processManager.spawn({ command, cwd, owner, ownerSession });
+    }
+    const activeFile = host?.activeSessionFile ?? null;
+    const activeTask = taskManager.findBySessionFile(activeFile);
+    if (activeTask) {
       return taskManager.spawn(activeTask.id, command, cwd);
     }
-
     const owner = typeof (opts as { owner?: unknown })?.owner === "string" ? (opts as { owner: string }).owner.slice(0, 500) : undefined;
     const ownerSession =
       typeof (opts as { ownerSession?: unknown })?.ownerSession === "string"
@@ -1455,9 +1506,12 @@ function registerIpc(): void {
     const id = validateId(taskId);
     const validatedCommand = validateCommand(command);
     const validatedCwd = validateCwd(cwd);
-    const client = daemonOnly(); if (client) {
-      // Tasks are daemon-owned in daemon mode; resolve there instead of the
-      // Electron TaskManager registry (which is empty in daemon mode).
+    if (isDaemonOwned()) {
+      // Tasks are daemon-owned in daemon mode. Falling through to the local
+      // TaskManager (empty in daemon mode) would report "unknown task" while
+      // the daemon is the actual authority and might have just lost the
+      // socket for a moment.
+      const client = requireDaemonClient();
       const task = (await daemonClientTasks()).find((t) => t.id === id);
       if (!task) throw new Error("unknown task");
       if (task.status !== "running") throw new Error("task is not running");
@@ -1531,7 +1585,14 @@ async function ensureDaemon(): Promise<boolean> {
     daemonClient.onConnectionChange((state) => {
       // A blip must not surrender runtime ownership to the local host; it
       // only marks the socket unreachable until the client reconnects.
+      const wasConnected = daemonConnected;
       daemonConnected = state === "connected";
+      // If the daemon owns the runtime and the socket just came back, install
+      // the daemon LSP notifier (it was deferred at startup if the socket
+      // happened to be down at that exact moment).
+      if (!wasConnected && daemonConnected && isDaemonOwned()) {
+        installDaemonNotifier(daemonClient!);
+      }
     });
     daemonClient.onEvent((envelope) => {
       // Only forward daemon events when the daemon actually owns the runtime.
@@ -1633,11 +1694,15 @@ app.whenReady().then(async () => {
     attentionManager.subscribe((registry) => win?.webContents.send("pideck:attention-update", registry));
     sessionIndex.subscribe((update) => win?.webContents.send("pideck:sessions-update", update));
   }
-  const notifierClient = daemonOnly(); if (notifierClient && isDaemonOwned()) {
-    lspManager.setPiNotifier((diagCwd, diagnostics) => {
-      if (diagCwd !== activeCwd) return;
-      notifierClient.request("pi.notifyDiagnostics", { diagnostics }).catch(() => {});
-    });
+  if (isDaemonOwned()) {
+    // Owner is the daemon. If the socket is live, install the daemon
+    // notifier. If the socket is down at this instant, do NOT install the
+    // local notifier — there is no local host to receive diagnostics — and
+    // instead install a notifier on reconnect (handled by the
+    // onConnectionChange hook below).
+    const notifierClient = daemonOnly();
+    if (notifierClient) installDaemonNotifier(notifierClient);
+    else installDeferredDaemonNotifier();
   } else {
     lspManager.setPiNotifier((diagCwd, diagnostics) => {
       if (diagCwd !== activeCwd) return;
