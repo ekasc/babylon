@@ -32,6 +32,10 @@ export interface DaemonClientOptions {
   /** false disables reconnection. Defaults to capped exponential backoff. */
   reconnect?: { initialDelayMs?: number; maxDelayMs?: number } | false;
   requestTimeoutMs?: number;
+  /** Response deadline for long-running prompts (streamed model output).
+   *  Defaults to PROMPT_TIMEOUT_MS. Connection establishment and all other
+   *  calls always use requestTimeoutMs. */
+  promptTimeoutMs?: number;
   log?: (message: string) => void;
 }
 
@@ -48,6 +52,14 @@ export interface DaemonClient {
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const DEFAULT_INITIAL_DELAY_MS = 100;
 const DEFAULT_MAX_DELAY_MS = 5_000;
+// Prompts stream a model response and can legitimately run for many minutes,
+// so they must not be killed by the short deadline used for control/state
+// calls. Connection establishment still uses the short request timeout so a
+// missing daemon fails fast; only the response wait is extended.
+const PROMPT_TIMEOUT_MS = 10 * 60 * 1000;
+// Operations whose response wait uses the long prompt deadline. Kept small on
+// purpose: only genuinely unbounded work (model generation) belongs here.
+const LONG_RUNNING_OPERATIONS = new Set<ProtocolMessageType>(["pi.prompt"]);
 
 interface PendingCall {
   resolve: (envelope: ProtocolEnvelope) => void;
@@ -58,6 +70,9 @@ interface PendingCall {
 export function connectDaemonClient(options: DaemonClientOptions): DaemonClient {
   const log = options.log ?? (() => {});
   const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const promptTimeoutMs = options.promptTimeoutMs ?? PROMPT_TIMEOUT_MS;
+  const operationTimeoutMs = (type: ProtocolMessageType): number =>
+    LONG_RUNNING_OPERATIONS.has(type) ? promptTimeoutMs : requestTimeoutMs;
   const reconnectEnabled = options.reconnect !== false;
   const initialDelayMs = (options.reconnect && options.reconnect.initialDelayMs) || DEFAULT_INITIAL_DELAY_MS;
   const maxDelayMs = (options.reconnect && options.reconnect.maxDelayMs) || DEFAULT_MAX_DELAY_MS;
@@ -207,8 +222,12 @@ export function connectDaemonClient(options: DaemonClientOptions): DaemonClient 
   };
 
   return {
-    async request(type, payload, timeoutMs = requestTimeoutMs): Promise<ProtocolEnvelope> {
+    async request(type, payload, timeoutMs = operationTimeoutMs(type)): Promise<ProtocolEnvelope> {
       if (closed) throw new DaemonRequestError("client is closed");
+      // The connection attempt fails fast on a dead daemon (ECONNREFUSED),
+      // so the operation deadline only really bounds the response wait.
+      // Prompts therefore survive long model generations instead of being
+      // killed by the 10s control-call deadline.
       const conn = await waitForConnection(timeoutMs);
       // The connection can drop while this call waited its turn; writing to
       // the dead socket would hang until timeout instead of failing now.

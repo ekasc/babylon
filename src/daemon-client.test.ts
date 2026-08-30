@@ -138,6 +138,34 @@ describe("babylon daemon client", () => {
     await expect(queued).resolves.toMatchObject({ type: "pong" });
   });
 
+  it("gives prompts a long response deadline but control calls the short one", async () => {
+    // A raw listener that never answers simulates an unresponsive daemon.
+    const server = net.createServer((socket) => {
+      socket.resume();
+    });
+    const port = await new Promise<number>((resolve) => {
+      server.listen(0, "127.0.0.1", () => resolve((server.address() as net.AddressInfo).port));
+    });
+    const client = connectDaemonClient({ listen: { port }, reconnect: false, promptTimeoutMs: 400 });
+    clients.push(client);
+
+    // A prompt uses the injected 400ms prompt deadline, not the 10s default,
+    // so a long-running generation is no longer killed at 10s.
+    await expect(client.request("pi.prompt", { message: "hi" })).rejects.toThrow(/timed out/);
+
+    // A control call still uses the 10s default, so by the time the prompt
+    // already timed out (400ms) the ping must still be in flight.
+    const ping = client.request("ping", null);
+    const settled = await Promise.race([
+      ping.then(() => "resolved").catch(() => "rejected"),
+      new Promise<string>((resolve) => setTimeout(() => resolve("pending"), 600)),
+    ]);
+    expect(settled).toBe("pending");
+    ping.catch(() => {}); // avoid unhandled rejection on client.close()
+    client.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
   it("rejects immediately when reconnection is disabled and the daemon is gone", async () => {
     const dir = await mkdtemp(join(tmpdir(), "babylon-daemon-client-"));
     const socketPath = join(dir, "d.sock");
