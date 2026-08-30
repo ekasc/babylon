@@ -1,0 +1,58 @@
+{
+  "benchmark": "SnapshotStore.capture (candidate algorithm)",
+  "ts": "2026-08-30T03:58:56.188Z",
+  "scales": [10000, 50000, 100000],
+  "iterations": 3,
+  "linkedWorktreeScale": 5000,
+  "machine": "local developer machine (not CI)",
+  "results": [
+    {
+      "scale": 10000,
+      "coldInitMs": 148.697,
+      "warmCleanMedianMs": 27.003,
+      "warmCleanMinMs": 25.291,
+      "warm1ModMedianMs": 119.004,
+      "warm1ModMinMs": 118.024,
+      "warm1DelMedianMs": 116.689,
+      "warm1DelMinMs": 113.709,
+      "warm1NewMedianMs": 120.841,
+      "warm1NewMinMs": 116.567
+    },
+    {
+      "scale": 50000,
+      "coldInitMs": 357.691,
+      "warmCleanMedianMs": 84.479,
+      "warmCleanMinMs": 83.954,
+      "warm1ModMedianMs": 993.481,
+      "warm1ModMinMs": 539.434,
+      "warm1DelMedianMs": 385.103,
+      "warm1DelMinMs": 380.483,
+      "warm1NewMedianMs": 382.368,
+      "warm1NewMinMs": 380.967
+    },
+    {
+      "scale": 100000,
+      "coldInitMs": 649.942,
+      "warmCleanMedianMs": 159.182,
+      "warmCleanMinMs": 144.013,
+      "warm1ModMedianMs": 3152.058,
+      "warm1ModMinMs": 2289.609,
+      "warm1DelMedianMs": 3575.384,
+      "warm1DelMinMs": 3536.768,
+      "warm1NewMedianMs": 4098.153,
+      "warm1NewMinMs": 3719.257
+    },
+    {
+      "scale": 5000,
+      "linkedWorktree": true,
+      "coldInitMs": 173.304,
+      "warmCleanMedianMs": 83.675,
+      "warmCleanMinMs": 68.68
+    }
+  ],
+  "interpretation": {
+    "warmClean": "Two concurrent discovery commands (diff-files + ls-files --others) plus write-tree. No per-file JS work. 27ms at 10k, 84ms at 50k, 159ms at 100k.",
+    "warm1Dirty": "Dominated by `git diff-files`'s O(N) stat walk over the shadow index. The shadow index resolves via alternates to the source's objects. This is the cost the reviewer predicted (the OpenCode-style algorithm is still O(N) at the git layer for authoritative dirty detection). At 100k the stat walk dominates; at 10k the candidate-only staging is the main cost.",
+    "followUp": "The reviewer named the follow-up investigations: Git fsmonitor, untracked cache behavior, split index, platform filesystem behavior. `core.fsmonitor=false` is set explicitly (matching OpenCode's design). `core.untrackedCache=true` is now set on the shadow; it warms across captures in production (the benchmark recreates the shadow each run, so the cache does not help there). The warm-clean path is the steady state for an idle developer reading code; the warm-1-dirty path is what a Send after an edit costs."
+  }
+}

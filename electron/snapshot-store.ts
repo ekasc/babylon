@@ -279,6 +279,7 @@ export class SnapshotStore {
         ["core.longpaths", "true"],
         ["core.symlinks", "true"],
         ["core.fsmonitor", "false"],
+        ["core.untrackedCache", "true"],
         ["feature.manyFiles", "true"],
         ["index.version", "4"],
       ]) {
