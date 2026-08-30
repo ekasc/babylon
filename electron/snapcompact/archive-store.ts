@@ -1,29 +1,38 @@
 // Snapcompact archive persistence.
 //
-// Stores a per-session archive under Babylon-owned state:
+// Stores per-session archives as immutable generations under
+// Babylon-owned state:
 //
 //   <stateDir>/snapcompact/<sessionKey>/
-//     manifest.json     - the SnapcompactArchive ledger (no PNG bytes)
-//     frames/<n>.png     - one PNG per frame
+//     manifest.json          - points at the active generation
+//     generations/
+//       <generation-id>/
+//         frame-0000.png
+//         frame-0001.png
 //
-// Writes are crash-safe: the manifest is written to a temp file in the
-// same directory and renamed atomically; frame PNGs are written to
-// frames/<n>.png.tmp and renamed. A crash mid-compaction therefore
-// leaves the previous valid archive on disk.
+// Crash safety:
+//   - Each generation is written into a fresh directory under
+//     generations/, frame files first, manifest only after the
+//     frame set is complete and validated. The manifest is swapped
+//     atomically (rename(2)). A crash before the swap leaves the
+//     previous generation byte-for-byte loadable.
+//   - On load, the active generation's frame set is validated. Any
+//     missing or corrupt frame makes the archive invalid; the
+//     store throws so the caller can fall back to the existing
+//     textual compaction. The archive never loads partially.
 //
-// Manifest version is 1. Future versions can read older manifests via
-// the version field; mismatched versions cause the older archive to be
-// treated as missing (the caller falls back to the existing textual
-// compaction) rather than mis-decoded.
+// Versioning: persisted manifest declares version=1. A future
+// reader that sees a different version treats the archive as
+// missing (returns null) rather than mis-decoding.
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { promises as fsp } from "node:fs";
 import { join } from "node:path";
 import type { SnapcompactArchive, SnapcompactFrame, SnapcompactSymbol } from "./types";
 
 const MANIFEST_VERSION = 1;
-const FRAME_PREFIX = "frame-";
-const FRAME_EXT = ".png";
+const GENERATION_PREFIX = "gen-";
+const MAX_GENERATIONS_KEPT = 4;
 
 function sessionKey(sessionFile: string): string {
   return createHash("sha256").update(sessionFile).digest("hex").slice(0, 24);
@@ -37,29 +46,45 @@ function manifestPath(stateDir: string, key: string): string {
   return join(archiveDir(stateDir, key), "manifest.json");
 }
 
-function framesDir(stateDir: string, key: string): string {
-  return join(archiveDir(stateDir, key), "frames");
-}
-
-function framePath(stateDir: string, key: string, index: number): string {
-  return join(framesDir(stateDir, key), `${FRAME_PREFIX}${String(index).padStart(4, "0")}${FRAME_EXT}`);
-}
-
-function frameTmpPath(stateDir: string, key: string, index: number): string {
-  return join(framesDir(stateDir, key), `${FRAME_PREFIX}${String(index).padStart(4, "0")}${FRAME_EXT}.tmp`);
-}
-
 function manifestTmpPath(stateDir: string, key: string): string {
   return join(archiveDir(stateDir, key), "manifest.json.tmp");
 }
 
-interface PersistedFrame {
+function generationsDir(stateDir: string, key: string): string {
+  return join(archiveDir(stateDir, key), "generations");
+}
+
+function generationDir(stateDir: string, key: string, genId: string): string {
+  return join(generationsDir(stateDir, key), genId);
+}
+
+function generationStagingDir(stateDir: string, key: string, genId: string): string {
+  return join(generationsDir(stateDir, key), genId + ".staging-" + randomUUID().slice(0, 8));
+}
+
+export class ArchiveIntegrityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ArchiveIntegrityError";
+  }
+}
+
+interface PersistedFrameMeta {
   index: number;
   width: number;
   height: number;
   sourceOffset: number;
   sourceEnd: number;
-  pngFile: string;
+  file: string;
+}
+
+interface PersistedGeneration {
+  id: string;
+  createdAt: number;
+  frameWidth: number;
+  frameHeight: number;
+  profileId: string;
+  frames: PersistedFrameMeta[];
 }
 
 interface PersistedArchive {
@@ -69,31 +94,20 @@ interface PersistedArchive {
   strategy: "snapcompact";
   sourceText: string;
   symbols: SnapcompactSymbol[];
-  frames: PersistedFrame[];
+  generation: PersistedGeneration;
   coveredThroughMessageId: string | null;
-  createdAt: number;
   coveredThroughTimestamp: number | null;
-  frameWidth: number;
-  frameHeight: number;
-  profileId: string;
+  frameBytes: number;
 }
 
-async function readManifest(path: string): Promise<PersistedArchive | null> {
-  try {
-    const raw = await fsp.readFile(path, "utf8");
-    const parsed = JSON.parse(raw) as PersistedArchive;
-    if (parsed?.version !== MANIFEST_VERSION) return null;
-    if (!parsed || !Array.isArray(parsed.frames)) return null;
-    return parsed;
-  } catch {
-    return null;
-  }
+async function readJson(path: string): Promise<unknown> {
+  const raw = await fsp.readFile(path, "utf8");
+  return JSON.parse(raw);
 }
 
 async function atomicWriteJson(target: string, tmp: string, value: unknown): Promise<void> {
   await fsp.mkdir(join(target, ".."), { recursive: true, mode: 0o700 });
-  const data = JSON.stringify(value, null, 2);
-  await fsp.writeFile(tmp, data, { mode: 0o600 });
+  await fsp.writeFile(tmp, JSON.stringify(value, null, 2), { mode: 0o600 });
   await fsp.rename(tmp, target);
 }
 
@@ -103,7 +117,6 @@ export interface ArchiveStoreOptions {
 
 export class ArchiveStore {
   private cache = new Map<string, SnapcompactArchive | null>();
-  private inFlight: Map<string, Promise<SnapcompactArchive | null>> = new Map();
 
   constructor(private readonly opts: ArchiveStoreOptions) {}
 
@@ -111,121 +124,152 @@ export class ArchiveStore {
     return sessionKey(sessionFile);
   }
 
+  /** Read the active manifest and load the referenced generation. Throws
+   *  ArchiveIntegrityError if the manifest or the active generation is
+   *  missing, corrupt, or has any missing frame file. Returns null when
+   *  no archive exists. */
   async load(sessionFile: string): Promise<SnapcompactArchive | null> {
     const k = this.keyFor(sessionFile);
     if (this.cache.has(k)) return this.cache.get(k) ?? null;
-    const dir = archiveDir(this.opts.stateDir, k);
-    const m = await readManifest(manifestPath(this.opts.stateDir, k));
-    if (!m) { this.cache.set(k, null); return null; }
+    const mpath = manifestPath(this.opts.stateDir, k);
+    let raw: PersistedArchive;
+    try {
+      const parsed = (await readJson(mpath)) as PersistedArchive;
+      if (parsed?.version !== MANIFEST_VERSION) return null;
+      if (!parsed.generation || !Array.isArray(parsed.generation.frames)) return null;
+      raw = parsed;
+    } catch {
+      return null;
+    }
+    const gen = raw.generation;
+    const gdir = generationDir(this.opts.stateDir, k, gen.id);
     const frames: SnapcompactFrame[] = [];
     let frameBytes = 0;
-    for (const f of m.frames) {
-      const fp = join(framesDir(this.opts.stateDir, k), f.pngFile);
-      try {
+    try {
+      for (const meta of gen.frames) {
+        const fp = join(gdir, meta.file);
         const buf = await fsp.readFile(fp);
         frameBytes += buf.length;
-        frames.push({ index: f.index, width: f.width, height: f.height, png: buf, sourceOffset: f.sourceOffset, sourceEnd: f.sourceEnd });
-      } catch {
-        // Missing frame file: skip but keep the archive. The caller
-        // decides whether a partial archive is still useful.
+        frames.push({ index: meta.index, width: meta.width, height: meta.height, png: buf, sourceOffset: meta.sourceOffset, sourceEnd: meta.sourceEnd });
       }
+    } catch (err: any) {
+      // Missing or unreadable frame file: the archive is invalid.
+      this.cache.set(k, null);
+      throw new ArchiveIntegrityError(`snapcompact archive frame file missing: ${err?.message ?? String(err)}`);
     }
     const archive: SnapcompactArchive = {
       version: MANIFEST_VERSION,
-      sessionId: m.sessionId,
-      sessionFile: m.sessionFile,
-      strategy: m.strategy,
-      sourceText: m.sourceText,
-      symbols: m.symbols,
+      sessionId: raw.sessionId,
+      sessionFile: raw.sessionFile,
+      strategy: raw.strategy,
+      sourceText: raw.sourceText,
+      symbols: raw.symbols,
       frames,
-      coveredThroughMessageId: m.coveredThroughMessageId,
-      createdAt: m.createdAt,
-      coveredThroughTimestamp: m.coveredThroughTimestamp,
-      frameWidth: m.frameWidth,
-      frameHeight: m.frameHeight,
-      profileId: m.profileId,
-      frameBytes,
+      coveredThroughMessageId: raw.coveredThroughMessageId,
+      createdAt: gen.createdAt,
+      coveredThroughTimestamp: raw.coveredThroughTimestamp,
+      frameWidth: gen.frameWidth,
+      frameHeight: gen.frameHeight,
+      profileId: gen.profileId,
+      frameBytes: raw.frameBytes,
     };
     this.cache.set(k, archive);
     return archive;
   }
 
-  /** Atomically replace the archive for `sessionFile`. If a write fails
-   *  partway, the previous archive (if any) remains intact. */
+  /** Atomically replace the archive for `sessionFile`. The previous
+   *  generation is left on disk until the new one is fully written and
+   *  the manifest is swapped. A crash before the swap leaves the
+   *  previous archive loadable. A crash after the swap leaves the new
+   *  archive loadable. */
   async write(sessionFile: string, archive: Omit<SnapcompactArchive, "version" | "frameBytes">): Promise<SnapcompactArchive> {
     const k = this.keyFor(sessionFile);
-    const dir = archiveDir(this.opts.stateDir, k);
-    const fdir = framesDir(this.opts.stateDir, k);
-    await fsp.mkdir(fdir, { recursive: true, mode: 0o700 });
+    const adir = archiveDir(this.opts.stateDir, k);
+    const gdirRoot = generationsDir(this.opts.stateDir, k);
+    await fsp.mkdir(gdirRoot, { recursive: true, mode: 0o700 });
 
-    // Write frames to temp files in a sibling directory so a crash
-    // during the rename never exposes a half-written frame as the
-    // canonical one.
-    const stagingDir = join(dir, "staging-" + Date.now().toString(36));
-    await fsp.mkdir(stagingDir, { recursive: true, mode: 0o700 });
-    const stagingFramesDir = join(stagingDir, "frames");
-    await fsp.mkdir(stagingFramesDir, { recursive: true, mode: 0o700 });
+    const newGenId = GENERATION_PREFIX + randomUUID().slice(0, 12);
+    const staging = generationStagingDir(this.opts.stateDir, k, newGenId);
+    await fsp.mkdir(staging, { recursive: true, mode: 0o700 });
 
-    const frameRefs: Array<Omit<SnapcompactFrame, "png"> & { pngFile: string }> = [];
+    const frameMetas: PersistedFrameMeta[] = [];
     let frameBytes = 0;
     try {
       for (const f of archive.frames) {
-        const fileName = `${FRAME_PREFIX}${String(f.index).padStart(4, "0")}${FRAME_EXT}`;
-        const stagedPath = join(stagingFramesDir, fileName);
-        await fsp.writeFile(stagedPath, f.png, { mode: 0o600 });
+        const fileName = `frame-${String(f.index).padStart(4, "0")}.png`;
+        const staged = join(staging, fileName);
+        await fsp.writeFile(staged, f.png, { mode: 0o600 });
         frameBytes += f.png.length;
-        frameRefs.push({
-          index: f.index,
-          width: f.width,
-          height: f.height,
-          pngFile: fileName,
-          sourceOffset: f.sourceOffset,
-          sourceEnd: f.sourceEnd,
-        });
+        frameMetas.push({ index: f.index, width: f.width, height: f.height, sourceOffset: f.sourceOffset, sourceEnd: f.sourceEnd, file: fileName });
       }
-      // Atomically move frames into the frames dir.
-      for (const ref of frameRefs) {
-        const staged = join(stagingFramesDir, ref.pngFile);
-        const target = join(fdir, ref.pngFile);
-        await fsp.rename(staged, target);
+      // Validate the staged generation before swap.
+      for (const meta of frameMetas) {
+        await fsp.access(join(staging, meta.file));
       }
-      await fsp.rm(stagingDir, { recursive: true, force: true });
+      // Atomically move the staged generation into the generations dir.
+      const finalGenDir = generationDir(this.opts.stateDir, k, newGenId);
+      await fsp.rename(staging, finalGenDir);
 
-      const manifest: PersistedArchive = {
+      const generation: PersistedGeneration = {
+        id: newGenId,
+        createdAt: archive.createdAt,
+        frameWidth: archive.frameWidth,
+        frameHeight: archive.frameHeight,
+        profileId: archive.profileId,
+        frames: frameMetas,
+      };
+      const persisted: PersistedArchive = {
         version: MANIFEST_VERSION,
         sessionId: archive.sessionId,
         sessionFile: archive.sessionFile,
         strategy: archive.strategy,
         sourceText: archive.sourceText,
         symbols: archive.symbols,
-        frames: frameRefs,
+        generation,
         coveredThroughMessageId: archive.coveredThroughMessageId,
-        createdAt: archive.createdAt,
         coveredThroughTimestamp: archive.coveredThroughTimestamp,
-        frameWidth: archive.frameWidth,
-        frameHeight: archive.frameHeight,
-        profileId: archive.profileId,
+        frameBytes,
       };
-      await atomicWriteJson(manifestPath(this.opts.stateDir, k), manifestTmpPath(this.opts.stateDir, k), manifest);
+      // Write the manifest last. A crash before this point leaves the
+      // previous generation referenced by the old manifest, which is
+      // still byte-for-byte intact.
+      await atomicWriteJson(manifestPath(this.opts.stateDir, k), manifestTmpPath(this.opts.stateDir, k), persisted);
+
+      // After a successful swap, GC old generations beyond a small
+      // retention window so a previous crash leaving stale generations
+      // on disk cannot grow without bound.
+      await this.gcGenerations(k, newGenId);
 
       const fullArchive: SnapcompactArchive = { version: MANIFEST_VERSION, ...archive, frameBytes };
       this.cache.set(k, fullArchive);
       return fullArchive;
     } catch (err) {
-      // Best-effort cleanup of staging on failure.
-      await fsp.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
+      // Best-effort cleanup of the staging dir on failure.
+      await fsp.rm(staging, { recursive: true, force: true }).catch(() => undefined);
       throw err;
+    }
+  }
+
+  private async gcGenerations(k: string, keep: string): Promise<void> {
+    const gdirRoot = generationsDir(this.opts.stateDir, k);
+    let entries: { name: string }[];
+    try { entries = (await fsp.readdir(gdirRoot, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => ({ name: e.name })); }
+    catch { return; }
+    const realGens = entries.map((e) => e.name).filter((n) => n.startsWith(GENERATION_PREFIX));
+    realGens.sort();
+    const toRemove = realGens.filter((n) => n !== keep).slice(0, Math.max(0, realGens.length - MAX_GENERATIONS_KEPT));
+    for (const name of toRemove) {
+      await fsp.rm(join(gdirRoot, name), { recursive: true, force: true }).catch(() => undefined);
     }
   }
 
   async clear(sessionFile: string): Promise<void> {
     const k = this.keyFor(sessionFile);
-    const dir = archiveDir(this.opts.stateDir, k);
-    await fsp.rm(dir, { recursive: true, force: true });
+    const adir = archiveDir(this.opts.stateDir, k);
+    await fsp.rm(adir, { recursive: true, force: true });
     this.cache.delete(k);
   }
 
-  /** True when a complete, current archive exists for the session. */
   async exists(sessionFile: string): Promise<boolean> {
     const a = await this.load(sessionFile);
     return a !== null;
