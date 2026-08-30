@@ -254,11 +254,31 @@ async function daemonClientTasks(): Promise<import("../src/tasks").Task[]> {
   }
 }
 
+/** Strict variant: takes a required live client and propagates request
+ *  failures. Use for mutating/destructive ownership decisions (process-spawn,
+ *  task-spawn, worktree-exit). A connected daemon that fails the request is
+ *  NOT equivalent to "there are no tasks" — the caller must surface the
+ *  failure. */
+async function daemonClientTasksStrict(client: import("../src/daemon-client").DaemonClient): Promise<import("../src/tasks").Task[]> {
+  const res = await client.request("state.get", {});
+  const runtime = (res.payload as { runtime?: { tasks?: { tasks: Record<string, import("../src/tasks").Task> } } })?.runtime;
+  return Object.values(runtime?.tasks?.tasks ?? {});
+}
+
 async function daemonTaskBySessionFile(file: string | null | undefined): Promise<import("../src/tasks").Task | undefined> {
   if (!file) return undefined;
   const client = daemonOnly();
   if (!client) return undefined;
   const tasks = await daemonClientTasks();
+  return tasks.find((t) => t.sessionFile === file);
+}
+
+async function daemonTaskBySessionFileStrict(
+  client: import("../src/daemon-client").DaemonClient,
+  file: string | null | undefined
+): Promise<import("../src/tasks").Task | undefined> {
+  if (!file) return undefined;
+  const tasks = await daemonClientTasksStrict(client);
   return tasks.find((t) => t.sessionFile === file);
 }
 
@@ -273,6 +293,14 @@ async function daemonActiveSessionFile(): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+/** Strict variant of `daemonActiveSessionFile`: takes a required live
+ *  client and propagates request failures. */
+async function daemonActiveSessionFileStrict(client: import("../src/daemon-client").DaemonClient): Promise<string | null> {
+  const res = await client.request("pi.getState", {});
+  const sessionFile = (res.payload as { sessionFile?: string } | null)?.sessionFile;
+  return typeof sessionFile === "string" && sessionFile.length > 0 ? sessionFile : null;
 }
 const agentEvents = new AgentEventBuffer((events) => {
   win?.webContents.send("pideck:agent-events", events);
@@ -1209,7 +1237,7 @@ function registerIpc(): void {
     if (!file) throw new Error("no active session");
     const header = await readSessionHeader(file);
     const task = isDaemonOwned()
-      ? await daemonTaskBySessionFile(file)
+      ? await daemonTaskBySessionFileStrict(requireDaemonClient(), file)
       : taskManager.findBySessionFile(file);
     const originalPath = header?.parentSession ?? task?.parentSessionFile;
     if (!originalPath || !existsSync(originalPath)) {
@@ -1295,8 +1323,12 @@ function registerIpc(): void {
 
   handle("pideck:permissions:get", async () => {
     if (isDaemonOwned()) {
-      const client = daemonOnly();
-      if (!client) return { mode: "auto" as const, rules: [] };
+      // The daemon is the authority for policy when it owns the runtime.
+      // Return its current state directly. A disconnected daemon
+      // surfaces as a thrown error (the UI shows a reconnecting
+      // indicator) rather than a fabricated `auto` default that would
+      // silently downgrade the agent's effective permissions.
+      const client = requireDaemonClient();
       const res = await client.request("permissions.get", {});
       return res.payload;
     }
@@ -1473,8 +1505,8 @@ function registerIpc(): void {
       // from the local TaskManager (which is empty in daemon mode) would
       // produce an ownerless process that the daemon knows nothing about.
       const client = requireDaemonClient();
-      const activeFile = await daemonActiveSessionFile();
-      const activeTask = await daemonTaskBySessionFile(activeFile);
+      const activeFile = await daemonActiveSessionFileStrict(client);
+      const activeTask = await daemonTaskBySessionFileStrict(client, activeFile);
       if (activeTask) {
         const proc = processManager.spawn({ command, cwd, owner: activeTask.id, ownerSession: activeTask.sessionId });
         await client.request("task.updated", { id: activeTask.id, patch: { terminalIds: [...(activeTask.terminalIds ?? []), proc.id] } }).catch(() => {});
@@ -1510,9 +1542,10 @@ function registerIpc(): void {
       // Tasks are daemon-owned in daemon mode. Falling through to the local
       // TaskManager (empty in daemon mode) would report "unknown task" while
       // the daemon is the actual authority and might have just lost the
-      // socket for a moment.
+      // socket for a moment. Use the strict fetch: a connected daemon that
+      // fails the request is not "no such task".
       const client = requireDaemonClient();
-      const task = (await daemonClientTasks()).find((t) => t.id === id);
+      const task = (await daemonClientTasksStrict(client)).find((t) => t.id === id);
       if (!task) throw new Error("unknown task");
       if (task.status !== "running") throw new Error("task is not running");
       if (!task.cwd || !cwdWithin(task.cwd, validatedCwd)) throw new Error("process cwd does not match task cwd");
