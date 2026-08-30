@@ -27,11 +27,7 @@ import { buildGitCommitPrompt, extractModelText, parseGeneratedCommitMessage, ty
 import type { PreparedCommitContext } from "./git";
 import { buildRecapPrompt, normalizeRecapText, pickRecapDelta, recapDue, recapWorthy, RECAP_INTERVAL_MS, type Recap } from "./recap";
 import { ArchiveStore } from "./snapcompact/archive-store";
-import { buildArchive } from "./snapcompact/build";
-import { profileForModel, modelSupportsImages } from "./snapcompact/model-profiles";
-import { pickStrategy } from "./snapcompact/strategy";
-import { buildContextProjection, assembleUserMessage } from "./snapcompact/context-assembly";
-import type { SnapcompactArchive } from "./snapcompact/types";
+import { createSnapcompactExtension, type SnapcompactExtensionOptions } from "./snapcompact/extension";
 import { ManagedSubagents, type ManagedSubagentRecord, type SubagentControlAction, type SubagentParentEvent } from "./subagents";
 import { createAskQuestionTool } from "./ask-question";
 import { createBabylonBashTool } from "./bash-tool";
@@ -117,7 +113,6 @@ export class PiHost {
   private readonly recaps: RecapStore;
   private readonly recapping = new Set<string>();
   private readonly snapcompact: ArchiveStore;
-  private snapcompactInFlight = new Set<string>();
   /** Session file → last observed message timestamp (ms). Event-driven, so the
    *  sweep never reads the session file unless a recap might be due. */
   private readonly lastMessageAt = new Map<string, number>();
@@ -260,6 +255,26 @@ export class PiHost {
         agentDir,
         settingsManager,
         modelRuntime: this.modelRuntime,
+        resourceLoaderOptions: {
+          extensionsOverride: (base) => ({
+            ...base,
+            extensions: [
+              ...base.extensions,
+              createSnapcompactExtension({
+                archiveStore: this.snapcompact,
+                getMode: () => (this.opts.settingsProvider?.getSettings() ?? defaultGetSettings()).compaction?.mode ?? "summary",
+                getModel: () => {
+                  const s = this.runtime?.session;
+                  const m: any = s?.model;
+                  if (!m) return null;
+                  return { provider: m.provider, id: m.id, input: m.input };
+                },
+                getSessionId: () => this.runtime?.session?.sessionId ?? "",
+                getSessionFile: () => this.runtime?.session?.sessionFile ?? null,
+              } as SnapcompactExtensionOptions),
+            ],
+          }),
+        },
       });
       const result = await createAgentSessionFromServices({
         services,
@@ -634,10 +649,10 @@ export class PiHost {
     const intervalMs = Number(process.env.PIDECK_RECAP_MS) || RECAP_INTERVAL_MS;
     const cached = this.lastMessageAt.get(file);
     if (!cached || Date.now() - cached < intervalMs) return;
-    // Reuse the same trigger boundary for the snapcompact archive so we
-    // do not build a second independent context estimator. Snapcompact is
-    // best-effort and runs in parallel with the recap.
-    void this.maybeBuildSnapcompact(session, file);
+    // Recap timing is not context pressure. Snapcompact is driven by
+    // Pi's real compaction boundary (`session_before_compact`) inside
+    // the snapcompact extension; the recap sweep never builds or stores
+    // a snapcompact archive.
     await this.maybeRecap(session, file);
   }
 
@@ -690,49 +705,14 @@ export class PiHost {
   }
 
   // -------------------------------------------------------------------------
-  // Snapcompact: deterministic bitmap archive of the projected transcript.
-  // Build/refresh rides the same trigger boundary as the existing recap
-  // sweep: when the recap boundary says "context reduction is required",
-  // the archive is rebuilt from the same message window. Manual compact
-  // also rebuilds it. The canonical Pi session is never mutated.
+  // Snapcompact: driven entirely by the snapcompact Pi extension wired
+  // in via `resourceLoaderOptions.extensionsOverride` at session
+  // creation time. The extension listens for `session_before_compact`
+  // (builds the archive from preparation.messagesToSummarize +
+  // preparation.turnPrefixMessages) and `context` (projects the
+  // archive transiently into the next LLM call). This host only
+  // owns the ArchiveStore and the callbacks the extension reads.
   // -------------------------------------------------------------------------
-
-  /** Returns the current archive for the session, or null. */
-  async getSnapcompactArchive(sessionFile: string): Promise<SnapcompactArchive | null> {
-    return this.snapcompact.load(sessionFile);
-  }
-
-  /** Build and persist a fresh archive for the active session. No-op if
-   *  another build for the same session is already in flight, or if the
-   *  session has no messages. Errors are swallowed: the archive is a
-   *  best-effort projection and must never break the active chat. */
-  private async maybeBuildSnapcompact(session: AgentSession, file: string): Promise<void> {
-    if (this.snapcompactInFlight.has(file)) return;
-    if (session.isStreaming) return;
-    this.snapcompactInFlight.add(file);
-    try {
-      const { messages } = await readSessionTail(file);
-      if (!messages.length) return;
-      const model = this.runtime.session.model;
-      const profile = profileForModel(model);
-      const last = messages[messages.length - 1];
-      const coveredEntryId = typeof last?.entryId === "string" ? last.entryId : null;
-      const lastTs = typeof last?.timestamp === "number" ? last.timestamp : null;
-      const result = buildArchive({
-        sessionId: session.sessionId,
-        sessionFile: file,
-        messages,
-        profile,
-        coveredThroughMessageId: coveredEntryId,
-        coveredThroughTimestamp: lastTs,
-      });
-      await this.snapcompact.write(file, result.archive);
-    } catch {
-      // Snapcompact is a projection; a failed build must never surface.
-    } finally {
-      this.snapcompactInFlight.delete(file);
-    }
-  }
 
   private async relayPromotedSubagentReply(session: AgentSession, text: string): Promise<void> {
     if (!text.trim()) return;
@@ -908,36 +888,15 @@ export class PiHost {
     // filesystem boundary. They remain part of the active checkpointed turn.
     const checkpoint = streamingBehavior ? null : await this.captureTurnStart();
     const opts: any = {};
-    const allImages: any[] = [];
-    // Snapcompact: the single owner (pickStrategy) decides whether the
-    // archive is used this prompt. When it is, attach the archive's
-    // frames to the user message alongside the user-supplied images
-    // and prepend a structured header so the model sees the exact-token
-    // dictionary as raw text near the images.
+    // Snapcompact no longer decorates the user message here. The
+    // transient archive projection is injected by the snapcompact
+    // extension's `context` handler, which runs before every LLM
+    // call. This method only forwards the user-supplied message and
+    // images so canonical session records remain untouched.
     try {
-      const mode = (this.opts.settingsProvider?.getSettings() ?? defaultGetSettings()).compaction?.mode ?? "summary";
-      const file = sessionAtStart.sessionFile;
-      const archive = file ? await this.snapcompact.load(file).catch(() => null) : null;
-      const session = sessionAtStart;
-      const matchesSession = archive ? archive.sessionId === session.sessionId : false;
-      const model = session.model;
-      const decision = pickStrategy({
-        model: model ? { provider: model.provider, id: model.id, input: (model as any).input } : null,
-        mode,
-        archive: archive && matchesSession ? archive : null,
-        archiveProducible: true,
-        archiveMatchesSession: matchesSession,
-      });
-      let finalMessage = message;
-      if (decision.strategy === "snapcompact" && archive && matchesSession) {
-        const projection = buildContextProjection(archive);
-        finalMessage = assembleUserMessage(message, projection);
-        for (const img of projection.images) allImages.push(img);
-      }
-      if (images?.length) allImages.push(...toPiImages(images)!);
-      if (allImages.length) opts.images = allImages;
+      if (images?.length) opts.images = toPiImages(images);
       if (streamingBehavior) opts.streamingBehavior = streamingBehavior;
-      return await this.runtime.session.prompt(finalMessage, opts);
+      return await this.runtime.session.prompt(message, opts);
     } finally {
       if (rollbackAtStart && this.runtime.session.sessionId === rollbackAtStart.sessionId) {
         const continued =
@@ -970,7 +929,9 @@ export class PiHost {
       // who clicks Compact and selects "snapcompact" strategy sees a
       // current archive on the next prompt. Non-destructive: the
       // canonical session is untouched.
-      if (session.sessionFile) void this.maybeBuildSnapcompact(session, session.sessionFile);
+      // Snapcompact is no longer built here. The session_before_compact
+      // hook in the snapcompact extension handles archive generation
+      // for both manual and threshold-triggered compactions.
       const before = entryDigest(session.sessionManager.getEntries());
       try {
         return await session.compact(customInstructions);

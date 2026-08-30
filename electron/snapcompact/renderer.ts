@@ -38,15 +38,35 @@ export function applySubstitution(sourceText: string, symbols: SnapcompactSymbol
   return out;
 }
 
+const DICT_PREFIX_RE = /\bE\d{3}=$/;
+
+function isDictionaryLine(text: string, pos: number): boolean {
+  // Look back from `pos` to the start of the line and see if the
+  // characters before the occurrence are an exact-token dictionary
+  // line of the form "E<digits>=".
+  const start = text.lastIndexOf("\n", pos - 1) + 1;
+  return DICT_PREFIX_RE.test(text.slice(start, pos));
+}
+
 function replaceAfterFirst(text: string, value: string, replacement: string): string {
-  const first = text.indexOf(value);
+  let cursor = 0;
+  let first = text.indexOf(value, cursor);
   if (first < 0) return text;
-  let out = text.slice(0, first + value.length);
-  let cursor = first + value.length;
+  let out = "";
+  if (isDictionaryLine(text, first)) {
+    out = text.slice(0, first) + replacement;
+  } else {
+    out = text.slice(0, first + value.length);
+  }
+  cursor = first + value.length;
   while (true) {
     const next = text.indexOf(value, cursor);
     if (next < 0) { out += text.slice(cursor); break; }
-    out += text.slice(cursor, next) + replacement;
+    if (isDictionaryLine(text, next)) {
+      out += text.slice(cursor, next + value.length);
+    } else {
+      out += text.slice(cursor, next) + replacement;
+    }
     cursor = next + value.length;
   }
   return out;
