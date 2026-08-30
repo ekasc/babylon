@@ -449,13 +449,19 @@ export class SnapshotStore {
 
       const shadowSet = new Set(splitNul(shadowResult.stdout));
       const candidates = new Set<string>();
+      // Untracked candidates are the only ones the oversize cutoff may drop;
+      // a tracked file the user modifies must always stay in the snapshot so
+      // a rollback can restore it.
+      const untracked = new Set<string>();
       for (const path of splitNul(dirtyResult.stdout)) {
         if (!path || isInternal(path)) continue;
         candidates.add(safeRelative(repo.root, path));
       }
       for (const path of splitNul(untrackedResult.stdout)) {
         if (!path || isInternal(path)) continue;
-        candidates.add(safeRelative(repo.root, path));
+        const rel = safeRelative(repo.root, path);
+        candidates.add(rel);
+        untracked.add(rel);
       }
       // Tracked in the source but not yet in the shadow (first capture
       // after init, or after the user `git add`s a new file). We do not
@@ -476,7 +482,10 @@ export class SnapshotStore {
       for (const rel of candidates) {
         try {
           const stat = await fsp.lstat(join(repo.root, rel));
-          if (stat.isFile() && stat.size > MAX_UNTRACKED_BYTES) {
+          // The oversize cutoff protects against huge *untracked* files (build
+          // artifacts, logs). It must not drop a tracked file the user edits,
+          // or a rollback could silently fail to restore that file.
+          if (untracked.has(rel) && stat.isFile() && stat.size > MAX_UNTRACKED_BYTES) {
             liveExcluded[rel] = { size: stat.size, mtimeMs: stat.mtimeMs };
             continue;
           }

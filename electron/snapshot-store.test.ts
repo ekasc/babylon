@@ -150,6 +150,37 @@ describe("SnapshotStore", () => {
     expect(diff).toContain("+three");
   });
 
+  it("excludes oversized untracked files but never oversized tracked files", async () => {
+    const base = await mkdtemp(join(tmpdir(), "pideck-snapshot-oversize-"));
+    roots.push(base);
+    const root = join(base, "project");
+    await mkdir(root);
+    await git(root, ["init"]);
+    await git(root, ["config", "user.email", "test@example.com"]);
+    await git(root, ["config", "user.name", "Test"]);
+    await writeFile(join(root, "tracked-big.txt"), "small\n");
+    await git(root, ["add", "tracked-big.txt"]);
+    await git(root, ["commit", "-m", "init"]);
+
+    const store = new SnapshotStore(join(base, "state"));
+    const before = await store.capture(root, { authoritative: true });
+    expect(before).not.toBeNull();
+
+    // A tracked file the user edits (still small here, but the rule must not
+    // depend on size) and a 3MB untracked artifact.
+    await writeFile(join(root, "tracked-big.txt"), "small-but-edited\n");
+    await writeFile(join(root, "untracked-big.bin"), Buffer.alloc(3 * 1024 * 1024, "x"));
+    const after = await store.capture(root, { authoritative: true });
+    expect(after).not.toBeNull();
+
+    // The edited tracked file stays in the snapshot so rollback can restore it.
+    expect(await store.changedFiles(root, before!.tree, after!.tree)).toContain("tracked-big.txt");
+    // The oversized untracked artifact is excluded, not staged.
+    const excludedPaths = after!.excluded.map((e) => e.path);
+    expect(excludedPaths).toContain("untracked-big.bin");
+    expect(excludedPaths).not.toContain("tracked-big.txt");
+  });
+
   it("captures the worktree at the instant of an authoritative capture, even before the watcher fires (rollback boundary)", async () => {
     const base = await mkdtemp(join(tmpdir(), "pideck-snapshot-authoritative-"));
     roots.push(base);
