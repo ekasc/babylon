@@ -122,14 +122,29 @@ describe("snapcompact Pi extension (session_before_compact + context)", () => {
     // from event.messages (which only has the summary).
     const ctxHandler = ext.handlers.get("context")![0] as any;
     const eventMessages = ctx.messages;
-    const result = await ctxHandler({ messages: eventMessages }, { sessionManager: sm });
+    // Add a current user request after compaction so ordering matters
+    sm.appendMessage({ role: "user", content: "CURRENT TASK" } as any);
+    const ctx2 = sm.buildSessionContext();
+    const result = await ctxHandler({ messages: ctx2.messages }, { sessionManager: sm });
     expect(result).toBeDefined();
     expect(result.messages).toBeDefined();
-    // Original messages preserved in order
-    expect(result.messages.length).toBeGreaterThan(eventMessages.length);
-    for (let i = 0; i < eventMessages.length; i++) {
-      expect(result.messages[i]).toEqual(eventMessages[i]);
-    }
+    // CompactionSummary marker is replaced, not appended — no "Recap: snapcompact" summary remains
+    expect(result.messages.some((m: any) => m.role === "compactionSummary")).toBe(false);
+    // Projection appears before CURRENT TASK, and CURRENT TASK is last user request
+    const toText = (m: any) => {
+      if (Array.isArray(m.content)) return m.content.map((b: any) => b.text ?? b.content ?? "").join("");
+      if (typeof m.content === "string") return m.content;
+      return m.summary ?? "";
+    };
+    const flat = result.messages.map(toText).join("\n");
+    expect(flat).toContain("CURRENT TASK");
+    const idxArchive = flat.indexOf("[Snapcompact archive]");
+    const idxTask = flat.indexOf("CURRENT TASK");
+    expect(idxArchive).toBeGreaterThan(-1);
+    expect(idxArchive).toBeLessThan(idxTask);
+    const lastUser = [...result.messages].reverse().find((m: any) => m.role === "user");
+    const lastText = toText(lastUser);
+    expect(lastText).toContain("CURRENT TASK");
     // Images are real Pi ImageContent (base64 data, image/png mimeType).
     const imgMsg = result.messages.find((m: any) => Array.isArray(m.content) && m.content.some((b: any) => b?.type === "image"));
     expect(imgMsg).toBeDefined();
@@ -163,14 +178,14 @@ describe("snapcompact Pi extension (session_before_compact + context)", () => {
     const ctxHandler2 = visionlessExt.handlers.get("context")![0] as any;
     const result = await ctxHandler2({ messages: ctx.messages }, { sessionManager: sm });
     expect(result).toBeDefined();
-    expect(result.messages.length).toBeGreaterThan(ctx.messages.length);
-    // Must NOT contain images
+    // Replacement: compactionSummary (-1) + fallback (+1) => same length
+    expect(result.messages.length).toBe(ctx.messages.length);
+    expect(result.messages.some((m: any) => m.role === "compactionSummary")).toBe(false);
     const hasImage = result.messages.some((m: any) => Array.isArray(m.content) && m.content.some((b: any) => b?.type === "image"));
     expect(hasImage).toBe(false);
-    // Must contain the textual fallback with history
-    const text = result.messages.map((m: any) => Array.isArray(m.content) ? m.content.map((b: any) => b.text ?? "").join("") : "").join("\n");
+    const toText2 = (m: any) => Array.isArray(m.content) ? m.content.map((b: any) => b.text ?? "").join("") : typeof m.content === "string" ? m.content : m.summary ?? "";
+    const text = result.messages.map(toText2).join("\n");
     expect(text).toContain("Snapcompact text fallback");
-    expect(text.length).toBeGreaterThan(50);
   });
 
   it("context event: the archive remains present across multiple LLM calls (multi-step tool turn)", async () => {
@@ -301,6 +316,33 @@ describe("snapcompact Pi extension (session_before_compact + context)", () => {
     expect(result).toBeDefined();
     const text = result.messages.map((m: any) => Array.isArray(m.content) ? m.content.map((b: any) => b.text ?? "").join("") : "").join("\n");
     expect(text).toContain("Snapcompact text fallback");
+  });
+
+  it("chronology: textFallback replaces marker before CURRENT TASK and last user is CURRENT TASK", async () => {
+    const ext = buildExt();
+    const beforeHandler = ext.handlers.get("session_before_compact")![0] as any;
+    const sm = makeSessionManager();
+    sm.appendMessage({ role: "user", content: "hello" } as any);
+    const c = await beforeHandler({
+      preparation: { firstKeptEntryId: "x", messagesToSummarize: [userMsg("fallback chronology /repo/f.ts")], turnPrefixMessages: [], tokensBefore: 10 },
+    }, { sessionManager: sm });
+    sm.appendCompaction(c.compaction.summary, c.compaction.firstKeptEntryId, c.compaction.tokensBefore, c.compaction.details as any, true);
+    sm.appendMessage({ role: "user", content: "CURRENT TASK FALLBACK" } as any);
+    const ctx = sm.buildSessionContext();
+    getModel = () => ({ provider: "openai", id: "gpt-3.5", input: ["text"] });
+    getMode = () => "snapcompact";
+    const freshExt = createSnapcompactExtension({ archiveStore: store, getMode, getModel, getSessionId, getSessionFile });
+    const result = await freshExt.handlers.get("context")![0]({ messages: ctx.messages }, { sessionManager: sm });
+    expect(result).toBeDefined();
+    expect(result.messages.some((m: any) => m.role === "compactionSummary")).toBe(false);
+    const toText = (m: any) => Array.isArray(m.content) ? m.content.map((b: any) => b.text ?? "").join("") : typeof m.content === "string" ? m.content : m.summary ?? "";
+    const flat = result.messages.map(toText).join("\n");
+    expect(flat.indexOf("Snapcompact text fallback")).toBeLessThan(flat.indexOf("CURRENT TASK FALLBACK"));
+    const lastUser = [...result.messages].reverse().find((m: any) => m.role === "user");
+    expect(toText(lastUser)).toContain("CURRENT TASK FALLBACK");
+    // Canonical not mutated
+    expect(sm.getEntries().some((e: any) => e.type === "compaction" && e.details?.snapcompactGeneration)).toBe(true);
+    expect(ctx.messages.some((m: any) => m.role === "compactionSummary")).toBe(true);
   });
 
   it("mode switched to summary after snapcompact compaction still injects textFallback", async () => {

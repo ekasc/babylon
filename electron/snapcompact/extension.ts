@@ -206,19 +206,26 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
       if (archive.sessionId !== sessionId) return undefined;
       if (archive.version !== 1) return undefined;
       if (archive.frames.length === 0) return undefined;
+      const fb = (archive as any).textFallback as string | undefined;
+      const markerIndex = event.messages.findIndex(
+        (m: any) => m?.role === "compactionSummary" && m?.summary === entry.summary,
+      );
+      if (markerIndex < 0) return undefined;
+      const before = event.messages.slice(0, markerIndex);
+      const after = event.messages.slice(markerIndex + 1);
       // If the active branch was compacted with Snapcompact, the durable
       // history is in the archive. Switching mode to "summary" or
       // switching to a text-only model must not make that history vanish
       // (Pi's durable summary is just "Recap: generation=..."). In
-      // those cases inject the stored textFallback instead of PNGs.
-      const fb = (archive as any).textFallback as string | undefined;
+      // those cases inject the stored textFallback at the marker
+      // position instead of PNGs.
       if (mode === "summary") {
         if (!fb) return undefined;
-        return { messages: [...event.messages, { role: "user", content: [{ type: "text", text: fb }] }] };
+        return { messages: [...before, { role: "user", content: [{ type: "text", text: fb }] }, ...after] };
       }
       if (!modelSupportsImages(model)) {
         if (!fb) return undefined;
-        return { messages: [...event.messages, { role: "user", content: [{ type: "text", text: fb }] }] };
+        return { messages: [...before, { role: "user", content: [{ type: "text", text: fb }] }, ...after] };
       }
       const decision = pickStrategy({
         model,
@@ -228,14 +235,12 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
         archiveMatchesSession: archive.sessionId === sessionId,
       });
       if (decision.strategy !== "snapcompact") {
-        const fb2 = (archive as any).textFallback as string | undefined;
-        if (fb2) return { messages: [...event.messages, { role: "user", content: [{ type: "text", text: fb2 }] }] };
+        if (fb) return { messages: [...before, { role: "user", content: [{ type: "text", text: fb }] }, ...after] };
         return undefined;
       }
       const profile = profileForModel(model);
       const { messages: projection } = buildProjectionMessages(archive, profile);
-      const rebuilt = [...event.messages, ...projection];
-      return { messages: rebuilt };
+      return { messages: [...before, ...projection, ...after] };
     },
   ]);
 
