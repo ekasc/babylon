@@ -1,4 +1,4 @@
-import { describe, expect, it, afterEach, beforeEach, vi } from "vitest";
+import { describe, expect, it, afterEach, beforeAll, beforeEach, vi } from "vitest";
 import { mkdtemp, mkdir, rm, writeFile, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,6 +28,14 @@ import { validateSessionPath } from "./session-path";
 const exec = promisify(execFile);
 const TEST_ROOT = "/tmp/babylon-e2e-20260827";
 const roots: string[] = [];
+
+beforeAll(async () => {
+  // Ensure the shared temp root exists on a fresh runner. The
+  // "reports non-repo cleanly" test calls mkdtemp directly under
+  // TEST_ROOT without going through makeRepo, so the dir must be
+  // present before any test runs.
+  await mkdir(TEST_ROOT, { recursive: true });
+});
 
 async function git(cwd: string, args: string[]): Promise<string> {
   return (await exec("git", args, { cwd })).stdout.trim();

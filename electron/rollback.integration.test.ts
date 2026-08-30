@@ -99,7 +99,6 @@ describe("PiHost rollback integration", () => {
     await git(cwd, ["init"]);
     await writeFile(join(cwd, "file.txt"), "before\n");
     await git(cwd, ["add", "file.txt"]);
-    await git(cwd, ["commit", "-m", "init"]);
 
     const host = new PiHost({ cwd, agentDir, stateDir, onEvent: () => undefined, onStatus: () => undefined });
     await host.start();

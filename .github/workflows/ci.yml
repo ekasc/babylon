@@ -25,6 +25,14 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # Several tests run `git commit` against ephemeral repos. A
+      # fresh runner has no git identity, which fails those tests.
+      # Set a global identity as a belt-and-suspenders measure; the
+      # tests that need a specific identity set it locally.
+      - name: Configure git identity
+        run: |
+          git config --global user.email "ci@babylon.local"
+          git config --global user.name  "Babylon CI"
       # Babylon imports @earendil-works/pi-coding-agent but does not
       # declare it as a dependency. Install the pinned version globally
       # (--ignore-scripts skips Pi's lifecycle hooks, which expect a Pi
