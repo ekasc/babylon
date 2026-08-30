@@ -426,19 +426,21 @@ export class SnapshotStore {
       let stat;
       try {
         stat = await fsp.lstat(join(repo.root, rel));
-      } catch (error: any) {
-        if (error?.code === "ENOENT") {
-          delete map.paths[rel];
-          continue;
-        }
-        throw error;
+      } catch {
+        // Unreadable or vanished since the last capture.
+        delete map.paths[rel];
+        continue;
       }
       if (stat.isFile() && stat.size > MAX_UNTRACKED_BYTES) {
         map.paths[rel] = { size: stat.size, mtimeMs: stat.mtimeMs };
+      } else {
+        // Shrunk below the limit, replaced by a directory or
+        // symlink, or otherwise no longer a regular file over the
+        // limit. Drop the entry; the candidate loop on the next pass
+        // (or the verification's `--others` filter on this pass)
+        // will classify the path as a normal candidate.
+        delete map.paths[rel];
       }
-      // Present but not oversize (or not a file): leave the entry;
-      // the candidate loop in the same capture will report it as
-      // newly untracked and admit it (removing the entry).
     }
   }
 
@@ -590,9 +592,18 @@ export class SnapshotStore {
       //    second discovery is empty, the checkpoint is stable.
       //    Watcher delivery is not consulted here — the verification
       //    is the only proof of stability. The `--others` result is
-      //    filtered against the persisted exclusion map: an excluded
-      //    file is a known exclusion, not a concurrent write, and
-      //    must not force an unnecessary retry.
+      //    filtered against the exclusion map: an excluded file is a
+      //    known exclusion, not a concurrent write, and must not
+      //    force an unnecessary retry.
+      //
+      //    Reconcile the exclusion map again first: a delete or
+      //    shrink that landed during this in-flight capture must be
+      //    reflected in the returned snapshot, not deferred to the
+      //    next one. Without this re-reconcile, the stability check
+      //    can succeed against stale exclusion metadata and the
+      //    caller receives a snapshot whose `excluded` list still
+      //    names a path the worktree no longer has.
+      await this.reconcileExclusions(repo, exclusions);
       const [vDirty, vUntracked] = await Promise.all([
         run("git", this.args(repo, ["diff-files", "-z", "--name-only"]), repo.root),
         run("git", this.args(repo, ["ls-files", "-z", "--others", "--exclude-standard"]), repo.root),

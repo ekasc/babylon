@@ -322,6 +322,77 @@ describe("SnapshotStore", () => {
     expect(after!.excluded).toEqual([]);
   });
 
+  it("drops an excluded file from the returned snapshot when it is deleted during the in-flight capture", async () => {
+    const base = await mkdtemp(join(tmpdir(), "pideck-snapshot-excl-inflight-"));
+    roots.push(base);
+    const root = join(base, "project");
+    await mkdir(root);
+    await git(root, ["init"]);
+    await git(root, ["config", "user.email", "test@example.com"]);
+    await git(root, ["config", "user.name", "Test"]);
+    // Non-trivial tracked set so the in-flight capture runs long
+    // enough for a setTimeout to fire during it.
+    for (let i = 0; i < 2000; i++) {
+      await writeFile(join(root, `f${String(i).padStart(5, "0")}.txt`), `${i}\n`);
+    }
+    await git(root, ["add", "-A"]);
+    // Oversize untracked file, excluded on the first capture.
+    const huge = join(root, "huge.log");
+    await writeFile(huge, Buffer.alloc(3 * 1024 * 1024, "x"));
+
+    const store = new SnapshotStore(join(base, "state"));
+    const before = await store.capture(root, { authoritative: true });
+    expect(before!.excluded.map((e) => e.path)).toContain("huge.log");
+
+    // Start an in-flight capture. The reconcile at the top of the
+    // first pass sees the file and keeps it. The verification's
+    // reconcile must observe the delete and drop the entry before
+    // the stability check decides the checkpoint is good.
+    const capturePromise = store.capture(root, { authoritative: true });
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await rm(huge);
+    const after = await capturePromise;
+    expect(after).not.toBeNull();
+    expect(after!.excluded.map((e) => e.path)).not.toContain("huge.log");
+    // The deletion was during the in-flight capture; the same
+    // returned snapshot reflects it.
+    expect(after!.excluded).toEqual([]);
+  });
+
+  it("admits a previously-excluded untracked file that shrank during the in-flight capture", async () => {
+    const base = await mkdtemp(join(tmpdir(), "pideck-snapshot-shrink-inflight-"));
+    roots.push(base);
+    const root = join(base, "project");
+    await mkdir(root);
+    await git(root, ["init"]);
+    await git(root, ["config", "user.email", "test@example.com"]);
+    await git(root, ["config", "user.name", "Test"]);
+    for (let i = 0; i < 2000; i++) {
+      await writeFile(join(root, `f${String(i).padStart(5, "0")}.txt`), `${i}\n`);
+    }
+    await git(root, ["add", "-A"]);
+    const huge = join(root, "shrinking.log");
+    await writeFile(huge, Buffer.alloc(3 * 1024 * 1024, "x"));
+
+    const store = new SnapshotStore(join(base, "state"));
+    const before = await store.capture(root, { authoritative: true });
+    expect(before!.excluded.map((e) => e.path)).toContain("shrinking.log");
+
+    // Shrink the file during the in-flight capture. The
+    // verification's reconcile drops it from the exclusion map; the
+    // verification's `--others` then reports it; the next pass
+    // admits it.
+    const capturePromise = store.capture(root, { authoritative: true });
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    await writeFile(huge, "small now\n");
+    const after = await capturePromise;
+    expect(after).not.toBeNull();
+    expect(after!.excluded.map((e) => e.path)).not.toContain("shrinking.log");
+    // The file is now in the snapshot tree.
+    const diff = await store.changedFiles(root, before!.tree, after!.tree);
+    expect(diff).toContain("shrinking.log");
+  });
+
   it("reconciles the exclusion map when an excluded file is renamed (delete-old + create-new)", async () => {
     const base = await mkdtemp(join(tmpdir(), "pideck-snapshot-excl-rename-"));
     roots.push(base);
