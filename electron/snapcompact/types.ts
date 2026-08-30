@@ -48,8 +48,10 @@ export interface SnapcompactArchive {
   sourceText: string;
   /** Exact-token dictionary preserved as raw text. */
   symbols: SnapcompactSymbol[];
-  /** Rasterized frames, in chronological order (oldest last). */
-  frames: Array<Omit<SnapcompactFrame, "png"> & { pngFile: string }>;
+  /** Rasterized frames, in chronological order (oldest last). In-memory
+   *  form holds the raw PNG bytes; the on-disk form stores a path per
+   *  frame in a separate frames/ directory. */
+  frames: SnapcompactFrame[];
   /** Last message entryId covered by this archive. */
   coveredThroughMessageId: string | null;
   /** Wall-clock creation time (ms since epoch). */
