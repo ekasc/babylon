@@ -234,17 +234,15 @@ describe("snapcompact Pi extension (session_before_compact + context)", () => {
     expect(resultA.messages.length).toBeGreaterThan(ctxA.messages.length);
   });
 
-  it("branch isolation: branch B without snapcompact does not leak branch A archive", async () => {
+  it("branch isolation: branch B without snapcompact does not leak branch A archive (separate managers)", async () => {
     const ext = buildExt();
     const beforeHandler = ext.handlers.get("session_before_compact")![0] as any;
-    // Build branch A with snapcompact
     const smA = makeSessionManager();
-    const rootId = smA.appendMessage({ role: "user", content: "root" } as any);
+    smA.appendMessage({ role: "user", content: "root" } as any);
     const cA = await beforeHandler({
       preparation: { firstKeptEntryId: "x", messagesToSummarize: [userMsg("branch A secret /repo/secret.ts")], turnPrefixMessages: [], tokensBefore: 10 },
     }, { sessionManager: smA });
     smA.appendCompaction(cA.compaction.summary, cA.compaction.firstKeptEntryId, cA.compaction.tokensBefore, cA.compaction.details as any, true);
-    // Branch B diverges from root without any snapcompact compaction
     const smB = makeSessionManager();
     smB.appendMessage({ role: "user", content: "root" } as any);
     smB.appendMessage({ role: "user", content: "branch B ordinary message" } as any);
@@ -252,8 +250,78 @@ describe("snapcompact Pi extension (session_before_compact + context)", () => {
     expect(ctxB.messages.some((m: any) => m.role === "compactionSummary")).toBe(false);
     const ctxHandler = ext.handlers.get("context")![0] as any;
     const resultB = await ctxHandler({ messages: ctxB.messages }, { sessionManager: smB });
-    // Must NOT inject branch A's archive into branch B
     expect(resultB).toBeUndefined();
+  });
+
+  it("branch isolation: real divergent branch via SessionManager.branch() does not leak", async () => {
+    const ext = buildExt();
+    const beforeHandler = ext.handlers.get("session_before_compact")![0] as any;
+    const sm = makeSessionManager();
+    const rootId = sm.appendMessage({ role: "user", content: "root" } as any);
+    // Branch A: snapcompact compaction
+    const cA = await beforeHandler({
+      preparation: { firstKeptEntryId: "x", messagesToSummarize: [userMsg("branch A secret /repo/a.ts")], turnPrefixMessages: [], tokensBefore: 10 },
+    }, { sessionManager: sm });
+    sm.appendCompaction(cA.compaction.summary, cA.compaction.firstKeptEntryId, cA.compaction.tokensBefore, cA.compaction.details as any, true);
+    // Diverge: go back to root and create branch B without snapcompact
+    sm.branch(rootId);
+    sm.appendMessage({ role: "user", content: "branch B ordinary" } as any);
+    const ctxB = sm.buildSessionContext();
+    // Active branch B has no snapcompact compaction
+    expect(ctxB.messages.some((m: any) => m.role === "compactionSummary" && String(m.summary ?? "").includes("snapcompact"))).toBe(false);
+    const ctxHandler = ext.handlers.get("context")![0] as any;
+    const resultB = await ctxHandler({ messages: ctxB.messages }, { sessionManager: sm });
+    expect(resultB).toBeUndefined();
+  });
+
+  it("textFallback survives ArchiveStore restart and works for text-only model via fresh store", async () => {
+    const ext = buildExt();
+    const beforeHandler = ext.handlers.get("session_before_compact")![0] as any;
+    const sm = makeSessionManager();
+    sm.appendMessage({ role: "user", content: "hello" } as any);
+    const c = await beforeHandler({
+      preparation: { firstKeptEntryId: "x", messagesToSummarize: [userMsg("restart test /repo/restart.ts")], turnPrefixMessages: [], tokensBefore: 10 },
+    }, { sessionManager: sm });
+    const gen = String(c.compaction.details.snapcompactGeneration);
+    sm.appendCompaction(c.compaction.summary, c.compaction.firstKeptEntryId, c.compaction.tokensBefore, c.compaction.details as any, true);
+    // Simulate Babylon restart: new ArchiveStore instance
+    const freshStore = new ArchiveStore({ stateDir });
+    const loaded = await freshStore.loadGeneration(sessionFile, gen);
+    expect(loaded).not.toBeNull();
+    expect(loaded!.textFallback).toBeDefined();
+    expect(loaded!.textFallback!.length).toBeGreaterThan(0);
+    expect(loaded!.textFallback).toContain("restart");
+    // Now use fresh store in a new extension with text-only model
+    getModel = () => ({ provider: "openai", id: "gpt-3.5", input: ["text"] });
+    getMode = () => "snapcompact";
+    const freshExt = createSnapcompactExtension({ archiveStore: freshStore, getMode, getModel, getSessionId, getSessionFile });
+    const ctx = sm.buildSessionContext();
+    const ctxHandler = freshExt.handlers.get("context")![0] as any;
+    const result = await ctxHandler({ messages: ctx.messages }, { sessionManager: sm });
+    expect(result).toBeDefined();
+    const text = result.messages.map((m: any) => Array.isArray(m.content) ? m.content.map((b: any) => b.text ?? "").join("") : "").join("\n");
+    expect(text).toContain("Snapcompact text fallback");
+  });
+
+  it("mode switched to summary after snapcompact compaction still injects textFallback", async () => {
+    const ext = buildExt();
+    const beforeHandler = ext.handlers.get("session_before_compact")![0] as any;
+    const sm = makeSessionManager();
+    sm.appendMessage({ role: "user", content: "hello" } as any);
+    const c = await beforeHandler({
+      preparation: { firstKeptEntryId: "x", messagesToSummarize: [userMsg("summary mode fallback /repo/summary.ts")], turnPrefixMessages: [], tokensBefore: 10 },
+    }, { sessionManager: sm });
+    sm.appendCompaction(c.compaction.summary, c.compaction.firstKeptEntryId, c.compaction.tokensBefore, c.compaction.details as any, true);
+    const ctx = sm.buildSessionContext();
+    // User changes setting Snapcompact -> Summary
+    getMode = () => "summary";
+    const summaryExt = createSnapcompactExtension({ archiveStore: store, getMode, getModel, getSessionId, getSessionFile });
+    const ctxHandler = summaryExt.handlers.get("context")![0] as any;
+    const result = await ctxHandler({ messages: ctx.messages }, { sessionManager: sm });
+    expect(result).toBeDefined();
+    const text = result.messages.map((m: any) => Array.isArray(m.content) ? m.content.map((b: any) => b.text ?? "").join("") : "").join("\n");
+    expect(text).toContain("Snapcompact text fallback");
+    expect(text).not.toContain("[Snapcompact archive] generation=");
   });
 
   it("split-turn ordering: archive built from messagesToSummarize before turnPrefixMessages", async () => {

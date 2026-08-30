@@ -2,6 +2,6 @@ fixture=rollout-recovery :: Long coding session: snapshot recovery, runtime-owne
   archiveCoverage: kept=22 first=u0 last=a21 omitted=0
   raw              chars=  2144 dictChars=     0 frames= 0 frameBytes=      0 imgTokens=    0 reqBytes=   2144 reqTok=   536 buildMs=1.4 trunc=N holes=N dictOK=N
   prefix-control   chars=  1500 dictChars=     0 frames= 0 frameBytes=      0 imgTokens=    0 reqBytes=   1500 reqTok=   375 buildMs=0.0 trunc=Y holes=N dictOK=N
-  snapcompact      chars=  2092 dictChars=   375 frames= 2 frameBytes=   9275 imgTokens= 1530 reqBytes=  14459 reqTok=  2053 buildMs=12.0 trunc=N holes=N dictOK=N
-  snapcompact-dict chars=  2092 dictChars=   375 frames= 2 frameBytes=   9275 imgTokens= 1530 reqBytes=  14835 reqTok=  2147 buildMs=12.0 trunc=N holes=N dictOK=Y
+  snapcompact      chars=  2092 dictChars=   375 frames= 2 frameBytes=   9275 imgTokens= 1530 reqBytes=  14459 reqTok=  2053 buildMs=11.4 trunc=N holes=N dictOK=N
+  snapcompact-dict chars=  2092 dictChars=   375 frames= 2 frameBytes=   9275 imgTokens= 1530 reqBytes=  14835 reqTok=  2147 buildMs=11.4 trunc=N holes=N dictOK=Y
 

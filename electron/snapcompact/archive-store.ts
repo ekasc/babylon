@@ -319,6 +319,7 @@ export class ArchiveStore {
         lastKeptEntryId: archive.lastKeptEntryId,
         keptCount: archive.keptCount,
         omittedTrailing: archive.omittedTrailing,
+        textFallback: (archive as any).textFallback ?? "",
       };
       // Also write a per-generation snapshot so loadGeneration can
       // reconstruct older branches without the active manifest.

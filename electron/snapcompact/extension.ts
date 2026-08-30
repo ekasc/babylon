@@ -206,14 +206,17 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
       if (archive.sessionId !== sessionId) return undefined;
       if (archive.version !== 1) return undefined;
       if (archive.frames.length === 0) return undefined;
-      if (mode === "summary") return undefined;
-      // Vision model: full bitmap projection. Text-only model after
-      // snapcompact compaction must still get history — inject the
-      // durable textFallback stored alongside the generation instead
-      // of PNGs. Without it the session would be empty after
-      // compaction (Pi summary is just "Recap: generation=...").
+      // If the active branch was compacted with Snapcompact, the durable
+      // history is in the archive. Switching mode to "summary" or
+      // switching to a text-only model must not make that history vanish
+      // (Pi's durable summary is just "Recap: generation=..."). In
+      // those cases inject the stored textFallback instead of PNGs.
+      const fb = (archive as any).textFallback as string | undefined;
+      if (mode === "summary") {
+        if (!fb) return undefined;
+        return { messages: [...event.messages, { role: "user", content: [{ type: "text", text: fb }] }] };
+      }
       if (!modelSupportsImages(model)) {
-        const fb = (archive as any).textFallback as string | undefined;
         if (!fb) return undefined;
         return { messages: [...event.messages, { role: "user", content: [{ type: "text", text: fb }] }] };
       }
