@@ -146,9 +146,56 @@ function renderTextWithMath(text: string, keyBase: string): ReactNode[] {
   return nodes;
 }
 
+function MarkdownTable({ children, ...props }: React.ComponentProps<"table">) {
+  const tableRef = useRef<HTMLTableElement>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handleCopy = (format: "markdown" | "csv") => {
+    const table = tableRef.current;
+    if (!table || typeof navigator === "undefined" || !navigator.clipboard) return;
+    const rows = [...table.querySelectorAll("tr")].map((tr) =>
+      [...tr.querySelectorAll("th, td")].map((cell) => cell.textContent?.trim() ?? "")
+    );
+    if (!rows.length) return;
+    let textOut = "";
+    if (format === "markdown") {
+      textOut = rows.map((r) => `| ${r.join(" | ")} |`).join("\n");
+      if (rows.length > 1) textOut = [textOut.split("\n")[0], `| ${rows[0].map(() => "---").join(" | ")} |`, ...textOut.split("\n").slice(1)].join("\n");
+    } else {
+      textOut = rows.map((r) => r.map((c) => `"${c.replace(/"/g, '""')}"`).join(",")).join("\n");
+    }
+    void navigator.clipboard.writeText(textOut).then(() => {
+      setCopied(true);
+      if (copyTimer.current) clearTimeout(copyTimer.current);
+      copyTimer.current = setTimeout(() => setCopied(false), 1200);
+    });
+  };
+  useEffect(() => () => { if (copyTimer.current) clearTimeout(copyTimer.current); }, []);
+  return (
+    <div className="my-3 overflow-hidden rounded-lg border border-line bg-[var(--raised)]">
+      <div className="overflow-x-auto">
+        <table ref={tableRef} {...props} className="w-full text-[13px]" style={{ border: 0, margin: 0, borderRadius: 0 }}>
+          {children}
+        </table>
+      </div>
+      <div className="flex items-center justify-between border-t border-line bg-inset px-2 py-1">
+        <button onClick={() => setExpanded((v) => !v)} aria-pressed={expanded} className="rounded px-2 py-1 text-[11px] text-dim hover:text-fg">
+          {expanded ? "Collapse cells" : "Expand cells"}
+        </button>
+        <button onClick={() => handleCopy(expanded ? "csv" : "markdown")} className="rounded px-2 py-1 text-[11px] text-dim hover:text-fg">
+          {copied ? "Copied" : expanded ? "Copy as CSV" : "Copy as Markdown"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function Markdown({ text }: { text: string }) {
   const preprocessed = useMemo(() => processMath(text), [text]);
   const headingSlugs = useRef<Map<string, number>>(new Map());
+  // Reset slugs per message so headings don't leak counts across renders
+  headingSlugs.current.clear();
 
   return (
     <div className="md">
@@ -175,6 +222,7 @@ export default function Markdown({ text }: { text: string }) {
               {children}
             </a>
           ),
+          table: ({ children, ...props }) => <MarkdownTable {...props}>{children}</MarkdownTable>,
           h1: ({ children, ...rest }) => headingWithAnchor({ children, level: 1, headingSlugs }),
           h2: ({ children }) => headingWithAnchor({ children, level: 2, headingSlugs }),
           h3: ({ children }) => headingWithAnchor({ children, level: 3, headingSlugs }),
