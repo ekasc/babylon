@@ -35,6 +35,10 @@ export interface BuildArchiveInput {
   coveredThroughMessageId?: string | null;
   /** Optional last activity timestamp (ms). */
   coveredThroughTimestamp?: number | null;
+  /** When set, the previous cumulative archive's normalized source. The new
+   *  archive will be built from previousSourceText + new messages' source,
+   *  re-extracting and re-rendering fresh (no OCR). */
+  previousArchive?: SnapcompactArchive | null;
 }
 
 export interface BuildArchiveResult {
@@ -71,16 +75,43 @@ function capRawSymbols(symbols: RawSymbol[], maxCount: number, maxDictChars: num
 export function buildArchive(input: BuildArchiveInput): BuildArchiveResult {
   const profile = input.profile;
   const t0 = performance.now();
-  // Enforce the source budget via the serializer's totalBudget.
-  const serialized = serializeTranscript({
+  const serializedNew = serializeTranscript({
     messages: input.messages,
     totalBudget: profile.maxSourceChars,
   });
+  // Cumulative rollover: if a previous snapcompact generation exists on
+  // this branch, rebuild from its normalized source + the newly discarded
+  // messages. This preserves history without OCRing PNGs.
+  let combinedSource = serializedNew.sourceText;
+  let truncated = serializedNew.truncated;
+  let keptCount = serializedNew.keptCount;
+  let firstKept = serializedNew.firstKeptEntryId;
+  let lastKept = serializedNew.lastKeptEntryId;
+  let omitted: import("./serializer").OmittedEntry[] = [...serializedNew.omittedTrailing] as import("./serializer").OmittedEntry[];
+  if (input.previousArchive?.sourceText) {
+    const prev = input.previousArchive.sourceText;
+    const sep = prev && combinedSource ? "\n\n" : "";
+    combinedSource = prev + sep + combinedSource;
+    // Enforce total budget on the combined source keeping recent suffix
+    if (combinedSource.length > profile.maxSourceChars) {
+      const dropped = combinedSource.length - profile.maxSourceChars;
+      combinedSource = combinedSource.slice(-profile.maxSourceChars);
+      // Record that oldest content was evicted due to cumulative budget
+      truncated = true;
+      omitted.push({ entryId: input.previousArchive.firstKeptEntryId ?? "prev", role: "cumulative", reason: "total-budget" as const });
+      void dropped;
+    }
+    // Coverage spans the cumulative archive
+    firstKept = input.previousArchive.firstKeptEntryId ?? firstKept;
+    // lastKept stays as newest
+    keptCount = (input.previousArchive.keptCount ?? 0) + keptCount;
+    omitted = [...((input.previousArchive.omittedTrailing as any) ?? []), ...omitted] as any;
+  }
   const t1 = performance.now();
-  const rawSymbols = extractHighValueTokens(serialized.sourceText);
+  const rawSymbols = extractHighValueTokens(combinedSource);
   const capped = capRawSymbols(rawSymbols, profile.maxSymbolCount, profile.maxDictChars);
   const frameProfile = profileToFrameProfile(profile);
-  const rendered = renderFrames({ sourceText: serialized.sourceText, rawSymbols: capped, profile: frameProfile });
+  const rendered = renderFrames({ sourceText: combinedSource, rawSymbols: capped, profile: frameProfile });
   const t2 = performance.now();
   // Enforce frame count and total PNG bytes.
   if (rendered.frames.length > profile.maxFrames) {
@@ -98,16 +129,16 @@ export function buildArchive(input: BuildArchiveInput): BuildArchiveResult {
   if (estimatedRequestBytes > profile.maxRequestBytes) {
     throw new ArchiveBudgetError("maxRequestBytes", estimatedRequestBytes, profile.maxRequestBytes);
   }
-  const textFallback = buildTextFallback(serialized.sourceText, rendered.symbols, rendered.adjustedSourceText);
+  const textFallback = buildTextFallback(combinedSource, rendered.symbols, rendered.adjustedSourceText);
   const archive: SnapcompactArchive = {
     version: 1,
     sessionId: input.sessionId,
     sessionFile: input.sessionFile,
     strategy: "snapcompact",
-    sourceText: serialized.sourceText,
+    sourceText: combinedSource,
     symbols: rendered.symbols,
     frames: rendered.frames,
-    coveredThroughMessageId: serialized.lastKeptEntryId,
+    coveredThroughMessageId: lastKept,
     createdAt: Date.now(),
     coveredThroughTimestamp: input.coveredThroughTimestamp ?? null,
     frameWidth: profile.width,
@@ -115,16 +146,16 @@ export function buildArchive(input: BuildArchiveInput): BuildArchiveResult {
     profileId: profile.id,
     frameBytes,
     compactionGenerationId: randomUUID(),
-    firstKeptEntryId: serialized.firstKeptEntryId,
-    lastKeptEntryId: serialized.lastKeptEntryId,
-    keptCount: serialized.keptCount,
-    omittedTrailing: serialized.omittedTrailing,
+    firstKeptEntryId: firstKept,
+    lastKeptEntryId: lastKept,
+    keptCount,
+    omittedTrailing: omitted,
     textFallback,
   };
   return {
     archive,
-    sourceText: serialized.sourceText,
-    truncated: serialized.truncated,
+    sourceText: combinedSource,
+    truncated,
     renderMs: t2 - t1,
     serializeMs: t1 - t0,
     frameBytes,

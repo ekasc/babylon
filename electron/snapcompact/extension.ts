@@ -134,12 +134,25 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
       });
       if (decision.strategy !== "snapcompact") return undefined;
       const profile = profileForModel(model);
-      // Pi's chronological order: older history first, then the split-turn prefix.
       const messages = [...(preparation.messagesToSummarize ?? []), ...(preparation.turnPrefixMessages ?? [])];
       if (!messages.length) return undefined;
+      // Cumulative rollover: if the active branch already has a previous
+      // snapcompact generation, compose its normalized source with the newly
+      // discarded messages so history is not lost. Use the session manager's
+      // active branch, not a cross-branch scan.
+      let previousArchive: SnapcompactArchive | null = null;
+      try {
+        const prevEntry = findSnapcompactCompactionEntry(ctx?.sessionManager);
+        if (prevEntry?.details?.snapcompactGeneration) {
+          const prevGen = String(prevEntry.details.snapcompactGeneration);
+          previousArchive = await opts.archiveStore.loadGeneration(deriveSessionFile(opts), prevGen).catch(() => null)
+            ?? await opts.archiveStore.load(deriveSessionFile(opts)).catch(() => null);
+          if (previousArchive && previousArchive.compactionGenerationId !== prevGen) previousArchive = null;
+        }
+      } catch { /* ignore, treat as first compaction */ }
       let result;
       try {
-        result = buildArchive({ sessionId: opts.getSessionId(), sessionFile: deriveSessionFile(opts), messages, profile });
+        result = buildArchive({ sessionId: opts.getSessionId(), sessionFile: deriveSessionFile(opts), messages, profile, previousArchive });
       } catch (err) {
         if (err instanceof ArchiveBudgetError) return undefined;
         throw err;
@@ -163,7 +176,8 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
         if (err instanceof ArchiveIntegrityError) return undefined;
         return undefined;
       }
-      const summary = `Recap: snapcompact archive generation=${result.archive.compactionGenerationId} frames=${result.archive.frames.length}`;
+      const boundedFallback = (result.archive.textFallback ?? "").slice(0, 4000);
+      const summary = `[Snapcompact generation=${result.archive.compactionGenerationId}]\n${boundedFallback}`;
       const compaction: CompactionResult = {
         summary,
         firstKeptEntryId: preparation.firstKeptEntryId,

@@ -71,4 +71,21 @@ describe("snapcompact build budgets", () => {
     expect(r.archive.textFallback!.length).toBeGreaterThan(0);
     expect(r.archive.textFallback!).toContain("[Snapcompact text fallback]");
   });
+
+  it("cumulative rollover retains previous source (G2 contains OLD + NEW)", () => {
+    const profile = profileForModel({ id: "generic-vision" });
+    const g1 = buildArchive({ sessionId: "s", sessionFile: "/s.jsonl", messages: [user("OLD_FACT_123", "u1")], profile });
+    const g2 = buildArchive({ sessionId: "s", sessionFile: "/s.jsonl", messages: [user("NEW_FACT_456", "u2")], profile, previousArchive: g1.archive });
+    expect(g2.archive.sourceText).toContain("OLD_FACT_123");
+    expect(g2.archive.sourceText).toContain("NEW_FACT_456");
+    expect(g2.archive.keptCount).toBeGreaterThan(g1.archive.keptCount);
+  });
+
+  it("cumulative rollover respects budget and records eviction, not silent loss", () => {
+    const profile = { ...profileForModel({ id: "generic-vision" }), maxSourceChars: 100 };
+    const g1 = buildArchive({ sessionId: "s", sessionFile: "/s.jsonl", messages: [user("A".repeat(80), "u1")], profile });
+    const g2 = buildArchive({ sessionId: "s", sessionFile: "/s.jsonl", messages: [user("B".repeat(80), "u2")], profile, previousArchive: g1.archive });
+    expect(g2.archive.sourceText.length).toBeLessThanOrEqual(100);
+    expect(g2.archive.omittedTrailing.length).toBeGreaterThan(0);
+  });
 });

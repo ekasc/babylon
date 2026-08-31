@@ -366,6 +366,41 @@ describe("snapcompact Pi extension (session_before_compact + context)", () => {
     expect(text).not.toContain("[Snapcompact archive] generation=");
   });
 
+  it("snapcompact -> snapcompact rollover is cumulative (G2 retains OLD_FACT)", async () => {
+    const ext = buildExt();
+    const beforeHandler = ext.handlers.get("session_before_compact")![0] as any;
+    const sm = makeSessionManager();
+    sm.appendMessage({ role: "user", content: "hello" } as any);
+    const c1 = await beforeHandler({ preparation: { firstKeptEntryId: "x", messagesToSummarize: [userMsg("OLD_FACT_123", "u-old")], turnPrefixMessages: [], tokensBefore: 10 } }, { sessionManager: sm });
+    expect(c1).toBeDefined();
+    sm.appendCompaction(c1.compaction.summary, c1.compaction.firstKeptEntryId, c1.compaction.tokensBefore, c1.compaction.details as any, true);
+    expect(c1.compaction.summary).toContain("Snapcompact text fallback");
+    expect(c1.compaction.summary).toContain("OLD_FACT_123");
+    // New conversation after G1
+    const c2 = await beforeHandler({ preparation: { firstKeptEntryId: "y", messagesToSummarize: [userMsg("NEW_FACT_456", "u-new")], turnPrefixMessages: [], tokensBefore: 10 } }, { sessionManager: sm });
+    expect(c2).toBeDefined();
+    sm.appendCompaction(c2.compaction.summary, c2.compaction.firstKeptEntryId, c2.compaction.tokensBefore, c2.compaction.details as any, true);
+    const g2 = await store.load(sessionFile);
+    expect(g2).not.toBeNull();
+    expect(g2!.sourceText).toContain("OLD_FACT_123");
+    expect(g2!.sourceText).toContain("NEW_FACT_456");
+    // Context projects G2 only, which is already cumulative
+    const ctx = sm.buildSessionContext();
+    const result = await (ext.handlers.get("context")![0] as any)({ messages: ctx.messages }, { sessionManager: sm });
+    expect(result).toBeDefined();
+    expect(result.messages.some((m: any) => m.role === "compactionSummary")).toBe(false);
+  });
+
+  it("persisted snapcompact summary carries bounded textFallback for future Pi textual compaction", async () => {
+    const ext = buildExt();
+    const beforeHandler = ext.handlers.get("session_before_compact")![0] as any;
+    const sm = makeSessionManager();
+    const c = await beforeHandler({ preparation: { firstKeptEntryId: "x", messagesToSummarize: [userMsg("fallback in summary /repo/f.ts", "u1")], turnPrefixMessages: [], tokensBefore: 10 } }, { sessionManager: sm });
+    expect(c.compaction.summary).toContain("[Snapcompact generation=");
+    expect(c.compaction.summary).toContain("Snapcompact text fallback");
+    expect(c.compaction.summary.length).toBeLessThanOrEqual(5000);
+  });
+
   it("split-turn ordering: archive built from messagesToSummarize before turnPrefixMessages", async () => {
     const ext = buildExt();
     const beforeHandler = ext.handlers.get("session_before_compact")![0] as any;
