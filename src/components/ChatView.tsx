@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import type { ChatItem } from "../store";
 import type { HistoryTurn } from "../bridge";
 import { UserMessage, AssistantMessage, ToolCard, ToolGroup, SystemLine, RecapLine, LaunchCard } from "./items";
@@ -48,6 +48,31 @@ interface Props {
   historyTurns?: HistoryTurn[];
   onRollback?(entryId: string): void;
   onOpenLaunch?(runId: string, runKind: "subagent" | "thread" | "workflow"): void;
+}
+
+function summarizeTurnTools(tools: Array<Extract<ChatItem, { kind: "tool" }>>): string {
+  let reads = 0;
+  let edits = 0;
+  let commands = 0;
+  let other = 0;
+  for (const t of tools) {
+    const details: any = (t as any).details;
+    const hasPatch = typeof details?.patch === "string" && details.patch.trim().length > 0;
+    const name = (t.name ?? "").toLowerCase();
+    if (hasPatch || name.includes("edit") || name.includes("write")) edits++;
+    else if (name === "bash" || name.includes("bash") || name.includes("shell") || name.includes("command")) commands++;
+    else if (name.includes("read") || name.includes("grep") || name.includes("glob")) reads++;
+    else other++;
+  }
+  const parts: string[] = [];
+  if (reads) parts.push(`Read ${reads} ${reads === 1 ? "file" : "files"}`);
+  if (edits) parts.push(`Changed ${edits} ${edits === 1 ? "file" : "files"}`);
+  if (commands) parts.push(`Ran ${commands} ${commands === 1 ? "command" : "commands"}`);
+  if (other) parts.push(`Used ${other} ${other === 1 ? "tool" : "tools"}`);
+  if (parts.length === 0) return "Worked";
+  if (parts.length === 1) return parts[0];
+  if (parts.length === 2) return `${parts[0]} and ${parts[1].toLowerCase()}`;
+  return `${parts.slice(0, -1).join(", ")}, and ${parts[parts.length - 1].toLowerCase()}`;
 }
 
 export default function ChatView({
@@ -140,6 +165,63 @@ export default function ChatView({
   const entries = useMemo(() => buildEntries(shown), [shown]);
   const longChat = items.length > 60;
 
+  // t3-style turn folding: each user message starts a turn. Settled turns
+  // (not the live one) collapse behind a single "Worked for" row.
+  const [expandedTurns, setExpandedTurns] = useState<Set<string>>(() => new Set());
+  const userIndices = useMemo(() => {
+    const idxs: number[] = [];
+    for (let i = 0; i < shown.length; i++) if (shown[i].kind === "user") idxs.push(i);
+    return idxs;
+  }, [shown]);
+  const latestUserIdx = userIndices.length ? userIndices[userIndices.length - 1] : -1;
+  const foldMap = useMemo(() => {
+    const map = new Map<number, { turnId: string; label: string; hiddenCount: number; start: number; end: number }>();
+    for (let t = 0; t < userIndices.length; t++) {
+      const start = userIndices[t];
+      const end = t + 1 < userIndices.length ? userIndices[t + 1] : shown.length;
+      const isLatest = t === userIndices.length - 1;
+      if (isLatest && streaming) continue;
+      if (isLatest) continue;
+      const slice = shown.slice(start + 1, end);
+      const tools = slice.filter((it) => it.kind === "tool") as Array<Extract<ChatItem, { kind: "tool" }>>;
+      const hasAssistant = slice.some((it) => it.kind === "assistant");
+      if (!hasAssistant || tools.length === 0) continue;
+      // Don't fold tiny turns
+      const hiddenCount = slice.length - (hasAssistant ? 1 : 0);
+      if (hiddenCount < 2) continue;
+      const userItem = shown[start] as Extract<ChatItem, { kind: "user" }>;
+      const turnId = userItem.entryId ?? userItem.key;
+      // Find terminal assistant (last assistant in turn)
+      const turnFoldsForLatest = false;
+      void turnFoldsForLatest;
+      map.set(start, {
+        turnId,
+        label: summarizeTurnTools(tools),
+        hiddenCount,
+        start,
+        end,
+      });
+    }
+    return map;
+  }, [shown, userIndices, streaming]);
+  const isFoldCollapsed = (turnId: string) => !expandedTurns.has(turnId);
+  const hiddenIndices = useMemo(() => {
+    const set = new Set<number>();
+    for (const [start, fold] of foldMap) {
+      if (!isFoldCollapsed(fold.turnId)) continue;
+      // Find terminal assistant (last assistant in turn)
+      let terminalIdx = -1;
+      for (let i = fold.start + 1; i < fold.end; i++) {
+        if (shown[i]?.kind === "assistant") terminalIdx = i;
+      }
+      for (let i = start + 1; i < fold.end; i++) {
+        if (i === terminalIdx) continue;
+        set.add(i);
+      }
+    }
+    return set;
+  }, [foldMap, shown, expandedTurns]);
+
   return (
     <div
       ref={ref}
@@ -162,49 +244,73 @@ export default function ChatView({
             <p>{streaming ? "Preparing this session…" : "Describe the change, question, or outcome you want."}</p>
           </div>
         ) : null}
-        {entries.map((entry, idx) =>
-          entry.type === "group" ? (
-            <Fragment key={`g-${entry.tools[0].key}`}>
-              <div className={longChat ? "chat-item chat-item-long" : "chat-item"}>
-                <ToolGroup tools={entry.tools} />
-              </div>
-              {cards.get(entry.index) ? (
-                <TurnChanges turn={cards.get(entry.index)!} isLatest={latestChanged?.entryId === cards.get(entry.index)!.entryId} />
-              ) : null}
-            </Fragment>
-          ) : (
-            <Fragment key={entry.item.key}>
-              <div className={longChat ? "chat-item chat-item-long" : "chat-item"}>
-                {(() => {
-                  const prev = idx > 0 ? entries[idx - 1] : null;
-                  const prevIsTool = !!prev && (prev.type === "group" || (prev.type === "single" && (prev.item.kind === "tool" || prev.item.kind === "launch")));
-                  const showTopDivider = entry.item.kind === "assistant" && prevIsTool;
-                  return (
-                    <>
-                      {showTopDivider ? <hr className="assistant-divider" /> : null}
-                      {entry.item.kind === "user" ? (
-                        <UserMessage item={entry.item} historyTurn={entry.item.entryId ? historyById.get(entry.item.entryId) : undefined} rollbackDisabled={streaming} onRollback={onRollback} />
-                      ) : entry.item.kind === "assistant" ? (
-                        <AssistantMessage item={entry.item} />
-                      ) : entry.item.kind === "tool" ? (
-                        <ToolCard item={entry.item} />
-                      ) : entry.item.kind === "recap" ? (
-                        <RecapLine text={entry.item.text} />
-                      ) : entry.item.kind === "launch" ? (
-                        <LaunchCard item={entry.item} onOpen={onOpenLaunch} />
-                      ) : (
-                        <SystemLine text={entry.item.text} />
-                      )}
-                    </>
-                  );
-                })()}
-              </div>
-              {cards.get(entry.index) ? (
-                <TurnChanges turn={cards.get(entry.index)!} isLatest={latestChanged?.entryId === cards.get(entry.index)!.entryId} />
-              ) : null}
-            </Fragment>
-          )
-        )}
+        {(() => {
+          const visibleEntries = entries.filter((e) => !hiddenIndices.has(e.index));
+          return visibleEntries.map((entry, idx) => {
+            const foldForUser = entry.type === "single" && entry.item.kind === "user" ? foldMap.get(entry.index) : undefined;
+            const isCollapsed = foldForUser ? isFoldCollapsed(foldForUser.turnId) : false;
+            return entry.type === "group" ? (
+              <Fragment key={`g-${entry.tools[0].key}`}>
+                <div className={longChat ? "chat-item chat-item-long" : "chat-item"}>
+                  <ToolGroup tools={entry.tools} />
+                </div>
+                {cards.get(entry.index) ? (
+                  <TurnChanges turn={cards.get(entry.index)!} isLatest={latestChanged?.entryId === cards.get(entry.index)!.entryId} />
+                ) : null}
+              </Fragment>
+            ) : (
+              <Fragment key={entry.item.key}>
+                <div className={longChat ? "chat-item chat-item-long" : "chat-item"}>
+                  {(() => {
+                    const prev = idx > 0 ? visibleEntries[idx - 1] : null;
+                    const prevIsTool = !!prev && (prev.type === "group" || (prev.type === "single" && (prev.item.kind === "tool" || prev.item.kind === "launch")));
+                    const showTopDivider = entry.item.kind === "assistant" && prevIsTool;
+                    return (
+                      <>
+                        {showTopDivider ? <hr className="assistant-divider" /> : null}
+                        {entry.item.kind === "user" ? (
+                          <UserMessage item={entry.item} historyTurn={entry.item.entryId ? historyById.get(entry.item.entryId) : undefined} rollbackDisabled={streaming} onRollback={onRollback} />
+                        ) : entry.item.kind === "assistant" ? (
+                          <AssistantMessage item={entry.item} />
+                        ) : entry.item.kind === "tool" ? (
+                          <ToolCard item={entry.item} />
+                        ) : entry.item.kind === "recap" ? (
+                          <RecapLine text={entry.item.text} />
+                        ) : entry.item.kind === "launch" ? (
+                          <LaunchCard item={entry.item} onOpen={onOpenLaunch} />
+                        ) : (
+                          <SystemLine text={entry.item.text} />
+                        )}
+                      </>
+                    );
+                  })()}
+                </div>
+                {foldForUser && isCollapsed ? (
+                  <button
+                    type="button"
+                    onClick={() => setExpandedTurns((prev) => { const n = new Set(prev); n.add(foldForUser.turnId); return n; })}
+                    className="my-1 flex w-full items-center gap-2 rounded-md border border-dashed border-line bg-inset/50 px-3 py-1.5 text-left text-[12.5px] text-dim hover:border-line-strong hover:text-fg"
+                  >
+                    <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--dim)]" />
+                    <span>{foldForUser.label}</span>
+                    <span className="ml-auto text-[11px]">{foldForUser.hiddenCount} steps hidden — click to expand</span>
+                  </button>
+                ) : foldForUser && !isCollapsed ? (
+                  <button
+                    type="button"
+                    onClick={() => setExpandedTurns((prev) => { const n = new Set(prev); n.delete(foldForUser.turnId); return n; })}
+                    className="my-1 flex w-full items-center justify-center rounded-md border border-line bg-transparent px-3 py-1 text-[12px] text-dim hover:text-fg"
+                  >
+                    Collapse
+                  </button>
+                ) : null}
+                {cards.get(entry.index) ? (
+                  <TurnChanges turn={cards.get(entry.index)!} isLatest={latestChanged?.entryId === cards.get(entry.index)!.entryId} />
+                ) : null}
+              </Fragment>
+            );
+          });
+        })()}
       </div>
     </div>
   );
