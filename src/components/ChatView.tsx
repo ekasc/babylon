@@ -90,6 +90,7 @@ export default function ChatView({
 }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
+  const lastUserScrollAt = useRef(0);
   const prevHeight = useRef(0);
   const prevFirstKey = useRef<string | null>(null);
   const onNeedEarlierRef = useRef(onNeedEarlier);
@@ -106,7 +107,13 @@ export default function ChatView({
     if (!el) return;
     const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
     if (dist < 24) stick.current = true;
-    else if (dist > 80) stick.current = false;
+    else if (dist > 80) {
+      stick.current = false;
+      lastUserScrollAt.current = Date.now();
+    } else {
+      // Slow scroll in the 24-80px band: treat as intentional read, pause auto-scroll briefly
+      lastUserScrollAt.current = Date.now();
+    }
     // Scroll-up streaming: near the top of the loaded region, ask for the next
     // older window. The App guards against duplicate concurrent fetches.
     if (el.scrollTop < 400 && canLoadMoreRef.current) {
@@ -124,7 +131,9 @@ export default function ChatView({
     const frame = requestAnimationFrame(() => {
       if (!el) return;
       if (stick.current) {
-        el.scrollTop = el.scrollHeight;
+        if (Date.now() - lastUserScrollAt.current > 700) {
+          el.scrollTop = el.scrollHeight;
+        }
       } else if (prepended && before > 0) {
         // Older messages were inserted above the viewport: keep the visible
         // content in place by shifting the scroll position by the inserted
