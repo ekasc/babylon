@@ -230,12 +230,15 @@ export default function ChatView({
         }
         for (let i = fold.start + 1; i < fold.end; i++) {
           if (i === terminalIdx) continue;
+          // Preserve the TurnChanges owner (e.g. recap) so the files-changed
+          // card does not disappear when the turn is collapsed
+          if (cards.has(i)) continue;
           set.add(i);
         }
       }
     }
     return set;
-  }, [foldMap, shown, expandedTurns]);
+  }, [foldMap, shown, expandedTurns, cards]);
   const entries = useMemo(() => buildEntries(shown), [shown]);
 
   return (

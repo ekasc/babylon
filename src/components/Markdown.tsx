@@ -34,20 +34,6 @@ function findCode(node: ReactNode): { lang?: string; text: string } | null {
   return findCode(el.props?.children);
 }
 
-function slugify(text: string): string {
-  return text
-    .toLowerCase()
-    .replace(/[^\p{Letter}\p{Number}\s-]/gu, "")
-    .replace(/\s+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "")
-    .slice(0, 80);
-}
-
-function getNodeText(node: ReactNode): string {
-  return textOf(node).trim();
-}
-
 /** Extract `// !annotation: …` lines from the code body so CodeBlock can render
  *  them as italic gray notes next to the matching line. Stored as
  *  `1: text`, `2: text`, etc., matching the line number. */
@@ -303,37 +289,4 @@ export default function Markdown({ text }: { text: string }) {
   );
 }
 
-function headingWithAnchor({ children, level, headingSlugs }: { children: ReactNode; level: number; headingSlugs: React.MutableRefObject<Map<string, number>> }) {
-  const [copied, setCopied] = useState(false);
-  const raw = getNodeText(children) || "";
-  const base = slugify(raw) || `h-${level}`;
-  const seen = headingSlugs.current.get(base) ?? 0;
-  headingSlugs.current.set(base, seen + 1);
-  const id = seen === 0 ? base : `${base}-${seen + 1}`;
-  const safeLevel = Math.min(Math.max(level, 1), 6);
-  const inner = (
-    <>
-      <a
-        href={`#${id}`}
-        className="md-heading-anchor"
-        aria-label="Copy link to this section"
-        onClick={(e) => {
-          e.preventDefault();
-          const url = `${location.origin}${location.pathname}#${id}`;
-          void navigator.clipboard.writeText(url).catch(() => undefined);
-          try {
-            history.replaceState(null, "", `#${id}`);
-          } catch {}
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1100);
-        }}
-      >
-        {children}
-      </a>
-      <span className={`md-heading-link ${copied ? "is-copied" : ""}`} aria-hidden="true">
-        #
-      </span>
-    </>
-  );
-  return React.createElement(`h${safeLevel}`, { id, className: "md-heading" }, inner);
-}
+
