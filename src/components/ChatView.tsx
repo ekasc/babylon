@@ -162,7 +162,6 @@ export default function ChatView({
     return nextCards;
   }, [shown, historyById]);
   const latestChanged = useMemo(() => [...historyTurns].reverse().find((turn) => turn.changedCount > 0), [historyTurns]);
-  const entries = useMemo(() => buildEntries(shown), [shown]);
   const longChat = items.length > 60;
 
   // t3-style turn folding: each user message starts a turn. Settled turns
@@ -173,27 +172,22 @@ export default function ChatView({
     for (let i = 0; i < shown.length; i++) if (shown[i].kind === "user") idxs.push(i);
     return idxs;
   }, [shown]);
-  const latestUserIdx = userIndices.length ? userIndices[userIndices.length - 1] : -1;
   const foldMap = useMemo(() => {
     const map = new Map<number, { turnId: string; label: string; hiddenCount: number; start: number; end: number }>();
     for (let t = 0; t < userIndices.length; t++) {
       const start = userIndices[t];
       const end = t + 1 < userIndices.length ? userIndices[t + 1] : shown.length;
       const isLatest = t === userIndices.length - 1;
-      if (isLatest && streaming) continue;
       if (isLatest) continue;
       const slice = shown.slice(start + 1, end);
       const tools = slice.filter((it) => it.kind === "tool") as Array<Extract<ChatItem, { kind: "tool" }>>;
       const hasAssistant = slice.some((it) => it.kind === "assistant");
       if (!hasAssistant || tools.length === 0) continue;
-      // Don't fold tiny turns
-      const hiddenCount = slice.length - (hasAssistant ? 1 : 0);
+      const hiddenCount = slice.filter((it) => it.kind !== "user").length - (hasAssistant ? 1 : 0);
       if (hiddenCount < 2) continue;
       const userItem = shown[start] as Extract<ChatItem, { kind: "user" }>;
       const turnId = userItem.entryId ?? userItem.key;
-      // Find terminal assistant (last assistant in turn)
-      const turnFoldsForLatest = false;
-      void turnFoldsForLatest;
+      if (!turnId) continue;
       map.set(start, {
         turnId,
         label: summarizeTurnTools(tools),
@@ -207,20 +201,21 @@ export default function ChatView({
   const isFoldCollapsed = (turnId: string) => !expandedTurns.has(turnId);
   const hiddenIndices = useMemo(() => {
     const set = new Set<number>();
-    for (const [start, fold] of foldMap) {
-      if (!isFoldCollapsed(fold.turnId)) continue;
-      // Find terminal assistant (last assistant in turn)
-      let terminalIdx = -1;
-      for (let i = fold.start + 1; i < fold.end; i++) {
-        if (shown[i]?.kind === "assistant") terminalIdx = i;
-      }
-      for (let i = start + 1; i < fold.end; i++) {
-        if (i === terminalIdx) continue;
-        set.add(i);
+    for (const [, fold] of foldMap) {
+      if (!expandedTurns.has(fold.turnId)) {
+        let terminalIdx = -1;
+        for (let i = fold.start + 1; i < fold.end; i++) {
+          if (shown[i]?.kind === "assistant") terminalIdx = i;
+        }
+        for (let i = fold.start + 1; i < fold.end; i++) {
+          if (i === terminalIdx) continue;
+          set.add(i);
+        }
       }
     }
     return set;
   }, [foldMap, shown, expandedTurns]);
+  const entries = useMemo(() => buildEntries(shown), [shown]);
 
   return (
     <div
@@ -286,27 +281,36 @@ export default function ChatView({
                   })()}
                 </div>
                 {foldForUser && isCollapsed ? (
-                  <button
-                    type="button"
-                    onClick={() => setExpandedTurns((prev) => { const n = new Set(prev); n.add(foldForUser.turnId); return n; })}
-                    className="my-1 flex w-full items-center gap-2 rounded-md border border-dashed border-line bg-inset/50 px-3 py-1.5 text-left text-[12.5px] text-dim hover:border-line-strong hover:text-fg"
-                  >
-                    <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--dim)]" />
-                    <span>{foldForUser.label}</span>
-                    <span className="ml-auto text-[11px]">{foldForUser.hiddenCount} steps hidden — click to expand</span>
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      aria-expanded="false"
+                      aria-label={`Expand turn: ${foldForUser.label}`}
+                      onClick={() => setExpandedTurns((prev) => { const n = new Set(prev); n.add(foldForUser.turnId); return n; })}
+                      className="my-1 flex w-full items-center gap-2 rounded-md border border-dashed border-line bg-inset/50 px-3 py-1.5 text-left text-[12.5px] text-dim hover:border-line-strong hover:text-fg"
+                    >
+                      <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--dim)]" aria-hidden />
+                      <span>{foldForUser.label}</span>
+                      <span className="ml-auto text-[11px]">{foldForUser.hiddenCount} steps hidden — click to expand</span>
+                    </button>
+                    {cards.get(foldForUser.end - 1) ? (
+                      <TurnChanges turn={cards.get(foldForUser.end - 1)!} isLatest={latestChanged?.entryId === cards.get(foldForUser.end - 1)!.entryId} />
+                    ) : null}
+                  </>
                 ) : foldForUser && !isCollapsed ? (
                   <button
                     type="button"
+                    aria-expanded="true"
+                    aria-label={`Collapse turn: ${foldForUser.label}`}
                     onClick={() => setExpandedTurns((prev) => { const n = new Set(prev); n.delete(foldForUser.turnId); return n; })}
                     className="my-1 flex w-full items-center justify-center rounded-md border border-line bg-transparent px-3 py-1 text-[12px] text-dim hover:text-fg"
                   >
                     Collapse
                   </button>
                 ) : null}
-                {cards.get(entry.index) ? (
+                {!foldForUser || !isCollapsed ? (cards.get(entry.index) ? (
                   <TurnChanges turn={cards.get(entry.index)!} isLatest={latestChanged?.entryId === cards.get(entry.index)!.entryId} />
-                ) : null}
+                ) : null) : null}
               </Fragment>
             );
           });

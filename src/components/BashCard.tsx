@@ -21,10 +21,20 @@ export default memo(function BashCard({ item }: BashCardProps) {
   const hasPatch = typeof item.details?.patch === "string" && item.details.patch.trim().length > 0;
   const patch = item.details?.patch ?? item.details?.diff;
   const isRunning = item.status === "running" || b.status === "running";
+  const isError = item.status === "error" || b.status === "failed" || b.status === "signaled" || (b.exitCode !== undefined && b.exitCode !== 0);
 
   useEffect(() => {
-    if (isRunning) setOpen(true);
-  }, [isRunning]);
+    if (isRunning || isError) setOpen(true);
+  }, [isRunning, isError]);
+
+  const formatDuration = (ms?: number) => {
+    if (ms == null) return null;
+    if (ms < 1000) return `${ms}ms`;
+    if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+    const m = Math.floor(ms / 60000);
+    const s = Math.round((ms % 60000) / 1000);
+    return s === 0 ? `${m}m` : `${m}m ${s}s`;
+  };
 
   const fetchFull = () => {
     if (fullOutput != null) return;
@@ -36,14 +46,23 @@ export default memo(function BashCard({ item }: BashCardProps) {
 
   return (
     <div className="bash-card-t3 group my-2 overflow-hidden rounded-lg border border-line bg-[var(--raised)]">
+      {b.unsafe ? (
+        <div className="flex items-center gap-2 bg-[color-mix(in_srgb,var(--err)_8%,transparent)] px-3 py-1.5 text-[12px] text-[var(--err)]" role="alert">
+          <span className="font-semibold uppercase tracking-wide text-[11px]">Potentially unsafe</span>
+          <span className="truncate">{b.unsafe}</span>
+        </div>
+      ) : null}
       <button
         onClick={() => setOpen((o) => !o)}
         className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-[var(--inset)]"
         aria-expanded={open}
+        title={command}
       >
-        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${isRunning ? "animate-pulse bg-[var(--accent)]" : item.status === "error" ? "bg-[var(--err)]" : "bg-[var(--dim)]"}`} />
+        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${isRunning ? "animate-pulse bg-[var(--accent)]" : isError ? "bg-[var(--err)]" : "bg-[var(--dim)]"}`} aria-hidden />
         <span className="font-mono text-[12.5px] text-dim">$</span>
         <span className="min-w-0 flex-1 truncate font-mono text-[12.5px] text-fg">{truncatedCmd}</span>
+        {b.durationMs != null ? <span className="shrink-0 font-mono text-[11px] text-dim">{formatDuration(b.durationMs)}</span> : null}
+        {b.exitCode !== undefined ? <span className={`shrink-0 rounded px-1.5 py-0.5 font-mono text-[11px] ${b.exitCode === 0 ? "bg-[color-mix(in_srgb,var(--ok)_12%,transparent)] text-[var(--ok)]" : "bg-[color-mix(in_srgb,var(--err)_12%,transparent)] text-[var(--err)]"}`}>{b.exitCode === 0 ? "exit 0" : `exit ${b.exitCode}`}</span> : b.exitSignal ? <span className="shrink-0 rounded bg-[color-mix(in_srgb,var(--err)_12%,transparent)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--err)]">{b.exitSignal}</span> : null}
         <span className="shrink-0 text-[11px] text-dim">{open ? "−" : "+"}</span>
       </button>
       {open && (

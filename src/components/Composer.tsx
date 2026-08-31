@@ -355,8 +355,12 @@ const Composer = memo(function Composer({ streaming, steering, followUp, command
             })}
           </div>
         )}
-
-        
+        {streaming && !hasBlockingDialog ? (
+          <div role="status" aria-live="polite" className="mb-2 flex items-center gap-2 rounded-lg border border-line bg-inset px-3 py-2 text-[12px] text-dim">
+            <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-dim" aria-hidden />
+            Agent is running
+          </div>
+        ) : null}
         <div className="composer-surface">
           {dialogs?.[0] ? (
             <div className="border-b border-line/60 bg-raised/40 px-4 py-3">
