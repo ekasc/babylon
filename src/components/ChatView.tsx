@@ -105,6 +105,7 @@ export default function ChatView({
 }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
+  const [showJump, setShowJump] = useState(false);
   const prevHeight = useRef(0);
   const prevFirstKey = useRef<string | null>(null);
   const onNeedEarlierRef = useRef(onNeedEarlier);
@@ -120,8 +121,9 @@ export default function ChatView({
     const el = ref.current;
     if (!el) return;
     const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
-    if (dist < 24) stick.current = true;
-    else stick.current = false;
+    const atBottom = dist < 24;
+    stick.current = atBottom;
+    setShowJump(!atBottom);
     // Scroll-up streaming: near the top of the loaded region, ask for the next
     // older window. The App guards against duplicate concurrent fetches.
     if (el.scrollTop < 400 && canLoadMoreRef.current) {
@@ -132,13 +134,14 @@ export default function ChatView({
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
+    const isInitialMount = prevFirstKey.current === null;
     const prepended = shown.length > 0 && prevFirstKey.current !== null && shown[0].key !== prevFirstKey.current;
     const before = prevHeight.current;
     prevHeight.current = el.scrollHeight;
     prevFirstKey.current = shown[0]?.key ?? null;
     const frame = requestAnimationFrame(() => {
       if (!el) return;
-      if (stick.current) {
+      if (isInitialMount) {
         el.scrollTop = el.scrollHeight;
       } else if (prepended && before > 0) {
         // Older messages were inserted above the viewport: keep the visible
@@ -353,6 +356,21 @@ export default function ChatView({
           });
         })()}
       </div>
+      {showJump && (
+        <button
+          type="button"
+          onClick={() => {
+            const el = ref.current;
+            if (!el) return;
+            el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+          }}
+          className="absolute left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-line bg-raised px-3 py-1.5 text-[12px] font-medium shadow-lg hover:bg-inset active:scale-[0.97] transition-transform"
+          style={{ bottom: chromeBottom + 16 }}
+          aria-label="Jump to bottom"
+        >
+          ↓ Jump to bottom
+        </button>
+      )}
     </div>
   );
 }
