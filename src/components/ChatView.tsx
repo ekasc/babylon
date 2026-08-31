@@ -364,7 +364,7 @@ export default function ChatView({
             if (!el) return;
             el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
           }}
-          className="absolute left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-line bg-raised px-3 py-1.5 text-[12px] font-medium shadow-lg hover:bg-inset active:scale-[0.97] transition-transform"
+          className="fixed left-1/2 z-50 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-line bg-raised px-3 py-1.5 text-[12px] font-medium shadow-lg hover:bg-inset active:scale-[0.97] transition-transform"
           style={{ bottom: chromeBottom + 16 }}
           aria-label="Jump to bottom"
         >
