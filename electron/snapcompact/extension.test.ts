@@ -422,24 +422,53 @@ describe("snapcompact Pi extension (session_before_compact + context)", () => {
     expect(idxOlder).toBeLessThan(idxSplit);
   });
 
-  it("split-turn ordering: archive built from messagesToSummarize before turnPrefixMessages", async () => {
+  it("branch contamination: first Snapcompact on active branch B does not archive inactive branch A", async () => {
+    const { mkdtempSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const dir = mkdtempSync(join(tmpdir(), "pideck-snapcompact-branch-"));
+    const realSessionFile = join(dir, "s.jsonl");
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(realSessionFile, "");
+    const branchFile = realSessionFile;
+    getSessionFile = () => branchFile;
     const ext = buildExt();
     const beforeHandler = ext.handlers.get("session_before_compact")![0] as any;
-    const sm = makeSessionManager();
-    const prep = {
-      firstKeptEntryId: "u1",
-      messagesToSummarize: [userMsg("older history", "u-old")],
-      turnPrefixMessages: [userMsg("split turn prefix", "u-split")],
-      tokensBefore: 100,
-    };
-    const result = await beforeHandler({ preparation: prep }, { sessionManager: sm });
-    // Load the archive and verify ordering: older history appears before split prefix
-    const archive = await store.load(sessionFile);
+    const sm = SessionManager.open(realSessionFile, undefined, dir);
+    const rootMsgId = sm.appendMessage({ role: "user", content: "ROOT" } as any);
+    // Branch A
+    sm.appendMessage({ role: "user", content: "BRANCH_A_SENTINEL" } as any);
+    const aLeaf = sm.getLeafId();
+    sm.branch(rootMsgId);
+    // Branch B active with >10 entries
+    const bIds: string[] = [];
+    for (let i = 0; i < 15; i++) {
+      const id = sm.appendMessage({ role: "user", content: `B-msg-${i} /repo/b${i}.ts` } as any);
+      bIds.push(id);
+    }
+    const bLeaf = sm.getLeafId();
+    const activeBefore = sm.getBranch().map((e: any) => e.id);
+    expect(activeBefore).toContain(bLeaf);
+    expect(activeBefore).not.toContain(aLeaf);
+    const compacted = await beforeHandler(
+      { preparation: { firstKeptEntryId: bLeaf, messagesToSummarize: [userMsg("b-snap")], turnPrefixMessages: [], tokensBefore: 5000 } },
+      { sessionManager: sm }
+    );
+    expect(compacted).toBeDefined();
+    sm.appendCompaction(compacted.compaction.summary, compacted.compaction.firstKeptEntryId, compacted.compaction.tokensBefore, compacted.compaction.details as any, true);
+    const archive = await store.load(branchFile);
     expect(archive).not.toBeNull();
-    const idxOlder = archive!.sourceText.indexOf("older history");
-    const idxSplit = archive!.sourceText.indexOf("split turn prefix");
-    expect(idxOlder).toBeGreaterThanOrEqual(0);
-    expect(idxSplit).toBeGreaterThanOrEqual(0);
-    expect(idxOlder).toBeLessThan(idxSplit);
+    expect(archive!.sourceText).toContain("B-msg-0");
+    expect(archive!.sourceText).not.toContain("BRANCH_A_SENTINEL");
+    const firstKept = compacted.compaction.firstKeptEntryId;
+    const activeAfter = sm.getBranch().map((e: any) => e.id);
+    expect(activeAfter).toContain(firstKept);
+    expect(activeAfter).toContain(sm.getLeafId());
+    // Persist and restart
+    const sm2 = SessionManager.open(realSessionFile, undefined, dir);
+    const activeAfterRestart = sm2.getBranch().map((e: any) => e.id);
+    expect(activeAfterRestart).toContain(firstKept);
+    const archive2 = await store.load(branchFile);
+    expect(archive2!.sourceText).not.toContain("BRANCH_A_SENTINEL");
+    rmSync(dir, { recursive: true, force: true });
   });
 });

@@ -160,21 +160,30 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
         // `omittedTrailing:total-budget`.
         const isFirstSnapcompact = !previousArchive;
         const buildProfile = { ...profile, maxSourceChars: 20_000_000 };
+        const getActiveEntries = (sm: any): any[] => {
+          try {
+            if (sm?.buildContextEntries) return sm.buildContextEntries();
+            if (sm?.getBranch) return sm.getBranch();
+            if (sm?.getEntries) return sm.getEntries();
+          } catch {}
+          return [];
+        };
         const buildMessages = (() => {
           // For the very first generation, expand messages to the entire
-          // session history up to firstKept, not just preparation's slice,
-          // and force firstKept to keep only ~10 recent turns as verbatim.
+          // active branch history up to firstKept, not just preparation's
+          // slice, and force firstKept to keep only ~10 recent turns as
+          // verbatim. Active branch only — never getEntries() which scans
+          // all branches and would contaminate branch B with branch A's
+          // history.
           try {
             const sm: any = (ctx as any)?.sessionManager;
-            if (sm?.getEntries) {
-              const all: any[] = sm.getEntries();
-              // Find firstKept index and keep only last 10 messages as recent
-              const firstKeptIdx = all.findIndex((e: any) => e?.id === preparation.firstKeptEntryId);
-              if (firstKeptIdx > 10) {
-                const keepFrom = Math.max(0, all.length - 10);
-                const toArchive = all.slice(0, keepFrom).map((e: any) => e?.message).filter(Boolean);
-                if (toArchive.length > messages.length) return toArchive;
-              }
+            const all: any[] = getActiveEntries(sm);
+            // Find firstKept index and keep only last 10 messages as recent
+            const firstKeptIdx = all.findIndex((e: any) => e?.id === preparation.firstKeptEntryId);
+            if (firstKeptIdx > 10) {
+              const keepFrom = Math.max(0, all.length - 10);
+              const toArchive = all.slice(0, keepFrom).map((e: any) => e?.message).filter(Boolean);
+              if (toArchive.length > messages.length) return toArchive;
             }
           } catch {}
           return messages;
@@ -182,10 +191,8 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
         const effectiveFirstKept = (() => {
           try {
             const sm: any = (ctx as any)?.sessionManager;
-            if (sm?.getEntries) {
-              const all: any[] = sm.getEntries();
-              if (all.length > 10) return all[all.length - 10].id ?? preparation.firstKeptEntryId;
-            }
+            const all: any[] = getActiveEntries(sm);
+            if (all.length > 10) return all[all.length - 10].id ?? preparation.firstKeptEntryId;
           } catch {}
           return preparation.firstKeptEntryId;
         })();
@@ -239,18 +246,15 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
   ]);
 
   ext.handlers.set("session_compact", [
-    async (event: any, ctx: any) => {
-      const compactionEntry = event?.compactionEntry;
-      if (!pendingFirstKeptReparentId || !compactionEntry || !ctx?.sessionManager) return;
-      const targetId = pendingFirstKeptReparentId;
-      pendingFirstKeptReparentId = null;
-      try {
-        const sm: any = ctx.sessionManager;
-        const firstKept: any = sm.byId?.get?.(targetId) ?? sm.getEntry?.(targetId);
-        if (!firstKept) return;
-        if (firstKept.parentId === compactionEntry.id) return;
-        firstKept.parentId = compactionEntry.id;
-      } catch {}
+    async (event: any, _ctx: any) => {
+      // No direct SessionManager mutation. The active branch already
+      // contains firstKept as an ancestor of the compaction (appendCompaction
+      // makes the compaction a child of the previous leaf), so
+      // buildContextEntries includes it without reparenting. Direct
+      // parentId mutation would also risk connecting branches that should
+      // remain independent and would not survive a SessionManager reload
+      // without a file rewrite.
+      if (pendingFirstKeptReparentId) pendingFirstKeptReparentId = null;
     },
   ]);
 

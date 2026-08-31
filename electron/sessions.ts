@@ -76,7 +76,7 @@ export class SessionIndex {
       // Recursive watch is unavailable on some platforms. The safety scan below
       // still guarantees eventual consistency without a hot polling loop.
     }
-    this.safetyTimer ??= setInterval(() => void this.rescan(true), 2_000);
+    this.safetyTimer ??= setInterval(() => void this.rescan(true), 15_000);
     this.safetyTimer.unref();
   }
 
