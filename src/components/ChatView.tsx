@@ -81,17 +81,13 @@ function summarizeTurnTools(tools: Array<Extract<ChatItem, { kind: "tool" }>>): 
   }
   const reads = readFiles.size || readOps;
   const edits = editedFiles.size || editOps;
-  const readLabel = readFiles.size ? `${reads} ${reads === 1 ? "file" : "files"}` : `${reads} ${reads === 1 ? "read" : "reads"}`;
-  const editLabel = editedFiles.size ? `${edits} ${edits === 1 ? "file" : "files"}` : `${edits} ${edits === 1 ? "edit" : "edits"}`;
   const parts: string[] = [];
-  if (reads) parts.push(readFiles.size ? `Read ${readLabel}` : `Read ${readLabel}`);
-  if (edits) parts.push(editedFiles.size ? `Changed ${editLabel}` : `Made ${editLabel}`);
-  if (commands) parts.push(`Ran ${commands} ${commands === 1 ? "command" : "commands"}`);
-  if (other) parts.push(`Used ${other} ${other === 1 ? "tool" : "tools"}`);
+  if (reads) parts.push(`${reads} read${reads === 1 ? "" : "s"}`);
+  if (edits) parts.push(`${edits} edit${edits === 1 ? "" : "s"}`);
+  if (commands) parts.push(`${commands} command${commands === 1 ? "" : "s"}`);
+  if (other) parts.push(`${other} tool${other === 1 ? "" : "s"}`);
   if (parts.length === 0) return "Worked";
-  if (parts.length === 1) return parts[0];
-  if (parts.length === 2) return `${parts[0]} and ${parts[1].toLowerCase()}`;
-  return `${parts.slice(0, -1).join(", ")}, and ${parts[parts.length - 1].toLowerCase()}`;
+  return parts.join(" \u00B7 ");
 }
 
 export default function ChatView({
@@ -308,13 +304,13 @@ export default function ChatView({
                   <button
                     type="button"
                     aria-expanded="false"
-                    aria-label={`Expand turn: ${foldForUser.label}`}
+                    aria-label={`Expand ${foldForUser.hiddenCount} hidden steps: ${foldForUser.label}`}
                     onClick={() => setExpandedTurns((prev) => { const n = new Set(prev); n.add(foldForUser.turnId); return n; })}
                     className="my-1 flex w-full items-center gap-2 rounded-md border border-dashed border-line bg-inset/50 px-3 py-1.5 text-left text-[12.5px] text-dim hover:border-line-strong hover:text-fg"
                   >
                     <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--dim)]" aria-hidden />
-                    <span>{foldForUser.label}</span>
-                    <span className="ml-auto text-[11px]">{foldForUser.hiddenCount} steps hidden — click to expand</span>
+                    <span className="truncate">{foldForUser.label}</span>
+                    <span className="ml-auto shrink-0 text-[11px]">{foldForUser.hiddenCount} hidden</span>
                   </button>
                 ) : foldForUser && !isCollapsed ? (
                   <button
