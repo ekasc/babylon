@@ -146,10 +146,14 @@ function renderTextWithMath(text: string, keyBase: string): ReactNode[] {
   return nodes;
 }
 
+function escapeMarkdownCell(text: string): string {
+  return text.replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\n/g, " ").replace(/\r/g, "");
+}
+
 function MarkdownTable({ children, ...props }: React.ComponentProps<"table">) {
   const tableRef = useRef<HTMLTableElement>(null);
   const [expanded, setExpanded] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const [copiedFormat, setCopiedFormat] = useState<string | null>(null);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleCopy = (format: "markdown" | "csv") => {
     const table = tableRef.current;
@@ -160,20 +164,25 @@ function MarkdownTable({ children, ...props }: React.ComponentProps<"table">) {
     if (!rows.length) return;
     let textOut = "";
     if (format === "markdown") {
-      textOut = rows.map((r) => `| ${r.join(" | ")} |`).join("\n");
-      if (rows.length > 1) textOut = [textOut.split("\n")[0], `| ${rows[0].map(() => "---").join(" | ")} |`, ...textOut.split("\n").slice(1)].join("\n");
+      const escaped = rows.map((r) => r.map(escapeMarkdownCell));
+      textOut = escaped.map((r) => `| ${r.join(" | ")} |`).join("\n");
+      const header = escaped[0];
+      if (header) {
+        const separator = `| ${header.map(() => "---").join(" | ")} |`;
+        textOut = `${escaped.map((r) => `| ${r.join(" | ")} |`).join("\n").split("\n")[0]}\n${separator}` + (escaped.length > 1 ? `\n${escaped.slice(1).map((r) => `| ${r.join(" | ")} |`).join("\n")}` : "");
+      }
     } else {
       textOut = rows.map((r) => r.map((c) => `"${c.replace(/"/g, '""')}"`).join(",")).join("\n");
     }
     void navigator.clipboard.writeText(textOut).then(() => {
-      setCopied(true);
+      setCopiedFormat(format);
       if (copyTimer.current) clearTimeout(copyTimer.current);
-      copyTimer.current = setTimeout(() => setCopied(false), 1200);
-    });
+      copyTimer.current = setTimeout(() => setCopiedFormat(null), 1200);
+    }).catch(() => {});
   };
   useEffect(() => () => { if (copyTimer.current) clearTimeout(copyTimer.current); }, []);
   return (
-    <div className="my-3 overflow-hidden rounded-lg border border-line bg-[var(--raised)]">
+    <div className="my-3 overflow-hidden rounded-lg border border-line bg-[var(--raised)]" data-expanded={expanded ? "true" : "false"}>
       <div className="overflow-x-auto">
         <table ref={tableRef} {...props} className="w-full text-[13px]" style={{ border: 0, margin: 0, borderRadius: 0 }}>
           {children}
@@ -183,9 +192,14 @@ function MarkdownTable({ children, ...props }: React.ComponentProps<"table">) {
         <button onClick={() => setExpanded((v) => !v)} aria-pressed={expanded} className="rounded px-2 py-1 text-[11px] text-dim hover:text-fg">
           {expanded ? "Collapse cells" : "Expand cells"}
         </button>
-        <button onClick={() => handleCopy(expanded ? "csv" : "markdown")} className="rounded px-2 py-1 text-[11px] text-dim hover:text-fg">
-          {copied ? "Copied" : expanded ? "Copy as CSV" : "Copy as Markdown"}
-        </button>
+        <div className="flex items-center gap-1">
+          <button onClick={() => handleCopy("markdown")} className="rounded px-2 py-1 text-[11px] text-dim hover:text-fg">
+            {copiedFormat === "markdown" ? "Copied" : "Copy Markdown"}
+          </button>
+          <button onClick={() => handleCopy("csv")} className="rounded px-2 py-1 text-[11px] text-dim hover:text-fg">
+            {copiedFormat === "csv" ? "Copied" : "Copy CSV"}
+          </button>
+        </div>
       </div>
     </div>
   );

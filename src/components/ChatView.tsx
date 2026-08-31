@@ -51,22 +51,41 @@ interface Props {
 }
 
 function summarizeTurnTools(tools: Array<Extract<ChatItem, { kind: "tool" }>>): string {
-  let reads = 0;
-  let edits = 0;
+  const readFiles = new Set<string>();
+  const editedFiles = new Set<string>();
+  let readOps = 0;
+  let editOps = 0;
   let commands = 0;
   let other = 0;
   for (const t of tools) {
     const details: any = (t as any).details;
+    const args: any = (t as any).args;
     const hasPatch = typeof details?.patch === "string" && details.patch.trim().length > 0;
     const name = (t.name ?? "").toLowerCase();
-    if (hasPatch || name.includes("edit") || name.includes("write")) edits++;
-    else if (name === "bash" || name.includes("bash") || name.includes("shell") || name.includes("command")) commands++;
-    else if (name.includes("read") || name.includes("grep") || name.includes("glob")) reads++;
-    else other++;
+    const filePath: string | null =
+      (typeof args?.file_path === "string" && args.file_path) ||
+      (typeof args?.path === "string" && args.path) ||
+      (typeof details?.file === "string" && details.file) ||
+      null;
+    if (hasPatch || name.includes("edit") || name.includes("write")) {
+      editOps++;
+      if (filePath) editedFiles.add(filePath);
+    } else if (name === "bash" || name.includes("bash") || name.includes("shell") || name.includes("command")) {
+      commands++;
+    } else if (name.includes("read") || name.includes("grep") || name.includes("glob")) {
+      readOps++;
+      if (filePath) readFiles.add(filePath);
+    } else {
+      other++;
+    }
   }
+  const reads = readFiles.size || readOps;
+  const edits = editedFiles.size || editOps;
+  const readLabel = readFiles.size ? `${reads} ${reads === 1 ? "file" : "files"}` : `${reads} ${reads === 1 ? "read" : "reads"}`;
+  const editLabel = editedFiles.size ? `${edits} ${edits === 1 ? "file" : "files"}` : `${edits} ${edits === 1 ? "edit" : "edits"}`;
   const parts: string[] = [];
-  if (reads) parts.push(`Read ${reads} ${reads === 1 ? "file" : "files"}`);
-  if (edits) parts.push(`Changed ${edits} ${edits === 1 ? "file" : "files"}`);
+  if (reads) parts.push(readFiles.size ? `Read ${readLabel}` : `Read ${readLabel}`);
+  if (edits) parts.push(editedFiles.size ? `Changed ${editLabel}` : `Made ${editLabel}`);
   if (commands) parts.push(`Ran ${commands} ${commands === 1 ? "command" : "commands"}`);
   if (other) parts.push(`Used ${other} ${other === 1 ? "tool" : "tools"}`);
   if (parts.length === 0) return "Worked";
@@ -90,7 +109,6 @@ export default function ChatView({
 }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
-  const lastUserScrollAt = useRef(0);
   const prevHeight = useRef(0);
   const prevFirstKey = useRef<string | null>(null);
   const onNeedEarlierRef = useRef(onNeedEarlier);
@@ -107,13 +125,7 @@ export default function ChatView({
     if (!el) return;
     const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
     if (dist < 24) stick.current = true;
-    else if (dist > 80) {
-      stick.current = false;
-      lastUserScrollAt.current = Date.now();
-    } else {
-      // Slow scroll in the 24-80px band: treat as intentional read, pause auto-scroll briefly
-      lastUserScrollAt.current = Date.now();
-    }
+    else stick.current = false;
     // Scroll-up streaming: near the top of the loaded region, ask for the next
     // older window. The App guards against duplicate concurrent fetches.
     if (el.scrollTop < 400 && canLoadMoreRef.current) {
@@ -131,9 +143,7 @@ export default function ChatView({
     const frame = requestAnimationFrame(() => {
       if (!el) return;
       if (stick.current) {
-        if (Date.now() - lastUserScrollAt.current > 700) {
-          el.scrollTop = el.scrollHeight;
-        }
+        el.scrollTop = el.scrollHeight;
       } else if (prepended && before > 0) {
         // Older messages were inserted above the viewport: keep the visible
         // content in place by shifting the scroll position by the inserted
@@ -189,7 +199,7 @@ export default function ChatView({
       const start = userIndices[t];
       const end = t + 1 < userIndices.length ? userIndices[t + 1] : shown.length;
       const isLatest = t === userIndices.length - 1;
-      if (isLatest) continue;
+      if (isLatest && streaming) continue;
       const slice = shown.slice(start + 1, end);
       const tools = slice.filter((it) => it.kind === "tool") as Array<Extract<ChatItem, { kind: "tool" }>>;
       const hasAssistant = slice.some((it) => it.kind === "assistant");
@@ -292,22 +302,17 @@ export default function ChatView({
                   })()}
                 </div>
                 {foldForUser && isCollapsed ? (
-                  <>
-                    <button
-                      type="button"
-                      aria-expanded="false"
-                      aria-label={`Expand turn: ${foldForUser.label}`}
-                      onClick={() => setExpandedTurns((prev) => { const n = new Set(prev); n.add(foldForUser.turnId); return n; })}
-                      className="my-1 flex w-full items-center gap-2 rounded-md border border-dashed border-line bg-inset/50 px-3 py-1.5 text-left text-[12.5px] text-dim hover:border-line-strong hover:text-fg"
-                    >
-                      <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--dim)]" aria-hidden />
-                      <span>{foldForUser.label}</span>
-                      <span className="ml-auto text-[11px]">{foldForUser.hiddenCount} steps hidden — click to expand</span>
-                    </button>
-                    {cards.get(foldForUser.end - 1) ? (
-                      <TurnChanges turn={cards.get(foldForUser.end - 1)!} isLatest={latestChanged?.entryId === cards.get(foldForUser.end - 1)!.entryId} />
-                    ) : null}
-                  </>
+                  <button
+                    type="button"
+                    aria-expanded="false"
+                    aria-label={`Expand turn: ${foldForUser.label}`}
+                    onClick={() => setExpandedTurns((prev) => { const n = new Set(prev); n.add(foldForUser.turnId); return n; })}
+                    className="my-1 flex w-full items-center gap-2 rounded-md border border-dashed border-line bg-inset/50 px-3 py-1.5 text-left text-[12.5px] text-dim hover:border-line-strong hover:text-fg"
+                  >
+                    <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--dim)]" aria-hidden />
+                    <span>{foldForUser.label}</span>
+                    <span className="ml-auto text-[11px]">{foldForUser.hiddenCount} steps hidden — click to expand</span>
+                  </button>
                 ) : foldForUser && !isCollapsed ? (
                   <button
                     type="button"

@@ -18,8 +18,8 @@ export default memo(function BashCard({ item }: BashCardProps) {
   const truncatedCmd = command.length > 80 ? command.slice(0, 80) + "…" : command;
   const output = fullOutput ?? item.output ?? "";
   const hasOutput = output.trim().length > 0;
-  const hasPatch = typeof item.details?.patch === "string" && item.details.patch.trim().length > 0;
   const patch = item.details?.patch ?? item.details?.diff;
+  const hasPatch = typeof patch === "string" && patch.trim().length > 0;
   const isRunning = item.status === "running" || b.status === "running";
   const isError = item.status === "error" || b.status === "failed" || b.status === "signaled" || (b.exitCode !== undefined && b.exitCode !== 0);
 
