@@ -14,6 +14,8 @@
     "smoke": "PIDECK_HEADLESS=1 PIDECK_SMOKE=4000 pnpm start",
     "bench:build": "node scripts/build-bench.mjs",
     "bench:snapshot": "node scripts/bench-snapshot.mjs",
+    "bench:snapcompact": "tsx scripts/snapcompact-bench.mjs",
+    "eval:snapcompact": "tsx scripts/snapcompact-eval.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

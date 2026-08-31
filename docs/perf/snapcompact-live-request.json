@@ -1,0 +1,121 @@
+{
+  "rollout-recovery": {
+    "fixtureId": "rollout-recovery",
+    "description": "Long coding session: snapshot recovery, runtime-ownership decision, daemon fixes, CI.",
+    "headerText": "[Snapcompact archive] profile=generic-vision\nframes=2 imageTokens~=1530\n--- archive head ---\n¶user\nship a recursive worktree watcher for the snapshot store\n\n¶assistant\nPlan: use `fs.watch` on the project root, ignore `.git` and the snapshot storage dir.\n¶tool bash\n{\"command\":\"ls electron/snapshot-store.ts\"}\n\n¶tool bash\n¶result\n[E011]\n\n¶user\nwhat file owns authoritative snapshot capture?\n\n¶assistant\n¶thinking\nI need to be precise.\n[E011] owns `SnapshotStore.captureInner`.\n\n¶user\nbranch it and write a test for the noop fast path\n\n¶assistant\nBranch name: feat/snapopt. Test fixture: 2000-file repo, write 1 file, capture twice.\n¶tool bash\n{\"command\":\"git checkout -b [E009]\"}\n\n¶tool bash\n¶result\nSwitched to a new branch '[E009]'\n\n¶user\nthe user said do not summarize with an LLM for the snapshot pipeline. enforce that.\n\n¶assistant\nAcknowledged: snapshot generation must remain local and deterministic. No LLM call in the capture path.\n\n¶user\nfix the disconnect-blip ownership bug: process-spawn and task-spawn fall back to local state when the daemon is owned but the socket is down.\n\n¶assistant\nUse `isDaemonOwned()` for the branch, `requireDaemonClient()` for the request. Throw on disconnected rather than fall back.\n\n¶user\nadd a PiHost-level regression that reproduces the destructive\n--- archive tail ---\n process-spawn and task-spawn fall back to local state when the daemon is owned but the socket is down.\n\n¶assistant\nUse `isDaemonOwned()` for the branch, `requireDaemonClient()` for the request. Throw on disconnected rather than fall back.\n\n¶user\nadd a PiHost-level regression that reproduces the destructive rollback race.\n\n¶assistant\nPattern: agent writes B, user immediately writes C, prepareRollback then commitRollback. The drift guard inside commitRollback must see C and refuse.\n\n¶user\nwhat was the git sha of the commit that introduced the reconciliation loop fix?\n\n¶assistant\nThe reconciliation loop fix landed in commit 3335ebf (Fix reconciliation, untracked discovery, and oversize transition semantics).\n\n¶user\npin the exact Pi version for CI\n\n¶assistant\nPinned @earendil-works/pi-coding-agent@0.84.3 in the workflow. Install globally with --ignore-scripts then run scripts/link-pi.mjs.\n\n¶user\nwhat command reproduces the test failure?\n\n¶assistant\npnpm run bench:snapshot -- --scales 10000,50000,100000 --iterations 3 --worktree-scale 5000\n\n¶user\nwhat port did we use for the local-only stub?\n\n¶assistant\nNo external port; the tests bind ephemeral ports via net.createServer(). 0.0.0.0:0.\n--- exact-token dictionary ---\nE001=0.84.3\nE002=0.0.0\nE003=3335ebf\nE004=the\nE005=it\nE006=name\nE007=-b\nE008=a\nE009=feat/snapopt\nE010=disconnected\nE011=electron/snapshot-store.ts\nE012=scripts/link-pi.mjs\nE013=git checkout -b feat/snapopt\"}\nE014=git sha of the commit that introduced the reconciliation loop fix?\nE015=pnpm run bench:snapshot -- --scales 10000,50000,100000 --iterations 3 --worktree-scale 5000\n--- end snapcompact ---",
+    "frames": [
+      {
+        "index": 0,
+        "width": 1024,
+        "height": 1024,
+        "base64": "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",
+        "lineStart": 0,
+        "lineEnd": 61,
+        "carriesOmission": false
+      },
+      {
+        "index": 1,
+        "width": 1024,
+        "height": 1024,
+        "base64": "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",
+        "lineStart": 62,
+        "lineEnd": 81,
+        "carriesOmission": false
+      }
+    ],
+    "dictionaryText": "E001=0.84.3\nE002=0.0.0\nE003=3335ebf\nE004=the\nE005=it\nE006=name\nE007=-b\nE008=a\nE009=feat/snapopt\nE010=disconnected\nE011=electron/snapshot-store.ts\nE012=scripts/link-pi.mjs\nE013=git checkout -b feat/snapopt\"}\nE014=git sha of the commit that introduced the reconciliation loop fix?\nE015=pnpm run bench:snapshot -- --scales 10000,50000,100000 --iterations 3 --worktree-scale 5000",
+    "archiveCoverage": {
+      "firstKeptEntryId": "u0",
+      "lastKeptEntryId": "a21",
+      "keptCount": 22,
+      "omittedCount": 0
+    },
+    "questions": [
+      {
+        "id": "q1",
+        "kind": "path",
+        "prompt": "Which file owns authoritative snapshot capture?",
+        "exact": [
+          "electron/snapshot-store.ts"
+        ]
+      },
+      {
+        "id": "q2",
+        "kind": "identifier",
+        "prompt": "Which function owns authoritative snapshot capture?",
+        "exact": [
+          "captureInner",
+          "SnapshotStore.captureInner"
+        ]
+      },
+      {
+        "id": "q3",
+        "kind": "identifier",
+        "prompt": "Which class owns it?",
+        "exact": [
+          "SnapshotStore"
+        ]
+      },
+      {
+        "id": "q4",
+        "kind": "branch",
+        "prompt": "What branch was created for the optimization work?",
+        "exact": [
+          "feat/snapopt"
+        ]
+      },
+      {
+        "id": "q5",
+        "kind": "sha",
+        "prompt": "What git sha introduced the reconciliation loop fix?",
+        "exact": [
+          "3335ebf"
+        ]
+      },
+      {
+        "id": "q6",
+        "kind": "version",
+        "prompt": "What exact Pi version was pinned in CI?",
+        "exact": [
+          "0.84.3"
+        ]
+      },
+      {
+        "id": "q7",
+        "kind": "port",
+        "prompt": "What port did the test use for the local-only stub?",
+        "exact": [
+          "0",
+          "0.0.0.0:0"
+        ]
+      },
+      {
+        "id": "q8",
+        "kind": "command",
+        "prompt": "What command reproduces the snapshot benchmark?",
+        "exact": [
+          "pnpm run bench:snapshot"
+        ]
+      },
+      {
+        "id": "q9",
+        "kind": "rule",
+        "prompt": "What rule did the user give about LLM use for snapshots?",
+        "exact": [
+          "no LLM",
+          "do not summarize",
+          "no llm",
+          "must remain local",
+          "no llm in the capture path"
+        ]
+      },
+      {
+        "id": "q10",
+        "kind": "semantic",
+        "prompt": "What was the early implementation decision about the worktree watcher ignore list?",
+        "semanticAnswer": "The watcher should ignore .git and the snapshot storage directory so changes there do not mark the worktree dirty."
+      }
+    ],
+    "totalRequestBytes": 12597
+  }
+}

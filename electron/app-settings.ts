@@ -38,6 +38,19 @@ export interface PiSettings {
   daemon?: {
     enabled?: boolean;
   };
+  /**
+   * Compaction strategy. "automatic" picks snapcompact when the active
+   * model supports images and a current snapcompact archive exists, and
+   * the existing textual compaction otherwise. "summary" forces the
+   * existing textual path. "snapcompact" forces the bitmap archive path
+   * (falls back to summary if the model cannot consume images or no
+   * archive is available).
+   *
+   * Default is "summary" so existing users see no behavior change.
+   */
+  compaction?: {
+    mode?: "automatic" | "summary" | "snapcompact";
+  };
   /** Appearance preferences. */
   appearance?: {
     useSystemFonts?: boolean;
@@ -66,6 +79,7 @@ const EMPTY: PiSettings = {
   gitCommitModel: DEFAULT_GIT_COMMIT_MODEL,
   gitCommitPrompt: DEFAULT_GIT_COMMIT_PROMPT,
   appearance: { useSystemFonts: true, monoFontFamily: "system" },
+  compaction: { mode: "summary" },
 };
 
 let cache: PiSettings | null = null;
@@ -94,6 +108,7 @@ export function getSettings(): PiSettings {
         ...parsed,
         contextWindowOverrides: parsed.contextWindowOverrides ?? {},
         appearance: { ...EMPTY.appearance, ...(parsed.appearance ?? {}) },
+        compaction: { ...EMPTY.compaction, ...(parsed.compaction ?? {}) },
       };
       return cache;
     }
