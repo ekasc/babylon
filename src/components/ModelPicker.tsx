@@ -14,6 +14,8 @@ interface Props {
   models: Model[];
   current?: Model | null;
   disabled?: boolean;
+  align?: "left" | "right";
+  wide?: boolean;
   onSelect(provider: string, modelId: string): void;
 }
 
@@ -38,7 +40,7 @@ interface Group {
   models: Model[];
 }
 
-export default function ModelPicker({ models, current, disabled, onSelect }: Props) {
+export default function ModelPicker({ models, current, disabled, align = "left", wide, onSelect }: Props) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [hi, setHi] = useState(0);
@@ -241,20 +243,23 @@ export default function ModelPicker({ models, current, disabled, onSelect }: Pro
       </button>
 
       {open && (
-        <div className="operator-popover absolute bottom-full left-0 z-50 mb-2 w-[460px] max-w-[calc(100vw-32px)] overflow-hidden p-1.5">
+        <>
+          {wide && <div className="fixed inset-0 z-40 bg-black/20" onClick={() => setOpen(false)} aria-hidden />}
+          <div className={`operator-popover absolute top-full ${align === "right" ? "right-0" : "left-0"} z-50 mt-2 overflow-hidden p-1.5 ${wide ? "w-[560px] max-w-[min(560px,calc(100vw-24px))] rounded-xl border border-white/15 bg-[#0F0F0F] shadow-2xl flex flex-col max-h-[min(560px,calc(100vh-80px))]" : "w-[460px] max-w-[calc(100vw-32px)]"}`}>
+            {wide && <div className="pointer-events-none absolute -top-1.5 right-[140px] h-3 w-3 rotate-45 border-l border-t border-white/15 bg-[#0F0F0F]" aria-hidden />}
           <div className="border-b border-line/60 p-2">
             <input
               ref={searchRef}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search all providers…"
+              placeholder="Search…"
               aria-label="Search models"
-              className="text-input"
+              className="w-full rounded-md border border-white/10 bg-transparent px-2.5 py-1.5 text-[12px] placeholder:text-white/40 outline-none focus:border-white/15"
             />
           </div>
           {!searching && tabs.length > 0 ? (
-            <div className="flex h-[340px]">
-              <div role="tablist" aria-label="Providers" className="w-[128px] shrink-0 overflow-y-auto border-r border-line/60 py-1">
+            <div className={wide ? "flex flex-1 min-h-0" : "flex h-[340px]"}>
+              <div role="tablist" aria-label="Providers" className={wide ? "w-[150px] shrink-0 overflow-y-auto border-r border-white/10 bg-white/[0.02] py-2" : "w-[128px] shrink-0 overflow-y-auto border-r border-line/60 py-1"}>
                 {tabs.map((t) => {
                   const selected = t.label === activeLabel;
                   return (
@@ -361,6 +366,7 @@ export default function ModelPicker({ models, current, disabled, onSelect }: Pro
             </div>
           )}
         </div>
+        </>
       )}
     </div>
   );

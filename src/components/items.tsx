@@ -115,15 +115,19 @@ export const LaunchCard = memo(function LaunchCard({ item, onOpen }: { item: Ext
       title={`Open ${runKind} ${runId} in Activity — click to view`}
       className={`conversation-launch my-3 flex w-full items-center gap-3 rounded-xl border ${border} bg-inset/60 px-3.5 py-2.5 text-left shadow-sm backdrop-blur-sm transition-all duration-150 hover:bg-inset hover:shadow-md hover:border-accent/20 active:scale-[0.99]`}
     >
-      <span className={`grid h-7 w-7 shrink-0 place-items-center rounded-full text-[11px] font-bold leading-none ${iconBg}`} aria-hidden="true">
-        {runKind === "subagent" ? "◈" : runKind === "thread" ? "⬢" : "⬣"}
+      <span className="relative grid h-7 w-7 shrink-0 place-items-center" aria-hidden="true">
+        {isRunning && <span className="absolute inset-0 rounded-full bg-accent/20 animate-ping" />}
+        <span className={`relative grid h-7 w-7 place-items-center rounded-full text-[11px] font-bold leading-none ${iconBg} ${isRunning ? "animate-pulse" : ""}`}>
+          {runKind === "subagent" ? "◈" : runKind === "thread" ? "⬢" : "⬣"}
+        </span>
       </span>
       <span className="flex min-w-0 flex-1 flex-col gap-0.5 text-left">
         <span className="flex items-center gap-2">
           <span className="text-[13px] font-semibold capitalize tracking-tight text-fg">{runKind}</span>
-          <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10.5px] font-semibold tracking-wide ${isRunning ? "bg-accent-soft text-accent" : status === "completed" ? "bg-ok/10 text-ok" : status === "failed" ? "bg-err/10 text-err" : "bg-inset text-dim"}`}>
-            <span className={`inline-block h-1.5 w-1.5 rounded-full ${dot}`} />
+          <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[10.5px] font-semibold tracking-wide ${isRunning ? "bg-accent-soft text-accent" : status === "completed" ? "bg-ok/10 text-ok" : status === "failed" ? "bg-err/10 text-err" : "bg-inset text-dim"}`}>
+            {isRunning ? <span className="h-3 w-3 animate-spin rounded-full border-2 border-accent border-t-transparent" aria-hidden="true" /> : <span className={`inline-block h-1.5 w-1.5 rounded-full ${dot}`} />}
             {verb}
+            {isRunning && <span className="ml-1 inline-flex gap-0.5" aria-hidden="true"><span className="h-1 w-1 animate-bounce rounded-full bg-accent" style={{animationDelay:"0ms"}} /><span className="h-1 w-1 animate-bounce rounded-full bg-accent" style={{animationDelay:"150ms"}} /><span className="h-1 w-1 animate-bounce rounded-full bg-accent" style={{animationDelay:"300ms"}} /></span>}
           </span>
         </span>
         <span className="truncate font-mono text-[12.5px] leading-none text-dim" title={label}>{label}</span>

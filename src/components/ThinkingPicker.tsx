@@ -15,10 +15,11 @@ interface Props {
   current: string;
   available?: string[]; // levels the model supports; if empty, assume all
   disabled?: boolean;
+  align?: "left" | "right";
   onSelect(level: string): void;
 }
 
-export default function ThinkingPicker({ current, available, disabled, onSelect }: Props) {
+export default function ThinkingPicker({ current, available, disabled, align = "left", onSelect }: Props) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -51,7 +52,7 @@ export default function ThinkingPicker({ current, available, disabled, onSelect 
         onClick={() => setOpen((v) => !v)}
         disabled={disabled}
         title="Reasoning level"
-        className="operator-meta-control flex h-8 items-center gap-1.5 px-2.5 text-[13px] disabled:opacity-50"
+        className="operator-meta-control flex h-8 items-center gap-1.5 px-2.5 text-[13px] disabled:opacity-50 border border-white/10 bg-white/[0.04] hover:bg-white/[0.07] rounded-md"
       >
         <BoltIcon size={12} className="shrink-0 text-dim" />
         <span className="shrink-0">{meta.label}</span>
@@ -59,7 +60,7 @@ export default function ThinkingPicker({ current, available, disabled, onSelect 
       </button>
 
       {open && (
-        <div className="operator-popover absolute bottom-full left-0 z-50 mb-2 w-[280px] overflow-hidden px-1.5 py-1.5">
+        <div className={`operator-popover absolute top-full ${align === "right" ? "right-0" : "left-0"} z-50 mt-2 w-[280px] max-w-[calc(100vw-32px)] overflow-hidden px-1.5 py-1.5`}>
           {levels.map((l) => {
             const m = LEVEL_META[l];
             const active = l === current;

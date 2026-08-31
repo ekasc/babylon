@@ -644,7 +644,9 @@ export class PiHost {
     const file = session?.sessionFile;
     if (!file || !session.sessionManager) return;
     if (session.isStreaming) return;
+    if (this.managedSubagents?.hasAnyActive()) return;
     if (this.managedSubagents?.hasActiveForSession(session.sessionId)) return;
+    if (await this.hasAnyActiveThreads()) return;
     if (await this.hasActiveThreadsForSession(session.sessionId)) return;
     const intervalMs = Number(process.env.PIDECK_RECAP_MS) || RECAP_INTERVAL_MS;
     const cached = this.lastMessageAt.get(file);
@@ -659,7 +661,9 @@ export class PiHost {
   private async maybeRecap(session: AgentSession, file: string): Promise<void> {
     if (this.recapping.has(file)) return;
     if (session.isStreaming) return;
+    if (this.managedSubagents?.hasAnyActive()) return;
     if (this.managedSubagents?.hasActiveForSession(session.sessionId)) return;
+    if (await this.hasAnyActiveThreads()) return;
     if (await this.hasActiveThreadsForSession(session.sessionId)) return;
     this.recapping.add(file);
     try {
@@ -1550,6 +1554,24 @@ export class PiHost {
           const raw = await fsp.readFile(path, "utf8");
           const state = JSON.parse(raw);
           if (state?.parentSessionId !== sessionId) continue;
+          const status = state?.status as string | undefined;
+          if (status && !["completed", "failed", "stopped"].includes(status)) return true;
+        } catch {}
+      }
+    } catch {}
+    return false;
+  }
+
+  private async hasAnyActiveThreads(): Promise<boolean> {
+    try {
+      const dir = join(this.cwd, ".pi", "state", "threads");
+      const entries: any[] = (await (fsp as any).readdir(dir, { withFileTypes: true }).catch(() => [])) as any[];
+      for (const entry of entries) {
+        if (!entry.isDirectory?.()) continue;
+        const path = join(dir, entry.name, "thread.json");
+        try {
+          const raw = await fsp.readFile(path, "utf8");
+          const state = JSON.parse(raw);
           const status = state?.status as string | undefined;
           if (status && !["completed", "failed", "stopped"].includes(status)) return true;
         } catch {}

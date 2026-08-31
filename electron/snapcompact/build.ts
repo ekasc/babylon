@@ -78,6 +78,7 @@ export function buildArchive(input: BuildArchiveInput): BuildArchiveResult {
   const serializedNew = serializeTranscript({
     messages: input.messages,
     totalBudget: profile.maxSourceChars,
+    perToolResultBudget: 16000,
   });
   // Cumulative rollover: if a previous snapcompact generation exists on
   // this branch, rebuild from its normalized source + the newly discarded

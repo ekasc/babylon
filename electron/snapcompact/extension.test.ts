@@ -421,4 +421,25 @@ describe("snapcompact Pi extension (session_before_compact + context)", () => {
     expect(idxSplit).toBeGreaterThanOrEqual(0);
     expect(idxOlder).toBeLessThan(idxSplit);
   });
+
+  it("split-turn ordering: archive built from messagesToSummarize before turnPrefixMessages", async () => {
+    const ext = buildExt();
+    const beforeHandler = ext.handlers.get("session_before_compact")![0] as any;
+    const sm = makeSessionManager();
+    const prep = {
+      firstKeptEntryId: "u1",
+      messagesToSummarize: [userMsg("older history", "u-old")],
+      turnPrefixMessages: [userMsg("split turn prefix", "u-split")],
+      tokensBefore: 100,
+    };
+    const result = await beforeHandler({ preparation: prep }, { sessionManager: sm });
+    // Load the archive and verify ordering: older history appears before split prefix
+    const archive = await store.load(sessionFile);
+    expect(archive).not.toBeNull();
+    const idxOlder = archive!.sourceText.indexOf("older history");
+    const idxSplit = archive!.sourceText.indexOf("split turn prefix");
+    expect(idxOlder).toBeGreaterThanOrEqual(0);
+    expect(idxSplit).toBeGreaterThanOrEqual(0);
+    expect(idxOlder).toBeLessThan(idxSplit);
+  });
 });

@@ -117,6 +117,7 @@ function findSnapcompactCompactionEntry(sessionManager: any): any | null {
 
 export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): Extension {
   const ext = buildMinimalExtension();
+  let pendingFirstKeptReparentId: string | null = null;
 
   ext.handlers.set("session_before_compact", [
     async (event: any, ctx: any) => {
@@ -152,7 +153,56 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
       } catch { /* ignore, treat as first compaction */ }
       let result;
       try {
-        result = buildArchive({ sessionId: opts.getSessionId(), sessionFile: deriveSessionFile(opts), messages, profile, previousArchive });
+        // Concrete fix for "entire session" expectation: the first snapcompact
+        // after enabling must archive the whole history, not just the 60k most-
+        // recent of the older part. Use a large budget and keep only the last
+        // ~10 turns verbatim, so 1000+ older tool results don't get dropped as
+        // `omittedTrailing:total-budget`.
+        const isFirstSnapcompact = !previousArchive;
+        const buildProfile = { ...profile, maxSourceChars: 20_000_000 };
+        const buildMessages = (() => {
+          // For the very first generation, expand messages to the entire
+          // session history up to firstKept, not just preparation's slice,
+          // and force firstKept to keep only ~10 recent turns as verbatim.
+          try {
+            const sm: any = (ctx as any)?.sessionManager;
+            if (sm?.getEntries) {
+              const all: any[] = sm.getEntries();
+              // Find firstKept index and keep only last 10 messages as recent
+              const firstKeptIdx = all.findIndex((e: any) => e?.id === preparation.firstKeptEntryId);
+              if (firstKeptIdx > 10) {
+                const keepFrom = Math.max(0, all.length - 10);
+                const toArchive = all.slice(0, keepFrom).map((e: any) => e?.message).filter(Boolean);
+                if (toArchive.length > messages.length) return toArchive;
+              }
+            }
+          } catch {}
+          return messages;
+        })();
+        const effectiveFirstKept = (() => {
+          try {
+            const sm: any = (ctx as any)?.sessionManager;
+            if (sm?.getEntries) {
+              const all: any[] = sm.getEntries();
+              if (all.length > 10) return all[all.length - 10].id ?? preparation.firstKeptEntryId;
+            }
+          } catch {}
+          return preparation.firstKeptEntryId;
+        })();
+        if (isFirstSnapcompact && effectiveFirstKept !== preparation.firstKeptEntryId) {
+          pendingFirstKeptReparentId = effectiveFirstKept;
+        } else {
+          pendingFirstKeptReparentId = null;
+        }
+        // Patch preparation for this one build so the resulting compaction's
+        // firstKept keeps only ~10 recent, archiving the rest.
+        const originalFirstKept = preparation.firstKeptEntryId;
+        (preparation as any).firstKeptEntryId = effectiveFirstKept;
+        try {
+          result = buildArchive({ sessionId: opts.getSessionId(), sessionFile: deriveSessionFile(opts), messages: buildMessages, profile: buildProfile, previousArchive });
+        } finally {
+          (preparation as any).firstKeptEntryId = originalFirstKept;
+        }
       } catch (err) {
         if (err instanceof ArchiveBudgetError) return undefined;
         throw err;
@@ -180,11 +230,27 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
       const summary = `[Snapcompact generation=${result.archive.compactionGenerationId}]\n${boundedFallback}`;
       const compaction: CompactionResult = {
         summary,
-        firstKeptEntryId: preparation.firstKeptEntryId,
+        firstKeptEntryId: pendingFirstKeptReparentId ?? preparation.firstKeptEntryId,
         tokensBefore: preparation.tokensBefore,
         details: { snapcompactGeneration: result.archive.compactionGenerationId, snapcompactProfile: result.archive.profileId } as any,
       };
       return { compaction };
+    },
+  ]);
+
+  ext.handlers.set("session_compact", [
+    async (event: any, ctx: any) => {
+      const compactionEntry = event?.compactionEntry;
+      if (!pendingFirstKeptReparentId || !compactionEntry || !ctx?.sessionManager) return;
+      const targetId = pendingFirstKeptReparentId;
+      pendingFirstKeptReparentId = null;
+      try {
+        const sm: any = ctx.sessionManager;
+        const firstKept: any = sm.byId?.get?.(targetId) ?? sm.getEntry?.(targetId);
+        if (!firstKept) return;
+        if (firstKept.parentId === compactionEntry.id) return;
+        firstKept.parentId = compactionEntry.id;
+      } catch {}
     },
   ]);
 
@@ -224,7 +290,11 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
       const markerIndex = event.messages.findIndex(
         (m: any) => m?.role === "compactionSummary" && m?.summary === entry.summary,
       );
-      if (markerIndex < 0) return undefined;
+      console.log(`[snapcompact] context: markerIndex=${markerIndex} eventMessages=${event.messages.length} entrySummary=${entry.summary.slice(0,60)} fbLen=${fb?.length}`);
+      if (markerIndex < 0) {
+        console.log(`[snapcompact] context: marker not found, event first 3:`, event.messages.slice(0,3).map((m:any)=>({role:m.role, summary:m.summary?.slice(0,30)})));
+        return undefined;
+      }
       const before = event.messages.slice(0, markerIndex);
       const after = event.messages.slice(markerIndex + 1);
       // If the active branch was compacted with Snapcompact, the durable
@@ -241,6 +311,7 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
         if (!fb) return undefined;
         return { messages: [...before, { role: "user", content: [{ type: "text", text: fb }] }, ...after] };
       }
+      console.log(`[snapcompact] context: found entry ${generationId} archive=${archive.compactionGenerationId} sessionId=${sessionId} archiveSessionId=${archive.sessionId} version=${archive.version} frames=${archive.frames.length} mode=${mode} model=${model?.provider}/${model?.id} input=${(model as any)?.input}`);
       const decision = pickStrategy({
         model,
         mode,
@@ -248,6 +319,7 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
         archiveProducible: true,
         archiveMatchesSession: archive.sessionId === sessionId,
       });
+      console.log(`[snapcompact] context decision: strategy=${decision.strategy} reason=${decision.reason} supportsImages=${modelSupportsImages(model as any)}`);
       if (decision.strategy !== "snapcompact") {
         if (fb) return { messages: [...before, { role: "user", content: [{ type: "text", text: fb }] }, ...after] };
         return undefined;

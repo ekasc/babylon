@@ -1,14 +1,18 @@
-import { useEffect, useMemo, useState } from "react";
-import { bridge, type ModelRef, type PiSettings } from "../bridge";
-import { applyMonoFont, applySystemFonts, applyTheme, monoStack, MONO_FONTS, type ThemePref } from "../lib/theme";
-import ModelPicker from "./ModelPicker";
-import ThinkingPicker from "./ThinkingPicker";
-import PermissionRulesSection from "./PermissionRulesSection";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { bridge, type PiSettings } from "../bridge";
+import type { ThemePref } from "../lib/theme";
+import { SettingsSidebar, type SettingsSectionId } from "./settings/SettingsSidebar";
+import { SettingsModels } from "./settings/SettingsModels";
+import { SettingsContext } from "./settings/SettingsContext";
+import { SettingsPermissions } from "./settings/SettingsPermissions";
+import { SettingsGit } from "./settings/SettingsGit";
+import { SettingsBackground } from "./settings/SettingsBackground";
+import { SettingsAppearance } from "./settings/SettingsAppearance";
+import { SettingsAdvanced } from "./settings/SettingsAdvanced";
 
 interface Props {
   models: any[];
   thinkingLevels: string[];
-  /** Live session state — the chat section mirrors and drives it. */
   agentState: any | null;
   onSetModel(provider: string, modelId: string): void;
   onSetThinking(level: string): void;
@@ -17,346 +21,138 @@ interface Props {
   onClose(): void;
 }
 
-const fmtWin = (n?: number) => (n ? `${Math.round(n / 1000)}k` : "—");
-const TABS = ["Pi", "Permissions", "Appearance"] as const;
-type Tab = (typeof TABS)[number];
-
-function Section(props: { title: string; hint?: string; children: React.ReactNode }) {
-  return (
-    <section className="settings-section">
-      <h3 className="settings-section-title">{props.title}</h3>
-      {props.hint ? <p className="settings-section-hint">{props.hint}</p> : null}
-      {props.children}
-    </section>
-  );
-}
+type SaveState = "idle" | "saving" | "error";
+const SEARCH_INDEX: Array<{ id: SettingsSectionId; label: string; keywords: string; anchor?: string }> = [
+  { id: "models", label: "Models › Default chat model", keywords: "model provider reasoning chat default current session" },
+  { id: "models", label: "Models › Title generation", keywords: "title recap model reasoning" },
+  { id: "models", label: "Models › Model catalogue", keywords: "catalogue list provider context window vision image" },
+  { id: "context", label: "Context › Compaction", keywords: "compaction summary automatic snapcompact experimental vision fallback strategy" },
+  { id: "context", label: "Context › Context window overrides", keywords: "context window override expert provider" },
+  { id: "permissions", label: "Permissions › Rules", keywords: "permission rule allow deny policy mode" },
+  { id: "git", label: "Git › Commit generation", keywords: "git commit prompt unslop message generation" },
+  { id: "background", label: "Background › Daemon", keywords: "daemon background runtime keep enabled" },
+  { id: "appearance", label: "Appearance › Theme", keywords: "theme light dark system appearance" },
+  { id: "appearance", label: "Appearance › Typography", keywords: "font typography mono system queryLocalFonts" },
+  { id: "advanced", label: "Advanced › Data & storage", keywords: "storage path data version diagnostics" },
+  { id: "advanced", label: "Advanced › Settings management", keywords: "export import reset settings json" },
+];
 
 export default function SettingsPage(props: Props) {
-  const [tab, setTab] = useState<Tab>("Pi");
+  const [section, setSection] = useState<SettingsSectionId>(() => (localStorage.getItem("babylon:settings-section") as SettingsSectionId) || "models");
   const [settings, setSettings] = useState<PiSettings | null>(null);
-  // Local edit buffers are committed on blur instead of writing on each key.
-  const [ctxDraft, setCtxDraft] = useState<Record<string, string>>({});
-  const [gitPromptDraft, setGitPromptDraft] = useState("");
-  const [systemFonts, setSystemFonts] = useState<string[]>([]);
-  const [fontFilter, setFontFilter] = useState("");
+  const [, setSaveState] = useState<SaveState>("idle");
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const searchRef = useRef<HTMLInputElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [catalogue, setCatalogue] = useState<any[]>(props.models);
+  const [levels, setLevels] = useState<string[]>(props.thinkingLevels);
+
+  useEffect(() => { localStorage.setItem("babylon:settings-section", section); }, [section]);
 
   useEffect(() => {
     let cancelled = false;
-    void bridge
-      .getSettings()
-      .then((s) => {
-        if (!cancelled) {
-          setSettings(s);
-          setGitPromptDraft(s.gitCommitPrompt ?? "");
-        }
-      })
-      .catch(() => undefined);
-    void (async () => {
-      // Prefer Local Font Access API (renderer, no asar/binary issues) — falls back to main-process enumeration.
-      let fonts: string[] = [];
-      try {
-        if ("queryLocalFonts" in window) {
-          const localFonts: Array<{ family: string }> = await (window as any).queryLocalFonts();
-          fonts = [...new Set(localFonts.map((f) => f.family))].sort((a, b) => a.localeCompare(b));
-        }
-      } catch {}
-      if (!fonts.length) {
-        try {
-          const fromMain = await bridge.listFonts();
-          if (Array.isArray(fromMain) && fromMain.length) fonts = fromMain;
-        } catch {}
-      }
-      if (!cancelled) {
-        if (fonts.length) setSystemFonts(fonts);
-        else setSystemFonts(MONO_FONTS.map((f) => f.id));
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    bridge.getSettings().then((s) => { if (!cancelled) setSettings(s); }).catch(() => undefined);
+    if (!props.models.length) bridge.getModels().then((m) => { if (!cancelled && Array.isArray(m) && m.length) setCatalogue(m); }).catch(() => undefined);
+    else setCatalogue(props.models);
+    if (!props.thinkingLevels.length) bridge.getThinkingLevels().then((l) => { if (!cancelled && Array.isArray(l)) setLevels(l); }).catch(() => undefined);
+    else setLevels(props.thinkingLevels);
+    return () => { cancelled = true; };
+  }, [props.models, props.thinkingLevels]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") props.onClose();
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
+        e.preventDefault();
+        searchRef.current?.focus();
+      } else if (e.key === "Escape") {
+        if (query) setQuery("");
+        else props.onClose();
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [query, props]);
 
   const save = async (patch: Partial<PiSettings>) => {
+    setSaveState("saving");
+    setSaveError(null);
     try {
-      setSettings(await bridge.setSettings(patch));
-    } catch {
-      // Settings persistence is best-effort in the UI; the host caches too.
+      const next = await bridge.setSettings(patch);
+      setSettings(next);
+      setSaveState("idle");
+    } catch (e: any) {
+      setSaveState("error");
+      setSaveError(e?.message ?? "Failed to save");
     }
   };
 
-  // Chat model/reasoning drive the live session AND persist as the remembered default.
-  const chatModel = props.agentState?.model ?? null;
-  const chatReasoning = props.agentState?.thinkingLevel ?? settings?.chatReasoning ?? "off";
-
-  const titleModel = useMemo(() => {
-    const ref = settings?.titleModel;
-    if (!ref) return null;
-    return props.models.find((m) => m.provider === ref.provider && m.id === ref.modelId) ?? { provider: ref.provider, id: ref.modelId };
-  }, [settings?.titleModel, props.models]);
-
-  const gitCommitModel = useMemo(() => {
-    const ref = settings?.gitCommitModel;
-    if (!ref) return null;
-    return props.models.find((m) => m.provider === ref.provider && m.id === ref.modelId) ?? { provider: ref.provider, id: ref.modelId };
-  }, [settings?.gitCommitModel, props.models]);
-
-  const overrides = settings?.contextWindowOverrides ?? {};
-
-  const commitContextWindow = (provider: string, modelId: string, raw: string) => {
-    const key = `${provider}/${modelId}`;
-    const next = { ...overrides };
-    const n = Number(raw);
-    if (!raw.trim() || !Number.isFinite(n) || n <= 0) delete next[key];
-    else next[key] = Math.round(n);
-    setCtxDraft((d) => ({ ...d, [key]: raw }));
-    void save({ contextWindowOverrides: next });
-  };
-
-  const pickTitleModel = (provider: string, modelId: string) => {
-    const ref: ModelRef = { provider, modelId };
-    void save({ titleModel: ref });
-  };
+  const results = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return [];
+    const tokens = q.split(/\s+/).filter(Boolean);
+    return SEARCH_INDEX.filter((r) => {
+      const hay = `${r.label} ${r.keywords}`.toLowerCase();
+      return tokens.every((t) => hay.includes(t));
+    });
+  }, [query]);
 
   return (
-    <div className="flex h-full" role="dialog" aria-label="Settings">
-      <nav className="settings-rail flex w-[180px] shrink-0 flex-col gap-0.5 border-r border-line/60 p-2 pt-12" aria-label="Settings sections">
-        {TABS.map((t) => (
-          <button
-            key={t}
-            role="tab"
-            aria-selected={tab === t}
-            onClick={() => setTab(t)}
-            className={`rounded-md px-3 py-1.5 text-left text-[13px] transition-colors duration-100 ${
-              tab === t ? "font-medium text-accent" : "text-dim hover:text-fg"
-            }`}
-          >
-            {t}
-          </button>
-        ))}
-        <div className="mt-auto">
-          <button onClick={props.onClose} className="w-full rounded-md px-3 py-1.5 text-left text-[13px] text-dim transition-colors duration-100 hover:text-fg">
-            ← Back
-          </button>
-        </div>
-      </nav>
-
+    <div ref={containerRef} className="flex h-full bg-bg" role="dialog" aria-label="Settings">
+      <SettingsSidebar active={section} onSelect={setSection} onBack={props.onClose} />
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-14 shrink-0 items-center justify-between border-b border-line/60 px-5">
-          <h2 className="text-[15px] font-semibold tracking-[-0.01em]">Settings</h2>
-          <span className="text-[11px] text-dim">esc to close</span>
+        <header className="settings-header flex h-[44px] shrink-0 items-center gap-3 px-8 sticky top-0 z-10">
+          <h2 className="text-[13px] font-semibold tracking-[-0.015em] text-white shrink-0" style={{fontOpticalSizing:'auto'}}>Settings</h2>
+          <div className="flex-1 flex justify-start">
+            <div className="relative w-full max-w-[720px] ml-4">
+              <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-dim/60 text-[12px]">⌕</span>
+              <input
+                ref={searchRef}
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search settings…"
+                aria-label="Search settings"
+                className="settings-input w-full pl-7 pr-7 py-1.5 text-[12.5px] placeholder:text-dim/60"
+              />
+              {query ? <button onClick={() => setQuery("")} aria-label="Clear search" className="settings-tab absolute right-2 top-1/2 -translate-y-1/2 grid h-5 w-5 place-items-center rounded-full bg-line/60 text-dim hover:text-fg hover:bg-line text-[11px]">×</button> : null}
+            </div>
+          </div>
         </header>
 
-        <div className="mx-auto w-full max-w-[720px] min-h-0 flex-1 overflow-y-auto p-6">
-            {tab === "Pi" && (
-              <>
-                <Section title="Chat" hint="Applies to the live session immediately and is remembered as the default.">
-                  <div className="flex items-center gap-2">
-                    <ModelPicker
-                      models={props.models}
-                      current={chatModel}
-                      disabled={!props.models.length}
-                      onSelect={(p, id) => {
-                        props.onSetModel(p, id);
-                        void save({ chatModel: { provider: p, modelId: id } });
-                      }}
-                    />
-                    <ThinkingPicker
-                      current={chatReasoning}
-                      available={props.thinkingLevels}
-                      disabled={!props.agentState}
-                      onSelect={(level) => {
-                        props.onSetThinking(level);
-                        void save({ chatReasoning: level });
-                      }}
-                    />
-                  </div>
-                  {!props.models.length && <p className="mt-2 text-[12px] text-dim">No models available — open a session to load the catalogue.</p>}
-                </Section>
-
-                <Section title="Title generation" hint="Used for automatic session names and recaps. Falls back to a built-in cheap model when unset.">
-                  <div className="flex items-center gap-2">
-                    <ModelPicker
-                      models={props.models}
-                      current={titleModel}
-                      disabled={!props.models.length}
-                      onSelect={pickTitleModel}
-                    />
-                    <ThinkingPicker
-                      current={settings?.titleReasoning ?? "low"}
-                      disabled={!settings}
-                      onSelect={(level) => void save({ titleReasoning: level })}
-                    />
-                  </div>
-                  {!settings && <p className="mt-2 text-[12px] text-dim">Loading settings…</p>}
-                </Section>
-
-                <Section title="Commit and push" hint="Stages the current tree, generates a message from the staged diff, then commits and pushes. Babylon always applies its built-in Unslop rules with low reasoning.">
-                  <div className="flex items-center gap-2">
-                    <ModelPicker
-                      models={props.models}
-                      current={gitCommitModel}
-                      disabled={!props.models.length || !settings}
-                      onSelect={(provider, modelId) => void save({ gitCommitModel: { provider, modelId } })}
-                    />
-                    <span className="rounded-md bg-inset px-2.5 py-1.5 text-[12px] text-dim">Low reasoning</span>
-                  </div>
-                  <label className="mt-3 block text-[12px] text-dim" htmlFor="git-commit-prompt">Prompt</label>
-                  <textarea
-                    id="git-commit-prompt"
-                    rows={4}
-                    value={gitPromptDraft}
-                    disabled={!settings}
-                    onChange={(event) => setGitPromptDraft(event.target.value)}
-                    onBlur={() => void save({ gitCommitPrompt: gitPromptDraft })}
-                    className="settings-input mt-1 w-full resize-y font-mono text-[12px] leading-5"
-                  />
-                  <p className="mt-1.5 text-[11.5px] text-dim">These instructions are appended to the fixed structured-output and Unslop prompt.</p>
-                </Section>
-
-                <Section title="Context windows" hint="Override the advertised context window per model. Empty restores the default.">
-                  {!props.models.length ? (
-                    <p className="text-[12px] text-dim">No models available.</p>
-                  ) : (
-                    <table className="w-full settings-ctx-table">
-                      <thead>
-                        <tr>
-                          <th>Model</th>
-                          <th>Default</th>
-                          <th>Override</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {props.models.map((m) => {
-                          const key = `${m.provider}/${m.id}`;
-                          const value = ctxDraft[key] ?? (overrides[key] !== undefined ? String(overrides[key]) : "");
-                          return (
-                            <tr key={key}>
-                              <td>
-                                <span className="block truncate text-[13px]">{m.name ?? m.id}</span>
-                                <span className="block truncate font-mono text-[11px] text-dim">{key}</span>
-                              </td>
-                              <td className="font-mono text-[12px] text-dim">{fmtWin(m.contextWindow)}</td>
-                              <td>
-                                <input
-                                  type="number"
-                                  inputMode="numeric"
-                                  min={0}
-                                  placeholder="—"
-                                  value={value}
-                                  onChange={(e) => setCtxDraft((d) => ({ ...d, [key]: e.target.value }))}
-                                  onBlur={(e) => commitContextWindow(m.provider, m.id, e.target.value)}
-                                  onKeyDown={(e) => {
-                                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                                  }}
-                                  className="settings-input w-[110px]"
-                                  aria-label={`Context window override for ${key}`}
-                                />
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  )}
-                </Section>
-              </>
-            )}
-
-            {tab === "Permissions" && (
-              <Section title="Permission rules">
-                <PermissionRulesSection />
-              </Section>
-            )}
-
-            {tab === "Appearance" && (
-              <>
-                <Section title="Theme">
-                  <div className="flex flex-col gap-0.5">
-                    {( ["light", "dark", "system"] as ThemePref[] ).map((t) => (
-                      <button
-                        key={t}
-                        onClick={() => {
-                          applyTheme(t);
-                          props.onThemeChange(t);
-                        }}
-                        className={`flex items-center justify-between rounded-md px-3 py-2 text-left text-[13px] transition-colors duration-100 ${
-                          props.theme === t ? "bg-inset text-fg" : "text-dim hover:text-fg"
-                        }`}
-                      >
-                        <span className="capitalize">{t}</span>
-                        {props.theme === t && <span className="text-accent">✓</span>}
-                      </button>
-                    ))}
-                  </div>
-                </Section>
-                <Section title="Fonts" hint="Pick any font installed on this Mac — no font files are shipped. Inline code falls back to ui-monospace / SFMono-Regular if the family is missing.">
-                  <div className="flex flex-col gap-3">
-                    <label className="flex items-center justify-between rounded-md px-3 py-2 hover:bg-inset">
-                      <span className="text-[13px] text-fg">Use system fonts</span>
-                      <input
-                        type="checkbox"
-                        checked={settings?.appearance?.useSystemFonts ?? true}
-                        onChange={(e) => {
-                          const enabled = e.target.checked;
-                          applySystemFonts(enabled);
-                          localStorage.setItem("pideck:useSystemFonts", String(enabled));
-                          void save({ appearance: { ...(settings?.appearance ?? {}), useSystemFonts: enabled } });
-                        }}
-                        className="h-4 w-4 accent-accent"
-                      />
-                    </label>
-                    <div>
-                      <label className="block text-[12px] font-medium text-dim" htmlFor="font-filter">Font family</label>
-                      <input
-                        id="font-filter"
-                        type="text"
-                        placeholder="Filter fonts… (e.g. Helvetica)"
-                        value={fontFilter}
-                        onChange={(e) => setFontFilter(e.target.value)}
-                        className="settings-input mt-1 w-full"
-                      />
-                      <select
-                        id="mono-font"
-                        value={settings?.appearance?.monoFontFamily ?? "system"}
-                        onChange={(e) => {
-                          const family = e.target.value;
-                          applyMonoFont(family);
-                          void save({ appearance: { ...(settings?.appearance ?? {}), monoFontFamily: family, useSystemFonts: true } });
-                        }}
-                        className="settings-input mt-1 w-full"
-                        size={8}
-                        style={{ fontFamily: monoStack(settings?.appearance?.monoFontFamily ?? "system") }}
-                      >
-                        <option value="system" style={{ fontFamily: monoStack("system") }}>System Default — ui-monospace</option>
-                        {(systemFonts.length ? systemFonts : MONO_FONTS.map((f) => f.id))
-                          .filter((f) => !fontFilter.trim() || f.toLowerCase().includes(fontFilter.trim().toLowerCase()))
-                          .slice(0, 400)
-                          .map((f) => (
-                            <option key={f} value={f} style={{ fontFamily: monoStack(f) }}>{f}</option>
-                          ))}
-                      </select>
-                      <p className="mt-1 text-[11px] text-dim">{systemFonts.length ? `${systemFonts.length} system fonts found` : "Loading system fonts…"} {fontFilter ? `· ${systemFonts.filter((f) => f.toLowerCase().includes(fontFilter.toLowerCase())).length} matched` : ""}</p>
-                      <div className="mt-2 rounded-md border border-line bg-inset/40 px-3 py-2">
-                        <p className="text-[11px] font-medium text-dim">Preview — {settings?.appearance?.monoFontFamily ?? "system"}</p>
-                        <p className="mt-1 truncate text-[13px]" style={{ fontFamily: monoStack(settings?.appearance?.monoFontFamily ?? "system") }}>{`const answer = 42 // ${settings?.appearance?.monoFontFamily ?? "system"}`}</p>
-                        <p className="truncate text-[13px]" style={{ fontFamily: monoStack(settings?.appearance?.monoFontFamily ?? "system") }}>The quick brown fox jumps over 0123456789</p>
-                        <p className="truncate text-[12px] text-dim" style={{ fontFamily: monoStack(settings?.appearance?.monoFontFamily ?? "system") }}>git commit -m "feat: ship any system font"</p>
-                      </div>
-                    </div>
-                  </div>
-                </Section>
-              </>
+        {query ? (
+          <div className="flex-1 overflow-auto p-4 settings-content" key="search">
+            {results.length ? (
+              <ul className="space-y-1 max-w-[720px]">
+                {results.map((r) => (
+                  <li key={r.label}>
+                    <button onClick={() => { setSection(r.id); setQuery(""); }} className="settings-tab w-full text-left rounded-lg px-3 py-2.5 hover:bg-inset border border-transparent hover:border-line/30">
+                      <span className="text-[13px] font-[550] tracking-[-0.01em]">{r.label}</span>
+                      <span className="block text-[11.5px] leading-4 text-dim mt-0.5">{r.keywords.slice(0, 80)}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-[13px] leading-5 text-dim text-center py-12">No settings found for “{query}”.</p>
             )}
           </div>
+        ) : (
+          <div className="min-h-0 flex-1 overflow-auto bg-bg" style={{scrollbarGutter:'stable'}}>
+            <div className="w-full max-w-[1120px] px-8 pt-8 pb-6 settings-content" key={section}>
+              {!settings ? <p className="text-[12px] text-dim">Loading settings…</p> : (
+                <>
+                  {section === "models" && <SettingsModels models={catalogue} thinkingLevels={levels} agentState={props.agentState} settings={settings} onSave={save} onSetModel={props.onSetModel} onSetThinking={props.onSetThinking} saveError={saveError} />}
+                  {section === "context" && <SettingsContext models={catalogue} agentState={props.agentState} settings={settings} onSave={save} />}
+                  {section === "permissions" && <SettingsPermissions />}
+                  {section === "git" && <SettingsGit settings={settings} onSave={save} models={catalogue} />}
+                  {section === "background" && <SettingsBackground settings={settings} onSave={save} />}
+                  {section === "appearance" && <SettingsAppearance settings={settings} onSave={save} theme={props.theme} onThemeChange={props.onThemeChange} />}
+                  {section === "advanced" && <SettingsAdvanced settings={settings} onSave={save} />}
+                </>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

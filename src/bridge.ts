@@ -1,4 +1,5 @@
 import type { Task } from "./tasks";
+import type { PiSettings } from "./lib/settings-shared";
 
 export interface SessionMeta {
   id: string;
@@ -415,14 +416,8 @@ export interface PermissionState {
   rules: PermissionRule[];
 }
 
-/** Reference to a catalogue model, persisted in Babylon-owned settings. */
-export interface ModelRef {
-  provider: string;
-  modelId: string;
-}
+export type { ModelRef, PiSettings } from "./lib/settings-shared"; // re-export for consumers
 
-/** Babylon-owned user preferences (Settings → Pi). Mirrors the host's
- *  `PiSettings` in electron/app-settings.ts. */
 export type ProcessState = "starting" | "running" | "exited" | "failed" | "killed";
 
 export interface ProcessSnapshot {
@@ -439,17 +434,6 @@ export interface ProcessSnapshot {
   detectedPorts: number[];
   output: string;
   outputTruncated: boolean;
-}
-
-export interface PiSettings {
-  chatModel?: ModelRef;
-  chatReasoning?: string;
-  titleModel?: ModelRef;
-  titleReasoning?: string;
-  gitCommitModel?: ModelRef;
-  gitCommitPrompt?: string;
-  contextWindowOverrides?: Record<string, number>;
-  appearance?: { useSystemFonts?: boolean; monoFontFamily?: string };
 }
 
 export interface Bridge {

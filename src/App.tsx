@@ -609,36 +609,28 @@ export default function App() {
     });
   }, [refreshSessions]);
 
-  useEffect(
-    () =>
-      bridge.onAgentEvents((events) => {
-        if (!hasSessionRef.current) return;
-        const context = {
-          activeSessionId: activeSessionIdRef.current,
-          switching: switchingRef.current,
-        };
-        let stateChanged = false;
-        const mapped: BabylonEvent[] = [];
-        for (const event of events) {
-          if (shouldAcceptEvent(event, context)) dispatch({ type: "event", event });
-          const babylonEvent = babylonEventFromAgentEvent(event);
-          if (babylonEvent) mapped.push(babylonEvent);
-          if (
-            event?.type === "agent_settled" ||
-            event?.type === "agent_end" ||
-            event?.type === "session_info_changed"
-          ) {
-            stateChanged = true;
-          }
-        }
-        appendEvents(mapped);
-        // Reflect engine-side state changes (model/thinking toggles, /fast,
-        // session renames) in the status bar without waiting for the next
-        // model/thinking/compact round-trip.
-        if (stateChanged) bridge.getState().then(setAgentState).catch(() => {});
-      }),
-    [appendEvents]
-  );
+  // Poll the active session file when it's being driven by the CLI (GUI not streaming).
+  // The SessionIndex watch (300ms) + safety scan (2s) should catch most changes, but
+  // a direct poll ensures sub-second live updates when the CLI is streaming.
+  useEffect(() => {
+    const activePath = activeSessionPath ?? status.sessionPath;
+    if (!activePath || streamingRef.current || switchingRef.current) return;
+    const id = window.setInterval(() => {
+      const current = activePathRef.current;
+      if (!current || streamingRef.current || switchingRef.current) return;
+      switchingRef.current = true;
+      activeSessionIdRef.current = null;
+      void bridge
+        .refreshSession(current)
+        .then((refreshed) => {
+          if (!refreshed) switchingRef.current = false;
+        })
+        .catch(() => {
+          switchingRef.current = false;
+        });
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [activeSessionPath, status.sessionPath, hasSession]);
 
   // Chunked transcript rendering: the full transcript is projected once (a
   // couple of ms) and `rebuild` keeps the store consistent, but ChatView only
@@ -689,6 +681,88 @@ export default function App() {
       return next;
     });
   }, []);
+
+  // Resync from the source of truth. Manual compaction doesn't fire
+  // agent_settled, so without this the StatsPopover context % and the
+  // transcript would stay at the pre-compaction values until the next
+  // user prompt.
+  const resyncFromSource = useCallback(async () => {
+    const expectedEpoch = epochRef.current;
+    try {
+      const activePath = activePathRef.current;
+      if (activePath && (await bridge.refreshSession(activePath))) return;
+      const [msgs, st, statsData, wt, nextHistory] = await Promise.all([
+        bridge.getMessages(),
+        bridge.getState(),
+        bridge.getStats(),
+        bridge.worktreeInfo(),
+        bridge.getHistory(),
+      ]);
+      if (expectedEpoch !== epochRef.current) return;
+      scheduleTranscript(msgs, expectedEpoch);
+      setAgentState(st);
+      setStats(statsData);
+      setWorktreeInfo(wt);
+      setHistory(nextHistory);
+      setHistoryRevision((revision) => revision + 1);
+      const rollbackCreatedAt = nextHistory.activeRollback?.createdAt ?? null;
+      if (rollbackCreatedAt && rollbackDraftRef.current !== rollbackCreatedAt) {
+        rollbackDraftRef.current = rollbackCreatedAt;
+        setDraftRequest({ id: Date.now(), text: nextHistory.activeRollback!.editorText });
+      } else if (!rollbackCreatedAt) {
+        rollbackDraftRef.current = null;
+      }
+      void refreshSessions();
+    } catch {
+      /* session may have closed */
+    }
+  }, [refreshSessions, scheduleTranscript]);
+
+  // When a run settles, resync from the source of truth.
+  useEffect(() => {
+    if (!state.settledNonce) return;
+    void resyncFromSource();
+  }, [state.settledNonce, resyncFromSource]);
+
+  useEffect(
+    () =>
+      bridge.onAgentEvents((events) => {
+        if (!hasSessionRef.current) return;
+        const context = {
+          activeSessionId: activeSessionIdRef.current,
+          switching: switchingRef.current,
+        };
+        let stateChanged = false;
+        const mapped: BabylonEvent[] = [];
+        let needsResync = false;
+        for (const event of events) {
+          if (shouldAcceptEvent(event, context)) dispatch({ type: "event", event });
+          const babylonEvent = babylonEventFromAgentEvent(event);
+          if (babylonEvent) mapped.push(babylonEvent);
+          if (
+            event?.type === "agent_settled" ||
+            event?.type === "agent_end" ||
+            event?.type === "session_info_changed"
+          ) {
+            stateChanged = true;
+          }
+          if (event?.type === "compaction_end" && !event.aborted) {
+            // Manual compact (and any successful compaction) replaces the
+            // live session messages with a compacted view. agent_settled
+            // does not fire here, so refresh the transcript, stats, and
+            // state ourselves to drop the now-stale items.
+            needsResync = true;
+          }
+        }
+        appendEvents(mapped);
+        // Reflect engine-side state changes (model/thinking toggles, /fast,
+        // session renames) in the status bar without waiting for the next
+        // model/thinking/compact round-trip.
+        if (stateChanged) bridge.getState().then(setAgentState).catch(() => {});
+        if (needsResync) void resyncFromSource();
+      }),
+    [appendEvents, resyncFromSource]
+  );
 
   const hydrate = useCallback(async (expectedEpoch = epochRef.current) => {
     try {
@@ -844,42 +918,6 @@ export default function App() {
       if (oldest !== undefined) cache.delete(oldest);
     }
   }, [state.items, state.streaming, canLoadMore]);
-
-  // When a run settles, resync from the source of truth.
-  useEffect(() => {
-    if (!state.settledNonce) return;
-    (async () => {
-      const expectedEpoch = epochRef.current;
-      try {
-        const activePath = activePathRef.current;
-        if (activePath && (await bridge.refreshSession(activePath))) return;
-        const [msgs, st, statsData, wt, nextHistory] = await Promise.all([
-          bridge.getMessages(),
-          bridge.getState(),
-          bridge.getStats(),
-          bridge.worktreeInfo(),
-          bridge.getHistory(),
-        ]);
-        if (expectedEpoch !== epochRef.current) return;
-        scheduleTranscript(msgs, expectedEpoch);
-        setAgentState(st);
-        setStats(statsData);
-        setWorktreeInfo(wt);
-        setHistory(nextHistory);
-        setHistoryRevision((revision) => revision + 1);
-        const rollbackCreatedAt = nextHistory.activeRollback?.createdAt ?? null;
-        if (rollbackCreatedAt && rollbackDraftRef.current !== rollbackCreatedAt) {
-          rollbackDraftRef.current = rollbackCreatedAt;
-          setDraftRequest({ id: Date.now(), text: nextHistory.activeRollback!.editorText });
-        } else if (!rollbackCreatedAt) {
-          rollbackDraftRef.current = null;
-        }
-        void refreshSessions();
-      } catch {
-        /* session may have closed */
-      }
-    })();
-  }, [state.settledNonce, refreshSessions]);
 
   // Clear the switch cover shortly after it fades (animation is 120ms; the
   // timeout also covers the reduced-motion path where no animation fires). The
@@ -1127,6 +1165,11 @@ export default function App() {
       applyMonoFont(family);
       localStorage.setItem("pideck:useSystemFonts", String(enabled));
       localStorage.setItem("pideck:monoFont", family);
+      const themeFromSettings = s?.appearance?.theme;
+      if (themeFromSettings === "light" || themeFromSettings === "dark" || themeFromSettings === "system") {
+        applyTheme(themeFromSettings);
+        setThemePref(themeFromSettings);
+      }
     }).catch(() => undefined);
   }, []);
 
