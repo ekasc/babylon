@@ -79,7 +79,7 @@ export default function ChatView({
   const onScroll = () => {
     const el = ref.current;
     if (!el) return;
-    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
     // Scroll-up streaming: near the top of the loaded region, ask for the next
     // older window. The App guards against duplicate concurrent fetches.
     if (el.scrollTop < 400 && canLoadMoreRef.current) {

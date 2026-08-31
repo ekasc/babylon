@@ -298,12 +298,12 @@ export default function App() {
     for (const g of groups) {
       for (const s of g.sessions) {
         const p = s.path;
-        if (p === activePath) continue;
         if (pinnedSet.has(p)) continue;
         if (snoozed[p] != null) continue;
         if (archivedSet.has(p)) continue;
         if (unsettled.includes(p)) continue;
         if (settled.includes(p)) { out.add(p); continue; }
+        if (p === activePath) continue;
         if (nowTick - (s.mtime ?? 0) > STALE_SETTLE_MS) out.add(p);
       }
     }

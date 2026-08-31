@@ -356,13 +356,7 @@ const Composer = memo(function Composer({ streaming, steering, followUp, command
           </div>
         )}
 
-        {streaming && !hasBlockingDialog ? (
-          <div className="mb-2 flex items-center gap-2.5 rounded-xl border border-accent/20 bg-accent-soft px-3 py-2.5 text-[13px] font-medium text-accent" role="status" aria-live="polite">
-            <span className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-accent border-t-transparent" aria-hidden="true" />
-            <span>Agent is running</span>
-            <span className="font-normal text-accent/70">— {mode === "steer" ? "steer to redirect" : "queue a follow-up"} or stop</span>
-          </div>
-        ) : null}
+        
         <div className="composer-surface">
           {dialogs?.[0] ? (
             <div className="border-b border-line/60 bg-raised/40 px-4 py-3">
