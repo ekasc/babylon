@@ -18,12 +18,14 @@ const CommandMenu = memo(function CommandMenu({ commands, selected, onSelect, on
   if (!commands.length) return null;
   return (
     <div
+      id="composer-commands"
       role="listbox"
       aria-label="Slash commands"
       className="absolute inset-x-0 bottom-[calc(100%+8px)] z-30 max-h-72 overflow-y-auto rounded-lg border border-line bg-raised p-1.5 shadow-2xl"
     >
       {commands.map((command, index) => (
         <button
+          id={`cmd-opt-${index}`}
           key={`${command.source}:${command.name}`}
           role="option"
           aria-selected={index === selected}

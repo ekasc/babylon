@@ -346,7 +346,7 @@ const Composer = memo(function Composer({ streaming, steering, followUp, command
                       })
                     }
                     aria-label={`Remove attachment ${a.name}`}
-                    className="absolute -right-2 -top-2 grid h-6 w-6 place-items-center rounded-full bg-fg text-bg opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
+                    className="absolute -right-2 -top-2 grid h-6 w-6 place-items-center rounded-full bg-fg text-bg opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-1"
                   >
                     <XIcon size={9} />
                   </button>
@@ -356,17 +356,17 @@ const Composer = memo(function Composer({ streaming, steering, followUp, command
           </div>
         )}
         {streaming && !hasBlockingDialog ? (
-          <div role="status" aria-live="polite" className="mb-2 flex items-center gap-2 rounded-lg border border-line bg-inset px-3 py-2 text-[12px] text-dim">
-            <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-dim" aria-hidden />
+          <div role="status" aria-live="polite" aria-atomic="true" className="mb-2 flex items-center gap-2 rounded-lg border border-line bg-inset px-3 py-2 text-[12px] text-dim">
+            <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-dim" aria-hidden="true" />
             Agent is running
           </div>
         ) : null}
         <div className="composer-surface">
           {dialogs?.[0] ? (
-            <div className="border-b border-line/60 bg-raised/40 px-4 py-3">
+            <div role="dialog" aria-modal="true" aria-labelledby="composer-dialog-title" className="border-b border-line/60 bg-raised/40 px-4 py-3">
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0 flex-1">
-                  <p className="text-[13.5px] font-semibold leading-snug tracking-tight">{dialogs[0].title ?? "Question"}</p>
+                  <p id="composer-dialog-title" className="text-[13.5px] font-semibold leading-snug tracking-tight">{dialogs[0].title ?? "Question"}</p>
                   {dialogs[0].message && <p className="mt-1 text-[12.5px] leading-relaxed text-dim">{dialogs[0].message}</p>}
                 </div>
                 <button
@@ -388,7 +388,7 @@ const Composer = memo(function Composer({ streaming, steering, followUp, command
                 <div className="mt-3 flex flex-col gap-1">
                   {dialogs[0].options!.map((o: string, idx: number) => (
                     <button
-                      key={o}
+                      key={`${o}-${idx}`}
                       onClick={async () => {
                         const id = dialogs[0].id;
                         onDialogDismiss?.(id);
@@ -428,6 +428,7 @@ const Composer = memo(function Composer({ streaming, steering, followUp, command
           <button
             onClick={() => fileRef.current?.click()}
             title="Attach images (or paste / drag & drop)"
+            aria-label="Attach image"
             disabled={hasBlockingDialog}
             className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-dim hover:bg-inset hover:text-fg disabled:opacity-40 disabled:cursor-not-allowed"
           >
@@ -452,6 +453,8 @@ const Composer = memo(function Composer({ streaming, steering, followUp, command
             aria-label="Message Pi"
             aria-autocomplete="list"
             aria-expanded={commandMatches.length > 0}
+            aria-controls={commandMatches.length > 0 ? "composer-commands" : undefined}
+            aria-activedescendant={commandMatches.length > 0 ? `cmd-opt-${selectedCommand}` : undefined}
             className="composer flex-1 resize-none bg-transparent px-2 py-2 text-[15px] outline-none placeholder:text-dim"
           />
 
