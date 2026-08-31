@@ -193,9 +193,6 @@ function MarkdownTable({ children, ...props }: React.ComponentProps<"table">) {
 
 export default function Markdown({ text }: { text: string }) {
   const preprocessed = useMemo(() => processMath(text), [text]);
-  const headingSlugs = useRef<Map<string, number>>(new Map());
-  // Reset slugs per message so headings don't leak counts across renders
-  headingSlugs.current.clear();
 
   return (
     <div className="md">
@@ -223,12 +220,12 @@ export default function Markdown({ text }: { text: string }) {
             </a>
           ),
           table: ({ children, ...props }) => <MarkdownTable {...props}>{children}</MarkdownTable>,
-          h1: ({ children, ...rest }) => headingWithAnchor({ children, level: 1, headingSlugs }),
-          h2: ({ children }) => headingWithAnchor({ children, level: 2, headingSlugs }),
-          h3: ({ children }) => headingWithAnchor({ children, level: 3, headingSlugs }),
-          h4: ({ children }) => headingWithAnchor({ children, level: 4, headingSlugs }),
-          h5: ({ children }) => headingWithAnchor({ children, level: 5, headingSlugs }),
-          h6: ({ children }) => headingWithAnchor({ children, level: 6, headingSlugs }),
+          h1: ({ children }) => <h1 className="md-heading">{children}</h1>,
+          h2: ({ children }) => <h2 className="md-heading">{children}</h2>,
+          h3: ({ children }) => <h3 className="md-heading">{children}</h3>,
+          h4: ({ children }) => <h4 className="md-heading">{children}</h4>,
+          h5: ({ children }) => <h5 className="md-heading">{children}</h5>,
+          h6: ({ children }) => <h6 className="md-heading">{children}</h6>,
           pre: ({ children }) => {
             const found = findCode(children);
             if (found) {

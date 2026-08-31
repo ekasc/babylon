@@ -346,7 +346,7 @@ textarea.composer:focus-visible{outline:none;box-shadow:none}
 
 /* Markdown and code */
 .md{line-height:1.72;word-break:break-word;color:var(--fg)}.md>*:first-child{margin-top:0}.md>*:last-child{margin-bottom:0}
-.md p{margin:.72em 0;max-width:68ch}.md h1,.md h2,.md h3{margin:1.5em 0 .5em;font-weight:700;letter-spacing:-.02em;line-height:1.22;color:var(--fg)}.md h1{font-size:1.42em;padding-bottom:.35em;border-bottom:1px solid var(--line)}.md h2{font-size:1.26em}.md h3{font-size:1.1em;color:color-mix(in srgb,var(--fg) 88%,var(--dim))}
+.md p{margin:.72em 0;max-width:68ch}.md-heading{margin:1em 0 .35em;font-weight:650;line-height:1.32;letter-spacing:-.01em;color:var(--fg)}.md-heading:is(h1){font-size:1.14em}.md-heading:is(h2){font-size:1.06em}.md-heading:is(h3){font-size:1em;color:color-mix(in srgb,var(--fg) 92%,var(--dim))}.md-heading:is(h4),.md-heading:is(h5),.md-heading:is(h6){font-size:.95em;color:var(--dim)}
 .md ul,.md ol{margin:.75em 0;padding-left:1.6em}.md ul{list-style:disc}.md ol{list-style:decimal}.md li{margin:.32em 0}.md li::marker{color:var(--dim)}
 .md code{border-radius:5px;background:var(--accent-soft);border:1px solid color-mix(in srgb,var(--accent) 14%,transparent);padding:.12em .36em;font-family:var(--mono);font-size:.86em;color:color-mix(in srgb,var(--accent) 78%,var(--fg));font-weight:500}
 .md pre{overflow-x:auto;margin:.9em 0;border:1px solid var(--line);border-radius:10px;background:var(--inset);padding:.95em 1em}.md pre code{background:none;border:0;padding:0;font-size:.86em;line-height:1.58;color:inherit;font-weight:400}
