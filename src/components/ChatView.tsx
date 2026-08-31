@@ -216,25 +216,24 @@ export default function ChatView({
     return map;
   }, [shown, userIndices, streaming]);
   const isFoldCollapsed = (turnId: string) => !expandedTurns.has(turnId);
-  const hiddenIndices = useMemo(() => {
+  // All hidden indices regardless of expanded state — kept out of the flat
+  // visibleEntries list so hidden tools render only inside the animated
+  // fold container (interruptible spring, 0fr ↔ 1fr).
+  const allHiddenIndices = useMemo(() => {
     const set = new Set<number>();
     for (const [, fold] of foldMap) {
-      if (!expandedTurns.has(fold.turnId)) {
-        let terminalIdx = -1;
-        for (let i = fold.start + 1; i < fold.end; i++) {
-          if (shown[i]?.kind === "assistant") terminalIdx = i;
-        }
-        for (let i = fold.start + 1; i < fold.end; i++) {
-          if (i === terminalIdx) continue;
-          // Preserve the TurnChanges owner (e.g. recap) so the files-changed
-          // card does not disappear when the turn is collapsed
-          if (cards.has(i)) continue;
-          set.add(i);
-        }
+      let terminalIdx = -1;
+      for (let i = fold.start + 1; i < fold.end; i++) {
+        if (shown[i]?.kind === "assistant") terminalIdx = i;
+      }
+      for (let i = fold.start + 1; i < fold.end; i++) {
+        if (i === terminalIdx) continue;
+        if (cards.has(i)) continue;
+        set.add(i);
       }
     }
     return set;
-  }, [foldMap, shown, expandedTurns, cards]);
+  }, [foldMap, shown, cards]);
   const entries = useMemo(() => buildEntries(shown), [shown]);
 
   return (
@@ -260,10 +259,16 @@ export default function ChatView({
           </div>
         ) : null}
         {(() => {
-          const visibleEntries = entries.filter((e) => !hiddenIndices.has(e.index));
+          const visibleEntries = entries.filter((e) => !allHiddenIndices.has(e.index));
           return visibleEntries.map((entry, idx) => {
             const foldForUser = entry.type === "single" && entry.item.kind === "user" ? foldMap.get(entry.index) : undefined;
             const isCollapsed = foldForUser ? isFoldCollapsed(foldForUser.turnId) : false;
+            const hiddenEntriesForFold = foldForUser
+              ? (() => {
+                  const slice = shown.slice(foldForUser.start + 1, foldForUser.end).filter((_, i) => allHiddenIndices.has(foldForUser.start + 1 + i));
+                  return slice.length ? buildEntries(slice as any) : [];
+                })()
+              : [];
             return entry.type === "group" ? (
               <Fragment key={`g-${entry.tools[0].key}`}>
                 <div className={longChat ? "chat-item chat-item-long" : "chat-item"}>
@@ -300,27 +305,45 @@ export default function ChatView({
                     );
                   })()}
                 </div>
-                {foldForUser && isCollapsed ? (
-                  <button
-                    type="button"
-                    aria-expanded="false"
-                    aria-label={`Expand ${foldForUser.hiddenCount} hidden steps: ${foldForUser.label}`}
-                    onClick={() => setExpandedTurns((prev) => { const n = new Set(prev); n.add(foldForUser.turnId); return n; })}
-                    className="my-1 flex w-full items-center gap-2 rounded-md border border-dashed border-line bg-inset/50 px-3 py-1.5 text-left text-[12.5px] text-dim hover:border-line-strong hover:text-fg"
-                  >
-                    <span className="truncate">{foldForUser.label}</span>
-                    <span className="ml-auto shrink-0 text-[11px]">{foldForUser.hiddenCount} hidden</span>
-                  </button>
-                ) : foldForUser && !isCollapsed ? (
-                  <button
-                    type="button"
-                    aria-expanded="true"
-                    aria-label={`Collapse turn: ${foldForUser.label}`}
-                    onClick={() => setExpandedTurns((prev) => { const n = new Set(prev); n.delete(foldForUser.turnId); return n; })}
-                    className="my-1 flex w-full items-center justify-center rounded-md border border-line bg-transparent px-3 py-1 text-[12px] text-dim hover:text-fg"
-                  >
-                    Collapse
-                  </button>
+                {foldForUser ? (
+                  <>
+                    <button
+                      type="button"
+                      aria-expanded={isCollapsed ? "false" : "true"}
+                      aria-label={isCollapsed ? `Expand ${foldForUser.hiddenCount} hidden steps: ${foldForUser.label}` : `Collapse turn: ${foldForUser.label}`}
+                      onPointerDown={(e) => (e.currentTarget as HTMLElement).setPointerCapture?.((e as any).pointerId)}
+                      onClick={() =>
+                        setExpandedTurns((prev) => {
+                          const n = new Set(prev);
+                          if (isCollapsed) n.add(foldForUser.turnId);
+                          else n.delete(foldForUser.turnId);
+                          return n;
+                        })
+                      }
+                      className="my-1 flex w-full items-center gap-2 rounded-md border border-dashed border-line bg-inset/50 px-3 py-1.5 text-left text-[12.5px] text-dim hover:border-line-strong hover:text-fg active:scale-[0.97] transition-transform duration-100 ease-out will-change-transform"
+                    >
+                      <span className="truncate">{isCollapsed ? foldForUser.label : "Hide details"}</span>
+                      <span className="ml-auto shrink-0 text-[11px]">{isCollapsed ? `${foldForUser.hiddenCount} hidden` : "Collapse"}</span>
+                    </button>
+                    <div
+                      className="grid transition-[grid-template-rows] duration-[400ms] ease-[cubic-bezier(0.2,0.8,0.2,1)] will-change-[grid-template-rows]"
+                      style={{ gridTemplateRows: isCollapsed ? "0fr" : "1fr" }}
+                    >
+                      <div className="overflow-hidden">
+                        {hiddenEntriesForFold.map((he) =>
+                          he.type === "group" ? (
+                            <div key={`h-${he.tools[0].key}`} className={longChat ? "chat-item chat-item-long" : "chat-item"}>
+                              <ToolGroup tools={he.tools} />
+                            </div>
+                          ) : (
+                            <div key={he.item.key} className={longChat ? "chat-item chat-item-long" : "chat-item"}>
+                              {he.item.kind === "tool" ? <ToolCard item={he.item as any} /> : he.item.kind === "assistant" ? <AssistantMessage item={he.item as any} /> : <SystemLine text={(he.item as any).text} />}
+                            </div>
+                          )
+                        )}
+                      </div>
+                    </div>
+                  </>
                 ) : null}
                 {!foldForUser || !isCollapsed ? (cards.get(entry.index) ? (
                   <TurnChanges turn={cards.get(entry.index)!} isLatest={latestChanged?.entryId === cards.get(entry.index)!.entryId} />
