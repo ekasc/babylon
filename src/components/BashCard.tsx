@@ -71,7 +71,7 @@ export default memo(function BashCard({ item }: BashCardProps) {
             <span className="text-dim">$ {command}</span>
             {hasOutput ? "\n" + output : hasPatch ? "" : "\n(no output)"}
           </pre>
-          {hasPatch ? <DiffView patch={patch} /> : null}
+          {hasPatch ? <div className="max-h-[320px] overflow-auto"><DiffView patch={patch} /></div> : null}
           {item.truncated && fullOutput == null ? (
             <button onClick={fetchFull} className="m-2 rounded-md border border-line bg-bg px-2 py-1 text-[12px] text-dim hover:text-fg">
               Show full output

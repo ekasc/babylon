@@ -304,7 +304,8 @@ export default function App() {
         if (unsettled.includes(p)) continue;
         if (settled.includes(p)) { out.add(p); continue; }
         if (p === activePath) continue;
-        if (nowTick - (s.mtime ?? 0) > STALE_SETTLE_MS) out.add(p);
+        if (s.mtime == null) continue;
+        if (nowTick - s.mtime > STALE_SETTLE_MS) out.add(p);
       }
     }
     return [...out];

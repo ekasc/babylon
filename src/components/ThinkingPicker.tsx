@@ -52,7 +52,7 @@ export default function ThinkingPicker({ current, available, disabled, align = "
         onClick={() => setOpen((v) => !v)}
         disabled={disabled}
         title="Reasoning level"
-        className="operator-meta-control flex h-8 items-center gap-1.5 px-2.5 text-[13px] disabled:opacity-50 border border-white/10 bg-white/[0.04] hover:bg-white/[0.07] rounded-md"
+        className="operator-meta-control flex h-8 items-center gap-1.5 px-2.5 text-[13px] disabled:opacity-50"
       >
         <BoltIcon size={12} className="shrink-0 text-dim" />
         <span className="shrink-0">{meta.label}</span>
