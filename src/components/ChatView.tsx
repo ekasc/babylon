@@ -308,7 +308,6 @@ export default function ChatView({
                     onClick={() => setExpandedTurns((prev) => { const n = new Set(prev); n.add(foldForUser.turnId); return n; })}
                     className="my-1 flex w-full items-center gap-2 rounded-md border border-dashed border-line bg-inset/50 px-3 py-1.5 text-left text-[12.5px] text-dim hover:border-line-strong hover:text-fg"
                   >
-                    <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--dim)]" aria-hidden />
                     <span className="truncate">{foldForUser.label}</span>
                     <span className="ml-auto shrink-0 text-[11px]">{foldForUser.hiddenCount} hidden</span>
                   </button>
