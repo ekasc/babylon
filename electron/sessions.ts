@@ -255,6 +255,15 @@ export async function readSessionInfo(
       }
     }
 
+    let lastMessageMs: number | null = null;
+    for (const entry of [...headObjects, ...tailObjects]) {
+      if (entry?.type !== "message" || !entry.timestamp) continue;
+      const t = Date.parse(entry.timestamp);
+      if (Number.isFinite(t) && (lastMessageMs === null || t > lastMessageMs)) lastMessageMs = t;
+    }
+    const effectiveMtime = lastMessageMs !== null ? Math.max(mtime, lastMessageMs) : mtime;
+    const sortMtime = lastMessageMs ?? mtime;
+
     return {
       id: header.id,
       path,
@@ -262,7 +271,7 @@ export async function readSessionInfo(
       name: name ?? firstUserText,
       firstUserText,
       startedAt: header.timestamp,
-      mtime,
+      mtime: sortMtime,
       size,
       isWorktree: !!header.parentSession,
       parentPath: typeof header.parentSession === "string" ? header.parentSession : undefined,

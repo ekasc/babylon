@@ -1,7 +1,50 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react";
 import type { ChatItem } from "../store";
 import type { HistoryTurn } from "../bridge";
 import { UserMessage, AssistantMessage, ToolCard, ToolGroup, SystemLine, RecapLine, LaunchCard } from "./items";
+import { formatTokens } from "../lib/format";
+import { formatTokensEffect } from "../lib/format.effect";
+import * as Effect from "effect/Effect";
+
+const CompactionCard = memo(function CompactionCard({ item }: { item: Extract<ChatItem, { kind: "compaction" }> }) {
+  const isCompacting = item.status === "compacting";
+  const isFailed = item.status === "failed";
+  const isAborted = item.status === "aborted";
+  let text: string;
+  let subtext: string | null = null;
+  if (isCompacting) {
+    text = "Compacting…";
+    subtext = item.reason ? `${item.reason}` : null;
+  } else if (isAborted) {
+    text = "Compaction aborted";
+  } else if (isFailed) {
+    text = "Compaction failed";
+    subtext = item.error ?? null;
+  } else {
+    const r = item.result;
+    if (r?.tokensBefore != null && r?.estimatedTokensAfter != null) {
+      text = `Compacted: ${Effect.runSync(formatTokensEffect(r.tokensBefore))} → ~${Effect.runSync(formatTokensEffect(r.estimatedTokensAfter))} tokens`;
+    } else {
+      text = "Compacted";
+    }
+    subtext = item.reason && item.reason !== "auto" ? item.reason : null;
+  }
+  return (
+    <div
+      className={`my-3 flex items-center gap-2.5 rounded-full border px-3.5 py-1.5 text-[12.5px] ${isFailed ? "border-err/30 bg-err/10 text-err" : isAborted ? "border-warn/30 bg-warn/10 text-warn" : "border-line bg-inset/60 text-dim"}`}
+      style={{ width: "fit-content", maxWidth: "100%" }}
+      role="status"
+      aria-live="polite"
+    >
+      {isCompacting ? <span className="spinner inline-block h-3 w-3 shrink-0 rounded-full border-[1.5px] border-line border-t-accent animate-spin" aria-hidden /> : null}
+      {isFailed ? <span aria-hidden>⚠</span> : null}
+      {isAborted ? <span aria-hidden>○</span> : null}
+      {!isCompacting && !isFailed && !isAborted ? <span aria-hidden>◍</span> : null}
+      <span className="font-medium" style={{ color: isFailed || isAborted ? undefined : "var(--fg)" }}>{text}</span>
+      {subtext ? <span className="text-dim truncate">· {subtext}</span> : null}
+    </div>
+  );
+});
 import { TurnChanges } from "./TurnChanges";
 
 /** Runs of consecutive tool calls at least this long render as one collapsed row. */
@@ -43,8 +86,6 @@ interface Props {
   /** Called when the user scrolls to the top of the loaded region. */
   onNeedEarlier?(): void;
   streaming: boolean;
-  chromeTop?: number;
-  chromeBottom?: number;
   historyTurns?: HistoryTurn[];
   onRollback?(entryId: string): void;
   onOpenLaunch?(runId: string, runKind: "subagent" | "thread" | "workflow"): void;
@@ -97,17 +138,17 @@ export default function ChatView({
   loadingEarlier = false,
   onNeedEarlier,
   streaming,
-  chromeTop = 66,
-  chromeBottom = 156,
   historyTurns = [],
   onRollback,
   onOpenLaunch,
 }: Props) {
   const ref = useRef<HTMLDivElement>(null);
+  const innerRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   const [showJump, setShowJump] = useState(false);
   const prevHeight = useRef(0);
   const prevFirstKey = useRef<string | null>(null);
+  const prevLength = useRef(0);
   const onNeedEarlierRef = useRef(onNeedEarlier);
   onNeedEarlierRef.current = onNeedEarlier;
   const canLoadMoreRef = useRef(canLoadMore);
@@ -121,7 +162,7 @@ export default function ChatView({
     const el = ref.current;
     if (!el) return;
     const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
-    const atBottom = dist < 24;
+    const atBottom = dist < 100;
     stick.current = atBottom;
     setShowJump(!atBottom);
     // Scroll-up streaming: near the top of the loaded region, ask for the next
@@ -135,23 +176,42 @@ export default function ChatView({
     const el = ref.current;
     if (!el) return;
     const isInitialMount = prevFirstKey.current === null;
-    const prepended = shown.length > 0 && prevFirstKey.current !== null && shown[0].key !== prevFirstKey.current;
+    const prevKey = prevFirstKey.current;
+    const isShrink = prevLength.current > 0 && shown.length < prevLength.current;
+    const prepended = shown.length > 0 && prevKey !== null && shown[0].key !== prevKey && !isShrink;
     const before = prevHeight.current;
     prevHeight.current = el.scrollHeight;
     prevFirstKey.current = shown[0]?.key ?? null;
+    prevLength.current = shown.length;
     const frame = requestAnimationFrame(() => {
       if (!el) return;
-      if (isInitialMount) {
+      if (isInitialMount || (isShrink && stick.current)) {
         el.scrollTop = el.scrollHeight;
       } else if (prepended && before > 0) {
         // Older messages were inserted above the viewport: keep the visible
         // content in place by shifting the scroll position by the inserted
         // height instead of letting the document jump.
         el.scrollTop += el.scrollHeight - before;
+      } else if (stick.current) {
+        el.scrollTop = el.scrollHeight;
       }
     });
     return () => cancelAnimationFrame(frame);
   }, [shown]);
+
+  // True streaming pin: any growth of the inner column (text deltas, tool
+  // output, tool groups) auto-pins when the user is at the bottom. Uses
+  // ResizeObserver so we don't have to guess which piece of `items` grew.
+  useEffect(() => {
+    const el = ref.current;
+    const inner = innerRef.current;
+    if (!el || !inner) return;
+    const ro = new ResizeObserver(() => {
+      if (stick.current) el.scrollTop = el.scrollHeight;
+    });
+    ro.observe(inner);
+    return () => ro.disconnect();
+  }, []);
 
   // Derived view data: rebuilt only when the transcript actually changes, not
   // on every parent render (streaming deltas re-render App many times/sec).
@@ -240,15 +300,15 @@ export default function ChatView({
   const entries = useMemo(() => buildEntries(shown), [shown]);
 
   return (
-    <div
-      ref={ref}
-      onScroll={onScroll}
-      className="conversation-scroll absolute inset-0 overflow-y-auto"
-      role="log"
-      aria-label="Conversation"
-      style={{ paddingTop: chromeTop, paddingBottom: chromeBottom }}
-    >
-      <div className="conversation-column mx-auto flex flex-col px-7 py-8">
+    <div className="relative flex flex-1 min-h-0 flex-col">
+      <div
+        ref={ref}
+        onScroll={onScroll}
+        className="conversation-scroll flex-1 min-h-0 overflow-y-auto"
+        role="log"
+        aria-label="Conversation"
+      >
+      <div ref={innerRef} className="conversation-column mx-auto flex flex-col px-7 py-8">
         {loadingEarlier ? (
           <div className="mb-3 flex items-center gap-2 text-[13px] text-dim" aria-live="polite">
             <span className="spinner inline-block h-3 w-3 rounded-full border-[1.5px] border-line border-t-accent" />
@@ -272,10 +332,11 @@ export default function ChatView({
                   return slice.length ? buildEntries(slice as any) : [];
                 })()
               : [];
+            const stagger = Math.min(idx * 18, 120);
             return entry.type === "group" ? (
               <Fragment key={`g-${entry.tools[0].key}`}>
-                <div className={longChat ? "chat-item chat-item-long" : "chat-item"}>
-                  <ToolGroup tools={entry.tools} />
+                <div className={longChat ? "chat-item chat-item-long" : "chat-item"} style={{ animationDelay: `${stagger}ms` } as any}>
+                  <ToolGroup tools={entry.tools} staggerMs={stagger} />
                 </div>
                 {cards.get(entry.index) ? (
                   <TurnChanges turn={cards.get(entry.index)!} isLatest={latestChanged?.entryId === cards.get(entry.index)!.entryId} />
@@ -283,7 +344,7 @@ export default function ChatView({
               </Fragment>
             ) : (
               <Fragment key={entry.item.key}>
-                <div className={longChat ? "chat-item chat-item-long" : "chat-item"}>
+                <div className={longChat ? "chat-item chat-item-long" : "chat-item"} style={{ animationDelay: `${stagger}ms` } as any}>
                   {(() => {
                     const prev = idx > 0 ? visibleEntries[idx - 1] : null;
                     const prevIsTool = !!prev && (prev.type === "group" || (prev.type === "single" && (prev.item.kind === "tool" || prev.item.kind === "launch")));
@@ -296,11 +357,13 @@ export default function ChatView({
                         ) : entry.item.kind === "assistant" ? (
                           <AssistantMessage item={entry.item} />
                         ) : entry.item.kind === "tool" ? (
-                          <ToolCard item={entry.item} />
+                          <ToolCard item={entry.item} staggerMs={stagger} />
                         ) : entry.item.kind === "recap" ? (
                           <RecapLine text={entry.item.text} />
                         ) : entry.item.kind === "launch" ? (
                           <LaunchCard item={entry.item} onOpen={onOpenLaunch} />
+                        ) : entry.item.kind === "compaction" ? (
+                          <CompactionCard item={entry.item} />
                         ) : (
                           <SystemLine text={entry.item.text} />
                         )}
@@ -323,7 +386,7 @@ export default function ChatView({
                           return n;
                         })
                       }
-                      className="my-1 flex w-full items-center gap-2 rounded-md border border-dashed border-line bg-inset/50 px-3 py-1.5 text-left text-[12.5px] text-dim hover:border-line-strong hover:text-fg active:scale-[0.97] transition-transform duration-100 ease-out will-change-transform"
+                      className="my-1 flex w-full items-center gap-2 rounded-md border border-dashed border-line bg-inset/50 px-3 py-1.5 text-left text-[12.5px] text-dim hover:border-line-strong hover:text-fg"
                     >
                       <span className="truncate">{isCollapsed ? foldForUser.label : "Hide details"}</span>
                       <span className="ml-auto shrink-0 text-[11px]">{isCollapsed ? `${foldForUser.hiddenCount} hidden` : "Collapse"}</span>
@@ -356,6 +419,7 @@ export default function ChatView({
           });
         })()}
       </div>
+      </div>
       {showJump && (
         <button
           type="button"
@@ -364,8 +428,7 @@ export default function ChatView({
             if (!el) return;
             el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
           }}
-          className="fixed left-1/2 z-50 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-line bg-raised px-3 py-1.5 text-[12px] font-medium shadow-lg hover:bg-inset active:scale-[0.97] transition-transform"
-          style={{ bottom: chromeBottom + 8 }}
+          className="absolute bottom-4 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-line bg-raised px-3 py-1.5 text-[12px] font-medium shadow-lg hover:bg-inset active:scale-[0.97] transition-transform"
           aria-label="Jump to bottom"
         >
           ↓ Jump to bottom

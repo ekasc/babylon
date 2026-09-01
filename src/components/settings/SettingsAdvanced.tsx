@@ -3,6 +3,19 @@ import type { PiSettings } from "../../bridge";
 import { SettingSection } from "./SettingSection";
 import { SettingRow } from "./SettingRow";
 
+const DEFAULT_RESET: Partial<PiSettings> = {
+  chatModel: undefined,
+  chatReasoning: undefined,
+  titleModel: undefined,
+  titleReasoning: undefined,
+  gitCommitModel: undefined,
+  gitCommitPrompt: undefined,
+  contextWindowOverrides: {},
+  appearance: { theme: "system", useSystemFonts: true, monoFontFamily: "system" },
+  compaction: { mode: "summary" },
+  daemon: {},
+};
+
 export function SettingsAdvanced({ settings, onSave }: { settings: PiSettings | null; onSave: (p: Partial<PiSettings>) => void }) {
   const [msg, setMsg] = useState<string | null>(null);
   const doExport = () => {
@@ -41,7 +54,7 @@ export function SettingsAdvanced({ settings, onSave }: { settings: PiSettings | 
           <div className="flex gap-2">
             <button onClick={doExport} className="rounded-md border border-line px-3 py-1.5 text-[12.5px] hover:bg-inset">Export settings</button>
             <label className="rounded-md border border-line px-3 py-1.5 text-[12.5px] hover:bg-inset cursor-pointer">Import from file<input type="file" accept=".json,application/json" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) void doImportFile(f); e.currentTarget.value = ""; }} /></label>
-            <button onClick={() => { if (confirm("Reset all settings to defaults?")) { onSave({ chatModel: undefined as any, chatReasoning: undefined as any, titleModel: undefined as any, titleReasoning: undefined as any, gitCommitModel: undefined as any, gitCommitPrompt: undefined as any, contextWindowOverrides: {}, appearance: { theme: "system", useSystemFonts: true, monoFontFamily: "system" }, compaction: { mode: "summary" }, daemon: {} }); setMsg("Reset to defaults"); setTimeout(()=>setMsg(null),1500); } }} className="rounded-md border border-err/30 text-err px-3 py-1.5 text-[12.5px] hover:bg-err/10">Reset everything</button>
+            <button onClick={() => { if (confirm("Reset all settings to defaults?")) { onSave(DEFAULT_RESET); setMsg("Reset to defaults"); setTimeout(()=>setMsg(null),1500); } }} className="rounded-md border border-err/30 text-err px-3 py-1.5 text-[12.5px] hover:bg-err/10">Reset everything</button>
             {msg ? <span className="text-[12px] text-dim self-center">{msg}</span> : null}
           </div>
         </div>

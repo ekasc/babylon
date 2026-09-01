@@ -132,6 +132,25 @@ function renderTextWithMath(text: string, keyBase: string): ReactNode[] {
   return nodes;
 }
 
+function wrapMath(node: ReactNode, keyBase: string): ReactNode {
+  if (node == null || typeof node === "boolean") return null;
+  if (typeof node === "string" || typeof node === "number") {
+    const s = String(node);
+    if (!s.includes("\u0000")) return s;
+    const parts = renderTextWithMath(s, keyBase);
+    return <>{parts}</>;
+  }
+  if (Array.isArray(node)) return node.map((n, i) => <React.Fragment key={`${keyBase}-${i}`}>{wrapMath(n, `${keyBase}-${i}`)}</React.Fragment>);
+  if (React.isValidElement(node)) {
+    const el = node as any;
+    if (el.props?.children != null) {
+      return React.cloneElement(el, { key: el.key ?? keyBase }, wrapMath(el.props.children, keyBase));
+    }
+    return node;
+  }
+  return node;
+}
+
 function escapeMarkdownCell(text: string): string {
   return text.replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\n/g, " ").replace(/\r/g, "");
 }
@@ -252,10 +271,7 @@ export default function Markdown({ text }: { text: string }) {
               </pre>
             );
           },
-          p: ({ children }) => {
-            const textChildren = renderTextWithMath(textOf(children), "p");
-            return <p>{textChildren}</p>;
-          },
+          p: ({ children }) => <p>{wrapMath(children, "p")}</p>,
           li: ({ children, ...rest }) => {
             const input = (rest as any).checked;
             if (typeof input === "boolean") {
@@ -264,12 +280,11 @@ export default function Markdown({ text }: { text: string }) {
                   <span className={`md-task-box ${input ? "is-checked" : ""}`} aria-hidden="true">
                     {input ? "✓" : ""}
                   </span>
-                  <span className={input ? "md-task-text is-checked" : "md-task-text"}>{children}</span>
+                  <span className={input ? "md-task-text is-checked" : "md-task-text"}>{wrapMath(children, "li")}</span>
                 </li>
               );
             }
-            // For non-task list items, render text with math.
-            return <li>{renderTextWithMath(textOf(children), "li")}</li>;
+            return <li>{wrapMath(children, "li")}</li>;
           },
           blockquote: ({ children }) => {
             const raw = textOf(children);

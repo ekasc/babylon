@@ -73,7 +73,7 @@ export function SettingsAppearance({ settings, onSave, theme, onThemeChange }: {
       <SettingSection title="Typography" hint="Pick any font installed on this Mac — no font files are shipped. Preview shows the monospace stack.">
         <label className="flex items-center justify-between rounded-md px-3 py-2.5 hover:bg-inset cursor-pointer border border-transparent hover:border-line/30">
           <span className="text-[13px]">Use system fonts</span>
-          <input type="checkbox" checked={settings?.appearance?.useSystemFonts ?? true} onChange={(e) => { const enabled = e.target.checked; applySystemFonts(enabled); localStorage.setItem("pideck:useSystemFonts", String(enabled)); onSave({ appearance: { ...(settings?.appearance ?? {}), useSystemFonts: enabled } }); }} className="h-4 w-4 accent-accent" />
+          <input type="checkbox" checked={settings?.appearance?.useSystemFonts ?? true} onChange={(e) => { const enabled = e.target.checked; applySystemFonts(enabled); localStorage.setItem("babylon:useSystemFonts", String(enabled)); onSave({ appearance: { ...(settings?.appearance ?? {}), useSystemFonts: enabled } }); }} className="h-4 w-4 accent-accent" />
         </label>
         <div className="mt-3 max-w-[480px]">
           <label className="block text-[12px] font-medium text-dim mb-1.5">Monospace font</label>

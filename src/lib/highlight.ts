@@ -89,7 +89,7 @@ export function cachedHighlight(code: string, lang?: string): string | null {
 function load(): Promise<HighlighterCore> {
   hlPromise ??= Promise.all([import("shiki/core"), import("shiki/engine/javascript")]).then(
     ([{ createHighlighterCore }, { createJavaScriptRegexEngine }]) => createHighlighterCore({
-    themes: [import("shiki/themes/github-light.mjs"), import("shiki/themes/github-dark.mjs")],
+    themes: [import("shiki/themes/github-light.mjs"), import("shiki/themes/tokyo-night.mjs")],
     langs: [
       import("shiki/langs/typescript.mjs"),
       import("shiki/langs/javascript.mjs"),
@@ -234,7 +234,7 @@ async function renderHighlight(code: string, lang?: string): Promise<string> {
     return queued(() =>
       hl.codeToHtml(code, {
         lang: langName,
-        themes: { light: "github-light", dark: "github-dark" },
+        themes: { light: "github-light", dark: "tokyo-night" },
         defaultColor: false,
       })
     );

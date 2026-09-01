@@ -1,8 +1,11 @@
+import { getWithFallback } from "./storage";
+import { RESERVED_THEME_IDS } from "./themePalettes";
+
 export type ThemePref = "light" | "dark" | "system";
 
 /** Apply a theme preference to the document root and persist it. */
 export function applyTheme(theme: ThemePref): void {
-  localStorage.setItem("pideck:theme", theme);
+  localStorage.setItem("babylon:theme", theme);
   const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
   const isDark = theme === "dark" || (theme === "system" && prefersDark);
   document.documentElement.classList.toggle("dark", isDark);
@@ -10,8 +13,8 @@ export function applyTheme(theme: ThemePref): void {
 }
 
 export function loadThemePref(): ThemePref {
-  const t = localStorage.getItem("pideck:theme");
-  return t === "light" || t === "dark" || t === "system" ? t : "system";
+  const t = getWithFallback("theme");
+  return t === "light" || t === "dark" || t === "system" ? (t as ThemePref) : "system";
 }
 
 export function applySystemFonts(enabled: boolean): void {
@@ -20,7 +23,7 @@ export function applySystemFonts(enabled: boolean): void {
 }
 
 export function loadSystemFontsPref(): boolean {
-  const v = localStorage.getItem("pideck:useSystemFonts");
+  const v = getWithFallback("useSystemFonts");
   if (v === "true") return true;
   if (v === "false") return false;
   return true;
@@ -50,11 +53,15 @@ export function monoStack(family: string): string {
 
 export function applyMonoFont(family: string): void {
   document.documentElement.style.setProperty("--mono", monoStack(family));
-  localStorage.setItem("pideck:monoFont", family);
+  localStorage.setItem("babylon:monoFont", family);
 }
 
 export function loadMonoFontPref(): string {
-  const v = localStorage.getItem("pideck:monoFont");
+  const v = getWithFallback("monoFont");
   if (v) return v;
   return "system";
+}
+
+export function isReservedThemeId(id: string): boolean {
+  return RESERVED_THEME_IDS.has(id);
 }

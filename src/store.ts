@@ -55,7 +55,8 @@ export type ChatItem =
     }
   | { kind: "system"; key: string; text: string }
   | { kind: "recap"; key: string; text: string; at: number }
-  | { kind: "launch"; key: string; runKind: "subagent" | "thread" | "workflow"; runId: string; label: string; status: "running" | "completed" | "failed" | "stopped" };
+  | { kind: "launch"; key: string; runKind: "subagent" | "thread" | "workflow"; runId: string; label: string; status: "running" | "completed" | "failed" | "stopped" }
+  | { kind: "compaction"; key: string; status: "compacting" | "compacted" | "aborted" | "failed"; reason?: string; result?: { tokensBefore?: number; estimatedTokensAfter?: number }; error?: string };
 
 export type DialogMethod = "select" | "confirm" | "input" | "editor";
 
@@ -90,6 +91,7 @@ export type Action =
   | { type: "rebuild"; messages: any[] }
   | { type: "event"; event: any }
   | { type: "local-user"; text: string; images?: string[] }
+  | { type: "local-user-rollback"; text: string }
   | { type: "dialog-dismiss"; id: string }
   | { type: "toast"; toast: Omit<Toast, "id"> }
   | { type: "toast-dismiss"; id: number };
@@ -268,18 +270,18 @@ export function reducer(state: State, action: Action): State {
       return { ...initialState, toasts: state.toasts };
     case "rebuild": {
       const fromMessages = messagesToItems(action.messages);
-      // Launch cards are not part of the agent's session file; preserve any
+      // Launch and compaction cards are not part of the agent's session file; preserve any
       // live rows so the user doesn't lose sight of running work after a
       // session-rebuild (e.g. settings change, agent_settled replay).
       const preserved = state.items.filter(
-        (it) => it.kind === "launch" && !fromMessages.some((row) => row.key === it.key)
+        (it) => (it.kind === "launch" || it.kind === "compaction") && !fromMessages.some((row) => row.key === it.key)
       );
       return {
         ...state,
         items: reconcileItems(state.items, [...fromMessages, ...preserved]),
-        streaming: false,
-        steering: [],
-        followUp: [],
+        streaming: state.streaming,
+        steering: state.steering,
+        followUp: state.followUp,
       };
     }
     case "local-user":
@@ -297,6 +299,13 @@ export function reducer(state: State, action: Action): State {
           },
         ],
       };
+    case "local-user-rollback": {
+      const idx = state.items.findLastIndex((it) => it.kind === "user" && it.optimistic && it.text === action.text);
+      if (idx < 0) return state;
+      const items = state.items.slice();
+      items.splice(idx, 1);
+      return { ...state, items };
+    }
     case "dialog-dismiss":
       return { ...state, dialogs: state.dialogs.filter((d) => d.id !== action.id) };
     case "toast": {
@@ -377,7 +386,7 @@ function applyEvent(state: State, ev: any): State {
           const last = state.items[state.items.length - 1];
           // The composer adds an optimistic row; the authoritative message_start
           // for the same prompt must not render a duplicate copy.
-          if (last?.kind === "user" && last.text === text && last.key.startsWith("u")) {
+          if (last?.kind === "user" && last.text === text && last.optimistic) {
             const authoritative = messagesToItems([m])[0];
             if (authoritative?.kind === "user" && authoritative.images?.length && !last.images?.length) {
               const items = state.items.slice();
@@ -504,19 +513,58 @@ function applyEvent(state: State, ev: any): State {
       return state;
     }
 
-    case "compaction_start":
-      return withToast(state, "info", "Compacting context…");
+    case "compaction_start": {
+      const compactionItem: Extract<ChatItem, { kind: "compaction" }> = {
+        kind: "compaction",
+        key: nextKey("compaction"),
+        status: "compacting",
+        reason: ev.reason ?? "auto",
+      };
+      return {
+        ...withToast(state, "info", "Compacting context…"),
+        items: [...state.items, compactionItem],
+      };
+    }
 
     case "compaction_end": {
-      if (ev.aborted) return withToast(state, "warning", "Compaction aborted");
-      if (ev.errorMessage) return withToast(state, "error", `Compaction failed: ${ev.errorMessage}`);
+      const items = state.items.slice();
+      let idx = -1;
+      for (let i = items.length - 1; i >= 0; i--) {
+        if (items[i].kind === "compaction" && (items[i] as Extract<ChatItem, { kind: "compaction" }>).status === "compacting") {
+          idx = i;
+          break;
+        }
+      }
+      let nextState: State = state;
+      if (idx >= 0) {
+        const cur = items[idx] as Extract<ChatItem, { kind: "compaction" }>;
+        if (ev.aborted) {
+          items[idx] = { ...cur, status: "aborted" as const };
+        } else if (ev.errorMessage) {
+          items[idx] = { ...cur, status: "failed" as const, error: ev.errorMessage };
+        } else {
+          items[idx] = { ...cur, status: "compacted" as const, result: ev.result ? { tokensBefore: ev.result.tokensBefore, estimatedTokensAfter: ev.result.estimatedTokensAfter } : undefined };
+        }
+        nextState = { ...state, items };
+      } else {
+        const status = ev.aborted ? ("aborted" as const) : ev.errorMessage ? ("failed" as const) : ("compacted" as const);
+        const compactionItem: Extract<ChatItem, { kind: "compaction" }> = {
+          kind: "compaction",
+          key: nextKey("compaction"),
+          status,
+          reason: ev.reason ?? "auto",
+          result: ev.result ? { tokensBefore: ev.result.tokensBefore, estimatedTokensAfter: ev.result.estimatedTokensAfter } : undefined,
+          error: ev.errorMessage,
+        };
+        nextState = { ...state, items: [...state.items, compactionItem] };
+      }
+      if (ev.aborted) return withToast(nextState, "warning", "Compaction aborted");
+      if (ev.errorMessage) return withToast(nextState, "error", `Compaction failed: ${ev.errorMessage}`);
       const r = ev.result;
       return withToast(
-        state,
+        nextState,
         "info",
-        r
-          ? `Context compacted: ${fmtTokens(r.tokensBefore)} → ~${fmtTokens(r.estimatedTokensAfter)} tokens`
-          : "Context compacted"
+        r ? `Context compacted: ${fmtTokens(r.tokensBefore)} → ~${fmtTokens(r.estimatedTokensAfter)} tokens` : "Context compacted"
       );
     }
 
@@ -592,6 +640,9 @@ function sameItem(a: ChatItem, b: ChatItem): boolean {
   if (a.kind === "launch" && b.kind === "launch") {
     return a.runId === b.runId && a.status === b.status && a.label === b.label;
   }
+  if (a.kind === "compaction" && b.kind === "compaction") {
+    return a.status === b.status && a.reason === b.reason && a.error === b.error && cheapSig(a.result) === cheapSig(b.result);
+  }
   return false;
 }
 
@@ -614,9 +665,8 @@ function cheapSig(value: any): string {
   return "?";
 }
 
+import { formatTokens as formatTokensRaw } from "./lib/usageFormat";
 export function fmtTokens(n?: number): string {
   if (n == null) return "0";
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
-  if (n >= 1000) return (n / 1000).toFixed(1) + "k";
-  return String(n);
+  return formatTokensRaw(n);
 }

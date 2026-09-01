@@ -5,7 +5,22 @@ import CodeBlock from "./CodeBlock";
 import Markdown from "./Markdown";
 import BashCard from "./BashCard";
 
+function parseSkillRef(text: string): string | null {
+  const slash = text.match(/^\/skill:([a-z0-9-]+)\b/);
+  if (slash) return slash[1];
+  const fm = text.match(/---[\s\S]*?\bname:\s*([a-z0-9-]+)\b/);
+  if (fm && text.length > 400 && (text.includes("description:") || text.includes("# "))) return fm[1];
+  if (text.length > 800 && text.includes("# ") && text.includes("description:")) {
+    const m2 = text.match(/\bname:\s*([a-z0-9-]+)/);
+    if (m2) return m2[1];
+  }
+  return null;
+}
+
 export const UserMessage = memo(function UserMessage({ item, historyTurn, rollbackDisabled, onRollback }: { item: Extract<ChatItem, { kind: "user" }>; historyTurn?: HistoryTurn; rollbackDisabled?: boolean; onRollback?(entryId: string): void }) {
+  const skillName = parseSkillRef(item.text);
+  const isSkillBlock = skillName != null && item.text.length > 120;
+  const [expandSkill, setExpandSkill] = useState(false);
   return (
     <article className={`conversation-user group/user relative ${item.optimistic ? "conversation-user-sent" : ""}`}>
       <div className="whitespace-pre-wrap text-[15px] leading-[1.55]">
@@ -23,7 +38,16 @@ export const UserMessage = memo(function UserMessage({ item, historyTurn, rollba
           ))}
         </span>
       )}
-      {item.text}
+      {isSkillBlock ? (
+        <span className="inline-flex flex-col gap-1.5">
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-line bg-inset px-2.5 py-1 font-mono text-[12px] leading-none text-dim">
+            <span className="h-1.5 w-1.5 rounded-full bg-accent" aria-hidden />
+            /skill:{skillName}
+            <button onClick={() => setExpandSkill((v) => !v)} className="ml-1 rounded-full px-1.5 py-0.5 text-[11px] hover:bg-line hover:text-fg">{expandSkill ? "hide" : "show"}</button>
+          </span>
+          {expandSkill ? <span className="block max-h-64 overflow-auto rounded-lg border border-line bg-inset/50 px-3 py-2 font-mono text-[12px] leading-5">{item.text}</span> : null}
+        </span>
+      ) : item.text}
       </div>
       {item.entryId && historyTurn ? (
         <div className="user-message-actions" aria-label="Message actions">
@@ -55,7 +79,7 @@ export const AssistantMessage = memo(function AssistantMessage({ item }: { item:
   })();
   const hasPreceding = lastTextIdx > 0 && item.blocks.slice(0, lastTextIdx).some((b) => b.type === "thinking" || b.text.trim());
   return (
-    <article className="conversation-assistant">
+    <article className="conversation-assistant" style={{ ["viewTransitionName" as any]: `msg-${item.key}` } as any}>
       <div className="flex flex-col gap-3">
       {item.blocks.map((b, i) => {
         const isLastText = i === lastTextIdx;
@@ -82,15 +106,14 @@ function Thinking({ text, open }: { text: string; open: boolean }) {
   }, [open]);
   const isStreaming = open;
   return (
-    <details className={`thinking-card ${expanded ? "is-open" : ""} ${isStreaming ? "is-streaming" : ""}`} open={expanded} onToggle={(e) => setExpanded((e.target as HTMLDetailsElement).open)}>
-      <summary className="thinking-summary">
-        <span className={`thinking-dot ${isStreaming ? "is-pulse" : ""}`} aria-hidden="true" />
-        <span className="thinking-label">{isStreaming ? "Thinking..." : "Thought"}</span>
-        <span className="thinking-hint">{isStreaming ? "streaming" : expanded ? "collapse" : "expand"}</span>
+    <details className="group my-2" open={expanded} onToggle={(e) => setExpanded((e.target as HTMLDetailsElement).open)} style={{ ["viewTransitionName" as any]: `thinking-${text.slice(0,8)}` } as any}>
+      <summary className="flex cursor-pointer list-none select-none items-center gap-1.5 text-[13px] text-dim hover:text-fg [&::-webkit-details-marker]:hidden">
+        <span className={`inline-block shrink-0 text-[10px] leading-none transition-transform ${expanded ? "rotate-90" : ""}`} aria-hidden>›</span>
+        <span className="font-medium tracking-tight">{isStreaming ? "Thinking…" : "Thought"}</span>
+        {isStreaming && <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-accent" aria-hidden />}
+        <span className="text-[11px] opacity-60">{isStreaming ? "streaming" : expanded ? "hide" : "show"}</span>
       </summary>
-      <div className="thinking-body">
-        <div className="thinking-content">{text}</div>
-      </div>
+      <div className="mt-1.5 border-l border-line/40 pl-3 font-mono text-[12.5px] leading-6 text-dim/90 whitespace-pre-wrap break-words">{text}</div>
     </details>
   );
 }
@@ -195,7 +218,7 @@ export function miniPatch(patch: string, maxLines = 6): string {
   return out.join("\n");
 }
 
-export const ToolCard = memo(function ToolCard({ item }: { item: Extract<ChatItem, { kind: "tool" }> }) {
+export const ToolCard = memo(function ToolCard({ item, staggerMs }: { item: Extract<ChatItem, { kind: "tool" }>; staggerMs?: number }) {
   const [open, setOpen] = useState(false);
   const [fullOutput, setFullOutput] = useState<string | null>(null);
 
@@ -215,7 +238,7 @@ export const ToolCard = memo(function ToolCard({ item }: { item: Extract<ChatIte
   }
 
   return (
-    <div className={`tool-row ${item.status === "running" ? "is-running" : item.status === "error" ? "is-error" : ""}`}>
+    <div className={`tool-row ${item.status === "running" ? "is-running" : item.status === "error" ? "is-error" : ""}`} style={staggerMs ? { animationDelay: `${staggerMs}ms` } as any : undefined}>
       <button
         onClick={() => setOpen((o) => !o)}
         className="tool-row-header"
@@ -261,14 +284,14 @@ export const ToolCard = memo(function ToolCard({ item }: { item: Extract<ChatIte
 });
 
 /** Collapses a run of consecutive tool calls into one summary row. */
-export const ToolGroup = memo(function ToolGroup({ tools }: { tools: Array<Extract<ChatItem, { kind: "tool" }>> }) {
+export const ToolGroup = memo(function ToolGroup({ tools, staggerMs }: { tools: Array<Extract<ChatItem, { kind: "tool" }>>; staggerMs?: number }) {
   const [open, setOpen] = useState(false);
   const anyRunning = tools.some((t) => t.status === "running" || t.status === "pending");
   const anyError = tools.some((t) => t.status === "error");
   const aggregate: "running" | "error" | "done" = anyRunning ? "running" : anyError ? "error" : "done";
 
   return (
-    <div className="tool-group">
+    <div className="tool-group" style={staggerMs ? { animationDelay: `${staggerMs}ms` } as any : undefined}>
       <button
         onClick={() => setOpen((o) => !o)}
         className="tool-group-header"

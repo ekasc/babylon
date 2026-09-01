@@ -7,6 +7,11 @@ import Sidebar from "./components/Sidebar";
 import SettingsPage from "./components/SettingsPage";
 import { applyMonoFont, applySystemFonts, applyTheme, loadMonoFontPref, loadSystemFontsPref, loadThemePref, type ThemePref } from "./lib/theme";
 import ProjectFilter from "./components/ProjectFilter";
+import { getNumberWithFallback, getWithFallback } from "./lib/storage";
+import { getNumberWithFallbackEffect, getWithFallbackEffect } from "./lib/storage.effect";
+import { normalizeProjectPathForDispatch } from "./lib/path";
+import { normalizeProjectPathForDispatchEffect } from "./lib/path.effect";
+import * as Effect from "effect/Effect";
 import ChatView from "./components/ChatView";
 import Composer, { type Attachment } from "./components/Composer";
 import DialogHost from "./components/DialogHost";
@@ -14,6 +19,7 @@ import Toasts from "./components/Toasts";
 import Hero from "./components/Hero";
 import WorkspacePane from "./components/WorkspacePane";
 import { RollbackConfirm, RollbackDock } from "./components/Rollback";
+import SessionFooter from "./components/SessionFooter";
 import { WorktreeBanner, WorktreeModal, type WorktreeInfo } from "./components/Worktree";
 import { ApprovalGate } from "./components/ApprovalGate";
 import GitCommitPopover from "./components/GitCommitPopover";
@@ -27,12 +33,19 @@ const AutomationPanel = lazy(() => import("./components/AutomationPanel").then((
 const DiagnosticsPanel = lazy(() => import("./components/DiagnosticsPanel").then((m) => ({ default: m.DiagnosticsPanel })));
 import { ProblemsPanel } from "./components/ProblemsPanel";
 import { collectDiagnostics } from "./diagnostics";
+import { collectDiagnosticsEffect } from "./diagnostics.effect";
 import { PromptHost, confirmAction, promptText } from "./lib/prompts";
 import { createDeviceRegistry, type DeviceRegistry } from "./device-pairing";
+import { createDeviceRegistryEffect } from "./device-pairing.effect";
 import { createScheduledTaskRegistry, type ScheduledTaskRegistry } from "./automation";
+import { createScheduledTaskRegistryEffect } from "./automation.effect";
 import { createAutomationHistory, type AutomationHistory } from "./automation-runner";
+import { createAutomationHistoryEffect } from "./automation-runner.effect";
+import { createAttentionRegistryEffect } from "./attention.effect";
+import { createRegistryEffect as createProcessRegistryEffect } from "./process-model.effect";
 import { createSchedulerLoop } from "./scheduler-loop";
 import { defaultPolicy as defaultBackgroundPolicy } from "./background-policy";
+import { defaultPolicyEffect } from "./background-policy.effect";
 import { appendEvent, createBabylonEvent, createEventLog, type BabylonEvent, type BabylonEventType, type EventLog } from "./events";
 import { stampOwnership } from "./ownership";
 
@@ -86,11 +99,18 @@ function babylonEventFromAgentEvent(event: any): BabylonEvent | null {
 import { addAttention, listAttention, removeAttention, type AttentionRegistry } from "./attention";
 import type { ProcessRegistry } from "./process-model";
 import type { PreviewRegistry } from "./preview-model";
-import { ChevronIcon, FlaskIcon, FolderIcon, LayersIcon, MoreIcon, PiMark } from "./components/icons";
+import { createPreviewRegistryEffect } from "./preview-model.effect";
+import { ArrowDownIcon, ArrowUpIcon, ChevronIcon, FlaskIcon, FolderIcon, LayersIcon, MoreIcon, PiMark } from "./components/icons";
 
 const BranchPanel = lazy(() => import("./components/BranchPanel"));
 const WorkflowsPanel = lazy(() => import("./components/WorkflowsPanel"));
 const CommandPalette = lazy(() => import("./components/CommandPalette"));
+
+function shortCwd(cwd?: string | null) {
+  if (!cwd) return "";
+  const normalized = Effect.runSync(normalizeProjectPathForDispatchEffect(cwd));
+  return normalized.replace(/^\/Users\/[^/]+/, "~");
+}
 
 function StatusDot({ status, working }: { status: string; working: boolean }) {
   const label = status === "ready" ? (working ? "Working" : "Ready") : status === "starting" ? "Starting" : status === "error" ? "Error" : status;
@@ -214,16 +234,26 @@ export default function App() {
 
   const [panelsMenuOpen, setPanelsMenuOpen] = useState(false);
   const [showProcesses, setShowProcesses] = useState(false);
-  const [processRegistry, setProcessRegistry] = useState<ProcessRegistry>({ processes: {} });
+  const [processRegistry, setProcessRegistry] = useState<ProcessRegistry>(() =>
+    Effect.runSync(createProcessRegistryEffect),
+  );
   const [showPreview, setShowPreview] = useState(false);
-  const [previewRegistry, setPreviewRegistry] = useState<PreviewRegistry>({ servers: {} });
+  const [previewRegistry, setPreviewRegistry] = useState<PreviewRegistry>(() =>
+    Effect.runSync(createPreviewRegistryEffect),
+  );
   const [showAttention, setShowAttention] = useState(false);
-  const [attention, setAttention] = useState<AttentionRegistry>({ items: {} });
+  const [attention, setAttention] = useState<AttentionRegistry>(() =>
+    Effect.runSync(createAttentionRegistryEffect),
+  );
   const [showDevices, setShowDevices] = useState(false);
-  const [devices, setDevices] = useState<DeviceRegistry>(() => createDeviceRegistry());
+  const [devices, setDevices] = useState<DeviceRegistry>(() => Effect.runSync(createDeviceRegistryEffect));
   const [showAutomation, setShowAutomation] = useState(false);
-  const [schedule, setSchedule] = useState<ScheduledTaskRegistry>(createScheduledTaskRegistry);
-  const [automationHistory, setAutomationHistory] = useState<AutomationHistory>(createAutomationHistory);
+  const [schedule, setSchedule] = useState<ScheduledTaskRegistry>(() =>
+    Effect.runSync(createScheduledTaskRegistryEffect),
+  );
+  const [automationHistory, setAutomationHistory] = useState<AutomationHistory>(() =>
+    Effect.runSync(createAutomationHistoryEffect),
+  );
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [showProblems, setShowProblems] = useState(false);
   const [lspSnapshots, setLspSnapshots] = useState<import("./bridge").LspProjectSnapshot[]>([]);
@@ -265,7 +295,7 @@ export default function App() {
         setAutomationHistory(next.history);
         setAttention(next.attention);
       },
-      policy: () => defaultBackgroundPolicy(),
+      policy: () => Effect.runSync(defaultPolicyEffect),
       run: () => ({ success: false, error: "no automation executor configured in this build" }),
       onError: (err) => console.error("scheduler tick failed:", err),
     });
@@ -277,11 +307,11 @@ export default function App() {
   const [rollbackPlan, setRollbackPlan] = useState<RollbackPlan | null>(null);
   const [rollbackBusy, setRollbackBusy] = useState(false);
   const [contextWidth, setContextWidth] = useState(() => {
-    const stored = Number(localStorage.getItem("pideck:context-width"));
+    const stored = Effect.runSync(getNumberWithFallbackEffect("context-width", NaN));
     return Number.isFinite(stored) && stored >= 360 && stored <= 1100 ? stored : 520;
   });
 
-  const [sidebarMinimized, setSidebarMinimized] = useState(() => localStorage.getItem("pideck:sidebar-minimized") === "1");
+  const [sidebarMinimized, setSidebarMinimized] = useState(() => Effect.runSync(getWithFallbackEffect("sidebar-minimized")) === "1");
   const [draftRequest, setDraftRequest] = useState<{ id: number; text: string } | null>(null);
   const [promotedParent, setPromotedParent] = useState<{ path: string; cwd: string } | null>(null);
   // Optimistic active session: set synchronously on click so the sidebar row
@@ -352,18 +382,6 @@ export default function App() {
   // once the in-process switch completes — no Hero flash, no blocking.
   const [hasSession, setHasSession] = useState(false);
   const [liveReady, setLiveReady] = useState(false);
-  // The transcript's bottom padding must track the real composer dock height
-  // (it changes with the meta row, rollback dock, streaming controls), or the
-  // last messages clip beneath the dock.
-  const composerDockRef = useRef<HTMLDivElement | null>(null);
-  const [composerHeight, setComposerHeight] = useState(176);
-  useEffect(() => {
-    const el = composerDockRef.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
-    const ro = new ResizeObserver(() => setComposerHeight(el.offsetHeight));
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [hasSession]);
 
   // Debounce the "Preparing…" indicator: show it only when the host has been
   // not-ready for >250ms (cold first-opens), so sub-100ms switches never flash it.
@@ -405,9 +423,9 @@ export default function App() {
   const streamingRef = useRef(false);
   const hasSessionRef = useRef(false);
   const rollbackDraftRef = useRef<string | null>(null);
-  hasSessionRef.current = hasSession;
-  liveReadyRef.current = liveReady;
-  streamingRef.current = state.streaming;
+  useEffect(() => { hasSessionRef.current = hasSession; }, [hasSession]);
+  useEffect(() => { liveReadyRef.current = liveReady; }, [liveReady]);
+  useEffect(() => { streamingRef.current = state.streaming; }, [state.streaming]);
 
   const toast = useCallback(
     (type: "info" | "warning" | "error", text: string) =>
@@ -423,16 +441,22 @@ export default function App() {
     }
   }, []);
 
+  const togglePalette = useCallback((next: boolean | ((v: boolean) => boolean)) => {
+    const apply = () => setShowCommandPalette(next as any);
+    const doc: any = document as any;
+    if (doc.startViewTransition && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) doc.startViewTransition(apply);
+    else apply();
+  }, []);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const command = event.metaKey || event.ctrlKey;
       if (command && event.key.toLowerCase() === "k") {
         event.preventDefault();
-        setShowCommandPalette((open) => !open);
+        togglePalette((open: boolean) => !open);
       } else if (command && !event.altKey && event.key.toLowerCase() === "b") {
         event.preventDefault();
         setSidebarMinimized((minimized) => {
-          localStorage.setItem("pideck:sidebar-minimized", minimized ? "0" : "1");
+          localStorage.setItem("babylon:sidebar-minimized", minimized ? "0" : "1");
           return !minimized;
         });
       } else if (command && event.altKey && event.key.toLowerCase() === "b") {
@@ -463,7 +487,7 @@ export default function App() {
       window.removeEventListener("blur", finish);
       document.documentElement.classList.remove("is-context-resizing");
       setContextWidth((width) => {
-        localStorage.setItem("pideck:context-width", String(width));
+        localStorage.setItem("babylon:context-width", String(width));
         return width;
       });
     };
@@ -687,11 +711,11 @@ export default function App() {
   // agent_settled, so without this the StatsPopover context % and the
   // transcript would stay at the pre-compaction values until the next
   // user prompt.
-  const resyncFromSource = useCallback(async () => {
+  const resyncFromSource = useCallback(async (opts?: { skipRefresh?: boolean }) => {
     const expectedEpoch = epochRef.current;
     try {
       const activePath = activePathRef.current;
-      if (activePath && (await bridge.refreshSession(activePath))) return;
+      if (!opts?.skipRefresh && activePath && (await bridge.refreshSession(activePath))) return;
       const [msgs, st, statsData, wt, nextHistory] = await Promise.all([
         bridge.getMessages(),
         bridge.getState(),
@@ -760,7 +784,7 @@ export default function App() {
         // session renames) in the status bar without waiting for the next
         // model/thinking/compact round-trip.
         if (stateChanged) bridge.getState().then(setAgentState).catch(() => {});
-        if (needsResync) void resyncFromSource();
+        if (needsResync) void resyncFromSource({ skipRefresh: true });
       }),
     [appendEvents, resyncFromSource]
   );
@@ -1067,18 +1091,26 @@ export default function App() {
           const expectedEpoch = epochRef.current;
           const requestId = latestRequestRef.current;
           await new Promise<void>((resolve, reject) => {
-            const off = bridge.onStatus((s) => {
+            let off: (() => void) | null = null;
+            const timeout = setTimeout(() => {
+              off?.();
+              reject(new Error("session warmup timed out"));
+            }, 15000);
+            off = bridge.onStatus((s) => {
               if (expectedEpoch !== epochRef.current) {
-                off();
+                clearTimeout(timeout);
+                off?.();
                 reject(new Error("session changed before the message could be sent"));
                 return;
               }
               if (s.requestId !== undefined && s.requestId !== requestId) return;
               if (s.status === "ready") {
-                off();
+                clearTimeout(timeout);
+                off?.();
                 resolve();
               } else if (s.status === "exited" || s.status === "error") {
-                off();
+                clearTimeout(timeout);
+                off?.();
                 reject(new Error(s.message ?? "session failed to open"));
               }
             });
@@ -1111,6 +1143,7 @@ export default function App() {
         if (history.activeRollback) await hydrate();
         return true;
       } catch (e: any) {
+        if (text.trim() || images?.length) dispatch({ type: "local-user-rollback", text });
         toast("error", e?.message ?? "send failed");
         if (history.activeRollback) void hydrate();
         return false;
@@ -1164,8 +1197,8 @@ export default function App() {
       const family = s?.appearance?.monoFontFamily ?? "system";
       applySystemFonts(enabled);
       applyMonoFont(family);
-      localStorage.setItem("pideck:useSystemFonts", String(enabled));
-      localStorage.setItem("pideck:monoFont", family);
+      localStorage.setItem("babylon:useSystemFonts", String(enabled));
+      localStorage.setItem("babylon:monoFont", family);
       const themeFromSettings = s?.appearance?.theme;
       if (themeFromSettings === "light" || themeFromSettings === "dark" || themeFromSettings === "system") {
         applyTheme(themeFromSettings);
@@ -1288,8 +1321,15 @@ export default function App() {
     workflowRuns.filter((run) => run.status === "pending" || run.status === "running" || run.status === "paused").length +
     activity.threads.filter((thread) => ["queued", "starting", "running", "interrupting"].includes(thread.status)).length +
     activity.subagents.filter((run) => run.status === "running").length;
+  const runningWorkflows = workflowRuns.filter((r) => r.status === "running" || r.status === "paused").length;
+  const subagentCount = activity.subagents.length;
+  const isLive = state.streaming || liveActivityCount > 0 || runningWorkflows > 0;
   const contextOpen = showWorkflowsPanel || showBranchPanel;
-  const activeDirtyCount = status.cwd ? gitStatuses[status.cwd]?.dirty.length ?? 0 : 0;
+  const headerGit = status.cwd ? gitStatuses[status.cwd] ?? null : null;
+  const headerBranch = (headerGit as any)?.branch ?? null;
+  const headerCwdLine = status.cwd ? (headerBranch ? `${shortCwd(status.cwd)} (${headerBranch})` : shortCwd(status.cwd)) : null;
+  const activeDirtyCount = (headerGit as any)?.isRepo ? ((headerGit as any).dirty?.length ?? 0) : 0;
+  const headerDirty = activeDirtyCount;
   const unresolvedAttention = listAttention(attention).length;
 
   // Diagnostics snapshot, recomputed only when an input to it actually
@@ -1297,16 +1337,18 @@ export default function App() {
   // background policy input is a constant in this build, so it varies never.
   const diagnosticsSnapshot = useMemo(
     () =>
-      collectDiagnostics({
-        now: Date.now(),
-        attention,
-        processes: processRegistry,
-        schedule,
-        history: automationHistory,
-        policy: defaultBackgroundPolicy(),
-        devices,
-        events: eventLog,
-      }),
+      Effect.runSync(
+        collectDiagnosticsEffect({
+          now: Date.now(),
+          attention,
+          processes: processRegistry,
+          schedule,
+          history: automationHistory,
+          policy: Effect.runSync(defaultPolicyEffect),
+          devices,
+          events: eventLog,
+        }),
+      ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [showDiagnostics, attention, processRegistry, schedule, automationHistory, devices, eventLog]
   );
@@ -1350,7 +1392,7 @@ export default function App() {
         onClose={() => setSettingsOpen(false)}
       />
     ) : (
-    <div className="app-shell flex h-full" style={{ "--dock-bottom": `${composerHeight + 12}px` } as React.CSSProperties}>
+    <div className="app-shell flex h-full">
       <Sidebar
         groups={groups}
         activePath={activeSessionPath ?? status.sessionPath}
@@ -1361,7 +1403,7 @@ export default function App() {
         onOpenSettings={() => setSettingsOpen(true)}
         onToggleMinimize={() =>
           setSidebarMinimized((minimized) => {
-            localStorage.setItem("pideck:sidebar-minimized", minimized ? "0" : "1");
+            localStorage.setItem("babylon:sidebar-minimized", minimized ? "0" : "1");
             return !minimized;
           })
         }
@@ -1389,7 +1431,7 @@ export default function App() {
           setShowBranchPanel((open) => !open);
           setShowWorkflowsPanel(false);
         }}
-        onSearch={() => setShowCommandPalette(true)}
+        onSearch={() => togglePalette(true)}
         pinnedOrder={pinnedOrder}
         snoozed={snoozed}
         settled={settledView}
@@ -1413,32 +1455,12 @@ export default function App() {
       />
 
       <div className="flex min-w-0 flex-1">
-        <main className="primary-workspace relative min-w-0 flex-1">
-          <div className="absolute inset-0">
-            {hasSession ? (
-              <ChatView
-                items={state.items}
-                renderCount={renderCap}
-                canLoadMore={canLoadMore}
-                loadingEarlier={loadingEarlier}
-                onNeedEarlier={() => void loadEarlier()}
-                streaming={state.streaming}
-                chromeTop={bannerVisible ? 110 : 72}
-                chromeBottom={composerHeight + 24}
-                historyTurns={history.turns}
-                onRollback={(entryId) => void prepareRollback(entryId)}
-                onOpenLaunch={() => setShowWorkflowsPanel(true)}
-              />
-            ) : (
-              <Hero status={status} groups={groups} onOpen={(path, cwd) => { setPromotedParent(null); void openSession(path, cwd); }} onNew={newSession} />
-            )}
-          </div>
-
-          <header className={`thread-header titlebar absolute inset-x-0 top-0 z-10 flex h-16 items-center gap-3 ${sidebarMinimized ? "pl-[88px] pr-5" : "px-5"}`}>
+        <main className="primary-workspace relative flex min-w-0 flex-1 flex-col min-h-0">
+          <header className={`thread-header titlebar shrink-0 z-10 flex h-16 items-center gap-3 border-b border-line/40 bg-raised/20 backdrop-blur ${sidebarMinimized ? "pl-[88px] pr-5" : "px-5"}`}>
             {sidebarMinimized ? (
               <button
                 onClick={() => {
-                  localStorage.setItem("pideck:sidebar-minimized", "0");
+                  localStorage.setItem("babylon:sidebar-minimized", "0");
                   setSidebarMinimized(false);
                 }}
                 title="Show sidebar (⌘B)"
@@ -1458,10 +1480,25 @@ export default function App() {
               </div>
             ) : null}
             {promotedParent ? <button onClick={() => { const parent = promotedParent; setPromotedParent(null); void openSession(parent.path, parent.cwd); }} title="Back to parent session" className="thread-action thread-action-text">← Parent</button> : null}
-            <StatusDot status={liveReady ? "ready" : status.status} working={state.streaming} />
-            <div className="min-w-0 max-w-[36ch] truncate text-[15px] font-semibold tracking-[-0.01em]">
+            <StatusDot status={liveReady ? "ready" : status.status} working={isLive} />
+            <div className="header-title min-w-0 max-w-[36ch] truncate text-[15px] font-semibold tracking-[-0.01em]" style={{ ["viewTransitionName" as any]: "active-session" } as any}>
               {headerName ?? agentState?.sessionName ?? (hasSession ? "Untitled session" : "Babylon")}
             </div>
+            {headerCwdLine ? (
+              <span className="hidden sm:flex min-w-0 items-center gap-2 truncate font-mono text-[12.5px] text-dim/70 ml-1">
+                <span className="truncate" title={headerCwdLine}>
+                  {headerCwdLine}
+                </span>
+                {headerGit?.isRepo ? (
+                  <span className="flex items-center gap-2 shrink-0 text-dim/55 tabular-nums">
+                    {headerDirty > 0 ? <span title={`${headerDirty} changed`}>●{headerDirty}</span> : null}
+                    {(headerGit as any).ahead > 0 ? <span className="flex items-center gap-0.5"><ArrowUpIcon size={11} />{(headerGit as any).ahead}</span> : null}
+                    {(headerGit as any).behind > 0 ? <span className="flex items-center gap-0.5"><ArrowDownIcon size={11} />{(headerGit as any).behind}</span> : null}
+                    {(headerGit as any).isWorktree ? <span className="flex items-center gap-0.5"><FlaskIcon size={11} />wt</span> : null}
+                  </span>
+                ) : null}
+              </span>
+            ) : null}
             <div className="ml-auto flex shrink-0 items-center gap-1.5">
               {hasSession && worktreeInfo?.isWorktree ? <span className="execution-context"><FlaskIcon size={13} /> Worktree</span> : null}
               {hasSession ? (
@@ -1506,7 +1543,7 @@ export default function App() {
                   ...(hasSession ? [{ label: "Session & worktree…", action: () => setShowWorktreeModal(true) }] : []),
                 ]}
               />
-              <button onClick={() => setShowCommandPalette(true)} title="Search and commands (⌘K)" className="thread-action">
+              <button onClick={() => togglePalette(true)} title="Search and commands (⌘K)" className="thread-action">
                 <FolderIcon size={16} />
               </button>
             </div>
@@ -1514,37 +1551,54 @@ export default function App() {
           </header>
 
           {bannerVisible ? (
-            <div className="absolute inset-x-0 top-16 z-10">
+            <div className="shrink-0 z-10">
               <WorktreeBanner info={worktreeInfo!} busy={wtBusy} onExit={exitWorktree} />
             </div>
           ) : null}
 
-          {hasSession ? (
-            <div ref={composerDockRef} className="absolute inset-x-0 bottom-0 z-10 flex flex-col">
-              {history.activeRollback ? (
-                <RollbackDock rollback={history.activeRollback} busy={rollbackBusy} onUndo={() => void undoRollback()} />
-              ) : null}
-              <Composer
-                streaming={state.streaming}
-                steering={state.steering}
-                followUp={state.followUp}
-                commands={commands}
+          <div className="flex flex-1 min-h-0 flex-col">
+              {hasSession ? (
+                <ChatView
+                  items={state.items}
+                  renderCount={renderCap}
+                  canLoadMore={canLoadMore}
+                  loadingEarlier={loadingEarlier}
+                  onNeedEarlier={() => void loadEarlier()}
+                  streaming={isLive}
+                  historyTurns={history.turns}
+                  onRollback={(entryId) => void prepareRollback(entryId)}
+                  onOpenLaunch={() => setShowWorkflowsPanel(true)}
+                />
+              ) : (
+                <div className="flex flex-1 min-h-0 overflow-hidden">
+                  <Hero status={status} groups={groups} onOpen={(path, cwd) => { setPromotedParent(null); void openSession(path, cwd); }} onNew={newSession} />
+                </div>
+              )}
+
+            {hasSession ? (
+              <SessionFooter
                 agentState={agentState}
                 stats={stats}
                 models={models}
                 thinkingLevels={thinkingLevels}
+                onSetModel={setModel}
+                onSetThinking={setThinking}
+                onCompact={compact}
+                streaming={isLive}
+                steering={state.steering}
+                followUp={state.followUp}
+                commands={commands}
                 draftRequest={draftRequest}
                 toast={toast}
                 onSend={send}
                 onAbort={abort}
-                onSetModel={setModel}
-                onSetThinking={setThinking}
-                onCompact={compact}
                 dialogs={state.dialogs}
                 onDialogDismiss={(id) => dispatch({ type: "dialog-dismiss", id })}
+                runningWorkflows={runningWorkflows}
+                subagentCount={subagentCount}
               />
-            </div>
-          ) : null}
+            ) : null}
+          </div>
         </main>
 
         <Suspense fallback={null}>
@@ -1583,7 +1637,7 @@ export default function App() {
           <CommandPalette
             groups={groups}
             commands={commands}
-            onClose={() => setShowCommandPalette(false)}
+            onClose={() => togglePalette(false)}
             onNew={() => void newSession()}
             onOpen={(path, cwd) => {
               setPromotedParent(null);

@@ -22,6 +22,8 @@ import {
 } from "./icons";
 import ProjectFilter from "./ProjectFilter";
 import { projectColor } from "../lib/colors";
+import { projectColorEffect } from "../lib/colors.effect";
+import * as Effect from "effect/Effect";
 import { promptText } from "../lib/prompts";
 
 /* ------------------------------------------------------------------ *
@@ -291,7 +293,7 @@ const SessionRow = memo(function SessionRow(props: RowProps) {
   const timeLabel = isSnoozed && snoozedUntil != null ? snoozeLabel(snoozedUntil, Date.now()) : timeAgo(session.mtime);
 
   const slim = section === "snoozed" || section === "settled";
-  const pc = projectColor(cwd);
+  const pc = Effect.runSync(projectColorEffect(cwd));
   const rowClass =
     `sidebar-session group/session ${active ? "is-active" : ""} ${archived ? "opacity-50" : ""} ${slim ? "is-slim" : ""}` +
     (props.section === "pinned" && dragIndex === index ? " is-dragging" : "");
@@ -319,10 +321,11 @@ const SessionRow = memo(function SessionRow(props: RowProps) {
     </span>
   );
 
+  const vtName = active ? "active-session" : `session-${session.id.slice(0,8)}`;
   return (
     <div
       className={rowClass}
-      style={{ ["--pc" as string]: pc } as React.CSSProperties}
+      style={{ ["--pc" as string]: pc, ["viewTransitionName" as any]: vtName } as React.CSSProperties}
       draggable={props.section === "pinned"}
       onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; props.onDragStart?.(); }}
       onDragOver={(e) => props.onDragOver?.(e)}
@@ -331,7 +334,12 @@ const SessionRow = memo(function SessionRow(props: RowProps) {
       <button
         className="flex min-w-0 flex-1 items-center gap-2 text-left"
         draggable={false}
-        onClick={() => props.onOpen(session.path, cwd, title)}
+        onClick={() => {
+          const doc: any = document as any;
+          const go = () => props.onOpen(session.path, cwd, title);
+          if (doc.startViewTransition && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) doc.startViewTransition(go);
+          else go();
+        }}
         onMouseEnter={() => {
           onRefreshGitStatus?.();
           if (!props.onPrefetch || active) return;
@@ -472,6 +480,7 @@ export default function Sidebar(props: Props) {
   const [settledVisible, setSettledVisible] = useState(SETTLED_INITIAL);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [overIndex, setOverIndex] = useState<number | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   const [width, setWidth] = useState(() => {
     const w = Number(localStorage.getItem("babylon:sidebar-width"));

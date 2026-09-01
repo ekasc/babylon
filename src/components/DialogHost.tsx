@@ -78,8 +78,8 @@ function DialogCard({
       aria-labelledby={`dialog-title-${dialog.id}`}
       className="operator-popover pointer-events-auto w-full max-w-md p-4"
     >
-      <h2 id={`dialog-title-${dialog.id}`} className="text-[14px] font-semibold tracking-tight">{dialog.title ?? "Extension request"}</h2>
-      {dialog.message && <p className="mt-1 text-[12.5px] text-dim">{dialog.message}</p>}
+      <h2 id={`dialog-title-${dialog.id}`} className="text-[14px] font-semibold tracking-tight break-words">{dialog.title ?? "Extension request"}</h2>
+      {dialog.message && <div className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md border border-line/60 bg-inset/40 px-3 py-2 text-[12.5px] leading-[1.6] text-dim">{dialog.message}</div>}
 
       <div className="mt-3">
         {dialog.method === "select" && (

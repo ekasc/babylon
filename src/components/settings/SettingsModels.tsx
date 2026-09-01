@@ -5,6 +5,8 @@ import { SettingSection } from "./SettingSection";
 import { SettingRow } from "./SettingRow";
 import { SettingsCard } from "./SettingsCard";
 import { findModel, getProviders, filterModels } from "../../lib/model-helpers";
+import { filterModelsEffect } from "../../lib/model-helpers.effect";
+import * as Effect from "effect/Effect";
 import { formatContextWindow } from "../../lib/format";
 import { modelSupportsImages } from "../../../electron/snapcompact/model-profiles";
 import type { PiSettings } from "../../bridge";
@@ -39,7 +41,7 @@ export function SettingsModels({
 
   const providers = useMemo(() => getProviders(models), [models]);
 
-  const filtered = useMemo(() => filterModels(models, q, provider), [models, q, provider]);
+  const filtered = useMemo(() => Effect.runSync(filterModelsEffect(models, q, provider)), [models, q, provider]);
 
   return (
     <div>
