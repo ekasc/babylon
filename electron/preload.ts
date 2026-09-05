@@ -19,6 +19,40 @@ const api = {
   openSession: (opts: { path?: string; cwd: string; requestId?: number }): Promise<void> =>
     ipcRenderer.invoke("pideck:open-session", opts),
 
+  botsList: (): Promise<any[]> => ipcRenderer.invoke("pideck:bots-list"),
+  botsCreate: (input: any): Promise<any> => ipcRenderer.invoke("pideck:bots-create", input),
+  botsUpdate: (id: string, patch: any): Promise<any> => ipcRenderer.invoke("pideck:bots-update", id, patch),
+  botsDelete: (id: string): Promise<{ removed: boolean }> => ipcRenderer.invoke("pideck:bots-delete", id),
+  botsOpen: (id: string): Promise<{ sessionFile: string | null; bot: any }> =>
+    ipcRenderer.invoke("pideck:bots-open", id),
+  onBotsUpdate: (cb: any) => on("pideck:bots-update", cb),
+  groupsList: (): Promise<any[]> => ipcRenderer.invoke("pideck:groups-list"),
+  groupsCreate: (input: any): Promise<any> => ipcRenderer.invoke("pideck:groups-create", input),
+  groupsUpdate: (id: string, patch: any): Promise<any> => ipcRenderer.invoke("pideck:groups-update", id, patch),
+  groupsDelete: (id: string): Promise<{ removed: boolean }> => ipcRenderer.invoke("pideck:groups-delete", id),
+  groupsOpen: (id: string): Promise<{ sessionFile: string | null; group: any }> =>
+    ipcRenderer.invoke("pideck:groups-open", id),
+  onGroupsUpdate: (cb: any) => on("pideck:groups-update", cb),
+  groupSend: (groupId: string, text: string): Promise<any> =>
+    ipcRenderer.invoke("pideck:group-send", groupId, text),
+  botsMessage: (targetId: string, text: string, fromId?: string): Promise<any> =>
+    ipcRenderer.invoke("pideck:bots-message", targetId, text, fromId),
+  botsDefaultGet: (): Promise<any> => ipcRenderer.invoke("pideck:bots-default-get"),
+  botsDefaultSet: (input: any): Promise<any> => ipcRenderer.invoke("pideck:bots-default-set", input),
+  projectSettingsGet: (cwd: string): Promise<any> => ipcRenderer.invoke("pideck:project-settings-get", cwd),
+  projectSettingsMembers: (hash: string, memberIds: string[]): Promise<any> =>
+    ipcRenderer.invoke("pideck:project-settings-members", hash, memberIds),
+  projectSettingsFreespeak: (hash: string, on: boolean): Promise<any> =>
+    ipcRenderer.invoke("pideck:project-settings-freespeak", hash, on),
+  projectDefaultUpdate: (hash: string, patch: any): Promise<any> =>
+    ipcRenderer.invoke("pideck:project-default-update", hash, patch),
+  projectDefaultReset: (hash: string): Promise<any> => ipcRenderer.invoke("pideck:project-default-reset", hash),
+  handoffCreate: (projectHash: string, sourceFile: string): Promise<any> =>
+    ipcRenderer.invoke("pideck:handoff-create", projectHash, sourceFile),
+  handoffList: (sourceFile: string): Promise<any> => ipcRenderer.invoke("pideck:handoff-list", sourceFile),
+  handoffConsume: (handoffId: string, liveFile: string): Promise<any> =>
+    ipcRenderer.invoke("pideck:handoff-consume", handoffId, liveFile),
+
   prompt: (message: string, images?: any[], streamingBehavior?: "steer" | "followUp"): Promise<any> =>
     ipcRenderer.invoke("pideck:prompt", message, images, streamingBehavior),
   abort: (): Promise<any> => ipcRenderer.invoke("pideck:abort"),

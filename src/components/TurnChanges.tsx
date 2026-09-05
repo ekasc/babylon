@@ -1,7 +1,7 @@
 import { memo, useEffect, useState } from "react";
 import { bridge, type HistoryTurn, type TurnFileChange, type TurnFileDiff } from "../bridge";
 import { DiffView } from "./items";
-import { ChevronIcon, FileIcon } from "./icons";
+import { ChevronIcon } from "./icons";
 
 const AUTO_EXPAND_FILE_LIMIT = 5;
 
@@ -71,7 +71,8 @@ function FileRow({ change, entryId }: { change: TurnFileChange; entryId: string 
 }
 
 export const TurnChanges = memo(function TurnChanges({ turn, isLatest }: { turn: HistoryTurn; isLatest: boolean }) {
-  const [open, setOpen] = useState(isLatest && turn.changedCount <= AUTO_EXPAND_FILE_LIMIT);
+  const changed = turn.changedCount > 0;
+  const [open, setOpen] = useState(isLatest && changed && turn.changedCount <= AUTO_EXPAND_FILE_LIMIT);
   const [data, setData] = useState<{ files: TurnFileChange[]; totals: { files: number; additions: number; deletions: number }; exclusions: string[] } | null>(null);
 
   useEffect(() => {
@@ -92,39 +93,38 @@ export const TurnChanges = memo(function TurnChanges({ turn, isLatest }: { turn:
   const totals = data?.totals ?? { files: turn.changedCount, additions: 0, deletions: 0 };
 
   return (
-    <div className="conversation-system-in my-3 rounded-lg border border-line bg-inset/40">
+    <div className="turn-changes">
       <button
         onClick={() => setOpen(!open)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left"
+        className="turn-changes-row"
         aria-expanded={open}
       >
-        <span className="shrink-0 text-dim">
-          <FileIcon size={13} />
+        <span className={`turn-changes-dot ${changed ? "is-on" : ""}`} aria-hidden />
+        <span className="turn-changes-label font-mono">
+          {changed ? `${totals.files} file${totals.files === 1 ? "" : "s"} changed` : "no changes"}
         </span>
-        <span className="text-[13px] font-medium">
-          {totals.files} file{totals.files === 1 ? "" : "s"} changed
-        </span>
-        <span className="shrink-0 font-mono text-[12px] text-dim">
-          <span className="text-ok">+{totals.additions}</span>
-          <span className="mx-1 text-line">/</span>
-          <span className="text-err">-{totals.deletions}</span>
-        </span>
+        {changed ? (
+          <span className="turn-changes-stats font-mono">
+            <span className="text-ok">+{totals.additions}</span>
+            <span className="text-err">−{totals.deletions}</span>
+          </span>
+        ) : null}
         <span className="min-w-0 flex-1" />
-        <span className={`shrink-0 text-dim transition-transform ${open ? "rotate-90" : ""}`}>
+        <span className={`turn-changes-chevron ${open ? "rotate-90" : ""}`}>
           <ChevronIcon size={10} />
         </span>
       </button>
       {open && (
-        <div className="border-t border-line/60">
+        <div className="turn-changes-body">
           {files.length === 0 ? (
-            <p className="px-3 py-2 text-[13px] text-dim">Loading changes…</p>
+            <p className="px-3 py-2 font-mono text-[12px] text-dim">loading changes…</p>
           ) : (
             <>
               {files.map((change) => (
                 <FileRow key={change.path} change={change} entryId={turn.entryId} />
               ))}
               {data?.exclusions.length ? (
-                <p className="px-3 py-1.5 text-[12px] text-dim">{data.exclusions.join(" · ")}</p>
+                <p className="px-3 py-1.5 font-mono text-[11px] text-dim">{data.exclusions.join(" · ")}</p>
               ) : null}
             </>
           )}

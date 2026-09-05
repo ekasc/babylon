@@ -16,6 +16,12 @@ export default memo(function BashCard({ item }: BashCardProps) {
   const b = item.babylon;
   const command = b.command || b.head || "bash";
   const truncatedCmd = command.length > 80 ? command.slice(0, 80) + "…" : command;
+  const cwdLabel = (() => {
+    const p = b.cwd || "";
+    if (!p) return null;
+    const parts = p.split(/[\\/]/).filter(Boolean);
+    return parts.length ? parts[parts.length - 1] : p;
+  })();
   const output = fullOutput ?? item.output ?? "";
   const hasOutput = output.trim().length > 0;
   const patch = item.details?.patch ?? item.details?.diff;
@@ -61,9 +67,22 @@ export default memo(function BashCard({ item }: BashCardProps) {
         <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${isRunning ? "animate-pulse bg-[var(--accent)]" : isError ? "bg-[var(--err)]" : "bg-[var(--dim)]"}`} aria-hidden />
         <span className="font-mono text-[12.5px] text-dim">$</span>
         <span className="min-w-0 flex-1 truncate font-mono text-[12.5px] text-fg">{truncatedCmd}</span>
-        {b.durationMs != null ? <span className="shrink-0 font-mono text-[11px] text-dim">{formatDuration(b.durationMs)}</span> : null}
-        {b.exitCode !== undefined ? <span className={`shrink-0 rounded px-1.5 py-0.5 font-mono text-[11px] ${b.exitCode === 0 ? "bg-[color-mix(in_srgb,var(--ok)_12%,transparent)] text-[var(--ok)]" : "bg-[color-mix(in_srgb,var(--err)_12%,transparent)] text-[var(--err)]"}`}>{b.exitCode === 0 ? "exit 0" : `exit ${b.exitCode}`}</span> : b.exitSignal ? <span className="shrink-0 rounded bg-[color-mix(in_srgb,var(--err)_12%,transparent)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--err)]">{b.exitSignal}</span> : null}
-        <span className="shrink-0 text-[11px] text-dim">{open ? "−" : "+"}</span>
+        {b.cwd ? (
+          <span className="bash-chip bash-chip-cwd" title={b.cwd}>
+            {cwdLabel}
+          </span>
+        ) : null}
+        {b.durationMs != null ? (
+          <span className="bash-chip bash-chip-dur">{formatDuration(b.durationMs)}</span>
+        ) : null}
+        {b.exitCode !== undefined ? (
+          <span className={`bash-chip bash-chip-exit ${b.exitCode === 0 ? "ok" : "err"}`}>
+            {b.exitCode === 0 ? "exit 0" : `exit ${b.exitCode}`}
+          </span>
+        ) : b.exitSignal ? (
+          <span className="bash-chip bash-chip-exit err">{b.exitSignal}</span>
+        ) : null}
+        <span className="bash-chevron">{open ? "−" : "+"}</span>
       </button>
       {open && (
         <div className="border-t border-line bg-[var(--inset)]">

@@ -6,6 +6,8 @@
  * unit-testable; persistence lives in RecapStore.
  */
 
+import { parseRoomTurn } from "../src/bots";
+
 export interface Recap {
   id: string;
   /** ISO timestamp of when the recap was generated. */
@@ -78,10 +80,49 @@ export function recapWorthy(messages: any[], minMessages = RECAP_MIN_MESSAGES, m
 export function buildRecapPrompt(deltaText: string): string {
   return (
     "Write a brief recap of the RECENT changes and current state in this coding-assistant " +
-    "conversation — the latest work done and what is next. Do not summarize the full history. " +
+    "conversation, the latest work done and what is next. Do not summarize the full history. " +
     'Reply with a single line starting with "Recap: " (1-3 short sentences). ' +
     "Skip greetings and chit-chat. Do not use markdown headers.\n\n" + deltaText
   );
+}
+
+/** Plain-text projection of a message window for summarization prompts.
+ *  User + assistant text only, oldest first, capped. Room director prompts
+ *  (user-role machinery) are machinery, not content, dropped. */
+export function transcriptText(messages: any[], cap = 24_000): string {
+  const parts: string[] = [];
+  let chars = 0;
+  for (const m of messages ?? []) {
+    if (m?.role !== "user" && m?.role !== "assistant") continue;
+    const blocks = typeof m.content === "string" ? [m.content] : Array.isArray(m.content) ? m.content : [];
+    for (const b of blocks) {
+      const text = typeof b === "string" ? b : String(b?.text ?? "");
+      if (!text.trim()) continue;
+      if (m.role === "user" && parseRoomTurn(text)) continue;
+      parts.push(text);
+      chars += text.length;
+      if (chars >= cap) return parts.join("\n\n").slice(0, cap);
+    }
+  }
+  return parts.join("\n\n");
+}
+
+/** Handoff prompt: a structured summary of a past thread, written in the
+ *  continuing voice (project default persona supplied by the caller, the
+ *  cheap model has no persona of its own). Explicit user action only. */
+export function buildHandoffPrompt(deltaText: string, author: { name: string; persona?: string }): string {
+  const voice = author.persona?.trim() ? `\nVoice notes for the summary (write in this voice): ${author.persona.trim()}` : "";
+  return (
+    `Summarize the following past conversation as a HANDOFF for ${author.name}, who will continue the work. ` +
+    "Structure it exactly with these markdown headers: ## Goal, ## Key decisions, ## Open loops, ## Files touched. " +
+    "Keep it under ~1200 words. Skip greetings and chit-chat." + voice + "\n\n" + deltaText
+  );
+}
+
+/** Normalizes a handoff reply into capped markdown (multi-line, unlike recaps). */
+export function normalizeHandoffText(raw: string): string | null {
+  const text = (raw ?? "").trim().replace(/\n{3,}/g, "\n\n").slice(0, 6000);
+  return text ? text : null;
 }
 
 /** Normalizes a model reply into a single "Recap: …" line. */

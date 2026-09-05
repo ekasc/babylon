@@ -1,11 +1,13 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { bridge, bridgeAvailable, type ActivityUpdate, type CommandInfo, type GitStatusResult, type HistoryProjection, type ProjectGroup, type RollbackPlan, type SessionMeta, type SessionStatus, type SessionWindow, type WorkflowRunSummary } from "./bridge";
+import { bridge, bridgeAvailable, type ActivityUpdate, type CommandInfo, type GitStatusResult, type HistoryProjection, type ProjectGroup, type ProjectSettings, type RollbackPlan, type SessionMeta, type SessionStatus, type SessionWindow, type WorkflowRunSummary } from "./bridge";
+import type { Bot, BotGroup, BotPatch, DefaultBot, NewBotInput, NewGroupInput } from "./bots";
+import { isBotMainSession, isGroupRoom } from "./bots";
 import { initialState, mergeLiveMessages, reducer } from "./store";
-import { shouldAcceptEvent } from "./sessionLifecycle";
+import { isAgentLive, shouldAcceptEvent } from "./sessionLifecycle";
 import { insertCommand } from "./commands";
-import Sidebar from "./components/Sidebar";
+import Sidebar, { type AgentDockItem } from "./components/Sidebar";
 import SettingsPage from "./components/SettingsPage";
-import { applyMonoFont, applySystemFonts, applyTheme, loadMonoFontPref, loadSystemFontsPref, loadThemePref, type ThemePref } from "./lib/theme";
+import { applyMonoFont, applySystemFonts, applyTheme, applyThemeId, loadMonoFontPref, loadSystemFontsPref, loadThemeId, loadThemePref, type ThemeId, type ThemePref } from "./lib/theme";
 import ProjectFilter from "./components/ProjectFilter";
 import { getNumberWithFallback, getWithFallback } from "./lib/storage";
 import { getNumberWithFallbackEffect, getWithFallbackEffect } from "./lib/storage.effect";
@@ -17,34 +19,21 @@ import Composer, { type Attachment } from "./components/Composer";
 import DialogHost from "./components/DialogHost";
 import Toasts from "./components/Toasts";
 import Hero from "./components/Hero";
+import BotsPanel, { BotAvatar } from "./components/BotsPanel";
+import ProjectPanel from "./components/ProjectPanel";
 import WorkspacePane from "./components/WorkspacePane";
 import { RollbackConfirm, RollbackDock } from "./components/Rollback";
 import SessionFooter from "./components/SessionFooter";
-import { WorktreeBanner, WorktreeModal, type WorktreeInfo } from "./components/Worktree";
 import { ApprovalGate } from "./components/ApprovalGate";
 import GitCommitPopover from "./components/GitCommitPopover";
 // Overlay panels are rarely needed at boot; lazy-load them so they stay out
 // of the startup bundle.
-const ProcessPanel = lazy(() => import("./components/ProcessPanel").then((m) => ({ default: m.ProcessPanel })));
 const PreviewPanel = lazy(() => import("./components/PreviewPanel").then((m) => ({ default: m.PreviewPanel })));
 const AttentionPanel = lazy(() => import("./components/AttentionPanel").then((m) => ({ default: m.AttentionPanel })));
-const DevicesPanel = lazy(() => import("./components/DevicesPanel").then((m) => ({ default: m.DevicesPanel })));
-const AutomationPanel = lazy(() => import("./components/AutomationPanel").then((m) => ({ default: m.AutomationPanel })));
 const DiagnosticsPanel = lazy(() => import("./components/DiagnosticsPanel").then((m) => ({ default: m.DiagnosticsPanel })));
-import { ProblemsPanel } from "./components/ProblemsPanel";
-import { collectDiagnostics } from "./diagnostics";
 import { collectDiagnosticsEffect } from "./diagnostics.effect";
 import { PromptHost, confirmAction, promptText } from "./lib/prompts";
-import { createDeviceRegistry, type DeviceRegistry } from "./device-pairing";
-import { createDeviceRegistryEffect } from "./device-pairing.effect";
-import { createScheduledTaskRegistry, type ScheduledTaskRegistry } from "./automation";
-import { createScheduledTaskRegistryEffect } from "./automation.effect";
-import { createAutomationHistory, type AutomationHistory } from "./automation-runner";
-import { createAutomationHistoryEffect } from "./automation-runner.effect";
 import { createAttentionRegistryEffect } from "./attention.effect";
-import { createRegistryEffect as createProcessRegistryEffect } from "./process-model.effect";
-import { createSchedulerLoop } from "./scheduler-loop";
-import { defaultPolicy as defaultBackgroundPolicy } from "./background-policy";
 import { defaultPolicyEffect } from "./background-policy.effect";
 import { appendEvent, createBabylonEvent, createEventLog, type BabylonEvent, type BabylonEventType, type EventLog } from "./events";
 import { stampOwnership } from "./ownership";
@@ -69,7 +58,7 @@ function mapAgentEventType(type: unknown): BabylonEventType | null {
 
 /**
  * Build a Babylon event from a real Pi engine event. Ownership uses the
- * runtime identity carried by the event itself (sessionId, toolCallId) — never
+ * runtime identity carried by the event itself (sessionId, toolCallId), never
  * whichever session happens to be open in the UI. Payloads stay flat ids and
  * flags; no prompt text or tool output ever enters the log.
  */
@@ -97,10 +86,9 @@ function babylonEventFromAgentEvent(event: any): BabylonEvent | null {
   return createBabylonEvent(type, { owner, payload });
 }
 import { addAttention, listAttention, removeAttention, type AttentionRegistry } from "./attention";
-import type { ProcessRegistry } from "./process-model";
 import type { PreviewRegistry } from "./preview-model";
 import { createPreviewRegistryEffect } from "./preview-model.effect";
-import { ArrowDownIcon, ArrowUpIcon, ChevronIcon, FlaskIcon, FolderIcon, LayersIcon, MoreIcon, PiMark } from "./components/icons";
+import { BellIcon, ChevronIcon, FolderIcon, LayersIcon, MoreIcon, PiMark } from "./components/icons";
 
 const BranchPanel = lazy(() => import("./components/BranchPanel"));
 const WorkflowsPanel = lazy(() => import("./components/WorkflowsPanel"));
@@ -130,31 +118,26 @@ function StatusDot({ status, working }: { status: string; working: boolean }) {
 export default function App() {
   const [state, dispatch] = useReducer(reducer, initialState);
   const [groups, setGroups] = useState<ProjectGroup[]>([]);
+  // Bot Mode: named specialists with a canonical forever-chat each.
+  const [bots, setBots] = useState<Bot[]>([]);
+  const [showBots, setShowBots] = useState(false);
+  const [appDefaultBot, setAppDefaultBot] = useState<DefaultBot | null>(null);
+  const [showProject, setShowProject] = useState(false);
+  // Group rooms: one shared session where member bots take serial turns.
+  const [botGroups, setBotGroups] = useState<BotGroup[]>([]);
+  // Per-project bots: settings snapshot for the active project (default copy,
+  // staffed roster, free-speak). Null until loaded; when absent (daemon mode,
+  // bridge gaps) the UI keeps today's global behavior.
+  const [projectSettings, setProjectSettings] = useState<{ settings: ProjectSettings; hash: string } | null>(null);
 
   // t3code-style sidebar state (client-persisted): pinned order, snoozed
-  // (path -> wake timestamp), settled, archived, unread.
+  // (path -> wake timestamp), archived, unread.
   const [pinnedOrder, setPinnedOrder] = useState<string[]>(() =>
     JSON.parse(localStorage.getItem("babylon:pinned") ?? "[]")
   );
   const [snoozed, setSnoozed] = useState<Record<string, number>>(() =>
     JSON.parse(localStorage.getItem("babylon:snoozed") ?? "{}")
   );
-  const [settled, setSettled] = useState<string[]>(() =>
-    JSON.parse(localStorage.getItem("babylon:settled") ?? "[]")
-  );
-  // Explicitly woken threads: override the stale-timer auto-settle.
-  const [unsettled, setUnsettled] = useState<string[]>(() =>
-    JSON.parse(localStorage.getItem("babylon:unsettled") ?? "[]")
-  );
-  useEffect(() => { localStorage.setItem("babylon:unsettled", JSON.stringify(unsettled)); }, [unsettled]);
-  useEffect(() => { localStorage.setItem("babylon:settled", JSON.stringify(settled)); }, [settled]);
-  // Threads are settled only after being idle this long (not the instant a run ends).
-  const STALE_SETTLE_MS = 30 * 60 * 1000;
-  const [nowTick, setNowTick] = useState(() => Date.now());
-  useEffect(() => {
-    const id = window.setInterval(() => setNowTick(Date.now()), 60_000);
-    return () => window.clearInterval(id);
-  }, []);
   const [archived, setArchived] = useState<string[]>(() =>
     JSON.parse(localStorage.getItem("babylon:archived") ?? "[]")
   );
@@ -177,10 +160,7 @@ export default function App() {
       return next;
     });
   }, []);
-  const reorderPinned = useCallback((order: string[]) => {
-    setPinnedOrder(order);
-    localStorage.setItem("babylon:pinned", JSON.stringify(order));
-  }, []);
+
   const toggleSnooze = useCallback((path: string, until?: number) => {
     setSnoozed((prev) => {
       const next = { ...prev };
@@ -217,26 +197,37 @@ export default function App() {
   }, []);
   const [status, setStatus] = useState<SessionStatus>({ status: "idle" });
   const [projectFilter, setProjectFilter] = useState("all");
+  // Explicitly opened tabs per space (herdr). Every successfully opened
+  // session registers here; tabs stay open until closed. Bounded per space.
+  const [openTabs, setOpenTabs] = useState<Record<string, string[]>>(() =>
+    JSON.parse(localStorage.getItem("babylon:tabs") ?? "{}")
+  );
+  const addOpenTab = useCallback((cwd: string, path: string) => {
+    setOpenTabs((prev) => {
+      const list = [...(prev[cwd] ?? [])];
+      if (!list.includes(path)) list.push(path);
+      while (list.length > 12) list.shift();
+      const next = { ...prev, [cwd]: list };
+      localStorage.setItem("babylon:tabs", JSON.stringify(next));
+      return next;
+    });
+  }, []);
+
   const [models, setModels] = useState<any[]>([]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [themePref, setThemePref] = useState<ThemePref>(loadThemePref);
+  const [themeId, setThemeId] = useState<ThemeId>(loadThemeId);
   const [commands, setCommands] = useState<CommandInfo[]>([]);
   const [agentState, setAgentState] = useState<any>(null);
   const [gitStatuses, setGitStatuses] = useState<Record<string, GitStatusResult>>({});
   const [stats, setStats] = useState<any>(null);
   const [thinkingLevels, setThinkingLevels] = useState<string[]>([]);
-  const [worktreeInfo, setWorktreeInfo] = useState<WorktreeInfo | null>(null);
-  const [showWorktreeModal, setShowWorktreeModal] = useState(false);
   const [showBranchPanel, setShowBranchPanel] = useState(false);
   const [showCommitPopover, setShowCommitPopover] = useState(false);
   const [showWorkflowsPanel, setShowWorkflowsPanel] = useState(false);
   const [showCommandPalette, setShowCommandPalette] = useState(false);
 
   const [panelsMenuOpen, setPanelsMenuOpen] = useState(false);
-  const [showProcesses, setShowProcesses] = useState(false);
-  const [processRegistry, setProcessRegistry] = useState<ProcessRegistry>(() =>
-    Effect.runSync(createProcessRegistryEffect),
-  );
   const [showPreview, setShowPreview] = useState(false);
   const [previewRegistry, setPreviewRegistry] = useState<PreviewRegistry>(() =>
     Effect.runSync(createPreviewRegistryEffect),
@@ -245,18 +236,7 @@ export default function App() {
   const [attention, setAttention] = useState<AttentionRegistry>(() =>
     Effect.runSync(createAttentionRegistryEffect),
   );
-  const [showDevices, setShowDevices] = useState(false);
-  const [devices, setDevices] = useState<DeviceRegistry>(() => Effect.runSync(createDeviceRegistryEffect));
-  const [showAutomation, setShowAutomation] = useState(false);
-  const [schedule, setSchedule] = useState<ScheduledTaskRegistry>(() =>
-    Effect.runSync(createScheduledTaskRegistryEffect),
-  );
-  const [automationHistory, setAutomationHistory] = useState<AutomationHistory>(() =>
-    Effect.runSync(createAutomationHistoryEffect),
-  );
   const [showDiagnostics, setShowDiagnostics] = useState(false);
-  const [showProblems, setShowProblems] = useState(false);
-  const [lspSnapshots, setLspSnapshots] = useState<import("./bridge").LspProjectSnapshot[]>([]);
   const [eventLog, setEventLog] = useState<EventLog>(createEventLog);
 
   // Append a batch of Babylon events to the diagnostics log. Invalid events
@@ -274,35 +254,7 @@ export default function App() {
     });
   }, []);
 
-  // Scheduler loop (Phase 8): drives due automation tasks on an interval.
-  // Refs give the loop a stable read of the latest committed state without
-  // re-creating it on every render.
-  const scheduleRef = useRef(schedule);
-  scheduleRef.current = schedule;
-  const automationHistoryRef = useRef(automationHistory);
-  automationHistoryRef.current = automationHistory;
-  const attentionRef = useRef(attention);
-  attentionRef.current = attention;
-  useEffect(() => {
-    const loop = createSchedulerLoop({
-      getState: () => ({
-        schedule: scheduleRef.current,
-        history: automationHistoryRef.current,
-        attention: attentionRef.current,
-      }),
-      setState: (next) => {
-        setSchedule(next.schedule);
-        setAutomationHistory(next.history);
-        setAttention(next.attention);
-      },
-      policy: () => Effect.runSync(defaultPolicyEffect),
-      run: () => ({ success: false, error: "no automation executor configured in this build" }),
-      onError: (err) => console.error("scheduler tick failed:", err),
-    });
-    loop.start();
-    return () => loop.stop();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);  const [history, setHistory] = useState<HistoryProjection>({ turns: [], leafId: null, hasBranches: false });
+  const [history, setHistory] = useState<HistoryProjection>({ turns: [], leafId: null, hasBranches: false });
   const [historyRevision, setHistoryRevision] = useState(0);
   const [rollbackPlan, setRollbackPlan] = useState<RollbackPlan | null>(null);
   const [rollbackBusy, setRollbackBusy] = useState(false);
@@ -318,40 +270,6 @@ export default function App() {
   // highlights instantly; the host's status confirm later keeps it exact.
   const [activeSessionPath, setActiveSessionPath] = useState<string | null>(null);
 
-  // Settled view = explicit settles ∪ stale idle threads (not the open thread).
-  // Explicit wakes override the stale timer; the active thread is never auto-settled.
-  const settledView = useMemo(() => {
-    const activePath = activeSessionPath ?? status.sessionPath;
-    const pinnedSet = new Set(pinnedOrder);
-    const archivedSet = new Set(archived);
-    const out = new Set<string>();
-    for (const g of groups) {
-      for (const s of g.sessions) {
-        const p = s.path;
-        if (pinnedSet.has(p)) continue;
-        if (snoozed[p] != null) continue;
-        if (archivedSet.has(p)) continue;
-        if (unsettled.includes(p)) continue;
-        if (settled.includes(p)) { out.add(p); continue; }
-        if (p === activePath) continue;
-        if (s.mtime == null) continue;
-        if (nowTick - s.mtime > STALE_SETTLE_MS) out.add(p);
-      }
-    }
-    return [...out];
-  }, [groups, activeSessionPath, status.sessionPath, pinnedOrder, snoozed, archived, settled, unsettled, nowTick]);
-
-  const toggleSettle = useCallback((path: string) => {
-    const isSettled = settledView.includes(path);
-    if (isSettled) {
-      setSettled((prev) => prev.filter((p) => p !== path));
-      setUnsettled((prev) => (prev.includes(path) ? prev : [...prev, path]));
-    } else {
-      setUnsettled((prev) => prev.filter((p) => p !== path));
-      setSettled((prev) => (prev.includes(path) ? prev : [...prev, path]));
-    }
-  }, [settledView]);
-
   const renameSession = async (path: string) => {
     const name = await promptText({ title: "Rename chat", prefill: headerName ?? undefined, placeholder: "Session name" });
     if (!name) return;
@@ -364,7 +282,7 @@ export default function App() {
   // Optimistic header title: shown instantly from the clicked row, replaced by
   // the host's sessionName when it hydrates.
   const [headerName, setHeaderName] = useState<string | null>(null);
-  // "Preparing…" only appears if the host stays not-ready past a beat — fast
+  // "Preparing…" only appears if the host stays not-ready past a beat, fast
   // switches (now <100ms) never flash it; cold first-opens still get the hint.
   const [preparingVisible, setPreparingVisible] = useState(false);
   // How many chat items ChatView mounts; the window is a suffix that grows
@@ -375,11 +293,10 @@ export default function App() {
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [activity, setActivity] = useState<ActivityUpdate>({ threads: [], subagents: [] });
   const [workflowRuns, setWorkflowRuns] = useState<WorkflowRunSummary[]>([]);
-  const [wtBusy, setWtBusy] = useState(false);
   // `hasSession` = a session's content is on screen (preview or live).
   // `liveReady` = the pi process is live on that session. Opening a session
   // flips hasSession immediately (instant file preview); liveReady follows
-  // once the in-process switch completes — no Hero flash, no blocking.
+  // once the in-process switch completes, no Hero flash, no blocking.
   const [hasSession, setHasSession] = useState(false);
   const [liveReady, setLiveReady] = useState(false);
 
@@ -514,36 +431,37 @@ export default function App() {
     };
   }, []);
 
-  // Process manager: Electron is the source of truth. Mirror snapshots into the
-  // ProcessRegistry so diagnostics and the Processes panel render truthful runtime state.
+  // Bot Mode roster: initial load + live push from the main-process store.
   useEffect(() => {
-    let cancelled = false;
-    bridge
-      .processList()
-      .then((snapshots) => {
-        if (cancelled) return;
-        setProcessRegistry({ processes: Object.fromEntries(snapshots.map((s) => [s.id, s])) });
-      })
-      .catch(() => undefined);
-    const off = bridge.onProcessUpdate((snapshots) => {
-      setProcessRegistry({ processes: Object.fromEntries(snapshots.map((s: any) => [s.id, s])) });
-    });
-    return () => {
-      cancelled = true;
-      off();
-    };
+    bridge.botsList().then(setBots).catch(() => undefined);
+    return bridge.onBotsUpdate(setBots);
   }, []);
-
-  // LSP: keep active project and problem list in sync
   useEffect(() => {
-    const off = bridge.onLspUpdate((snapshots) => setLspSnapshots(snapshots));
-    bridge.lspListSnapshots().then(setLspSnapshots).catch(() => undefined);
-    return off;
+    if (!showBots) return;
+    bridge.botsDefaultGet().then(setAppDefaultBot).catch(() => undefined);
+  }, [showBots]);
+  useEffect(() => {
+    bridge.groupsList().then(setBotGroups).catch(() => undefined);
+    return bridge.onGroupsUpdate(setBotGroups);
   }, []);
   useEffect(() => {
     const cwd = status.cwd;
-    if (!cwd) return;
-    bridge.lspSetProject(cwd).catch(() => undefined);
+    if (!cwd) {
+      setProjectSettings(null);
+      return;
+    }
+    let live = true;
+    bridge
+      .projectSettingsGet(cwd)
+      .then((v) => {
+        if (live) setProjectSettings(v);
+      })
+      .catch(() => {
+        if (live) setProjectSettings(null);
+      });
+    return () => {
+      live = false;
+    };
   }, [status.cwd]);
 
   // Attention Inbox: raise an item when the agent needs the user (here, a
@@ -620,8 +538,11 @@ export default function App() {
         !streamingRef.current &&
         !switchingRef.current
       ) {
+        // Background refresh must never clear the active session id: the
+        // false path (turn running, nothing to pull) emits no status, so a
+        // cleared id would blackhole the whole turn's events (every agent
+        // event carries sessionId) until the next explicit open.
         switchingRef.current = true;
-        activeSessionIdRef.current = null;
         void bridge
           .refreshSession(activePath)
           .then((refreshed) => {
@@ -643,8 +564,10 @@ export default function App() {
     const id = window.setInterval(() => {
       const current = activePathRef.current;
       if (!current || streamingRef.current || switchingRef.current) return;
+      // See above: never clear the active session id here. A refresh that
+      // returns false emits no status, so clearing would drop every later
+      // agent event for the live session (blackholed turn, no indicator).
       switchingRef.current = true;
-      activeSessionIdRef.current = null;
       void bridge
         .refreshSession(current)
         .then((refreshed) => {
@@ -657,58 +580,33 @@ export default function App() {
     return () => window.clearInterval(id);
   }, [activeSessionPath, status.sessionPath, hasSession]);
 
-  // Chunked transcript rendering: the full transcript is projected once (a
-  // couple of ms) and `rebuild` keeps the store consistent, but ChatView only
-  // mounts a growing window of items per event-loop tick. A huge stored
-  // transcript never blocks the main thread with one multi-hundred-millisecond
-  // React commit. Scheduling uses a MessageChannel (the same trick as React's
-  // scheduler): rAF stalls when the window is occluded or minimized, which
-  // would freeze hydration mid-way.
+  // Chunked transcript windowing disabled per user report of "section"
+  // feeling while both above/below load. Was: suffix window of 150 then
+  // MessageChannel chunks of 400 growing upward. Now: mount full transcript
+  // immediately; large sessions may briefly block but scroll is stable and
+  // the user is never stuck in a middle window.
   const scheduleTranscript = useCallback((messages: any[], epoch: number) => {
-    const CHUNK = 400;
-    // First paint is a small suffix window (the latest ~150 messages mount in
-    // ~15ms), then the window grows upward in the background. Keeps a switch
-    // to a big session perceptually instant while never freezing the thread.
-    const INITIAL_WINDOW = 150;
     dispatch({ type: "rebuild", messages });
-    if (messages.length <= INITIAL_WINDOW) {
-      setRenderCap(Number.MAX_SAFE_INTEGER);
-      renderCapRef.current = Number.MAX_SAFE_INTEGER;
-      return;
-    }
-    setRenderCap(INITIAL_WINDOW);
-    renderCapRef.current = INITIAL_WINDOW;
-    const channel = new MessageChannel();
-    let visible = INITIAL_WINDOW;
-    channel.port1.onmessage = () => {
-      if (epoch !== epochRef.current) return;
-      visible += CHUNK;
-      // The window is a suffix: it grows upward toward older messages, so a
-      // bottom-pinned viewport never jumps while a big transcript mounts.
-      if (visible >= messages.length) {
-        setRenderCap(Number.MAX_SAFE_INTEGER);
-        renderCapRef.current = Number.MAX_SAFE_INTEGER;
-        return;
-      }
-      setRenderCap(visible);
-      renderCapRef.current = visible;
-      channel.port2.postMessage(null);
-    };
-    channel.port2.postMessage(null);
+    setRenderCap(Number.MAX_SAFE_INTEGER);
+    renderCapRef.current = Number.MAX_SAFE_INTEGER;
+    return;
+    // Legacy chunked path kept for reference (disabled):
+    // const CHUNK = 400;
+    // const INITIAL_WINDOW = 150;
+    // if (messages.length <= INITIAL_WINDOW) {
+    //   setRenderCap(Number.MAX_SAFE_INTEGER);
+    //   return;
+    // }
+    // setRenderCap(INITIAL_WINDOW);
   }, []);
 
-  // Grow the suffix window after older messages are prepended, so the newly
-  // loaded region becomes visible while the current viewport stays put.
-  const growRenderCap = useCallback((by: number) => {
-    setRenderCap((current) => {
-      const next = current >= Number.MAX_SAFE_INTEGER / 2 ? current : current + by;
-      renderCapRef.current = next;
-      return next;
-    });
-  }, []);
+  // No-op now that windowing is disabled, was: grow suffix window when
+  // older messages prepended. Keeping the function for `loadEarlier` call
+  // site but it no longer adjusts `renderCap` (always MAX).
+  const growRenderCap = useCallback((_by: number) => {}, []);
 
   // Resync from the source of truth. Manual compaction doesn't fire
-  // agent_settled, so without this the StatsPopover context % and the
+  // a run-end event, so without this the StatsPopover context % and the
   // transcript would stay at the pre-compaction values until the next
   // user prompt.
   const resyncFromSource = useCallback(async (opts?: { skipRefresh?: boolean }) => {
@@ -716,18 +614,16 @@ export default function App() {
     try {
       const activePath = activePathRef.current;
       if (!opts?.skipRefresh && activePath && (await bridge.refreshSession(activePath))) return;
-      const [msgs, st, statsData, wt, nextHistory] = await Promise.all([
+      const [msgs, st, statsData, nextHistory] = await Promise.all([
         bridge.getMessages(),
         bridge.getState(),
         bridge.getStats(),
-        bridge.worktreeInfo(),
         bridge.getHistory(),
       ]);
       if (expectedEpoch !== epochRef.current) return;
       scheduleTranscript(msgs, expectedEpoch);
       setAgentState(st);
       setStats(statsData);
-      setWorktreeInfo(wt);
       setHistory(nextHistory);
       setHistoryRevision((revision) => revision + 1);
       const rollbackCreatedAt = nextHistory.activeRollback?.createdAt ?? null;
@@ -773,8 +669,8 @@ export default function App() {
           }
           if (event?.type === "compaction_end" && !event.aborted) {
             // Manual compact (and any successful compaction) replaces the
-            // live session messages with a compacted view. agent_settled
-            // does not fire here, so refresh the transcript, stats, and
+            // live session messages with a compacted view. No run-end event
+            // fires here, so refresh the transcript, stats, and
             // state ourselves to drop the now-stale items.
             needsResync = true;
           }
@@ -791,13 +687,12 @@ export default function App() {
 
   const hydrate = useCallback(async (expectedEpoch = epochRef.current) => {
     try {
-      const [msgs, ms, commandData, st, statsData, wt, nextHistory] = await Promise.all([
+      const [msgs, ms, commandData, st, statsData, nextHistory] = await Promise.all([
         bridge.getMessages(),
         bridge.getModels(),
         bridge.getCommands(),
         bridge.getState(),
         bridge.getStats(),
-        bridge.worktreeInfo(),
         bridge.getHistory(),
       ]);
       if (expectedEpoch !== epochRef.current) return;
@@ -833,7 +728,6 @@ export default function App() {
       }
       setAgentState(st);
       setStats(statsData);
-      setWorktreeInfo(wt);
       setHistory(nextHistory);
       setHistoryRevision((revision) => revision + 1);
       const rollbackCreatedAt = nextHistory.activeRollback?.createdAt ?? null;
@@ -861,6 +755,7 @@ export default function App() {
           activePathRef.current = s.sessionPath ?? s.state?.sessionFile ?? activePathRef.current;
           setActiveSessionPath(activePathRef.current);
           setLiveReady(true);
+          if (s.sessionPath && s.cwd) addOpenTab(s.cwd, s.sessionPath);
           void hydrate(epochRef.current);
         } else if (s.status === "starting") {
           liveReadyRef.current = false;
@@ -875,7 +770,7 @@ export default function App() {
     [hydrate, toast]
   );
 
-  // Git status keyed by project cwd, so every non-settled thread can show its
+  // Git status keyed by project cwd, so every thread can show its
   // branch (and full status on hover). Refreshed when the session list or
   // active project changes, on a light timer, and on row hover.
   const refreshGitStatuses = useCallback(() => {
@@ -906,7 +801,7 @@ export default function App() {
 
   // Predictive fetch (kills the serial IPC from the click path): hovering a
   // sidebar row warms its tail into the LRU cache, so a click is a fully
-  // synchronous swap — no await, one batched paint.
+  // synchronous swap, no await, one batched paint.
   const prefetchSession = useCallback((path: string) => {
     const cache = sessionCacheRef.current;
     if (cache.has(path) || prefetchingRef.current.has(path)) return;
@@ -924,6 +819,35 @@ export default function App() {
       })
       .catch(() => prefetchingRef.current.delete(path));
   }, []);
+
+  // Bot Mode: the bot whose canonical chat is on screen, if any. Drives the
+  // header badge (a bot's chat is forever: reopening it resumes the same file).
+  const activeBot: Bot | null = useMemo(() => {
+    const file = activeSessionPath ?? status.sessionPath ?? null;
+    if (!file) return null;
+    return (
+      bots.find(
+        (b) =>
+          (b.sessionsByProject ? Object.values(b.sessionsByProject).includes(file) : false) ||
+          isBotMainSession(b, file)
+      ) ?? null
+    );
+  }, [bots, activeSessionPath, status.sessionPath]);
+  // Staffed extras for the active project (null = unknown: keep global behavior).
+  const sharedStaff = useMemo(() => {
+    if (!projectSettings) return null;
+    return projectSettings.settings.memberIds
+      .map((id) => bots.find((b) => b.id === id))
+      .filter((b): b is Bot => !!b);
+  }, [projectSettings, bots]);
+  const activeGroup: BotGroup | null = useMemo(() => {
+    const file = activeSessionPath ?? status.sessionPath ?? null;
+    if (!file) return null;
+    return botGroups.find((g) => isGroupRoom(g, file)) ?? null;
+  }, [botGroups, activeSessionPath, status.sessionPath]);
+  // A rule-3 default chat with staff: extra-bot turns render speaker headers
+  // (thinking stays visible, unlike rooms).
+  const sharedSpeakers = activeGroup == null && activeBot == null && (sharedStaff?.length ?? 0) > 0;
 
   // Keep the per-session transcript cache fresh (skipped while a switch is in
   // flight so the previous session's items never land under the new path).
@@ -950,6 +874,11 @@ export default function App() {
     async (path: string | undefined, cwd: string, displayName?: string) => {
       const expectedEpoch = ++epochRef.current;
       const requestId = ++latestRequestRef.current;
+      // Stash the current view so a failed switch can stay put instead of
+      // stranding the user on Home.
+      const prevPath = activePathRef.current;
+      const prevMessages = loadedMessagesRef.current;
+      const prevOffset = earliestOffsetRef.current;
       switchingRef.current = true;
       liveReadyRef.current = false;
       activeSessionIdRef.current = null;
@@ -961,7 +890,7 @@ export default function App() {
       setActiveSessionPath(path ?? null);
       setHeaderName(displayName ?? null);
       // Transcript cache (opencode's SESSION_CACHE pattern): switching back to
-      // a recently-viewed session renders from memory — no fetch, no re-read —
+      // a recently-viewed session renders from memory, no fetch, no re-read ,
       // and the host re-warms in the background. The cache is populated by the
       // items effect below and evicted LRU (bounded by the 16KB tool-output
       // clamp, so a few sessions stay cheap).
@@ -976,7 +905,7 @@ export default function App() {
         setCanLoadMore(memo.canLoadMore);
       }
       // Fetch the stored transcript tail FIRST so the UI never renders an
-      // empty chat while we switch — `reset` + `rebuild` batch into one render
+      // empty chat while we switch, `reset` + `rebuild` batch into one render
       // with the messages already populated (no empty-state flicker). The tail
       // read is O(tail), not O(file); older windows load on demand.
       let cached: SessionWindow | undefined;
@@ -1000,7 +929,6 @@ export default function App() {
       // switches so the model picker and thinking options never wait on the
       // host open. Commands are cwd-bound and must reload per project.
       setCommands([]);
-      setWorktreeInfo(null);
       setHistory({ turns: [], leafId: null, hasBranches: false });
       rollbackDraftRef.current = null;
       setRollbackPlan(null);
@@ -1020,12 +948,77 @@ export default function App() {
         if (expectedEpoch !== epochRef.current) return;
         switchingRef.current = false;
         toast("error", e?.message ?? "failed to open session");
-        setHasSession(false);
-        setLiveReady(false);
+        if (prevPath) {
+          activePathRef.current = prevPath;
+          setActiveSessionPath(prevPath);
+          loadedMessagesRef.current = prevMessages;
+          earliestOffsetRef.current = prevOffset;
+          setCanLoadMore(prevOffset != null && prevOffset > 0);
+          if (prevMessages.length) scheduleTranscript(prevMessages, expectedEpoch);
+        } else {
+          setHasSession(false);
+          setLiveReady(false);
+        }
       }
     },
     [toast]
   );
+
+  // User-curated spaces (herdr): folders you add explicitly. The pi session
+  // index is never auto-imported into the sidebar.
+  const [spaces, setSpaces] = useState<string[]>(() =>
+    JSON.parse(localStorage.getItem("babylon:spaces") ?? "[]")
+  );
+  const addSpace = useCallback(async () => {
+    const cwd = await bridge.pickFolder();
+    if (!cwd) return;
+    setSpaces((prev) => {
+      if (prev.includes(cwd)) return prev;
+      const next = [...prev, cwd];
+      localStorage.setItem("babylon:spaces", JSON.stringify(next));
+      return next;
+    });
+    const latest = groups
+      .find((g) => g.cwd === cwd)
+      ?.sessions.slice()
+      .sort((a, b) => b.mtime - a.mtime)[0];
+    await openSession(latest?.path, cwd);
+  }, [groups, openSession]);
+  const removeSpace = useCallback((cwd: string) => {
+    setSpaces((prev) => {
+      const next = prev.filter((c) => c !== cwd);
+      localStorage.setItem("babylon:spaces", JSON.stringify(next));
+      return next;
+    });
+  }, []);
+  // Explicit tab close (herdr): the tab goes away, the session stays on disk
+  // and in Search. Closing the active tab falls back to its neighbor.
+  const closeTab = useCallback((cwd: string, path: string) => {
+    setOpenTabs((prev) => {
+      const list = (prev[cwd] ?? []).filter((p) => p !== path);
+      const next = { ...prev };
+      if (list.length) next[cwd] = list;
+      else delete next[cwd];
+      localStorage.setItem("babylon:tabs", JSON.stringify(next));
+      return next;
+    });
+    if (path === activePathRef.current) {
+      const remaining = (openTabs[cwd] ?? []).filter((p) => p !== path);
+      const pinnedHere = pinnedOrder.filter(
+        (p) => !remaining.includes(p) && groups.some((g) => g.sessions.some((s) => s.path === p && s.cwd === cwd))
+      );
+      const nextPath = remaining[remaining.length - 1] ?? pinnedHere[pinnedHere.length - 1];
+      if (nextPath) {
+        for (const g of groups) {
+          const s = g.sessions.find((x) => x.path === nextPath);
+          if (s) {
+            void openSession(s.path, s.cwd);
+            break;
+          }
+        }
+      }
+    }
+  }, [openTabs, pinnedOrder, groups, openSession]);
 
   // Scroll-up streaming: fetch the next older window of the stored transcript
   // and prepend it, growing the suffix window so the newly loaded region is
@@ -1056,8 +1049,14 @@ export default function App() {
     }
   }, [growRenderCap, scheduleTranscript]);
 
-  // Codex-style: with a project open, "new session" starts a chat in it — no
+  // Codex-style: with a project open, "new session" starts a chat in it, no
   // folder dialog. Only prompt for a folder when no project is open yet.
+  // Note: this deliberately has no forever-chat guard. Bot chats and group
+  // rooms persist (reopening one resumes the same file), but New session is
+  // the escape hatch: it always leaves the room and starts a fresh project
+  // chat. Compacting a room is the explicit Compact action instead, the old
+  // reroute trapped users in fresh rooms with "Nothing to compact" errors
+  // and no way to start a session in another project.
   const newSession = useCallback(async () => {
     const target = projectFilter !== "all" ? projectFilter : status.cwd;
     if (target) {
@@ -1076,11 +1075,198 @@ export default function App() {
     [openSession]
   );
 
+  // Project settings entry: resilient, the header button and the Bots shelf
+  // share this so the click is never dead. Uses the loaded snapshot when
+  // present, otherwise fetches on demand (a fresh session can render before
+  // the background load lands); failures toast instead of silently swallowing.
+  const openProject = useCallback(async () => {
+    if (projectSettings) {
+      setShowProject(true);
+      return;
+    }
+    const cwd = status.cwd;
+    if (!cwd) {
+      toast("info", "Open a project folder first");
+      return;
+    }
+    try {
+      const v = await bridge.projectSettingsGet(cwd);
+      setProjectSettings(v);
+      setShowProject(true);
+    } catch (e: any) {
+      toast("error", e?.message ?? "could not load project settings");
+    }
+  }, [projectSettings, status.cwd, toast]);
+
   // Switch to a different (or new) project folder.
   const openFolder = useCallback(async () => {
     const cwd = await bridge.pickFolder();
     if (cwd) await openSession(undefined, cwd);
   }, [openSession]);
+
+  // Bot Mode: open a bot's canonical forever-chat. The main process opens the
+  // host session (installing the persona overlay + model pin and creating the
+  // canonical file on first open); the renderer then displays it through the
+  // normal session path, which re-derives the same overlay by file lookup.
+  const openBot = useCallback(async (bot: Bot) => {
+    setPromotedParent(null);
+    try {
+      const result = await bridge.botsOpen(bot.id);
+      void bridge.botsList().then(setBots).catch(() => undefined);
+      let cwd = bot.cwd ?? (projectFilter !== "all" ? projectFilter : status.cwd) ?? status.cwd;
+      if (!cwd) {
+        const picked = await bridge.pickFolder();
+        if (!picked) {
+          toast("info", "Pick a project folder to open the bot chat");
+          return;
+        }
+        cwd = picked;
+      }
+      await openSession(result.sessionFile ?? undefined, cwd, bot.name);
+    } catch (e: any) {
+      // Drop the optimistic row/header so a failed open can't strand the UI
+      // on a session that never displayed (header falls back to live status).
+      setActiveSessionPath(null);
+      setHeaderName(null);
+      toast("error", e?.message ?? "could not open bot chat");
+    }
+  }, [openSession, projectFilter, status.cwd, toast]);
+
+  const createBot = useCallback(async (input: NewBotInput) => {
+    const created = await bridge.botsCreate(input);
+    void bridge.botsList().then(setBots).catch(() => undefined);
+    toast("info", `Bot "${created.name}" created`);
+  }, [toast]);
+  // Hire into this project: create the employee globally, staff them here.
+  const createAndStaffBot = useCallback(
+    async (input: NewBotInput) => {
+      const created = await bridge.botsCreate(input);
+      await bridge.botsList().then(setBots).catch(() => undefined);
+      if (projectSettings) {
+        const next = await bridge.projectSettingsMembers(projectSettings.hash, [
+          ...projectSettings.settings.memberIds,
+          created.id,
+        ]);
+        setProjectSettings({ hash: projectSettings.hash, settings: next });
+      }
+      toast("info", `Bot "${created.name}" hired`);
+    },
+    [projectSettings, toast]
+  );
+
+  const updateBot = useCallback(async (id: string, patch: BotPatch) => {
+    await bridge.botsUpdate(id, patch);
+    void bridge.botsList().then(setBots).catch(() => undefined);
+  }, []);
+
+  const deleteBot = useCallback(async (bot: Bot) => {
+    if (!(await confirmAction({ title: `Delete bot "${bot.name}"?`, message: "Its chat files stay on disk; routines and mentions stop resolving.", confirmLabel: "Delete bot", danger: true }))) return;
+    try {
+      await bridge.botsDelete(bot.id);
+      void bridge.botsList().then(setBots).catch(() => undefined);
+      toast("info", `Bot "${bot.name}" deleted`);
+    } catch (e: any) {
+      toast("error", e?.message ?? "could not delete bot");
+    }
+  }, [toast]);
+
+  // Group rooms: open the shared session through the normal display path.
+  const openGroup = useCallback(async (group: BotGroup) => {
+    setPromotedParent(null);
+    try {
+      const result = await bridge.groupsOpen(group.id);
+      void bridge.groupsList().then(setBotGroups).catch(() => undefined);
+      const memberCwd = bots.find((b) => b.id === group.memberIds[0])?.cwd;
+      let cwd = group.cwd ?? memberCwd ?? (projectFilter !== "all" ? projectFilter : status.cwd) ?? status.cwd;
+      if (!cwd) {
+        const picked = await bridge.pickFolder();
+        if (!picked) {
+          toast("info", "Pick a project folder to open the room");
+          return;
+        }
+        cwd = picked;
+      }
+      await openSession(result.sessionFile ?? undefined, cwd, group.name);
+    } catch (e: any) {
+      setActiveSessionPath(null);
+      setHeaderName(null);
+      toast("error", e?.message ?? "could not open group room");
+    }
+  }, [openSession, projectFilter, status.cwd, toast, bots]);
+
+  const createGroup = useCallback(async (input: NewGroupInput) => {
+    const created = await bridge.groupsCreate(input);
+    void bridge.groupsList().then(setBotGroups).catch(() => undefined);
+    toast("info", `Group "${created.name}" created`);
+  }, [toast]);
+
+  const updateGroup = useCallback(async (id: string, patch: { name?: string; memberIds?: string[] }) => {
+    await bridge.groupsUpdate(id, patch);
+    void bridge.groupsList().then(setBotGroups).catch(() => undefined);
+  }, []);
+
+  const deleteGroup = useCallback(async (group: BotGroup) => {
+    if (!(await confirmAction({ title: `Delete group "${group.name}"?`, message: "Its room files stay on disk.", confirmLabel: "Delete group", danger: true }))) return;
+    try {
+      await bridge.groupsDelete(group.id);
+      void bridge.groupsList().then(setBotGroups).catch(() => undefined);
+      toast("info", `Group "${group.name}" deleted`);
+    } catch (e: any) {
+      toast("error", e?.message ?? "could not delete group");
+    }
+  }, [toast]);
+
+  // Bot-to-bot DM: one attributed turn in the target's chat; the reply lands
+  // in the open chat as an activity line (success needs no toast, the relay
+  // line is the confirmation). Failures rethrow so the panel keeps the draft
+  // open with the error inline.
+  // Handoffs: adopted history is read-only; the default agent summarizes a past
+  // thread into a sidecar file, consumed later as a compaction boundary.
+  const createHandoff = useCallback(
+    async (sourcePath: string) => {
+      if (!projectSettings) {
+        toast("error", "Open the project first, it needs settings to author the handoff");
+        return;
+      }
+      try {
+        toast("info", "Summarizing handoff…");
+        const handoff = await bridge.handoffCreate(projectSettings.hash, sourcePath);
+        toast("info", `Handoff by ${handoff.author} ready, consume it from this chat's menu`);
+      } catch (e: any) {
+        toast("error", e?.message ?? "could not create handoff");
+      }
+    },
+    [projectSettings, toast]
+  );
+  const consumeHandoff = useCallback(
+    async (sourcePath: string) => {
+      const live = activeSessionPath ?? status.sessionPath;
+      if (!live) {
+        toast("error", "Open the live chat first, handoffs install there");
+        return;
+      }
+      try {
+        const list = await bridge.handoffList(sourcePath);
+        const latest = list[list.length - 1];
+        if (!latest) {
+          toast("info", "No handoffs yet, create one first");
+          return;
+        }
+        await bridge.handoffConsume(latest.id, live);
+        toast("info", "Handoff installed");
+      } catch (e: any) {
+        toast("error", e?.message ?? "could not consume handoff");
+      }
+    },
+    [activeSessionPath, status.sessionPath, toast]
+  );
+  const sendBotMessage = useCallback(async (targetId: string, text: string) => {
+    const result = await bridge.botsMessage(targetId, text, activeBot?.id);
+    if (result.pass) {
+      const target = bots.find((b) => b.id === targetId);
+      toast("info", `@${target?.name ?? "bot"} had nothing to add`);
+    }
+  }, [activeBot?.id, bots, toast]);
 
   const send = useCallback(
     async (text: string, images?: Attachment[], streamingBehavior?: "steer" | "followUp"): Promise<boolean> => {
@@ -1126,6 +1312,26 @@ export default function App() {
         if (history.activeRollback) {
           setHistory((current) => ({ ...current, activeRollback: undefined }));
         }
+        if (activeGroup && !streamingBehavior) {
+          // Group room: the driver sends the message and runs serial member
+          // turns in the same session. Text only, attachments stay in 1:1s.
+          if (images?.length) {
+            dispatch({ type: "local-user-rollback", text });
+            toast("info", "Images stay in 1:1 chats, rooms take text for now");
+            return false;
+          }
+          const room = await bridge.groupSend(activeGroup.id, text);
+          appendEvents([
+            createBabylonEvent("message.sent", {
+              owner: stampOwnership(
+                activeSessionIdRef.current ? { sessionId: activeSessionIdRef.current } : {}
+              ),
+            }),
+          ]);
+          if (room.stopped) toast("info", "Room rounds stopped");
+          if (history.activeRollback) await hydrate();
+          return true;
+        }
         await bridge.prompt(
           text,
           images?.map((a) => ({ type: "image", data: a.data, mimeType: a.mimeType })),
@@ -1149,7 +1355,7 @@ export default function App() {
         return false;
       }
     },
-    [history.activeRollback, hydrate, toast, appendEvents]
+    [history.activeRollback, hydrate, toast, appendEvents, activeGroup]
   );
 
   const abort = useCallback(async () => {
@@ -1159,6 +1365,44 @@ export default function App() {
       /* ignore */
     }
   }, []);
+
+  // Jump to a live agent from the sidebar dock (herdr): promote its thread
+  // or subagent into an openable session, or reveal the workflows panel.
+  const openAgentItem = useCallback(
+    async (a: AgentDockItem) => {
+      try {
+        if (a.kind === "thread") {
+          const r = await bridge.threadsPromote(a.id);
+          await openSession(r.sessionFile, r.cwd);
+        } else if (a.kind === "subagent") {
+          const r = await bridge.subagentsPromote(a.id);
+          await openSession(r.sessionFile, r.cwd);
+        } else {
+          setShowWorkflowsPanel(true);
+          setShowBranchPanel(false);
+        }
+      } catch (e: any) {
+        toast("error", e?.message ?? "could not open agent");
+      }
+    },
+    [openSession, toast]
+  );
+
+  // Stop a live subagent/thread/workflow from its LaunchCard. Routes to the
+  // correct bridge control by run kind; the store flips the card to "stopped"
+  // when the matching babylon_launch_update/terminated event lands.
+  const controlLaunch = useCallback(
+    async (runId: string, runKind: "subagent" | "thread" | "workflow", action: "stop") => {
+      try {
+        if (runKind === "subagent") await bridge.subagentsControl(action, runId);
+        else if (runKind === "thread") await bridge.threadsControl(action, runId);
+        else if (runKind === "workflow") await bridge.workflowsControl(action, runId);
+      } catch (e: any) {
+        toast("error", e?.message ?? "failed to control launch");
+      }
+    },
+    [toast]
+  );
 
   const setModel = useCallback(
     async (provider: string, modelId: string) => {
@@ -1188,15 +1432,20 @@ export default function App() {
   useEffect(() => {
     applyTheme(themePref);
   }, [themePref]);
+  useEffect(() => {
+    applyThemeId(themeId);
+  }, [themeId]);
 
   useEffect(() => {
     applySystemFonts(loadSystemFontsPref());
     applyMonoFont(loadMonoFontPref());
+    applyThemeId(loadThemeId());
     void bridge.getSettings().then((s) => {
       const enabled = s?.appearance?.useSystemFonts ?? true;
       const family = s?.appearance?.monoFontFamily ?? "system";
       applySystemFonts(enabled);
       applyMonoFont(family);
+      applyThemeId(loadThemeId());
       localStorage.setItem("babylon:useSystemFonts", String(enabled));
       localStorage.setItem("babylon:monoFont", family);
       const themeFromSettings = s?.appearance?.theme;
@@ -1214,38 +1463,6 @@ export default function App() {
       toast("error", e?.message ?? "compaction failed");
     }
   }, [toast]);
-
-  const exitWorktree = useCallback(
-    async (keep: boolean) => {
-      if (
-        !keep &&
-        !(await confirmAction({
-          title: "Discard this worktree?",
-          message:
-            "The worktree session (and its git worktree + pideck/* branch, if one was created) will be deleted.\n\nYour original session is untouched.",
-          confirmLabel: "Discard",
-          danger: true,
-        }))
-      ) {
-        return;
-      }
-      setWtBusy(true);
-      try {
-        const res = await bridge.worktreeExit({ keep });
-        toast(
-          "info",
-          keep
-            ? "Back on the original session — worktree kept"
-            : `Worktree discarded${res.gitRemoved ? " (git worktree removed)" : ""}`
-        );
-      } catch (e: any) {
-        toast("error", e?.message ?? "failed to exit worktree");
-      } finally {
-        setWtBusy(false);
-      }
-    },
-    [toast]
-  );
 
   const prepareRollback = useCallback(async (entryId: string) => {
     try {
@@ -1316,24 +1533,124 @@ export default function App() {
   const activeBranch: string | undefined =
     (agentState?.gitWorktree?.branch as string | undefined) ??
     (agentState?.git?.branch as string | undefined);
-  const bannerVisible = hasSession && liveReady && !!worktreeInfo?.isWorktree;
   const liveActivityCount =
     workflowRuns.filter((run) => run.status === "pending" || run.status === "running" || run.status === "paused").length +
     activity.threads.filter((thread) => ["queued", "starting", "running", "interrupting"].includes(thread.status)).length +
     activity.subagents.filter((run) => run.status === "running").length;
   const runningWorkflows = workflowRuns.filter((r) => r.status === "running" || r.status === "paused").length;
   const subagentCount = activity.subagents.length;
-  const isLive = state.streaming || liveActivityCount > 0 || runningWorkflows > 0;
+  // Agents dock (herdr-style): live threads/subagents/workflows with an
+  // owning session each, so the sidebar can jump to them or stop them.
+  const agentDockItems = useMemo((): AgentDockItem[] => {
+    const items: AgentDockItem[] = [];
+    const pathToCwd = new Map<string, string>();
+    const idToPath = new Map<string, string>();
+    for (const g of groups) {
+      for (const s of g.sessions) {
+        pathToCwd.set(s.path, s.cwd);
+        idToPath.set(s.id, s.path);
+      }
+    }
+    for (const t of activity.threads) {
+      if (!["queued", "starting", "running", "interrupting"].includes(t.status) && t.status !== "interrupted") continue;
+      const sp = t.sessionFile ?? t.parentSessionFile ?? null;
+      items.push({
+        kind: "thread",
+        id: t.threadId,
+        label: t.name ?? t.goal ?? t.threadId.slice(0, 8),
+        status: t.status === "interrupted" ? "blocked" : "running",
+        sessionPath: sp,
+        cwd: t.cwd ?? (sp ? pathToCwd.get(sp) : undefined),
+      });
+    }
+    for (const s of activity.subagents) {
+      if (s.status !== "running" && s.status !== "starting" && s.status !== "interrupted") continue;
+      const sp = s.sessionFile ?? s.parentSessionFile ?? null;
+      items.push({
+        kind: "subagent",
+        id: s.runId,
+        label: s.name ?? s.task ?? s.runId.slice(0, 8),
+        status: s.status === "interrupted" ? "blocked" : "running",
+        sessionPath: sp,
+        cwd: sp ? pathToCwd.get(sp) : undefined,
+      });
+    }
+    for (const r of workflowRuns) {
+      if (r.status !== "pending" && r.status !== "running" && r.status !== "paused") continue;
+      const sp = r.sessionId ? (idToPath.get(r.sessionId) ?? null) : null;
+      items.push({
+        kind: "workflow",
+        id: r.runId,
+        label: r.description ? `${r.workflowName}, ${r.description}` : r.workflowName,
+        status: r.status === "paused" ? "needs-input" : "running",
+        sessionPath: sp,
+        cwd: sp ? pathToCwd.get(sp) : undefined,
+      });
+    }
+    return items;
+  }, [activity, workflowRuns, groups]);
+  // Per-session liveness (opencode-style): the active transcript's streaming
+  // plus background threads / subagents / workflows matched to their owning
+  // session file. Sidebar rows read this so a run in another project still
+  // shows a dot after you switch away. Falls back to done when unknown.
+  const sessionStatusMap = useMemo(() => {
+    const map: Record<string, { streaming: boolean; agentStatus: "running" | "blocked" | "needs-input" | "done" }> = {};
+    const activePath = activeSessionPath ?? status.sessionPath ?? undefined;
+    const ensure = (path: string) => (map[path] ??= { streaming: false, agentStatus: "done" });
+    if (activePath && (state.streaming || agentState?.isStreaming === true)) {
+      ensure(activePath).streaming = true;
+      ensure(activePath).agentStatus = "running";
+    }
+    const sessionIdToPath = new Map<string, string>();
+    for (const g of groups) for (const s of g.sessions) sessionIdToPath.set(s.id, s.path);
+    const markRunning = (path: string | null | undefined) => {
+      if (!path) return;
+      ensure(path).streaming = true;
+      ensure(path).agentStatus = "running";
+    };
+    const markBlocked = (path: string | null | undefined) => {
+      if (!path) return;
+      const e = ensure(path);
+      if (e.agentStatus === "done") e.agentStatus = "blocked";
+    };
+    for (const t of activity.threads) {
+      const paths = [t.sessionFile, t.parentSessionFile].filter(Boolean) as string[];
+      if (["queued", "starting", "running", "interrupting"].includes(t.status)) paths.forEach(markRunning);
+      else if (t.status === "interrupted") paths.forEach(markBlocked);
+    }
+    for (const s of activity.subagents) {
+      const paths = [s.sessionFile, s.parentSessionFile].filter(Boolean) as string[];
+      if (s.status === "running") paths.forEach(markRunning);
+      else if (s.status === "interrupted") paths.forEach(markBlocked);
+    }
+    for (const r of workflowRuns) {
+      const path = r.sessionId ? sessionIdToPath.get(r.sessionId) : undefined;
+      if (!path) continue;
+      if (r.status === "pending" || r.status === "running") markRunning(path);
+      else if (r.status === "paused" && ensure(path).agentStatus === "done") ensure(path).agentStatus = "needs-input";
+    }
+    return map;
+  }, [groups, activeSessionPath, status.sessionPath, state.streaming, agentState, activity, workflowRuns]);
+  const isLive = isAgentLive({
+    streaming: state.streaming,
+    // Host truth from the last hydrate: after a reload mid-turn the fresh
+    // transcript state reports idle while the agent is still running.
+    hostStreaming: agentState?.isStreaming === true,
+    liveActivityCount,
+    runningWorkflows,
+  });
   const contextOpen = showWorkflowsPanel || showBranchPanel;
   const headerGit = status.cwd ? gitStatuses[status.cwd] ?? null : null;
   const headerBranch = (headerGit as any)?.branch ?? null;
   const headerCwdLine = status.cwd ? (headerBranch ? `${shortCwd(status.cwd)} (${headerBranch})` : shortCwd(status.cwd)) : null;
   const activeDirtyCount = (headerGit as any)?.isRepo ? ((headerGit as any).dirty?.length ?? 0) : 0;
-  const headerDirty = activeDirtyCount;
+  // One identity chip covers the old bot pill + room pill + Project button.
+  const identityName = activeGroup?.name ?? activeBot?.name ?? projectSettings?.settings.defaultBot.name ?? null;
+  const identityKind = activeGroup ? "room" : activeBot ? "bot" : null;
   const unresolvedAttention = listAttention(attention).length;
 
   // Diagnostics snapshot, recomputed only when an input to it actually
-  // changes — not on every unrelated render while the panel is open. The
+  // changes, not on every unrelated render while the panel is open. The
   // background policy input is a constant in this build, so it varies never.
   const diagnosticsSnapshot = useMemo(
     () =>
@@ -1341,22 +1658,18 @@ export default function App() {
         collectDiagnosticsEffect({
           now: Date.now(),
           attention,
-          processes: processRegistry,
-          schedule,
-          history: automationHistory,
           policy: Effect.runSync(defaultPolicyEffect),
-          devices,
           events: eventLog,
         }),
       ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [showDiagnostics, attention, processRegistry, schedule, automationHistory, devices, eventLog]
+    [showDiagnostics, attention, eventLog]
   );
 
   // Preload/bridge missing (e.g. renderer opened outside Electron, or the
   // preload script failed to load). Previously `window.pideck` was accessed
   // unconditionally, every effect threw, React unmounted the tree, and the
-  // window went blank — no UI, no error. Render a visible screen instead.
+  // window went blank, no UI, no error. Render a visible screen instead.
   if (!bridgeAvailable) {
     return (
       <div className="grid h-full place-items-center p-8">
@@ -1380,7 +1693,8 @@ export default function App() {
   }
 
   return (
-    settingsOpen ? (
+    <div className="app-shell flex h-full">
+    {settingsOpen ? (
       <SettingsPage
         models={models}
         thinkingLevels={thinkingLevels}
@@ -1388,11 +1702,58 @@ export default function App() {
         onSetModel={setModel}
         onSetThinking={setThinking}
         theme={themePref}
+        themeId={themeId}
+        onThemeIdChange={setThemeId}
         onThemeChange={setThemePref}
         onClose={() => setSettingsOpen(false)}
+        bots={sharedStaff ?? bots}
+        defaultBotName={projectSettings?.settings.defaultBot.name ?? null}
+        botsEmptyHint={projectSettings ? "No staff yet." : undefined}
+        onOpenBot={(bot) => {
+          setSettingsOpen(false);
+          void openBot(bot);
+        }}
+        onManageBots={() => setShowBots(true)}
+        onOpenProject={() => void openProject()}
       />
-    ) : (
-    <div className="app-shell flex h-full">
+    ) : null}
+      {showProject && projectSettings && status.cwd ? (
+        <ProjectPanel
+          projectPath={status.cwd}
+          settings={projectSettings.settings}
+          hash={projectSettings.hash}
+          employees={bots}
+          onSaveDefault={(patch) => bridge.projectDefaultUpdate(projectSettings.hash, patch)}
+          onResetDefault={() => bridge.projectDefaultReset(projectSettings.hash)}
+          onSetMembers={(ids) => bridge.projectSettingsMembers(projectSettings.hash, ids)}
+          onSetFreeSpeak={(on) => bridge.projectSettingsFreespeak(projectSettings.hash, on)}
+          onCreateAndStaff={createAndStaffBot}
+          onChanged={(next) => setProjectSettings({ hash: projectSettings.hash, settings: next })}
+          onClose={() => setShowProject(false)}
+        />
+      ) : null}
+      {showBots ? (
+        <BotsPanel
+          bots={bots}
+          activeBotId={activeBot?.id ?? null}
+          onOpen={(bot) => void openBot(bot)}
+          onCreate={createBot}
+          onUpdate={updateBot}
+          onDelete={deleteBot}
+          defaultBot={appDefaultBot}
+          onSaveDefaultBot={async (input) => {
+            setAppDefaultBot(await bridge.botsDefaultSet(input));
+          }}
+          onClose={() => setShowBots(false)}
+          groups={botGroups}
+          activeGroupId={activeGroup?.id ?? null}
+          onOpenGroup={(group) => void openGroup(group)}
+          onCreateGroup={createGroup}
+          onUpdateGroup={updateGroup}
+          onDeleteGroup={deleteGroup}
+          onSendMessage={sendBotMessage}
+        />
+      ) : null}
       <Sidebar
         groups={groups}
         activePath={activeSessionPath ?? status.sessionPath}
@@ -1417,7 +1778,7 @@ export default function App() {
         projectFilter={projectFilter}
         onProjectFilterChange={setProjectFilter}
         onDeleteSession={async (path, name) => {
-          if (!(await confirmAction({ title: `Delete chat “${name}”?`, message: "This cannot be undone.", confirmLabel: "Delete chat", danger: true }))) return;
+          if (!(await confirmAction({ title: `Delete chat "${name}"?`, message: "This cannot be undone.", confirmLabel: "Delete chat", danger: true }))) return;
           try {
             await bridge.deleteSession(path);
             toast("info", "Chat deleted");
@@ -1434,29 +1795,37 @@ export default function App() {
         onSearch={() => togglePalette(true)}
         pinnedOrder={pinnedOrder}
         snoozed={snoozed}
-        settled={settledView}
         archived={archived}
         unread={unread}
         showArchived={showArchived}
         activeStreaming={hasSession && state.streaming}
         agentState={liveAgentState}
+        sessionStatus={sessionStatusMap}
         activeBranch={activeBranch}
         gitStatuses={gitStatuses}
         onRefreshGitStatus={refreshGitStatusForCwd}
-        onReorderPinned={reorderPinned}
+        agents={agentDockItems}
+        onOpenAgent={(a) => void openAgentItem(a)}
+        onStopAgent={(a) => void controlLaunch(a.id, a.kind, "stop")}
+        spaceCwds={spaces}
+        onAddSpace={() => void addSpace()}
+        onRemoveSpace={removeSpace}
+        openTabs={openTabs}
+        onCloseTab={closeTab}
         onTogglePin={togglePin}
         onToggleSnooze={toggleSnooze}
-        onToggleSettle={toggleSettle}
         onToggleUnread={toggleUnread}
         onToggleArchive={toggleArchive}
         onRename={renameSession}
         onCopy={copySession}
+        onCreateHandoff={createHandoff}
+        onConsumeHandoff={consumeHandoff}
         onToggleShowArchived={toggleShowArchived}
       />
 
       <div className="flex min-w-0 flex-1">
         <main className="primary-workspace relative flex min-w-0 flex-1 flex-col min-h-0">
-          <header className={`thread-header titlebar shrink-0 z-10 flex h-16 items-center gap-3 border-b border-line/40 bg-raised/20 backdrop-blur ${sidebarMinimized ? "pl-[88px] pr-5" : "px-5"}`}>
+          <header className={`thread-header titlebar shrink-0 z-10 flex h-11 items-center gap-2 border-b border-line bg-bg ${sidebarMinimized ? "pl-[88px] pr-3" : "px-3"}`}>
             {sidebarMinimized ? (
               <button
                 onClick={() => {
@@ -1470,10 +1839,10 @@ export default function App() {
                 <ChevronIcon size={16} strokeWidth={2} />
               </button>
             ) : null}
-            {sidebarMinimized && groups.length > 1 ? (
+            {sidebarMinimized && spaces.length > 1 ? (
               <div className="w-[180px] shrink-0">
                 <ProjectFilter
-                  projects={groups.map((g) => ({ cwd: g.cwd, name: g.cwd.split("/").filter(Boolean).pop() || g.cwd }))}
+                  projects={spaces.map((c) => ({ cwd: c, name: c.split("/").filter(Boolean).pop() || c }))}
                   value={projectFilter}
                   onChange={setProjectFilter}
                 />
@@ -1481,66 +1850,65 @@ export default function App() {
             ) : null}
             {promotedParent ? <button onClick={() => { const parent = promotedParent; setPromotedParent(null); void openSession(parent.path, parent.cwd); }} title="Back to parent session" className="thread-action thread-action-text">← Parent</button> : null}
             <StatusDot status={liveReady ? "ready" : status.status} working={isLive} />
-            <div className="header-title min-w-0 max-w-[36ch] truncate text-[15px] font-semibold tracking-[-0.01em]" style={{ ["viewTransitionName" as any]: "active-session" } as any}>
+            <div className="header-title min-w-0 max-w-[40ch] truncate text-[13px] font-semibold tracking-[-0.01em]" title={headerCwdLine ?? undefined}>
               {headerName ?? agentState?.sessionName ?? (hasSession ? "Untitled session" : "Babylon")}
             </div>
-            {headerCwdLine ? (
-              <span className="hidden sm:flex min-w-0 items-center gap-2 truncate font-mono text-[12.5px] text-dim/70 ml-1">
-                <span className="truncate" title={headerCwdLine}>
-                  {headerCwdLine}
-                </span>
-                {headerGit?.isRepo ? (
-                  <span className="flex items-center gap-2 shrink-0 text-dim/55 tabular-nums">
-                    {headerDirty > 0 ? <span title={`${headerDirty} changed`}>●{headerDirty}</span> : null}
-                    {(headerGit as any).ahead > 0 ? <span className="flex items-center gap-0.5"><ArrowUpIcon size={11} />{(headerGit as any).ahead}</span> : null}
-                    {(headerGit as any).behind > 0 ? <span className="flex items-center gap-0.5"><ArrowDownIcon size={11} />{(headerGit as any).behind}</span> : null}
-                    {(headerGit as any).isWorktree ? <span className="flex items-center gap-0.5"><FlaskIcon size={11} />wt</span> : null}
-                  </span>
-                ) : null}
-              </span>
+            {status.cwd ? (
+              <button
+                type="button"
+                onClick={() => void openProject()}
+                title={activeGroup ? `${activeGroup.name}'s room, members take serial turns here` : activeBot ? `${activeBot.name}'s forever-chat, reopening it resumes this same session` : "Project settings, default bot, team, free discussion"}
+                className="flex shrink-0 items-center gap-1.5 rounded-full border border-line bg-raised px-2 py-0.5 text-[12px] font-semibold"
+              >
+                {identityName ? (
+                  <>
+                    <BotAvatar name={identityName} size={14} />
+                    <span className="max-w-[14ch] truncate">{identityName}</span>
+                    {identityKind ? <span className="text-dim">{identityKind}</span> : null}
+                  </>
+                ) : (
+                  <span>Project</span>
+                )}
+              </button>
             ) : null}
             <div className="ml-auto flex shrink-0 items-center gap-1.5">
-              {hasSession && worktreeInfo?.isWorktree ? <span className="execution-context"><FlaskIcon size={13} /> Worktree</span> : null}
               {hasSession ? (
                 <button
                   onClick={() => {
                     setShowWorkflowsPanel((open) => !open);
                     setShowBranchPanel(false);
                   }}
-                  title="Activity — workflows, threads, subagents"
+                  title="Activity, workflows, threads, subagents"
                   aria-pressed={showWorkflowsPanel}
                   className={`thread-action relative ${showWorkflowsPanel ? "is-active" : ""}`}
                 >
-                  <LayersIcon size={16} />
-                  {liveActivityCount > 0 ? <span className="sidebar-count absolute -right-1 -top-1">{liveActivityCount}</span> : null}
+                  <LayersIcon size={14} />
+                  {liveActivityCount > 0 ? <span className="absolute -right-1 -top-1 min-w-[16px] h-[16px] px-1 grid place-items-center rounded-full bg-accent text-white text-[10px] font-bold leading-none">{liveActivityCount}</span> : null}
                 </button>
               ) : null}
+
               <button
-                onClick={() => setShowCommitPopover(true)}
-                title="Commit and push — stages all changes, generates a message, and pushes"
-                className="thread-action thread-action-text"
+                onClick={() => setShowAttention((v) => !v)}
+                title={`Attention, ${unresolvedAttention} unresolved`}
+                aria-pressed={showAttention}
+                className={`thread-action relative ${showAttention ? "is-active" : ""}`}
               >
-                Commit{activeDirtyCount > 0 ? ` ${activeDirtyCount}` : ""}
+                <BellIcon size={14} className={unresolvedAttention > 0 ? "text-err" : ""} />
+                {unresolvedAttention > 0 ? <span className="absolute -right-1 -top-1 min-w-[16px] h-[16px] px-1 grid place-items-center rounded-full bg-err text-white text-[10px] font-bold leading-none">{unresolvedAttention}</span> : null}
               </button>
               <button
-                onClick={() => setShowPreview((open) => !open)}
-                title="Browser preview"
-                aria-pressed={showPreview}
-                className={`thread-action thread-action-text ${showPreview ? "is-active" : ""}`}
+                onClick={() => setShowCommitPopover(true)}
+                title="Commit and push, stages all changes, generates a message, and pushes"
+                className="thread-action thread-action-text text-[12px]"
               >
-                Preview
+                Commit{activeDirtyCount > 0 ? ` ${activeDirtyCount}` : ""}
               </button>
               <PanelsMenu
                 open={panelsMenuOpen}
                 onOpenChange={setPanelsMenuOpen}
                 items={[
-                  { label: "Terminals", open: showProcesses, onToggle: () => setShowProcesses((v) => !v) },
-                  { label: "Problems", open: showProblems, onToggle: () => setShowProblems((v) => !v), badge: lspSnapshots.find((s) => s.cwd === status.cwd)?.diagnostics.length ?? 0 },
-                  { label: "Attention inbox", open: showAttention, onToggle: () => setShowAttention((v) => !v), badge: unresolvedAttention },
-                  { label: "Paired devices", open: showDevices, onToggle: () => setShowDevices((v) => !v) },
-                  { label: "Scheduled tasks", open: showAutomation, onToggle: () => setShowAutomation((v) => !v) },
+                  { label: "Browser preview", open: showPreview, onToggle: () => setShowPreview((v) => !v) },
                   { label: "Runtime diagnostics", open: showDiagnostics, onToggle: () => setShowDiagnostics((v) => !v) },
-                  ...(hasSession ? [{ label: "Session & worktree…", action: () => setShowWorktreeModal(true) }] : []),
                 ]}
               />
               <button onClick={() => togglePalette(true)} title="Search and commands (⌘K)" className="thread-action">
@@ -1549,12 +1917,6 @@ export default function App() {
             </div>
             {preparingVisible ? <span className="shrink-0 text-[13px] text-dim">Preparing…</span> : null}
           </header>
-
-          {bannerVisible ? (
-            <div className="shrink-0 z-10">
-              <WorktreeBanner info={worktreeInfo!} busy={wtBusy} onExit={exitWorktree} />
-            </div>
-          ) : null}
 
           <div className="flex flex-1 min-h-0 flex-col">
               {hasSession ? (
@@ -1565,9 +1927,27 @@ export default function App() {
                   loadingEarlier={loadingEarlier}
                   onNeedEarlier={() => void loadEarlier()}
                   streaming={isLive}
+                  isRoom={activeGroup != null}
+                  roomHandle={
+                    activeGroup != null || sharedSpeakers
+                      ? state.roomTurn?.phase === "started"
+                        ? state.roomTurn.handle
+                        : null
+                      : null
+                  }
+                  roomMembers={
+                    activeGroup
+                      ? bots.filter((b) => activeGroup.memberIds.includes(b.id))
+                      : sharedSpeakers
+                        ? (sharedStaff ?? [])
+                        : []
+                  }
+                  roomName={activeGroup?.name ?? ""}
+                  showSpeakers={sharedSpeakers}
                   historyTurns={history.turns}
                   onRollback={(entryId) => void prepareRollback(entryId)}
                   onOpenLaunch={() => setShowWorkflowsPanel(true)}
+                  onControlLaunch={(runId, runKind, action) => void controlLaunch(runId, runKind, action)}
                 />
               ) : (
                 <div className="flex flex-1 min-h-0 overflow-hidden">
@@ -1596,6 +1976,11 @@ export default function App() {
                 onDialogDismiss={(id) => dispatch({ type: "dialog-dismiss", id })}
                 runningWorkflows={runningWorkflows}
                 subagentCount={subagentCount}
+                mentionBots={
+                  activeGroup
+                    ? bots.filter((b) => activeGroup.memberIds.includes(b.id))
+                    : (sharedStaff ?? bots.filter((b) => !b.hidden))
+                }
               />
             ) : null}
           </div>
@@ -1649,18 +2034,7 @@ export default function App() {
           />
         )}
       </Suspense>
-      {ready && showWorktreeModal && worktreeInfo && (
-        <WorktreeModal info={worktreeInfo} onClose={() => setShowWorktreeModal(false)} toast={toast} />
-      )}
       <Suspense fallback={null}>
-        {showProcesses ? (
-          <ProcessPanel
-            registry={processRegistry}
-            setRegistry={setProcessRegistry}
-            activeCwd={status.cwd ?? undefined}
-            onClose={() => setShowProcesses(false)}
-          />
-        ) : null}
         {showPreview ? (
           <PreviewPanel
             registry={previewRegistry}
@@ -1675,47 +2049,10 @@ export default function App() {
             onClose={() => setShowAttention(false)}
           />
         ) : null}
-        {showDevices ? (
-          <DevicesPanel
-            registry={devices}
-            setRegistry={setDevices}
-            onClose={() => setShowDevices(false)}
-            pairingCrypto={{
-              newToken: () =>
-                Array.from(crypto.getRandomValues(new Uint8Array(16)))
-                  .map((b) => b.toString(16).padStart(2, "0"))
-                  .join(""),
-              hash: async (token) => {
-                const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
-                return Array.from(new Uint8Array(bytes))
-                  .map((b) => b.toString(16).padStart(2, "0"))
-                  .join("");
-              },
-            }}
-          />
-        ) : null}
-        {showAutomation ? (
-          <AutomationPanel
-            schedule={schedule}
-            setSchedule={setSchedule}
-            history={automationHistory}
-            onClose={() => setShowAutomation(false)}
-          />
-        ) : null}
         {showDiagnostics ? (
           <DiagnosticsPanel
             snapshot={diagnosticsSnapshot}
             onClose={() => setShowDiagnostics(false)}
-          />
-        ) : null}
-        {showProblems ? (
-          <ProblemsPanel
-            snapshot={lspSnapshots.find((s) => s.cwd === status.cwd) ?? null}
-            cwd={status.cwd}
-            onRefresh={() => {
-              if (status.cwd) bridge.lspRefresh(status.cwd).catch(() => undefined);
-            }}
-            onClose={() => setShowProblems(false)}
           />
         ) : null}
       </Suspense>
@@ -1740,7 +2077,6 @@ export default function App() {
       <PromptHost />
       <Toasts toasts={state.toasts} onDismiss={(id) => dispatch({ type: "toast-dismiss", id })} />
     </div>
-    )
   );
 }
 

@@ -1,15 +1,58 @@
 import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react";
 import type { ChatItem } from "../store";
 import type { HistoryTurn } from "../bridge";
+import type { Bot } from "../bots";
+import { botHandle } from "../bots";
 import { UserMessage, AssistantMessage, ToolCard, ToolGroup, SystemLine, RecapLine, LaunchCard } from "./items";
+import { BotAvatar } from "./BotsPanel";
 import { formatTokens } from "../lib/format";
 import { formatTokensEffect } from "../lib/format.effect";
 import * as Effect from "effect/Effect";
+
+/** Group-room speaker header: avatar + name so member turns read as voices. */
+export function MemberHeader({ handle, members }: { handle: string; members: Bot[] }) {
+  const member = members.find((m) => botHandle(m) === handle);
+  return (
+    <div className="mb-1 flex min-w-0 items-center gap-1.5" data-room-speaker={handle}>
+      <BotAvatar name={member?.name ?? handle} size={16} />
+      <span className="truncate text-[13px] font-semibold">{member?.name ?? `@${handle}`}</span>
+      {member?.title ? <span className="truncate text-[12px] text-dim">{member.title}</span> : null}
+    </div>
+  );
+}
+
+/** Group-room host header: the facilitator's own replies (answers to you
+ *  directly, not member turns) get the room's identity, never a blank bubble. */
+export function RoomHostHeader({ roomName }: { roomName: string }) {
+  return (
+    <div className="mb-1 flex min-w-0 items-center gap-1.5" data-room-host={roomName}>
+      <BotAvatar name={roomName} size={16} />
+      <span className="truncate text-[13px] font-semibold">{roomName}</span>
+      <span className="truncate text-[12px] text-dim">host</span>
+    </div>
+  );
+}
+
+/** Speaker attribution above an assistant turn: the directed member when known,
+ *  the room host for unattributed room replies, nothing in plain chats. Shared
+ *  project chats show member headers without the host fallback (the default bot
+ *  is the implicit speaker) and keep thinking visible. */
+function SpeakerHead({ speaker, streaming, roomHandle, members, isRoom, roomName, showSpeakers }: {
+  speaker?: string; streaming?: boolean; roomHandle?: string | null; members: Bot[]; isRoom: boolean; roomName: string; showSpeakers: boolean;
+}) {
+  if (!isRoom && !showSpeakers) return null;
+  const handle = speaker ?? (streaming ? roomHandle : null);
+  if (handle) return <MemberHeader handle={handle} members={members} />;
+  if (isRoom) return <RoomHostHeader roomName={roomName} />;
+  return null;
+}
 
 const CompactionCard = memo(function CompactionCard({ item }: { item: Extract<ChatItem, { kind: "compaction" }> }) {
   const isCompacting = item.status === "compacting";
   const isFailed = item.status === "failed";
   const isAborted = item.status === "aborted";
+  const settled = !isCompacting && !isFailed && !isAborted;
+  let leading: string | null = null;
   let text: string;
   let subtext: string | null = null;
   if (isCompacting) {
@@ -17,30 +60,32 @@ const CompactionCard = memo(function CompactionCard({ item }: { item: Extract<Ch
     subtext = item.reason ? `${item.reason}` : null;
   } else if (isAborted) {
     text = "Compaction aborted";
+    leading = "○";
   } else if (isFailed) {
     text = "Compaction failed";
     subtext = item.error ?? null;
+    leading = "⚠";
   } else {
     const r = item.result;
     if (r?.tokensBefore != null && r?.estimatedTokensAfter != null) {
-      text = `Compacted: ${Effect.runSync(formatTokensEffect(r.tokensBefore))} → ~${Effect.runSync(formatTokensEffect(r.estimatedTokensAfter))} tokens`;
+      text = `${Effect.runSync(formatTokensEffect(r.tokensBefore))}→${Effect.runSync(formatTokensEffect(r.estimatedTokensAfter))}`;
     } else {
       text = "Compacted";
     }
     subtext = item.reason && item.reason !== "auto" ? item.reason : null;
+    leading = "◍";
   }
+  const mono = settled && text.includes("→");
   return (
     <div
-      className={`my-3 flex items-center gap-2.5 rounded-full border px-3.5 py-1.5 text-[12.5px] ${isFailed ? "border-err/30 bg-err/10 text-err" : isAborted ? "border-warn/30 bg-warn/10 text-warn" : "border-line bg-inset/60 text-dim"}`}
-      style={{ width: "fit-content", maxWidth: "100%" }}
+      className={`my-3 flex w-fit items-center gap-2.5 rounded-md border px-3 py-1.5 text-[12px] ${isFailed ? "border-err/30 bg-err/10 text-err" : isAborted ? "border-warn/30 bg-warn/10 text-warn" : "border-line bg-inset/60 text-dim"}`}
+      style={{ maxWidth: "100%" }}
       role="status"
       aria-live="polite"
     >
       {isCompacting ? <span className="spinner inline-block h-3 w-3 shrink-0 rounded-full border-[1.5px] border-line border-t-accent animate-spin" aria-hidden /> : null}
-      {isFailed ? <span aria-hidden>⚠</span> : null}
-      {isAborted ? <span aria-hidden>○</span> : null}
-      {!isCompacting && !isFailed && !isAborted ? <span aria-hidden>◍</span> : null}
-      <span className="font-medium" style={{ color: isFailed || isAborted ? undefined : "var(--fg)" }}>{text}</span>
+      {leading ? <span aria-hidden className={mono ? "font-mono" : undefined}>{leading}</span> : null}
+      <span className={`font-medium ${mono ? "font-mono tabular-nums tracking-tight" : ""}`} style={{ color: isFailed || isAborted ? undefined : "var(--fg)" }}>{text}</span>
       {subtext ? <span className="text-dim truncate">· {subtext}</span> : null}
     </div>
   );
@@ -89,6 +134,19 @@ interface Props {
   historyTurns?: HistoryTurn[];
   onRollback?(entryId: string): void;
   onOpenLaunch?(runId: string, runKind: "subagent" | "thread" | "workflow"): void;
+  onControlLaunch?(runId: string, runKind: "subagent" | "thread" | "workflow", action: "stop"): void;
+  /** Group room: hide reasoning blocks and director machinery (collapsed in
+   *  the store); show member presence instead. */
+  isRoom?: boolean;
+  /** Live member turn handle while a room turn streams, else null. */
+  roomHandle?: string | null;
+  /** Room members for speaker headers. */
+  roomMembers?: Bot[];
+  /** Room name for the host header (facilitator replies carry no speaker). */
+  roomName?: string;
+  /** Shared project chat with staff: show speaker headers for extra-bot turns
+   *  without hiding thinking (rooms hide it; shared chats keep it). */
+  showSpeakers?: boolean;
 }
 
 function summarizeTurnTools(tools: Array<Extract<ChatItem, { kind: "tool" }>>): string {
@@ -141,13 +199,21 @@ export default function ChatView({
   historyTurns = [],
   onRollback,
   onOpenLaunch,
+  onControlLaunch,
+  isRoom = false,
+  roomHandle = null,
+  roomMembers = [],
+  roomName = "",
+  showSpeakers = false,
 }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const innerRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
+  const lastUserScrollAt = useRef(0);
   const [showJump, setShowJump] = useState(false);
   const prevHeight = useRef(0);
   const prevFirstKey = useRef<string | null>(null);
+  const prevLastKey = useRef<string | null>(null);
   const prevLength = useRef(0);
   const onNeedEarlierRef = useRef(onNeedEarlier);
   onNeedEarlierRef.current = onNeedEarlier;
@@ -162,9 +228,12 @@ export default function ChatView({
     const el = ref.current;
     if (!el) return;
     const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
-    const atBottom = dist < 100;
-    stick.current = atBottom;
-    setShowJump(!atBottom);
+    const atBottom = dist < 8;
+    if (!atBottom) lastUserScrollAt.current = Date.now();
+    const wasStick = stick.current;
+    if (atBottom && !wasStick) stick.current = true;
+    else if (!atBottom) stick.current = false;
+    setShowJump(!stick.current);
     // Scroll-up streaming: near the top of the loaded region, ask for the next
     // older window. The App guards against duplicate concurrent fetches.
     if (el.scrollTop < 400 && canLoadMoreRef.current) {
@@ -172,46 +241,45 @@ export default function ChatView({
     }
   };
 
+  // Pin on first open and on new-chat switch, and on genuine appends at
+  // the end when the user is still following. Fold expand / streaming
+  // deltas (same item grows) do NOT pin via this path, streaming uses
+  // ResizeObserver below. `prepended` is only for "load earlier" where
+  // the old first item is still visible in the new window.
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
-    const isInitialMount = prevFirstKey.current === null;
     const prevKey = prevFirstKey.current;
+    const prevLast = prevLastKey.current;
+    const isInitialMount = prevLength.current === 0 && shown.length > 0;
     const isShrink = prevLength.current > 0 && shown.length < prevLength.current;
-    const prepended = shown.length > 0 && prevKey !== null && shown[0].key !== prevKey && !isShrink;
+    const prevKeyStillPresent = prevKey ? shown.some((s) => s.key === prevKey) : false;
+    const isNewChat = prevKey !== null && !prevKeyStillPresent && shown.length > 0;
+    const grewAtEnd = shown.length > prevLength.current && shown[shown.length - 1]?.key !== prevLast;
+    const prepended = !isNewChat && shown.length > 0 && prevKey !== null && shown[0].key !== prevKey && !isShrink && prevKeyStillPresent;
     const before = prevHeight.current;
     prevHeight.current = el.scrollHeight;
     prevFirstKey.current = shown[0]?.key ?? null;
+    prevLastKey.current = shown[shown.length - 1]?.key ?? null;
     prevLength.current = shown.length;
-    const frame = requestAnimationFrame(() => {
-      if (!el) return;
-      if (isInitialMount || (isShrink && stick.current)) {
-        el.scrollTop = el.scrollHeight;
-      } else if (prepended && before > 0) {
-        // Older messages were inserted above the viewport: keep the visible
-        // content in place by shifting the scroll position by the inserted
-        // height instead of letting the document jump.
-        el.scrollTop += el.scrollHeight - before;
-      } else if (stick.current) {
-        el.scrollTop = el.scrollHeight;
-      }
-    });
-    return () => cancelAnimationFrame(frame);
+    if (prepended && before > 0) {
+      requestAnimationFrame(() => {
+        if (ref.current) ref.current.scrollTop += ref.current.scrollHeight - before;
+      });
+      return;
+    }
+    if (isInitialMount || isNewChat || (grewAtEnd && stick.current && Date.now() - lastUserScrollAt.current > 800)) {
+      requestAnimationFrame(() => {
+        if (ref.current && (isInitialMount || isNewChat || stick.current)) ref.current.scrollTop = ref.current.scrollHeight;
+      });
+    }
   }, [shown]);
 
-  // True streaming pin: any growth of the inner column (text deltas, tool
-  // output, tool groups) auto-pins when the user is at the bottom. Uses
-  // ResizeObserver so we don't have to guess which piece of `items` grew.
-  useEffect(() => {
-    const el = ref.current;
-    const inner = innerRef.current;
-    if (!el || !inner) return;
-    const ro = new ResizeObserver(() => {
-      if (stick.current) el.scrollTop = el.scrollHeight;
-    });
-    ro.observe(inner);
-    return () => ro.disconnect();
-  }, []);
+  // Auto-pin via ResizeObserver disabled per user request, was pulling
+  // the viewport to bottom on every streaming delta / tool output.
+  // Keeping the observer disconnected entirely; use "Jump to bottom"
+  // button to return. Re-enable by restoring this effect.
+  // useEffect(() => { ... ResizeObserver ... }, [streaming]);
 
   // Derived view data: rebuilt only when the transcript actually changes, not
   // on every parent render (streaming deltas re-render App many times/sec).
@@ -229,7 +297,7 @@ export default function ChatView({
         if (turnStart >= 0) {
           const start = shown[turnStart];
           const turn = start.kind === "user" && start.entryId ? historyById.get(start.entryId) : undefined;
-          if (turn && turn.changedCount > 0) nextCards.set(i - 1, turn);
+          if (turn) nextCards.set(i - 1, turn);
         }
         turnStart = i;
       }
@@ -237,7 +305,7 @@ export default function ChatView({
     if (turnStart >= 0) {
       const start = shown[turnStart];
       const turn = start.kind === "user" && start.entryId ? historyById.get(start.entryId) : undefined;
-      if (turn && turn.changedCount > 0) nextCards.set(shown.length - 1, turn);
+      if (turn) nextCards.set(shown.length - 1, turn);
     }
     return nextCards;
   }, [shown, historyById]);
@@ -279,7 +347,7 @@ export default function ChatView({
     return map;
   }, [shown, userIndices, streaming]);
   const isFoldCollapsed = (turnId: string) => !expandedTurns.has(turnId);
-  // All hidden indices regardless of expanded state — kept out of the flat
+  // All hidden indices regardless of expanded state, kept out of the flat
   // visibleEntries list so hidden tools render only inside the animated
   // fold container (interruptible spring, 0fr ↔ 1fr).
   const allHiddenIndices = useMemo(() => {
@@ -355,13 +423,16 @@ export default function ChatView({
                         {entry.item.kind === "user" ? (
                           <UserMessage item={entry.item} historyTurn={entry.item.entryId ? historyById.get(entry.item.entryId) : undefined} rollbackDisabled={streaming} onRollback={onRollback} />
                         ) : entry.item.kind === "assistant" ? (
-                          <AssistantMessage item={entry.item} />
+                          <>
+                            <SpeakerHead speaker={entry.item.speaker} streaming={entry.item.streaming} roomHandle={roomHandle} members={roomMembers} isRoom={isRoom} roomName={roomName} showSpeakers={showSpeakers} />
+                            <AssistantMessage item={entry.item} hideThinking={isRoom} />
+                          </>
                         ) : entry.item.kind === "tool" ? (
                           <ToolCard item={entry.item} staggerMs={stagger} />
                         ) : entry.item.kind === "recap" ? (
                           <RecapLine text={entry.item.text} />
                         ) : entry.item.kind === "launch" ? (
-                          <LaunchCard item={entry.item} onOpen={onOpenLaunch} />
+                          <LaunchCard item={entry.item} onOpen={onOpenLaunch} onControl={onControlLaunch} />
                         ) : entry.item.kind === "compaction" ? (
                           <CompactionCard item={entry.item} />
                         ) : (
@@ -386,13 +457,13 @@ export default function ChatView({
                           return n;
                         })
                       }
-                      className="my-1 flex w-full items-center gap-2 rounded-md border border-dashed border-line bg-inset/50 px-3 py-1.5 text-left text-[12.5px] text-dim hover:border-line-strong hover:text-fg"
+                      className="my-1 flex w-full items-center gap-2 rounded-md border border-line bg-inset/50 px-3 py-1.5 text-left text-[12px] text-dim transition-colors hover:border-line-strong hover:text-fg"
                     >
                       <span className="truncate">{isCollapsed ? foldForUser.label : "Hide details"}</span>
                       <span className="ml-auto shrink-0 text-[11px]">{isCollapsed ? `${foldForUser.hiddenCount} hidden` : "Collapse"}</span>
                     </button>
                     <div
-                      className="grid transition-[grid-template-rows] duration-[400ms] ease-[cubic-bezier(0.2,0.8,0.2,1)] will-change-[grid-template-rows]"
+                      className="grid transition-[grid-template-rows] duration-200 ease-[cubic-bezier(0.2,0.8,0.2,1)] will-change-[grid-template-rows]"
                       style={{ gridTemplateRows: isCollapsed ? "0fr" : "1fr" }}
                     >
                       <div className="overflow-hidden">
@@ -403,7 +474,10 @@ export default function ChatView({
                             </div>
                           ) : (
                             <div key={he.item.key} className={longChat ? "chat-item chat-item-long" : "chat-item"}>
-                              {he.item.kind === "tool" ? <ToolCard item={he.item as any} /> : he.item.kind === "assistant" ? <AssistantMessage item={he.item as any} /> : <SystemLine text={(he.item as any).text} />}
+                              {he.item.kind === "tool" ? <ToolCard item={he.item as any} /> : he.item.kind === "assistant" ? (<>
+                                <SpeakerHead speaker={(he.item as any).speaker} streaming={(he.item as any).streaming} roomHandle={roomHandle} members={roomMembers} isRoom={isRoom} roomName={roomName} showSpeakers={showSpeakers} />
+                                <AssistantMessage item={he.item as any} hideThinking={isRoom} />
+                              </>) : <SystemLine text={(he.item as any).text} />}
                             </div>
                           )
                         )}
@@ -418,6 +492,14 @@ export default function ChatView({
             );
           });
         })()}
+        {(isRoom || showSpeakers) && streaming && roomHandle ? (
+          <div className="chat-item">
+            <p className="my-2 flex items-center gap-2 text-[13px] text-dim" aria-live="polite">
+              <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-accent" aria-hidden />
+              @{roomHandle} is thinking…
+            </p>
+          </div>
+        ) : null}
       </div>
       </div>
       {showJump && (
@@ -426,9 +508,12 @@ export default function ChatView({
           onClick={() => {
             const el = ref.current;
             if (!el) return;
+            stick.current = true;
+            setShowJump(false);
+            lastUserScrollAt.current = 0;
             el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
           }}
-          className="absolute bottom-4 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-line bg-raised px-3 py-1.5 text-[12px] font-medium shadow-lg hover:bg-inset active:scale-[0.97] transition-transform"
+          className="absolute bottom-4 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-line bg-raised px-3 py-1.5 text-[12px] font-medium transition-colors hover:bg-inset active:scale-[0.97]"
           aria-label="Jump to bottom"
         >
           ↓ Jump to bottom

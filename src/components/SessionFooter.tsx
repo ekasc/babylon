@@ -3,9 +3,6 @@ import PermissionModePicker from "./PermissionModePicker";
 import ModelPicker from "./ComposerModelPicker";
 import ThinkingPicker from "./ComposerThinkingPicker";
 import StatsPopover from "./StatsPopover";
-import { formatContextPercent } from "../lib/format";
-import { formatContextPercentEffect } from "../lib/format.effect";
-import * as Effect from "effect/Effect";
 
 function ThroughputBars({ active }: { active: boolean }) {
   return (
@@ -46,12 +43,8 @@ interface Props {
 	onDialogDismiss?: (id: string) => void;
 	runningWorkflows?: number;
 	subagentCount?: number;
-}
-
-function fmtContext(stats: any) {
-	return Effect.runSync(
-		formatContextPercentEffect(stats?.contextUsage?.percent, stats?.contextUsage?.tokens, stats?.contextUsage?.contextWindow),
-	);
+	/** Bots offered for @-mention completion in the composer. */
+	mentionBots?: import("../bots").Bot[];
 }
 
 export default function SessionFooter({
@@ -74,6 +67,7 @@ export default function SessionFooter({
 	onDialogDismiss,
 	runningWorkflows = 0,
 	subagentCount = 0,
+	mentionBots = [],
 }: Props) {
 	const model = agentState?.model ?? null;
 	const thinking = agentState?.thinkingLevel ?? "off";
@@ -100,6 +94,7 @@ export default function SessionFooter({
 						onCompact={onCompact ?? (() => {})}
 						dialogs={dialogs}
 						onDialogDismiss={onDialogDismiss}
+						mentionBots={mentionBots}
 					/>
 				</div>
 			</div>
@@ -140,15 +135,12 @@ export default function SessionFooter({
 
 				<div className="flex-1" />
 
-				<div className="flex gap-4 items-center shrink-0">
-					<span className="flex gap-1.5 items-center tabular-nums shrink-0">
+				<div className="flex gap-3 items-center shrink-0 text-[12px] leading-none tabular-nums">
+					<span className="flex gap-1 items-center shrink-0">
 						<span className="tui-footer-control">
 							<StatsPopover stats={stats} hasSession={!!agentState} onCompact={onCompact ?? (() => {})} />
 						</span>
-						<span>{fmtContext(stats)}</span>
 					</span>
-					<span className="shrink-0 text-dim/30">·</span>
-					<span className="tabular-nums shrink-0">MCP: 0</span>
 					{subagentCount > 0 && (
 						<>
 							<span className="shrink-0 text-dim/30">·</span>

@@ -21,6 +21,12 @@ import { TaskManager } from "./task-manager";
 import { LspManager, validateCwd as validateLspCwd } from "./lsp-manager";
 import { HookManager } from "./hook-manager";
 import { AttentionManager } from "./attention-manager";
+import { BotStore } from "./bots";
+import { ProjectSettingsStore, projectHashForCwd } from "./project-settings";
+import { HandoffStore } from "./handoff-store";
+import { buildHandoffPrompt, normalizeHandoffText, transcriptText } from "./recap";
+import { botChatForProject, botHandle, buildBotSystemPrompt, buildDefaultBotSystemPrompt, buildGroupSystemPrompt, groupAnchorCwd, isPassReply, parseBotMentions, resolveSharedChatOrder } from "../src/bots";
+import { driveRoomTurns } from "./room-driver";
 import { type CheckResult, type CompletionContract } from "../src/completion-contracts";
 import { connectDaemonClient, type DaemonClient } from "../src/daemon-client";
 import { createLocalRuntime } from "../src/local-runtime";
@@ -33,7 +39,7 @@ const PI_SESSIONS_ROOT = join(homedir(), ".pi", "agent", "sessions");
 const DEV_SERVER = !!process.env.VITE_DEV_SERVER_URL;
 
 // ---------------------------------------------------------------------------
-// Window bounds persistence — dev restarts reopen at the same place instead
+// Window bounds persistence, dev restarts reopen at the same place instead
 // of re-centering over the user's work.
 // ---------------------------------------------------------------------------
 
@@ -163,11 +169,131 @@ const taskManager = new TaskManager(processManager);
 const lspManager = new LspManager();
 const hookManager = new HookManager();
 const attentionManager = new AttentionManager();
+const botStore = new BotStore();
+const projectSettings = new ProjectSettingsStore();
+function broadcastBots(): void {
+  win?.webContents.send("pideck:bots-update", botStore.list());
+}
+function broadcastGroups(): void {
+  win?.webContents.send("pideck:groups-update", botStore.listGroups());
+}
+/** Project settings for a cwd, snapshotting the app-default on first open.
+ *  Never touches the repo; identity is the exact folder path. */
+function projectSettingsForCwd(cwd: string) {
+  return projectSettings.getOrCreate(cwd, botStore.getDefaultBot());
+}
+
+/** Staffed employees for a project, skipping deleted bots (membership is
+ *  reconciled on read so deletes never break opens). */
+function projectTeam(memberIds: string[]): NonNullable<ReturnType<BotStore["get"]>>[] {
+  return memberIds
+    .map((id) => botStore.get(id))
+    .filter((b): b is NonNullable<typeof b> => !!b);
+}
+
+/** Persona overlay for a session file: member chat, group room, project
+ *  default, or none. Exactly one applies; daemon-owned opens never reach
+ *  here (they return before overlay selection), so this never leaks an
+ *  overlay into daemon mode. */
+function overlayForSessionFile(file: string | null | undefined, cwd?: string): string | null {
+  if (!file) return null;
+  const mapped = botStore.findByProjectSessionFile(file);
+  if (mapped?.bot) return buildBotSystemPrompt(mapped.bot, botStore.list());
+  const bot = botStore.findBySessionFile(file);
+  if (bot) return buildBotSystemPrompt(bot, botStore.list());
+  const group = botStore.findGroupBySessionFile(file);
+  if (group) {
+    const members = group.memberIds
+      .map((id) => botStore.get(id))
+      .filter((b): b is NonNullable<typeof b> => !!b);
+    if (members.length >= 2) return buildGroupSystemPrompt(group, members);
+  }
+  if (cwd) {
+    try {
+      const { settings } = projectSettingsForCwd(cwd);
+      return buildDefaultBotSystemPrompt(settings.defaultBot, projectTeam(settings.memberIds));
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/** Staffed extras for a shared (default-bot) project chat: @-mentioned members,
+ *  or the full staff when the project opted into free-speak. Skipped for rooms,
+ *  member 1:1s, staff-less projects, and quiet turns with no mentions, so
+ *  unstated chats behave byte-for-byte as before. */
+async function driveSharedChatExtras(userText: string): Promise<void> {
+  const file = getHost().activeSessionFile;
+  const cwd = getHost().cwd;
+  if (!file || !cwd) return;
+  if (botStore.findGroupBySessionFile(file)) return;
+  if (botStore.findByProjectSessionFile(file) || botStore.findBySessionFile(file)) return;
+  const settings = projectSettings.get(cwd);
+  if (!settings || settings.memberIds.length === 0) return;
+  const members = projectTeam(settings.memberIds);
+  if (members.length === 0) return;
+  // Mention routing covers both sides of the just-settled turn: the user's
+  // text AND the default bot's reply, so a quoted "@hands take over"
+  // handoff actually dispatches instead of sitting inert in the transcript.
+  const assistantText = lastAssistantText(await getRuntime().getMessages());
+  const order = resolveSharedChatOrder(members, userText, assistantText, settings.freeSpeak === true);
+  if (order.length === 0) return;
+  await driveRoomTurns({ groupId: `project:${projectHashForCwd(cwd)}`, members, order, io: driveExtrasIO() });
+}
+
+/** Shared driver IO: serial prompts in the live session with visible presence.
+ *  Used by group rooms and shared-chat extras alike. */
+function driveExtrasIO() {
+  const runtime = getRuntime();
+  return {
+    prompt: async (text: string) => {
+      await runtime.prompt(text);
+    },
+    readReply: async () => lastAssistantText(await runtime.getMessages()),
+    emit: (ev: Record<string, unknown>) => {
+      try {
+        getHost().emitRoomEvent(ev);
+      } catch {}
+    },
+  };
+}
+/** New bot/room sessions have a canonical future path before first flush ,
+ *  resolve them lexically (containment-checked) when the live host owns them. */
+async function resolveCanonicalSessionFile(stored: string | null | undefined): Promise<string | undefined> {
+  if (!stored) return undefined;
+  let owned: string | null = null;
+  try {
+    owned = getHost().activeSessionFile;
+  } catch {}
+  if (owned && owned === stored) return owned;
+  try {
+    const validated = await validateSessionPath(PI_SESSIONS_ROOT, stored);
+    if (!existsSync(validated)) return undefined;
+    return validated;
+  } catch {
+    return undefined;
+  }
+}
+/** Latest assistant text in a message list (best-effort; "" when absent). */
+function lastAssistantText(messages: any[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (!m || m.role !== "assistant") continue;
+    const c = m.content;
+    if (typeof c === "string") return c;
+    if (Array.isArray(c)) {
+      return c.map((b: any) => (typeof b === "string" ? b : (b?.text ?? ""))).join("");
+    }
+    return "";
+  }
+  return "";
+}
 const contracts = new Map<string, CompletionContract>();
 let daemonClient: DaemonClient | null = null;
 /** Authoritative runtime ownership. "daemon" only after a successful startup
  *  handshake; "local" when the daemon is disabled, missing, or unreachable at
- *  startup. This is intentionally NOT flipped by a transient disconnect — a
+ *  startup. This is intentionally NOT flipped by a transient disconnect, a
  *  daemon that blips and reconnects stays daemon-owned, it just can't be
  *  reached for a moment (`daemonConnected`). */
 let runtimeOwner: "local" | "daemon" = "local";
@@ -193,7 +319,7 @@ function isDaemonEnabled(): boolean {
 
 function getRuntime(): RuntimeFacade {
   if (runtimeOwner === "daemon" && daemonClient) return createDaemonRuntime(daemonClient);
-  // Fallback to local runtime — host may be null during early startup, so guard
+  // Fallback to local runtime, host may be null during early startup, so guard
   const hostForLocal = host ?? ({ open: async () => ({}), prompt: async () => ({}), abort: async () => ({}), getState: async () => ({}), getMessages: async () => [] } as unknown as PiHost);
   return createLocalRuntime({ taskManager, attentionManager, hookManager, piHost: hostForLocal, contracts });
 }
@@ -212,12 +338,12 @@ function isDaemonOwned(): boolean {
 
 /** Require a live daemon client when the daemon owns the runtime. If it is
  *  temporarily disconnected, fail explicitly rather than silently falling
- *  back to local state — local does not own the runtime and mutating it would
+ *  back to local state, local does not own the runtime and mutating it would
  *  corrupt the daemon's authoritative view. */
 function requireDaemonClient(): DaemonClient {
   if (runtimeOwner !== "daemon") throw new Error("not in daemon mode");
   const client = daemonOnly();
-  if (!client) throw new Error("daemon is reconnecting — try again shortly");
+  if (!client) throw new Error("daemon is reconnecting, try again shortly");
   return client;
 }
 
@@ -257,7 +383,7 @@ async function daemonClientTasks(): Promise<import("../src/tasks").Task[]> {
 /** Strict variant: takes a required live client and propagates request
  *  failures. Use for mutating/destructive ownership decisions (process-spawn,
  *  task-spawn, worktree-exit). A connected daemon that fails the request is
- *  NOT equivalent to "there are no tasks" — the caller must surface the
+ *  NOT equivalent to "there are no tasks", the caller must surface the
  *  failure. */
 async function daemonClientTasksStrict(client: import("../src/daemon-client").DaemonClient): Promise<import("../src/tasks").Task[]> {
   const res = await client.request("state.get", {});
@@ -322,7 +448,7 @@ function applyCwd(cwd: string): void {
 function updateActivityBridge(_cwd: string): void {
   // Threads/subagents activity lives inside PiHost's private ThreadManager /
   // ManagedSubagents. PiHost must expose them (or an activity snapshot) before
-  // this bridge can be wired — follow-up to the OMP→PiHost swap.
+  // this bridge can be wired, follow-up to the OMP→PiHost swap.
 }
 
 function updateWorkflowsBridge(_cwd: string): void {
@@ -350,7 +476,7 @@ function createWindow(): void {
     titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
     // Center the lights on the 64px titlebar line (y + 12/2 = 32) and keep
     // clear of the header content that starts at 88px.
-    trafficLightPosition: { x: 20, y: 26 },
+    trafficLightPosition: { x: 12, y: 16 },
     backgroundColor: "#161616",
     webPreferences: {
       preload: join(__dirname, "preload.cjs"),
@@ -633,6 +759,7 @@ async function startHost(): Promise<void> {
         : undefined,
       hookManager,
       getTaskIdForSessionFile: (file) => taskManager.findBySessionFile(file)?.id,
+      getBotIdForSessionFile: (file) => botStore.findBySessionFile(file)?.id,
       onEvent: (ev) => {
         agentEvents.push(ev);
         if (ev?.type === "message_end" || ev?.type === "agent_settled" || ev?.type === "session_info_changed") {
@@ -641,7 +768,10 @@ async function startHost(): Promise<void> {
       },
       onStatus: (s: any) => {
         if (s?.cwd) applyCwd(s.cwd);
-        sendStatus(s.status, { state: s.state, sessionPath: s.sessionPath });
+        // Forward requestId: the renderer matches ready/error against its
+        // latest open to ignore stale switches. Dropping it deadens that
+        // guard and lets an old ready rebind the live session id.
+        sendStatus(s.status, { state: s.state, sessionPath: s.sessionPath, requestId: s.requestId });
       },
     });
     await host.start();
@@ -653,7 +783,7 @@ async function startHost(): Promise<void> {
       } catch {}
     });
     applyCwd(activeCwd);
-    // Warm but invisible — the user hasn't opened a session yet.
+    // Warm but invisible, the user hasn't opened a session yet.
     console.log("[pideck] pi host ready (in-process)");
   } catch (err) {
     host = null;
@@ -662,7 +792,7 @@ async function startHost(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// IPC (pideck:* channels — same surface as before; renderer unchanged)
+// IPC (pideck:* channels, same surface as before; renderer unchanged)
 // ---------------------------------------------------------------------------
 
 function assertTrustedSender(event: IpcMainInvokeEvent): void {
@@ -723,10 +853,36 @@ function registerIpc(): void {
 
   handle(
     "pideck:open-session",
-    async (_e, opts: { path?: string; cwd: string; requestId?: number }) => {
+    async (_e, opts: { path?: string; cwd: string; requestId?: number; botId?: string }) => {
       if (!opts || typeof opts.cwd !== "string" || opts.cwd.length > 4096) throw new Error("invalid session options");
       if (hostReady) await hostReady;
-      const path = opts.path === undefined ? undefined : await validateSessionPath(PI_SESSIONS_ROOT, opts.path);
+      let path: string | undefined;
+      if (opts.path !== undefined) {
+        try {
+          path = await validateSessionPath(PI_SESSIONS_ROOT, opts.path);
+        } catch (err) {
+          // A brand-new session (e.g. a bot's first chat) has a canonical
+          // future path before its first flush, so it isn't on disk yet. If
+          // the live host already owns exactly that file, resolve it
+          // lexically (still containment-checked) and let PiHost sync from
+          // the in-memory session instead of rejecting a session we own.
+          const missing =
+            err instanceof Error && err.message === "session path does not exist" &&
+            typeof opts.path === "string" && opts.path.endsWith(".jsonl");
+          const lexical = missing ? resolve(opts.path) : null;
+          const rel = lexical ? relative(resolve(PI_SESSIONS_ROOT), lexical) : "";
+          const inside = !!lexical && rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+          let owned: string | null = null;
+          try {
+            owned = getHost().activeSessionFile;
+          } catch {}
+          if (inside && lexical && owned && resolve(owned) === lexical) {
+            path = lexical;
+          } else {
+            throw err;
+          }
+        }
+      }
       if (isDaemonOwned()) {
         const client = requireDaemonClient();
         const res = await client.request("pi.openSession", { ...opts, path });
@@ -735,11 +891,366 @@ function registerIpc(): void {
         if (t?.status === "paused") await client.request("task.updated", { id: t.id, patch: { status: "running" } });
         return state;
       }
+      // Bot Mode: opening with a botId installs that bot's persona overlay for
+      // the new runtime; opening a bot's canonical chat file does the same via
+      // lookup so every entry point (sidebar rows, history, prefetch) agrees.
+      // Any other file in a project gets the project default (rule 3); files
+      // with no project context resolve null so prompts never leak across bots.
+      if (opts.botId !== undefined) {
+        const bot = botStore.get(opts.botId);
+        if (!bot) throw new Error("Bot not found");
+        getHost().setBotSystemPrompt(buildBotSystemPrompt(bot, botStore.list()));
+      } else if (path !== undefined) {
+        getHost().setBotSystemPrompt(overlayForSessionFile(path, opts.cwd));
+      } else {
+        getHost().setBotSystemPrompt(null);
+      }
       const state = (await getRuntime().openSession({ ...opts, path })) as { sessionFile?: string } | null | undefined;
       taskManager.resumeForSession((state as { sessionFile?: string } | null | undefined)?.sessionFile);
       return state;
     }
   );
+
+  // -------------------------------------------------------------------------
+  // Bot Mode (Hermes-style Bots: named specialists with a canonical chat)
+  // -------------------------------------------------------------------------
+
+  handle("pideck:bots-list", () => botStore.list());
+
+  handle("pideck:bots-create", async (_e, input: { name: string; title?: string; description?: string; persona?: string; model?: { provider: string; modelId: string }; cwd?: string }) => {
+    if (!input || typeof input.name !== "string") throw new Error("invalid bot");
+    if (input.cwd !== undefined && typeof input.cwd !== "string") throw new Error("invalid bot home project");
+    const created = botStore.create({
+      name: input.name,
+      ...(input.title !== undefined ? { title: input.title } : {}),
+      ...(input.description !== undefined ? { description: input.description } : {}),
+      ...(input.persona !== undefined ? { persona: input.persona } : {}),
+      ...(input.model !== undefined ? { model: input.model } : {}),
+      ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
+    });
+    broadcastBots();
+    return created;
+  });
+
+  handle("pideck:bots-update", async (_e, id: string, patch: Record<string, unknown>) => {
+    if (typeof id !== "string" || !patch || typeof patch !== "object") throw new Error("invalid bot update");
+    const allowed: Record<string, true> = {
+      name: true, title: true, description: true, persona: true, model: true, cwd: true, hidden: true, mainSessionFile: true,
+    };
+    const clean: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(patch)) if (allowed[k]) clean[k] = v;
+    const updated = botStore.update(id, clean as Parameters<BotStore["update"]>[1]);
+    broadcastBots();
+    return updated;
+  });
+
+  handle("pideck:bots-delete", async (_e, id: string) => {
+    if (typeof id !== "string") throw new Error("invalid bot id");
+    const removed = botStore.remove(id);
+    broadcastBots();
+    return { removed };
+  });
+
+  handle("pideck:bots-open", async (_e, id: string, requestId?: number) => {
+    if (typeof id !== "string") throw new Error("invalid bot id");
+    if (isDaemonOwned()) throw new Error("Bot chats need the local runtime (turn off the daemon to use Bots)");
+    if (hostReady) await hostReady;
+    const bot = botStore.get(id);
+    if (!bot) throw new Error("Bot not found");
+    getHost().setBotSystemPrompt(buildBotSystemPrompt(bot, botStore.list()));
+    const cwd = bot.cwd && bot.cwd.length > 0 ? bot.cwd : activeCwd || homedir();
+    const projectHash = projectHashForCwd(cwd);
+    // Per-project chat first, legacy canonical second (owned-or-on-disk).
+    const path = await resolveCanonicalSessionFile(botChatForProject(bot, projectHash));
+    const state = (await getRuntime().openSession({ path, cwd, ...(requestId !== undefined ? { requestId } : {}) })) as {
+      sessionFile?: string;
+    } | null | undefined;
+    const sessionFile = state?.sessionFile ?? null;
+    if (sessionFile && sessionFile !== botChatForProject(bot, projectHash)) {
+      botStore.setProjectSession(id, projectHash, sessionFile);
+      broadcastBots();
+    }
+    if (bot.model) {
+      try {
+        await getHost().setModel(bot.model.provider, bot.model.modelId);
+      } catch (err) {
+        console.warn(`[pideck] bot model pin unavailable (${bot.model.provider}/${bot.model.modelId}):`, err);
+      }
+    }
+    taskManager.resumeForSession(sessionFile);
+    return { sessionFile, bot: botStore.get(id) };
+  });
+
+  // -------------------------------------------------------------------------
+  // Group rooms: one shared session, serial member turns driven here.
+  // -------------------------------------------------------------------------
+
+  handle("pideck:groups-list", () => botStore.listGroups());
+
+  handle("pideck:groups-create", async (_e, input: { name: string; memberIds: string[]; cwd?: string }) => {
+    if (!input || typeof input.name !== "string" || !Array.isArray(input.memberIds)) {
+      throw new Error("invalid group");
+    }
+    const created = botStore.createGroup({
+      name: input.name,
+      memberIds: input.memberIds,
+      ...(typeof input.cwd === "string" && input.cwd ? { cwd: input.cwd } : {}),
+    });
+    broadcastGroups();
+    return created;
+  });
+
+  handle("pideck:groups-update", async (_e, id: string, patch: Record<string, unknown>) => {
+    if (typeof id !== "string" || !patch || typeof patch !== "object") throw new Error("invalid group update");
+    const clean: { name?: string; memberIds?: string[]; cwd?: string } = {};
+    if (typeof patch.name === "string") clean.name = patch.name;
+    if (Array.isArray(patch.memberIds)) clean.memberIds = patch.memberIds.filter((m): m is string => typeof m === "string");
+    if (patch.cwd === undefined || typeof patch.cwd === "string") clean.cwd = (patch.cwd as string | undefined) ?? "";
+    const updated = botStore.updateGroup(id, clean);
+    broadcastGroups();
+    return updated;
+  });
+
+  handle("pideck:groups-delete", async (_e, id: string) => {
+    if (typeof id !== "string") throw new Error("invalid group id");
+    const removed = botStore.removeGroup(id);
+    broadcastGroups();
+    return { removed };
+  });
+
+  /** Ensure the room session is live with the group overlay; create the
+   *  canonical file on first open. Returns the room file (possibly unflushed). */
+  async function ensureGroupRoom(groupId: string): Promise<{ sessionFile: string; group: NonNullable<ReturnType<BotStore["getGroup"]>>; members: NonNullable<ReturnType<BotStore["get"]>>[] }> {
+    const group = botStore.getGroup(groupId);
+    if (!group) throw new Error("Group not found");
+    const members = group.memberIds
+      .map((mid) => botStore.get(mid))
+      .filter((b): b is NonNullable<typeof b> => !!b);
+    if (members.length < 2) throw new Error("A group needs at least 2 bots");
+    if (!group.projectHash) {
+      // One-time anchor for pre-project groups; same fallback chain as cwd below.
+      const anchorCwd = groupAnchorCwd(group, botStore.list()) ?? activeCwd ?? homedir();
+      try {
+        botStore.updateGroup(group.id, { projectHash: projectHashForCwd(anchorCwd) });
+        broadcastGroups();
+      } catch {
+        // Anchor persists on the next open instead.
+      }
+    }
+    getHost().setBotSystemPrompt(buildGroupSystemPrompt(group, members));
+    const cwd = group.cwd && group.cwd.length > 0 ? group.cwd : members[0]?.cwd && members[0].cwd.length > 0 ? members[0].cwd! : activeCwd || homedir();
+    const path = await resolveCanonicalSessionFile(group.mainSessionFile);
+    const state = (await getRuntime().openSession({ path, cwd })) as { sessionFile?: string } | null | undefined;
+    const sessionFile = state?.sessionFile ?? null;
+    if (!sessionFile) throw new Error("could not open group room");
+    if (sessionFile !== group.mainSessionFile) {
+      botStore.setGroupRoom(groupId, sessionFile);
+      broadcastGroups();
+    }
+    taskManager.resumeForSession(sessionFile);
+    return { sessionFile, group: botStore.getGroup(groupId)!, members };
+  }
+
+  handle("pideck:groups-open", async (_e, id: string) => {
+    if (typeof id !== "string") throw new Error("invalid group id");
+    if (isDaemonOwned()) throw new Error("Group rooms need the local runtime (turn off the daemon to use Bots)");
+    if (hostReady) await hostReady;
+    const { sessionFile, group } = await ensureGroupRoom(id);
+    return { sessionFile, group };
+  });
+
+  handle("pideck:group-send", async (_e, groupId: string, text: string) => {
+    if (typeof groupId !== "string" || typeof text !== "string" || !text.trim() || text.length > 200_000) {
+      throw new Error("invalid group send");
+    }
+    if (isDaemonOwned()) throw new Error("Group rooms need the local runtime (turn off the daemon to use Bots)");
+    if (hostReady) await hostReady;
+    if (getHost().isStreaming) throw new Error("The agent is busy, wait for this turn to finish");
+    const { group, members } = await ensureGroupRoom(groupId);
+    const runtime = getRuntime();
+    // The user's message streams like any normal turn.
+    await runtime.prompt(text);
+    // Mention-only by default: extras speak only when asked. Projects that opt
+    // into free-speak keep the legacy full rotation. Caps + quiet-settle live
+    // in the driver; abort (or any turn failure) stops.
+    const settings = group.projectHash ? projectSettings.getByHash(group.projectHash) : undefined;
+    const freeSpeak = settings?.freeSpeak === true;
+    const mentioned = new Set(
+      parseBotMentions(text).flatMap((h) =>
+        members.filter((m) => botHandle(m) === h || m.name.toLowerCase() === h).map((m) => m.id)
+      )
+    );
+    const order = mentioned.size > 0 ? members.filter((m) => mentioned.has(m.id)) : freeSpeak ? members : [];
+    if (order.length === 0) {
+      return { rounds: 0, turns: 0, spoke: 0, stopped: false, sessionFile: group.mainSessionFile };
+    }
+    // Serial member turns as a mention-routed queue. The opening order is the
+    // roster (or the mentioned subset); a spoke turn naming @someone jumps
+    // them to the front, an explicit mention overrides a quiet streak, but
+    // the turn/round caps still bound ping-pong loops. A drained queue
+    // refills for the next round; an all-quiet drain settles the room.
+    // Abort (or any turn failure) stops.
+    const result = await driveRoomTurns({ groupId, members, order, io: driveExtrasIO() });
+    return { ...result, sessionFile: group.mainSessionFile };
+  });
+
+  // -------------------------------------------------------------------------
+  // Project settings + app-default (per-project bots metadata; userData side).
+  // -------------------------------------------------------------------------
+
+  handle("pideck:project-settings-get", async (_e, cwd: string) => {
+    if (typeof cwd !== "string" || !cwd) throw new Error("invalid cwd");
+    const { settings, hash } = projectSettingsForCwd(cwd);
+    return { settings: { ...settings, memberIds: settings.memberIds.filter((id) => botStore.get(id)) }, hash };
+  });
+
+  handle("pideck:project-settings-members", async (_e, hash: string, memberIds: string[]) => {
+    if (typeof hash !== "string" || !Array.isArray(memberIds)) throw new Error("invalid project members");
+    for (const id of memberIds) {
+      if (typeof id !== "string" || !botStore.get(id)) throw new Error("Members must be existing bots");
+    }
+    return projectSettings.setMembers(hash, memberIds);
+  });
+
+  handle("pideck:project-settings-freespeak", async (_e, hash: string, on: boolean) => {
+    if (typeof hash !== "string") throw new Error("invalid project");
+    return projectSettings.setFreeSpeak(hash, on === true);
+  });
+
+  handle("pideck:project-default-update", async (_e, hash: string, patch: Record<string, unknown>) => {
+    if (typeof hash !== "string" || !patch || typeof patch !== "object") throw new Error("invalid default update");
+    const allowed = ["name", "title", "description", "persona", "model"] as const;
+    const clean: Record<string, unknown> = {};
+    for (const k of allowed) if (patch[k] !== undefined) clean[k] = patch[k];
+    return projectSettings.updateDefaultBot(hash, clean as Parameters<ProjectSettingsStore["updateDefaultBot"]>[1]);
+  });
+
+  handle("pideck:project-default-reset", async (_e, hash: string) => {
+    if (typeof hash !== "string") throw new Error("invalid project");
+    return projectSettings.resetDefaultBot(hash, botStore.getDefaultBot());
+  });
+
+  const handoffStore = new HandoffStore(join(app.getPath("userData"), "pideck-state", "handoffs"));
+
+  handle("pideck:handoff-create", async (_e, projectHash: string, sourceFile: string) => {
+    if (typeof projectHash !== "string" || typeof sourceFile !== "string" || !sourceFile) {
+      throw new Error("invalid handoff request");
+    }
+    const settings = projectSettings.getByHash(projectHash);
+    if (!settings) throw new Error("Open the project first, it needs settings to author the handoff");
+    const target = await validateSessionPath(PI_SESSIONS_ROOT, sourceFile);
+    const { messages } = await readSessionTail(target);
+    const deltaText = transcriptText(messages);
+    if (!deltaText.trim()) throw new Error("Nothing to summarize yet, the thread is still fresh");
+    if (hostReady) await hostReady;
+    const summary = normalizeHandoffText(
+      (await getHost().summarizeHandoff(buildHandoffPrompt(deltaText, settings.defaultBot))) ?? ""
+    );
+    if (!summary) throw new Error("Summarization came back empty, try again");
+    return handoffStore.append(target, {
+      summary,
+      author: settings.defaultBot.name,
+      sourceChars: deltaText.length,
+    });
+  });
+
+  handle("pideck:handoff-list", async (_e, sourceFile: string) => {
+    if (typeof sourceFile !== "string" || !sourceFile) throw new Error("invalid handoff request");
+    const target = await validateSessionPath(PI_SESSIONS_ROOT, sourceFile);
+    return handoffStore.forSource(target);
+  });
+
+  handle("pideck:handoff-consume", async (_e, handoffId: string, liveFile: string) => {
+    if (typeof handoffId !== "string" || typeof liveFile !== "string" || !liveFile) {
+      throw new Error("invalid handoff request");
+    }
+    const handoff = await handoffStore.findById(handoffId);
+    if (!handoff) throw new Error("Handoff not found");
+    const live = await validateSessionPath(PI_SESSIONS_ROOT, liveFile);
+    if (hostReady) await hostReady;
+    if (getHost().isStreaming) throw new Error("Wait for the live turn to finish first");
+    const estimatedTokensBefore = Math.max(1, Math.round(handoff.sourceChars / 4));
+    const estimatedTokensAfter = Math.max(1, Math.round(handoff.summary.length / 4));
+    await getHost().consumeHandoff(live, handoff.summary, estimatedTokensBefore);
+    await handoffStore.markConsumed(handoffId, live);
+    getHost().emitHandoffEvent({
+      type: "babylon_handoff_consumed",
+      handoffId,
+      sourceName: handoff.sourceFile.split("/").pop() ?? handoff.sourceFile,
+      author: handoff.author,
+      tokensBefore: estimatedTokensBefore,
+      estimatedTokensAfter,
+    });
+    sessionIndex.touch();
+    return { consumedInto: live };
+  });
+
+  handle("pideck:bots-default-get", () => botStore.getDefaultBot());
+
+  handle("pideck:bots-default-set", async (_e, input: unknown) => {
+    if (!input || typeof input !== "object") throw new Error("invalid default bot");
+    const updated = botStore.setDefaultBot(input as Parameters<BotStore["setDefaultBot"]>[0]);
+    broadcastBots();
+    return updated;
+  });
+
+  // -------------------------------------------------------------------------
+  // Bot-to-bot DM: one attributed turn in the target's chat, reply relayed
+  // into the origin as a bot-message line. Idle sessions only, the single
+  // runtime cannot background turns, so delivery is synchronous and visible.
+  // -------------------------------------------------------------------------
+
+  handle("pideck:bots-message", async (_e, targetId: string, text: string, fromId?: string) => {
+    if (typeof targetId !== "string" || typeof text !== "string" || !text.trim() || text.length > 200_000) {
+      throw new Error("invalid bot message");
+    }
+    if (isDaemonOwned()) throw new Error("Bot chats need the local runtime (turn off the daemon to use Bots)");
+    if (hostReady) await hostReady;
+    const target = botStore.get(targetId);
+    if (!target) throw new Error("Bot not found");
+    const from = typeof fromId === "string" ? botStore.get(fromId) : undefined;
+    if (getHost().isStreaming) throw new Error("The agent is busy, wait for this turn to finish");
+    const origin = getHost().activeSessionFile;
+    if (!origin) throw new Error("Open a chat first, replies need a home");
+    const originCwd = getHost().cwd;
+    // Run the target turn in the target's canonical chat.
+    getHost().setBotSystemPrompt(buildBotSystemPrompt(target, botStore.list()));
+    const targetCwd = target.cwd && target.cwd.length > 0 ? target.cwd : activeCwd || homedir();
+    const targetHash = projectHashForCwd(targetCwd);
+    const targetPath = await resolveCanonicalSessionFile(botChatForProject(target, targetHash));
+    const targetState = (await getRuntime().openSession({ path: targetPath, cwd: targetCwd })) as {
+      sessionFile?: string;
+    } | null | undefined;
+    const targetFile = targetState?.sessionFile ?? null;
+    if (targetFile && targetFile !== botChatForProject(target, targetHash)) {
+      botStore.setProjectSession(targetId, targetHash, targetFile);
+      broadcastBots();
+    }
+    if (target.model) {
+      try {
+        await getHost().setModel(target.model.provider, target.model.modelId);
+      } catch (err) {
+        console.warn(`[pideck] bot model pin unavailable (${target.model.provider}/${target.model.modelId}):`, err);
+      }
+    }
+    const sender = from ? `@${botHandle(from)} (${from.name})` : "you (the human)";
+    await getRuntime().prompt(`[DM from ${sender}, reply briefly in your voice, or PASS if nothing to add]\n\n${text}`);
+    const reply = lastAssistantText(await getRuntime().getMessages());
+    const pass = isPassReply(reply);
+    // Switch home and relay the reply as an attributed activity line.
+    getHost().setBotSystemPrompt(overlayForSessionFile(origin, originCwd));
+    await getRuntime().openSession({ path: origin, cwd: originCwd });
+    if (!pass) {
+      const clipped = reply.length > 6000 ? `${reply.slice(0, 6000)}\n… (truncated, full reply lives in @${botHandle(target)}'s chat)` : reply;
+      await getHost().postBotMessage(
+        `[Babylon Bot Message]\n@${from ? botHandle(from) : "you"} asked @${botHandle(target)}: ${text.length > 500 ? `${text.slice(0, 500)}…` : text}\n\n@${botHandle(target)} replied:\n\n${clipped}`,
+        { fromId: from?.id ?? null, targetId, text: text.slice(0, 500) }
+      );
+    }
+    taskManager.resumeForSession(origin);
+    sessionIndex.touch();
+    return { reply: pass ? null : reply, pass };
+  });
 
   handle("pideck:prompt", async (_e, message: string, images?: any[], streamingBehavior?: string) => {
     if (typeof message !== "string" || message.length > 2_000_000) throw new Error("invalid prompt payload");
@@ -762,7 +1273,17 @@ function registerIpc(): void {
       const res = await client.request("pi.prompt", { message, images, streamingBehavior });
       return res.payload;
     }
-    return getRuntime().prompt(message, images, streamingBehavior);
+    const result = await getRuntime().prompt(message, images, streamingBehavior);
+    // Shared project chats: after the default bot's turn settles, staffed
+    // extras speak when asked (or freely when the project opted in). Never on
+    // mid-stream steer/follow-up turns, and never loudly, a skipped driver is
+    // the common case and must not fail the send.
+    if (!streamingBehavior) {
+      await driveSharedChatExtras(message).catch((err) =>
+        console.warn("[pideck] shared-chat extras skipped:", err)
+      );
+    }
+    return result;
   });
   handle("pideck:abort", async () => {
     if (isDaemonOwned()) {
@@ -857,7 +1378,7 @@ function registerIpc(): void {
       prepared = await gitOps.prepareCommitContext(root);
       const context = prepared;
       stagedForRecovery = true;
-      if (context.truncatedPatch) emit("generating", "Generating commit message (patch truncated — using file summary for remaining changes)");
+      if (context.truncatedPatch) emit("generating", "Generating commit message (patch truncated, using file summary for remaining changes)");
       else emit("generating", "Generating commit message");
       const generated = await getRuntime().generateCommitMessage(context) as any;
       emit("committing", `Committing ${generated.subject}`);
@@ -875,7 +1396,7 @@ function registerIpc(): void {
       // half-staged state.
       if (stagedForRecovery && !committed) {
         await gitOps.resetStaged(root, prepared ?? undefined);
-        emit("error", `${cause instanceof Error ? cause.message : String(cause)} — staged changes were unstaged`);
+        emit("error", `${cause instanceof Error ? cause.message : String(cause)}, staged changes were unstaged`);
       }
       const detail = cause instanceof Error ? cause.message : String(cause);
       const message = committed ? `Commit succeeded, but push failed: ${detail}` : detail;
@@ -943,7 +1464,7 @@ function registerIpc(): void {
         if (c) all.add(c);
       }
     } catch {}
-    // 2) system_profiler — most reliable on macOS, includes Miracode
+    // 2) system_profiler, most reliable on macOS, includes Miracode
     try {
       const { stdout } = await pexec(`system_profiler SPFontsDataType 2>/dev/null | grep "Family:" | awk -F: '{print $2}' | sort | uniq`, { maxBuffer: 10 * 1024 * 1024 }) as any;
       for (const line of String(stdout).split("\n")) {
@@ -951,7 +1472,7 @@ function registerIpc(): void {
         if (c) all.add(c);
       }
     } catch {}
-    // 3) Direct font file scan — catches newly installed .ttf/.otf like Miracode.ttf
+    // 3) Direct font file scan, catches newly installed .ttf/.otf like Miracode.ttf
     try {
       const { readdirSync, existsSync } = await import("node:fs");
       const { homedir } = await import("node:os");
@@ -1124,7 +1645,7 @@ function registerIpc(): void {
       }
       const before: any = await getRuntime().getState();
       if (!before?.sessionFile) {
-        throw new Error("no persisted session to worktree yet — send at least one message first");
+        throw new Error("no persisted session to worktree yet, send at least one message first");
       }
       const originalPath = before.sessionFile;
       const originalCwd = activeCwd;
@@ -1149,7 +1670,7 @@ function registerIpc(): void {
           const baseCwd = header.cwd ?? activeCwd;
           const info = await gitInfo(baseCwd);
           if (!info.isRepo || !info.root) {
-            throw new Error("project is not a git repository — uncheck the git worktree option");
+            throw new Error("project is not a git repository, uncheck the git worktree option");
           }
           gitRoot = info.root;
           let branch = `pideck/${safeName}`;
@@ -1294,7 +1815,7 @@ function registerIpc(): void {
       // No task resolved (daemon has none for this session, *or* the socket
       // is down and we could not tell which). Refuse rather than run cleanup
       // while the daemon still believes a task is running.
-      throw new Error("daemon is reconnecting — try again shortly");
+      throw new Error("daemon is reconnecting, try again shortly");
     }
     if (!opts.keep && dirty) throw new Error("Cannot discard a task worktree with uncommitted changes");
     return cleanup();
@@ -1590,7 +2111,7 @@ async function ensureDaemon(): Promise<boolean> {
   const entryExists = existsSync(entry);
   if (!alive) {
     if (!entryExists) {
-      console.warn("daemon.enabled is set but dist-daemon/main.mjs is missing; run pnpm build:daemon — falling back to in-process host");
+      console.warn("daemon.enabled is set but dist-daemon/main.mjs is missing; run pnpm build:daemon, falling back to in-process host");
       return false;
     }
     const child = spawn(process.execPath, [entry], {
@@ -1717,8 +2238,12 @@ app.whenReady().then(async () => {
   // here, once, and start exactly one host. A later transient disconnect
   // flips `daemonConnected` but never reverts `runtimeOwner`.
   await ensureDaemon();
+  // Bots are local-runtime state in v1 (daemon owns tasks/attention when
+  // active, but bot chats need the in-process host for persona overlays).
+  botStore.subscribe((bots) => win?.webContents.send("pideck:bots-update", bots));
+  botStore.subscribeGroups((groups) => win?.webContents.send("pideck:groups-update", groups));
   if (isDaemonOwned()) {
-    // Daemon owns tasks and attention when active — thin client, no local subscriptions
+    // Daemon owns tasks and attention when active, thin client, no local subscriptions
     sessionIndex.subscribe((update) => win?.webContents.send("pideck:sessions-update", update));
   } else {
     processManager.subscribe((snapshots) => win?.webContents.send("pideck:process-update", snapshots));
@@ -1730,7 +2255,7 @@ app.whenReady().then(async () => {
   if (isDaemonOwned()) {
     // Owner is the daemon. If the socket is live, install the daemon
     // notifier. If the socket is down at this instant, do NOT install the
-    // local notifier — there is no local host to receive diagnostics — and
+    // local notifier, there is no local host to receive diagnostics, and
     // instead install a notifier on reconnect (handled by the
     // onConnectionChange hook below).
     const notifierClient = daemonOnly();

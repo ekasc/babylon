@@ -16,6 +16,7 @@ import {
 } from "../bridge";
 import { fmtTokens } from "../store";
 import Markdown from "./Markdown";
+import { WorkflowsTimeline } from "./WorkflowsTimeline";
 import {
   ChevronIcon,
   LayersIcon,
@@ -196,7 +197,7 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props)
           return d.agents?.find((a) => a.id === id) ?? prevA;
         });
       } catch {
-        /* transient — next poll tick will retry */
+        /* transient, next poll tick will retry */
       }
     },
     []
@@ -397,7 +398,7 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props)
         ) : agent ? (
           <AgentView agent={agent} />
         ) : detail ? (
-          <RunDetailView run={detail} onControl={control} onDelete={remove} onOpenAgent={setAgent} />
+          <WorkflowsTimeline run={detail} onControl={control} onDelete={remove} onOpenAgent={setAgent} />
         ) : runs.length === 0 ? (
           <div className="flex flex-col items-center gap-3 px-4 py-14 text-center">
             <LayersIcon size={30} className="text-dim" />
@@ -417,7 +418,7 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props)
 }
 
 /* ---------------------------------------------------------------------------
-   Level 1 — runs list
+   Level 1, runs list
 --------------------------------------------------------------------------- */
 function RunList({ runs, onOpen }: { runs: WorkflowRunSummary[]; onOpen(runId: string): void }) {
   const ROW_H = 86;
@@ -451,7 +452,7 @@ function RunList({ runs, onOpen }: { runs: WorkflowRunSummary[]; onOpen(runId: s
             key={r.runId}
             onClick={() => onOpen(r.runId)}
             className="activity-row group flex w-full items-start gap-2.5 px-2.5 py-3 text-left"
-            title={`${r.workflowName} — ${meta.label}`}
+            title={`${r.workflowName}, ${meta.label}`}
           >
             <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${meta.dot}`} />
             <span className="min-w-0 flex-1">
@@ -485,7 +486,7 @@ function RunList({ runs, onOpen }: { runs: WorkflowRunSummary[]; onOpen(runId: s
 }
 
 /* ---------------------------------------------------------------------------
-   Level 2 — run detail (phases + agents + controls)
+   Level 2, run detail (phases + agents + controls)
 --------------------------------------------------------------------------- */
 export function RunDetailView({
   run,
@@ -537,7 +538,7 @@ export function RunDetailView({
         {run.pauseReason && (
           <p className="mt-1.5 rounded-md border border-warn/30 bg-warn/10 px-2 py-1 text-[14px] leading-snug text-warn">
             Paused: {run.pauseReason}
-            {run.resetHint ? ` — ${run.resetHint}` : ""}
+            {run.resetHint ? `, ${run.resetHint}` : ""}
           </p>
         )}
         {run.error && (
@@ -560,7 +561,7 @@ export function RunDetailView({
           ) : foreign ? (
             <span
               className="cursor-default rounded-md border border-line/40 px-2 py-1 text-[14px] text-dim opacity-70"
-              title="This run was started in another pi session — control it from there"
+              title="This run was started in another pi session, control it from there"
             >
               read-only · other session
             </span>
@@ -649,7 +650,7 @@ export function RunDetailView({
           )}
         </SectionLabel>
         {agents.length === 0 ? (
-          <p className="px-1 py-2 text-[14px] text-dim">No agents yet — queued runs appear here once they start.</p>
+          <p className="px-1 py-2 text-[14px] text-dim">No agents yet, queued runs appear here once they start.</p>
         ) : (
           <div className="flex flex-col gap-1">
             {agents.map((a) => (
@@ -707,7 +708,7 @@ function AgentRow({ agent, onOpen }: { agent: WorkflowAgentDetail; onOpen(): voi
         <span className="block text-[14px] tracking-[0.02em] text-dim">
           {[agent.model ? agent.model.split("/").pop() : "", agent.tokens != null ? `${fmtTokens(agent.tokens)} tok` : ""]
             .filter(Boolean)
-            .join(" · ") || "—"}
+            .join(" · ") || ","}
         </span>
       </span>
       <ChevronIcon size={12} className="shrink-0 text-dim" />
@@ -716,14 +717,14 @@ function AgentRow({ agent, onOpen }: { agent: WorkflowAgentDetail; onOpen(): voi
 }
 
 /* ---------------------------------------------------------------------------
-   Level 3 — agent detail (prompt / result / error / history)
+   Level 3, agent detail (prompt / result / error / history)
 --------------------------------------------------------------------------- */
 export function AgentView({ agent }: { agent: WorkflowAgentDetail }) {
   const meta = AGENT_STATUS[agent.status] ?? { label: agent.status, dot: "bg-dim", text: "text-dim" };
   const result = stringifyResult(agent.result);
   const { text: prompt, label: promptLabel } = extractAgentPrompt(agent.prompt);
   // resultPreview carries the readable markdown summary when the raw result is
-  // a structured object — prefer it for display.
+  // a structured object, prefer it for display.
   const displayResult =
     typeof agent.result === "object" && typeof agent.resultPreview === "string" && agent.resultPreview.trim()
       ? agent.resultPreview.trim()
@@ -882,7 +883,7 @@ function AgentDetail({ item, toast, onOpenSession, onUpdate }: { item: AgentItem
     : ["starting", "running"].includes(status);
   const badge = thread ? "thread" : run!.persistent ? "persistent" : "bounded";
   const description = thread ? thread.goal : (run!.task ?? run!.goal);
-  const model = thread ? thread.model : (run!.requestedModel ?? "—");
+  const model = thread ? thread.model : (run!.requestedModel ?? ",");
   const profile = thread ? thread.profile : run!.profile;
   const milestones = thread ? thread.milestones : run!.milestones;
   const recent = thread ? thread.recentMessages : run!.recentMessages;
@@ -933,8 +934,8 @@ function AgentDetail({ item, toast, onOpenSession, onUpdate }: { item: AgentItem
     <div className="border-b border-line pb-4">
       <div className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full ${live ? "bg-accent" : status === "failed" || status === "routing_mismatch" ? "bg-err" : status === "blocked" ? "bg-warn" : status === "completed" || status === "idle" ? "bg-ok" : "bg-dim"}`} /><h2 className="min-w-0 flex-1 truncate text-[16px] font-semibold">{name}</h2><span className="shrink-0 rounded bg-inset px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-dim">{badge}</span><span className="text-[13px] text-dim">{status.replace("_", " ")}</span></div>
       {!recent?.length && description ? <p className="mt-2 text-[14px] leading-6 text-dim">{description}</p> : null}
-      <p className="mt-2 text-[12px] text-dim">{model} · {profile ?? "—"} · {id.slice(0, 8)}</p>
-      {milestones?.length ? <div className="mt-3 rounded-lg border border-line bg-inset/40 px-3 py-2"><span className="text-[11px] font-semibold uppercase tracking-wide text-dim">Milestones</span><ul className="mt-1 space-y-1">{milestones.map((m, index) => <li key={`${m.at}-${index}`} className="flex items-start gap-2 text-[13px]"><span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-ok" /><span className="min-w-0"><span className="font-medium">{m.name}</span>{m.note ? <span className="text-dim"> — {m.note}</span> : null}<span className="ml-1 text-[11px] text-dim">{new Date(m.at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</span></span></li>)}</ul></div> : null}
+      <p className="mt-2 text-[12px] text-dim">{model} · {profile ?? ","} · {id.slice(0, 8)}</p>
+      {milestones?.length ? <div className="mt-3 rounded-lg border border-line bg-inset/40 px-3 py-2"><span className="text-[11px] font-semibold uppercase tracking-wide text-dim">Milestones</span><ul className="mt-1 space-y-1">{milestones.map((m, index) => <li key={`${m.at}-${index}`} className="flex items-start gap-2 text-[13px]"><span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-ok" /><span className="min-w-0"><span className="font-medium">{m.name}</span>{m.note ? <span className="text-dim">, {m.note}</span> : null}<span className="ml-1 text-[11px] text-dim">{new Date(m.at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</span></span></li>)}</ul></div> : null}
     </div>
     <div ref={scrollRef} className="max-h-[46vh] overflow-y-auto py-4">
       <TranscriptContent recent={recent} run={run} thread={thread} />

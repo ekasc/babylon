@@ -49,12 +49,6 @@ export function DiagnosticsPanel({
           <section className="border-t border-line pt-2">
             <div className="text-[12px] font-semibold uppercase tracking-wide text-dim">Work</div>
             <Row label="Unresolved attention" value={snapshot.attention.unresolved} />
-            <Row label="Processes active / exited" value={`${snapshot.processes.active} / ${snapshot.processes.exited}`} />
-            <Row
-              label="Scheduled tasks"
-              value={`${snapshot.automation.enabledTasks} of ${snapshot.automation.scheduledTasks} enabled`}
-            />
-            <Row label="Recorded automation runs" value={snapshot.automation.recordedRuns} />
           </section>
 
           {snapshot.backgroundPolicy ? (
@@ -66,19 +60,12 @@ export function DiagnosticsPanel({
             </section>
           ) : null}
 
-          {snapshot.devices ? (
-            <section className="border-t border-line pt-2">
-              <div className="text-[12px] font-semibold uppercase tracking-wide text-dim">Paired devices</div>
-              <Row label="Active / revoked" value={`${snapshot.devices.paired} / ${snapshot.devices.revoked}`} />
-            </section>
-          ) : null}
-
           {snapshot.events ? (
             <section className="border-t border-line pt-2">
               <div className="text-[12px] font-semibold uppercase tracking-wide text-dim">Event stream</div>
               <Row label="Total events" value={snapshot.events.total} />
               {snapshot.events.firstTs !== undefined ? (
-                <Row label="Window" value={`${new Date(snapshot.events.firstTs).toLocaleTimeString()} – ${new Date(snapshot.events.lastTs ?? 0).toLocaleTimeString()}`} />
+                <Row label="Window" value={`${new Date(snapshot.events.firstTs).toLocaleTimeString()}, ${new Date(snapshot.events.lastTs ?? 0).toLocaleTimeString()}`} />
               ) : null}
               <div className="mt-1.5 text-[11.5px] text-dim">Observed event types</div>
               <div className="mt-1 flex flex-wrap gap-1">
@@ -92,7 +79,7 @@ export function DiagnosticsPanel({
                 ) : null}
               </div>
               <div className="mt-1.5 text-[11.5px] text-dim">
-                Unobserved event types <span className="text-dim/70">(not seen this session — not necessarily broken)</span>
+                Unobserved event types <span className="text-dim/70">(not seen this session, not necessarily broken)</span>
               </div>
               <div className="mt-1 flex flex-wrap gap-1">
                 {snapshot.events.unobservedTypes.map((type) => (

@@ -9,7 +9,7 @@ interface Props {
 
 export default function Toasts({ toasts, onDismiss }: Props) {
   return (
-    <div aria-live="polite" aria-relevant="additions" className="pointer-events-none fixed bottom-12 right-4 z-50 flex w-[340px] flex-col gap-2">
+    <div aria-live="polite" aria-relevant="additions" className="pointer-events-none fixed bottom-12 right-4 z-[70] flex w-[340px] flex-col gap-2">
       {toasts.map((t) => (
         <ToastCard key={t.id} toast={t} onDismiss={onDismiss} />
       ))}

@@ -6,6 +6,7 @@ import {
 	useRef,
 	useState,
 } from "react";
+import { createPortal } from "react-dom";
 import { CheckIcon, ChevronIcon, CpuIcon, SparkleIcon } from "./icons";
 
 interface Model {
@@ -28,8 +29,8 @@ const RECENTS_KEY = "babylon:recent-models";
 const MAX_RECENT = 5;
 const RECENT_LABEL = "Recent";
 
-const fmtWin = (n?: number) => (n ? `${Math.round(n / 1000)}k` : "—");
-const fmtCost = (n?: number) => (n ? `$${n.toFixed(2)}/M` : "—");
+const fmtWin = (n?: number) => (n ? `${Math.round(n / 1000)}k` : ",");
+const fmtCost = (n?: number) => (n ? `$${n.toFixed(2)}/M` : ",");
 
 function loadRecents(): string[] {
 	try {
@@ -61,6 +62,12 @@ export default function ModelPicker({
 	const rootRef = useRef<HTMLDivElement>(null);
 	const searchRef = useRef<HTMLInputElement>(null);
 	const listRef = useRef<HTMLDivElement>(null);
+	const popoverRef = useRef<HTMLDivElement>(null);
+	// Viewport-fixed popover position, measured from the trigger on open.
+	// The footer lives in an isolated stacking context, so an absolutely
+	// positioned popover can paint under (or be clipped by) the panes above
+	// it, fixed + portal escapes every ancestor trap. Clamped on all sides.
+	const [pos, setPos] = useState<{ left: number; bottom: number } | null>(null);
 
 	const currentKey = current ? `${current.provider}/${current.id}` : "";
 	const searching = query.trim().length > 0;
@@ -130,6 +137,31 @@ export default function ModelPicker({
 
 	const flat = useMemo(() => visible.flatMap((g) => g.models), [visible]);
 
+	// Viewport-fixed placement, measured from the trigger on open (see pos).
+	useEffect(() => {
+		if (!open) {
+			setPos(null);
+			return;
+		}
+		const place = () => {
+			const r = rootRef.current?.getBoundingClientRect();
+			if (!r) return;
+			const w = Math.min(460, window.innerWidth - 24);
+			setPos({
+				left: Math.max(12, Math.min(r.left, window.innerWidth - w - 12)),
+				bottom: Math.max(12, window.innerHeight - r.top + 8),
+			});
+		};
+		place();
+		// Measured coords go stale on viewport changes, close instead of
+		// floating detached from the trigger.
+		const onResize = () => setOpen(false);
+		window.addEventListener("resize", onResize);
+		return () => {
+			window.removeEventListener("resize", onResize);
+		};
+	}, [open]);
+
 	// Opening lands on the current model's provider tab.
 	useLayoutEffect(() => {
 		if (!open) return;
@@ -149,7 +181,7 @@ export default function ModelPicker({
 	// Single owner for initial highlight placement: whenever the visible pane
 	// takes shape (open, tab switch, new query), land on the current model if
 	// this pane contains it, else row 0. Must be a layout effect so placement
-	// resolves pre-paint, and must be the ONLY writer — passive resets were
+	// resolves pre-paint, and must be the ONLY writer, passive resets were
 	// clobbering this value after paint.
 	useLayoutEffect(() => {
 		if (!open || flat.length === 0) return;
@@ -162,13 +194,13 @@ export default function ModelPicker({
 
 	// Keep the highlighted row in view. Attached as a ref callback on whichever
 	// row is highlighted. NOTE: resolve the scroll container from the row itself
-	// (rows are direct children of the pane), NOT from listRef — React attaches
+	// (rows are direct children of the pane), NOT from listRef, React attaches
 	// child refs before parent refs, so on a fresh popover mount listRef is
 	// still null here and the scroll silently no-ops.
 	//
 	// Uses layout offsets (offsetTop/offsetHeight), NOT getBoundingClientRect:
 	// the popover mounts with a scale(.98) entrance animation, and transformed
-	// rects measure every distance ~2% short while it runs — the scroll lands
+	// rects measure every distance ~2% short while it runs, the scroll lands
 	// short and never corrects. Layout offsets are pre-transform and stable.
 	const scrollRowIntoView = useCallback(
 		(el: HTMLElement | null) => {
@@ -191,7 +223,8 @@ export default function ModelPicker({
 	useEffect(() => {
 		if (!open) return;
 		const onDown = (e: MouseEvent) => {
-			if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+			const t = e.target as Node;
+			if (!rootRef.current?.contains(t) && !popoverRef.current?.contains(t)) setOpen(false);
 		};
 		window.addEventListener("mousedown", onDown);
 		return () => {
@@ -260,7 +293,7 @@ export default function ModelPicker({
 				onClick={() => setOpen((v) => !v)}
 				disabled={disabled || !models.length}
 				title={
-					currentKey ? `Switch model — ${currentKey}` : "Switch model"
+					currentKey ? `Switch model, ${currentKey}` : "Switch model"
 				}
 				aria-haspopup="dialog"
 				aria-expanded={open}
@@ -283,8 +316,8 @@ export default function ModelPicker({
 				/>
 			</button>
 
-			{open && (
-				<div className="flex overflow-hidden absolute left-1/2 bottom-full z-50 flex-col p-1.5 mb-2 -translate-x-1/2 operator-popover w-[460px] max-w-[min(460px,calc(100vw-24px))] max-h-[min(420px,calc(100vh-80px))]">
+			{open && pos && createPortal(
+				<div ref={popoverRef} style={{ left: pos.left, bottom: pos.bottom }} className="flex overflow-hidden fixed z-[70] flex-col p-1.5 operator-popover w-[460px] max-w-[min(460px,calc(100vw-24px))] max-h-[min(420px,calc(100vh-80px))]">
 					<div className="p-2 border-b border-line/60">
 						<input
 							ref={searchRef}
@@ -407,7 +440,7 @@ export default function ModelPicker({
 						>
 							{flat.length === 0 && (
 								<p className="py-4 px-3 text-center text-[13px] text-dim">
-									No models match “{query}”
+									No models match "{query}"
 								</p>
 							)}
 							{flat.map((m) => {
@@ -471,7 +504,7 @@ export default function ModelPicker({
 						</div>
 					)}
 				</div>
-			)}
+			, document.body)}
 		</div>
 	);
 }

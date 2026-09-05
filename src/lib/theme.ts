@@ -2,8 +2,9 @@ import { getWithFallback } from "./storage";
 import { RESERVED_THEME_IDS } from "./themePalettes";
 
 export type ThemePref = "light" | "dark" | "system";
+export type ThemeId = "terminal" | "excalidraw";
 
-/** Apply a theme preference to the document root and persist it. */
+/** Apply mode (light/dark/system), controls .dark class */
 export function applyTheme(theme: ThemePref): void {
   localStorage.setItem("babylon:theme", theme);
   const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
@@ -15,6 +16,18 @@ export function applyTheme(theme: ThemePref): void {
 export function loadThemePref(): ThemePref {
   const t = getWithFallback("theme");
   return t === "light" || t === "dark" || t === "system" ? (t as ThemePref) : "system";
+}
+
+/** Apply theme id (terminal/excalidraw), controls .theme-* class, each theme defines its own light+dark */
+export function applyThemeId(id: ThemeId): void {
+  localStorage.setItem("babylon:themeId", id);
+  document.documentElement.classList.toggle("theme-excalidraw", id === "excalidraw");
+  document.documentElement.classList.toggle("theme-terminal", id === "terminal");
+}
+
+export function loadThemeId(): ThemeId {
+  const t = getWithFallback("themeId");
+  return t === "excalidraw" || t === "terminal" ? (t as ThemeId) : "terminal";
 }
 
 export function applySystemFonts(enabled: boolean): void {
@@ -52,8 +65,27 @@ export function monoStack(family: string): string {
 }
 
 export function applyMonoFont(family: string): void {
-  document.documentElement.style.setProperty("--mono", monoStack(family));
+  const stack = monoStack(family);
+  document.documentElement.style.setProperty("--mono", stack);
+  document.documentElement.style.setProperty("--font-mono", stack);
   localStorage.setItem("babylon:monoFont", family);
+}
+
+export function applySansFont(family: string): void {
+  const stack = family === "system" ? "-apple-system, BlinkMacSystemFont, \"SF Pro Text\", \"Helvetica Neue\", \"Segoe UI\", sans-serif" : `"${family.replace(/"/g, '\\"')}", -apple-system, BlinkMacSystemFont, sans-serif`;
+  document.documentElement.style.setProperty("--font-sans", stack);
+  localStorage.setItem("babylon:sansFont", family);
+}
+
+export function loadSansFontPref(): string {
+  return getWithFallback("sansFont") || "system";
+}
+
+export function applyRadius(radius: string): void {
+  document.documentElement.style.setProperty("--radius", radius);
+  document.documentElement.style.setProperty("--radius-sm", radius);
+  document.documentElement.style.setProperty("--radius-lg", radius);
+  localStorage.setItem("babylon:radius", radius);
 }
 
 export function loadMonoFontPref(): string {
