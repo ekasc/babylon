@@ -7,8 +7,6 @@
 import { createBashTool, createBashToolDefinition } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
 
-const PARSE_ARGV_TIMEOUT_MS = 200;
-
 type ShellHint = { kind: "explain"; label: string; description: string };
 
 function buildHints(command: string): ShellHint[] {

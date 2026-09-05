@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { fmtTokens } from "../store";
+import { formatTokensEffect } from "../lib/usageFormat.effect";
+import * as Effect from "effect/Effect";
+const fmtTokensE = (n?: number) => Effect.runSync(n == null ? Effect.succeed("0") : formatTokensEffect(n));
 import { CompressIcon, GaugeIcon } from "./icons";
 
 interface Stats {
@@ -81,7 +84,7 @@ export default function StatsPopover({ stats, hasSession, onCompact }: Props) {
                 Context window
               </span>
               <span className="font-mono text-[12px] text-dim">
-                {cu?.tokens != null ? fmtTokens(cu.tokens) : "—"} / {cu?.contextWindow ? fmtTokens(cu.contextWindow) : "—"}
+                {cu?.tokens != null ? fmtTokensE(cu.tokens) : "—"} / {cu?.contextWindow ? fmtTokensE(cu.contextWindow) : "—"}
               </span>
             </div>
             <div className="h-1.5 overflow-hidden rounded-full bg-inset">
@@ -93,9 +96,9 @@ export default function StatsPopover({ stats, hasSession, onCompact }: Props) {
           </div>
 
           <div className="px-4 py-3">
-            <Row label="Tokens" value={fmtTokens(stats?.tokens?.total)} />
-            <Row label="input" sub="output" value={`${fmtTokens(stats?.tokens?.input)} / ${fmtTokens(stats?.tokens?.output)}`} />
-            <Row label="cache" sub="read / write" value={`${fmtTokens(stats?.tokens?.cacheRead)} / ${fmtTokens(stats?.tokens?.cacheWrite)}`} />
+            <Row label="Tokens" value={fmtTokensE(stats?.tokens?.total)} />
+            <Row label="input" sub="output" value={`${fmtTokensE(stats?.tokens?.input)} / ${fmtTokensE(stats?.tokens?.output)}`} />
+            <Row label="cache" sub="read / write" value={`${fmtTokensE(stats?.tokens?.cacheRead)} / ${fmtTokensE(stats?.tokens?.cacheWrite)}`} />
             <Row label="Cost" value={fmtUsd(stats?.cost)} />
             <div className="my-1.5 border-t border-line/60" />
             <Row label="Messages" value={`${stats?.totalMessages ?? 0}`} />

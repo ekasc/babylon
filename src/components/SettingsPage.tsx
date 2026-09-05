@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { bridge, type PiSettings } from "../bridge";
-import type { ThemePref } from "../lib/theme";
+import type { ThemeId, ThemePref } from "../lib/theme";
 import { SettingsSidebar, type SettingsSectionId } from "./settings/SettingsSidebar";
 import { SettingsModels } from "./settings/SettingsModels";
 import { SettingsContext } from "./settings/SettingsContext";
@@ -9,6 +9,8 @@ import { SettingsGit } from "./settings/SettingsGit";
 import { SettingsBackground } from "./settings/SettingsBackground";
 import { SettingsAppearance } from "./settings/SettingsAppearance";
 import { SettingsAdvanced } from "./settings/SettingsAdvanced";
+import { SettingsBots } from "./settings/SettingsBots";
+import type { Bot } from "../bots";
 
 interface Props {
   models: any[];
@@ -18,12 +20,21 @@ interface Props {
   onSetThinking(level: string): void;
   theme: ThemePref;
   onThemeChange(theme: ThemePref): void;
+  themeId: ThemeId;
+  onThemeIdChange(id: ThemeId): void;
   onClose(): void;
+  bots: Bot[];
+  defaultBotName: string | null;
+  botsEmptyHint?: string;
+  onOpenBot(bot: Bot): void;
+  onManageBots(): void;
+  onOpenProject(): void;
 }
 
 type SaveState = "idle" | "saving" | "error";
 const SEARCH_INDEX: Array<{ id: SettingsSectionId; label: string; keywords: string; anchor?: string }> = [
   { id: "models", label: "Models › Default chat model", keywords: "model provider reasoning chat default current session" },
+  { id: "bots", label: "Bots › Team", keywords: "bot specialist roster team default staff teammates chat manager" },
   { id: "models", label: "Models › Title generation", keywords: "title recap model reasoning" },
   { id: "models", label: "Models › Model catalogue", keywords: "catalogue list provider context window vision image" },
   { id: "context", label: "Context › Compaction", keywords: "compaction summary automatic snapcompact experimental vision fallback strategy" },
@@ -98,7 +109,7 @@ export default function SettingsPage(props: Props) {
   }, [query]);
 
   return (
-    <div ref={containerRef} className="flex h-full bg-bg" role="dialog" aria-label="Settings">
+    <div ref={containerRef} className="absolute inset-0 z-[80] flex h-full bg-bg" role="dialog" aria-label="Settings">
       <SettingsSidebar active={section} onSelect={setSection} onBack={props.onClose} />
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="settings-header flex h-[44px] shrink-0 items-center gap-3 px-8 sticky top-0 z-10">
@@ -133,7 +144,7 @@ export default function SettingsPage(props: Props) {
                 ))}
               </ul>
             ) : (
-              <p className="text-[13px] leading-5 text-dim text-center py-12">No settings found for “{query}”.</p>
+              <p className="text-[13px] leading-5 text-dim text-center py-12">No settings found for "{query}".</p>
             )}
           </div>
         ) : (
@@ -144,9 +155,10 @@ export default function SettingsPage(props: Props) {
                   {section === "models" && <SettingsModels models={catalogue} thinkingLevels={levels} agentState={props.agentState} settings={settings} onSave={save} onSetModel={props.onSetModel} onSetThinking={props.onSetThinking} saveError={saveError} />}
                   {section === "context" && <SettingsContext models={catalogue} agentState={props.agentState} settings={settings} onSave={save} />}
                   {section === "permissions" && <SettingsPermissions />}
+                  {section === "bots" && <SettingsBots bots={props.bots} defaultBotName={props.defaultBotName} emptyHint={props.botsEmptyHint} onOpenBot={props.onOpenBot} onManageBots={props.onManageBots} onOpenProject={props.onOpenProject} />}
                   {section === "git" && <SettingsGit settings={settings} onSave={save} models={catalogue} />}
                   {section === "background" && <SettingsBackground settings={settings} onSave={save} />}
-                  {section === "appearance" && <SettingsAppearance settings={settings} onSave={save} theme={props.theme} onThemeChange={props.onThemeChange} />}
+                  {section === "appearance" && <SettingsAppearance settings={settings} onSave={save} theme={props.theme} onThemeChange={props.onThemeChange} themeId={props.themeId} onThemeIdChange={props.onThemeIdChange} />}
                   {section === "advanced" && <SettingsAdvanced settings={settings} onSave={save} />}
                 </>
               )}

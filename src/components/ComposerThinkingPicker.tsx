@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { BoltIcon, CheckIcon, ChevronIcon } from "./icons";
 
 const LEVEL_META: Record<string, { label: string; desc: string }> = {
-  off: { label: "Off", desc: "No reasoning — fastest responses" },
+  off: { label: "Off", desc: "No reasoning, fastest responses" },
   minimal: { label: "Minimal", desc: "A little reasoning for simple tasks" },
   low: { label: "Low", desc: "Light reasoning on complex steps" },
   medium: { label: "Medium", desc: "Balanced reasoning for most work" },
@@ -22,6 +23,29 @@ interface Props {
 export default function ThinkingPicker({ current, available, disabled, align = "left", onSelect }: Props) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
+  // Viewport-fixed position measured from the trigger on open: the footer
+  // lives in an isolated stacking context, so nested popovers can paint
+  // under (or be clipped by) the panes above. Portal escapes all of that.
+  const [pos, setPos] = useState<{ left: number; bottom: number } | null>(null);
+
+  useEffect(() => {
+    if (!open) {
+      setPos(null);
+      return;
+    }
+    const r = rootRef.current?.getBoundingClientRect();
+    if (r) {
+      const w = Math.min(280, window.innerWidth - 24);
+      setPos({
+        left: Math.max(12, Math.min(r.left, window.innerWidth - w - 12)),
+        bottom: Math.max(12, window.innerHeight - r.top + 8),
+      });
+    }
+    const onResize = () => setOpen(false);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [open]);
 
   const levels = useMemo(() => {
     const supported = available && available.length ? new Set(available) : null;
@@ -31,7 +55,8 @@ export default function ThinkingPicker({ current, available, disabled, align = "
   useEffect(() => {
     if (!open) return;
     const onDown = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+      const t = e.target as Node;
+      if (!rootRef.current?.contains(t) && !popoverRef.current?.contains(t)) setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setOpen(false);
@@ -52,15 +77,15 @@ export default function ThinkingPicker({ current, available, disabled, align = "
         onClick={() => setOpen((v) => !v)}
         disabled={disabled}
         title="Reasoning level"
-        className="operator-meta-control flex h-8 items-center gap-1.5 px-2.5 text-[13px] disabled:opacity-50 border border-white/10 bg-white/[0.04] hover:bg-white/[0.07] rounded-md"
+        className="operator-meta-control flex h-8 items-center gap-1.5 px-2.5 disabled:opacity-50"
       >
-        <BoltIcon size={12} className="shrink-0 text-dim" />
+        <BoltIcon size={15} className="shrink-0 text-dim" />
         <span className="shrink-0">{meta.label}</span>
         <ChevronIcon size={10} className={`shrink-0 text-dim transition-transform ${open ? "rotate-90" : ""}`} />
       </button>
 
-      {open && (
-        <div className="operator-popover absolute bottom-full left-1/2 z-50 mb-2 w-[280px] max-w-[calc(100vw-32px)] -translate-x-1/2 overflow-hidden px-1.5 py-1.5 rounded-xl border border-white/10 bg-[#0F0F0F] shadow-xl">
+      {open && pos && createPortal(
+        <div ref={popoverRef} style={{ left: pos.left, bottom: pos.bottom }} className="operator-popover fixed z-[70] mb-2 w-[280px] max-w-[calc(100vw-32px)] overflow-hidden px-1.5 py-1.5 rounded-xl border border-white/10 bg-[#0F0F0F] shadow-xl">
           {levels.map((l) => {
             const m = LEVEL_META[l];
             const active = l === current;
@@ -86,7 +111,7 @@ export default function ThinkingPicker({ current, available, disabled, align = "
             );
           })}
         </div>
-      )}
+      , document.body)}
     </div>
   );
 }

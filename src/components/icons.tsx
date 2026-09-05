@@ -305,5 +305,36 @@ export const InputIcon = (props: IconProps) => (
   </svg>
 );
 
+export const BellIcon = (props: IconProps) => (
+  <svg {...base(props)}>
+    <path d="M6 13a6 6 0 0 0 6 6 6 6 0 0 0 6-6V9a6 6 0 0 0-12 0v4z" />
+    <path d="M10 19a2 2 0 0 0 4 0" />
+  </svg>
+);
+
+// Inventory rail: a module/extension mark (two overlapping panels).
+export const ExtensionIcon = (props: IconProps) => (
+  <svg {...base(props)}>
+    <rect x="3" y="7" width="11" height="11" rx="2" />
+    <rect x="10" y="3" width="11" height="11" rx="2" />
+  </svg>
+);
+
+// Inventory rail: a template/layout mark (panel with a sidebar column).
+export const TemplateIcon = (props: IconProps) => (
+  <svg {...base(props)}>
+    <rect x="4" y="4" width="16" height="16" rx="2" />
+    <path d="M4 9h16M9 9v11" />
+  </svg>
+);
+
+// Inventory rail: a theme mark (light/dark half-filled circle).
+export const ThemeIcon = (props: IconProps) => (
+  <svg {...base(props)}>
+    <circle cx="12" cy="12" r="8" />
+    <path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor" stroke="none" />
+  </svg>
+);
+
 
 

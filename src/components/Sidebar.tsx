@@ -8,7 +8,6 @@ import {
   BlockedIcon,
   BranchIcon,
   ChatIcon,
-  CheckIcon,
   ChevronIcon,
   ClockIcon,
   FlaskIcon,
@@ -22,6 +21,8 @@ import {
 } from "./icons";
 import ProjectFilter from "./ProjectFilter";
 import { projectColor } from "../lib/colors";
+import { projectColorEffect } from "../lib/colors.effect";
+import * as Effect from "effect/Effect";
 import { promptText } from "../lib/prompts";
 
 /* ------------------------------------------------------------------ *
@@ -31,7 +32,7 @@ import { promptText } from "../lib/prompts";
 /* ------------------------------------------------------------------ *
  * Helpers                                                             *
  * ------------------------------------------------------------------ */
-type Section = "pinned" | "active" | "snoozed" | "settled" | "archived";
+type Section = "pinned" | "active" | "snoozed" | "archived";
 
 function projectName(cwd: string): string {
   return cwd.split("/").filter(Boolean).pop() || cwd;
@@ -93,21 +94,21 @@ function ThreadMenu(props: {
   y: number;
   session: SessionMeta;
   pinned: boolean;
-  settled: boolean;
   snoozedUntil: number | undefined;
   unread: boolean;
   archived: boolean;
   onClose(): void;
   onTogglePin(path: string): void;
-  onToggleSettle(path: string): void;
   onToggleSnooze(path: string, until?: number): void;
   onToggleUnread(path: string): void;
   onToggleArchive(path: string): void;
   onRename(path: string): void;
   onCopy(kind: "path" | "id" | "branch", session: SessionMeta): void;
   onDelete(path: string, name: string): void;
+  onCreateHandoff?(path: string): void;
+  onConsumeHandoff?(path: string): void;
 }) {
-  const { session, pinned, settled, snoozedUntil, unread, archived, onClose } = props;
+  const { session, pinned, snoozedUntil, unread, archived, onClose } = props;
   const isSnoozed = snoozedUntil != null && snoozedUntil > Date.now();
   const [sub, setSub] = useState<"snooze" | "copy" | null>(null);
   const presets = useMemo(() => buildSnoozePresets(Date.now()), []);
@@ -154,7 +155,6 @@ function ThreadMenu(props: {
         ) : (
           <>
             <button role="menuitem" className="thread-menu-item" onClick={() => { props.onTogglePin(session.path); onClose(); }}>{pinned ? "Unpin chat" : "Pin chat"}</button>
-            <button role="menuitem" className="thread-menu-item" onClick={() => { props.onToggleSettle(session.path); onClose(); }}>{settled ? "Un-settle chat" : "Settle chat"}</button>
             {isSnoozed ? (
               <button role="menuitem" className="thread-menu-item" onClick={() => { props.onToggleSnooze(session.path); onClose(); }}>Wake chat</button>
             ) : (
@@ -195,6 +195,13 @@ function ThreadMenu(props: {
                 </div>
               )}
             </div>
+            {props.onCreateHandoff || props.onConsumeHandoff ? <div className="thread-menu-sep" /> : null}
+            {props.onCreateHandoff ? (
+              <button role="menuitem" className="thread-menu-item" onClick={() => { props.onCreateHandoff?.(session.path); onClose(); }}>Create handoff…</button>
+            ) : null}
+            {props.onConsumeHandoff ? (
+              <button role="menuitem" className="thread-menu-item" onClick={() => { props.onConsumeHandoff?.(session.path); onClose(); }}>Consume latest handoff</button>
+            ) : null}
             <div className="thread-menu-sep" />
             <button role="menuitem" className="thread-menu-item" onClick={() => { props.onToggleArchive(session.path); onClose(); }}>Archive chat</button>
             <button role="menuitem" className="thread-menu-item danger" onClick={() => { props.onDelete(session.path, session.name ?? session.firstUserText ?? session.id); onClose(); }}>Delete chat</button>
@@ -214,8 +221,9 @@ interface RowProps {
   section: Section;
   active: boolean;
   pinned: boolean;
+  /** Grouped mode: project header already shows the project, so the row skips its project line. */
+  hideProject?: boolean;
   snoozedUntil: number | undefined;
-  settled: boolean;
   unread: boolean;
   archived: boolean;
   streaming: boolean;
@@ -223,21 +231,27 @@ interface RowProps {
   branch?: string;
   gitStatus?: GitStatusResult | null;
   onRefreshGitStatus?: () => void;
-  dragIndex: number | null;
-  index: number;
   onOpen(path: string | undefined, cwd: string, name?: string): void;
   onPrefetch?(path: string): void;
   onDelete?(path: string, name: string): void;
   onTogglePin(path: string): void;
-  onToggleSettle(path: string): void;
   onToggleSnooze(path: string, until?: number): void;
   onToggleUnread(path: string): void;
   onToggleArchive(path: string): void;
   onRename(path: string): void;
   onCopy(kind: "path" | "id" | "branch", session: SessionMeta): void;
-  onDragStart?(): void;
-  onDragOver?(e: React.DragEvent): void;
-  onDrop?(e: React.DragEvent): void;
+  onCreateHandoff?(path: string): void;
+  onConsumeHandoff?(path: string): void;
+}
+
+/** Live agent for the Agents dock (herdr-style): jump to it or stop it. */
+export interface AgentDockItem {
+  kind: "thread" | "subagent" | "workflow";
+  id: string;
+  label: string;
+  status: "running" | "blocked" | "needs-input";
+  sessionPath?: string | null;
+  cwd?: string;
 }
 
 // Git status meta: only commit divergence (ahead / behind), each colored by meaning.
@@ -282,7 +296,7 @@ function gitStatusTooltip(g: GitStatusResult): string {
 }
 
 const SessionRow = memo(function SessionRow(props: RowProps) {
-  const { session, cwd, section, active, pinned, snoozedUntil, settled, unread, archived, streaming, dragIndex, index, agentStatus, branch, gitStatus, onRefreshGitStatus } = props;
+  const { session, cwd, section, active, pinned, snoozedUntil, unread, archived, streaming, agentStatus, branch, gitStatus, onRefreshGitStatus } = props;
   const title = session.name ?? session.firstUserText ?? session.id.slice(0, 8);
   const hoverTimer = useRef(0);
   const cancelPrefetch = () => { if (hoverTimer.current) { window.clearTimeout(hoverTimer.current); hoverTimer.current = 0; } };
@@ -290,14 +304,23 @@ const SessionRow = memo(function SessionRow(props: RowProps) {
   const isSnoozed = snoozedUntil != null && snoozedUntil > Date.now();
   const timeLabel = isSnoozed && snoozedUntil != null ? snoozeLabel(snoozedUntil, Date.now()) : timeAgo(session.mtime);
 
-  const slim = section === "snoozed" || section === "settled";
-  const pc = projectColor(cwd);
+  const slim = section === "snoozed";
+  const pc = Effect.runSync(projectColorEffect(cwd));
   const rowClass =
-    `sidebar-session group/session ${active ? "is-active" : ""} ${archived ? "opacity-50" : ""} ${slim ? "is-slim" : ""}` +
-    (props.section === "pinned" && dragIndex === index ? " is-dragging" : "");
+    `sidebar-session group/session ${active ? "is-active" : ""} ${archived ? "opacity-50" : ""} ${slim ? "is-slim" : ""}`;
 
   const effectiveBranch = gitStatus?.branch ?? branch;
   const gitTip = gitStatus?.isRepo ? gitStatusTooltip(gitStatus) : undefined;
+  // Single status badge shared by both layouts; absent when idle so quiet
+  // rows stay quiet and running/blocked rows stand out.
+  const statusBadge = agentStatus !== "done" ? (
+    <span className={`session-status ml-auto ${agentStatus}`}>
+      {agentStatus === "running" && <RunningIcon size={11} />}
+      {agentStatus === "blocked" && <BlockedIcon size={11} />}
+      {agentStatus === "needs-input" && <InputIcon size={11} />}
+      {agentStatus === "needs-input" ? "needs input" : agentStatus}
+    </span>
+  ) : null;
   // Always render the third line so every non-slim row is the same height
   // (no reflow when the active row changes or git data loads).
   const branchNode = (
@@ -319,95 +342,111 @@ const SessionRow = memo(function SessionRow(props: RowProps) {
     </span>
   );
 
+  const rowStyle = { ["--pc" as string]: pc } as React.CSSProperties;
+  // Tabs render the button itself as the row: no wrapper container, no
+  // active-state box. The active tab reads via text color, not background.
+  const buttonClass = props.hideProject
+    ? `min-w-0 flex-1 rounded-md px-2 py-1 text-left ${active ? "text-fg" : "text-dim"} hover:text-fg`
+    : "flex min-w-0 flex-1 items-center gap-2 text-left";
+  const menuPortal = menu &&
+    createPortal(
+      <ThreadMenu
+        x={menu.x}
+        y={menu.y}
+        session={session}
+        pinned={pinned}
+        snoozedUntil={snoozedUntil}
+        unread={unread}
+        archived={archived}
+        onClose={() => setMenu(null)}
+        onTogglePin={props.onTogglePin}
+        onToggleSnooze={props.onToggleSnooze}
+        onToggleUnread={props.onToggleUnread}
+        onToggleArchive={props.onToggleArchive}
+        onRename={props.onRename}
+        onCopy={props.onCopy}
+        onCreateHandoff={props.onCreateHandoff}
+        onConsumeHandoff={props.onConsumeHandoff}
+        onDelete={props.onDelete ?? (() => {})}
+      />,
+      document.body
+    );
+  const content = slim ? (
+    <>
+      <span className="shrink-0 text-dim">{isSnoozed ? <ClockIcon size={15} /> : <ChatIcon size={15} />}</span>
+      <span className="min-w-0 flex-1 truncate text-dim">{isSnoozed ? timeLabel : title}</span>
+      {gitStatus?.isRepo && <GitStatusMeta g={gitStatus} />}
+      <span className="sidebar-meta shrink-0 w-12 text-right tabular-nums">{isSnoozed ? "" : timeAgo(session.mtime)}</span>
+    </>
+  ) : props.hideProject ? (
+    <span className="min-w-0 flex-1">
+      <span className="flex min-w-0 items-center gap-1.5">
+        {unread && <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--pc)] align-middle" />}
+        {streaming && <span className="inline-block h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-[var(--ok)] align-middle" />}
+        <span className="truncate text-[13px] leading-snug">{title}</span>
+        <span className="sidebar-meta ml-auto shrink-0 tabular-nums">{timeAgo(session.mtime)}</span>
+      </span>
+    </span>
+  ) : (
+    <span className="min-w-0 flex-1">
+      <span className="flex min-w-0 items-center gap-1.5">
+        {session.isWorktree ? <FlaskIcon size={13} className="shrink-0 text-warn" /> : <FolderIcon size={13} className="shrink-0 text-dim" />}
+
+        <span className="sidebar-project-name sidebar-meta truncate">{projectName(cwd)}</span>
+        {statusBadge}
+      </span>
+      <span className="flex min-w-0 items-center gap-1.5">
+        {unread && <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--pc)] align-middle" />}
+        {streaming && <span className="inline-block h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-[var(--ok)] align-middle" />}
+        <span className="truncate text-fg text-[14px] leading-snug">{title}</span>
+      </span>
+      <span className="flex min-w-0 items-center gap-1.5">
+        {branchNode}
+        <span className="sidebar-meta ml-auto shrink-0 tabular-nums">{timeAgo(session.mtime)}</span>
+      </span>
+    </span>
+  );
+  const button = (
+    <button
+      className={buttonClass}
+      style={props.hideProject ? rowStyle : undefined}
+      draggable={false}
+      onClick={() => props.onOpen(session.path, cwd, title)}
+      onMouseEnter={() => {
+        onRefreshGitStatus?.();
+        if (!props.onPrefetch || active) return;
+        cancelPrefetch();
+        hoverTimer.current = window.setTimeout(() => props.onPrefetch?.(session.path), 150);
+      }}
+      onMouseLeave={() => { cancelPrefetch(); }}
+      onFocus={() => { if (props.onPrefetch && !active) props.onPrefetch(session.path); }}
+      onContextMenu={(e) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY }); }}
+      title={`${title}\n${session.path}${effectiveBranch ? `\n${effectiveBranch}` : ""}`}
+    >
+      {content}
+    </button>
+  );
+  if (props.hideProject) {
+    // Tabs render the button itself as the row: no wrapper container.
+    return (
+      <>
+        {button}
+        {menuPortal}
+      </>
+    );
+  }
   return (
     <div
       className={rowClass}
-      style={{ ["--pc" as string]: pc } as React.CSSProperties}
-      draggable={props.section === "pinned"}
-      onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; props.onDragStart?.(); }}
-      onDragOver={(e) => props.onDragOver?.(e)}
-      onDrop={(e) => props.onDrop?.(e)}
+      style={rowStyle}
     >
-      <button
-        className="flex min-w-0 flex-1 items-center gap-2 text-left"
-        draggable={false}
-        onClick={() => props.onOpen(session.path, cwd, title)}
-        onMouseEnter={() => {
-          onRefreshGitStatus?.();
-          if (!props.onPrefetch || active) return;
-          cancelPrefetch();
-          hoverTimer.current = window.setTimeout(() => props.onPrefetch?.(session.path), 150);
-        }}
-        onMouseLeave={() => { cancelPrefetch(); }}
-        onFocus={() => { if (props.onPrefetch && !active) props.onPrefetch(session.path); }}
-        onContextMenu={(e) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY }); }}
-        title={`${title}\n${session.path}`}
-      >
-        {slim ? (
-          <>
-            <span className="shrink-0 text-dim">{isSnoozed ? <ClockIcon size={15} /> : <ChatIcon size={15} />}</span>
-            <span className="min-w-0 flex-1 truncate text-dim">{isSnoozed ? timeLabel : title}</span>
-            {gitStatus?.isRepo && <GitStatusMeta g={gitStatus} />}
-            <span className="sidebar-meta shrink-0 w-12 text-right tabular-nums">{isSnoozed ? "" : timeAgo(session.mtime)}</span>
-          </>
-        ) : (
-          <span className="min-w-0 flex-1">
-            <span className="flex min-w-0 items-center gap-1.5">
-              {session.isWorktree ? <FlaskIcon size={13} className="shrink-0 text-warn" /> : <FolderIcon size={13} className="shrink-0 text-dim" />}
-
-              <span className="sidebar-project-name sidebar-meta truncate">{projectName(cwd)}</span>
-              {active && (
-                <span className={`session-status ml-auto ${agentStatus}`}>
-                  {agentStatus === "running" && <RunningIcon size={11} />}
-                  {agentStatus === "blocked" && <BlockedIcon size={11} />}
-                  {agentStatus === "needs-input" && <InputIcon size={11} />}
-                  {agentStatus === "done" && <CheckIcon size={11} />}
-                  {agentStatus === "needs-input" ? "needs input" : agentStatus}
-                </span>
-              )}
-            </span>
-            <span className="flex min-w-0 items-center gap-1.5">
-              {unread && <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--pc)] align-middle" />}
-              {streaming && active && <span className="inline-block h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-[var(--ok)] align-middle" />}
-              <span className="truncate text-fg text-[14px] leading-snug">{title}</span>
-            </span>
-            <span className="flex min-w-0 items-center gap-1.5">
-              {branchNode}
-              <span className="sidebar-meta ml-auto shrink-0 tabular-nums">{timeAgo(session.mtime)}</span>
-            </span>
-          </span>
-        )}
-      </button>
-
-      {menu &&
-        createPortal(
-          <ThreadMenu
-            x={menu.x}
-            y={menu.y}
-            session={session}
-            pinned={pinned}
-            settled={settled}
-            snoozedUntil={snoozedUntil}
-            unread={unread}
-            archived={archived}
-            onClose={() => setMenu(null)}
-            onTogglePin={props.onTogglePin}
-            onToggleSettle={props.onToggleSettle}
-            onToggleSnooze={props.onToggleSnooze}
-            onToggleUnread={props.onToggleUnread}
-            onToggleArchive={props.onToggleArchive}
-            onRename={props.onRename}
-            onCopy={props.onCopy}
-            onDelete={props.onDelete ?? (() => {})}
-          />,
-          document.body
-        )}
+      {button}
+      {menuPortal}
     </div>
   );
 });
-
 /* ------------------------------------------------------------------ *
- * Sidebar (1:1 with t3code's flat Pinned → Active → Snoozed → Settled) *
+ * Sidebar (flat Pinned → Active → Snoozed) *
  * ------------------------------------------------------------------ */
 interface Props {
   groups: ProjectGroup[];
@@ -432,27 +471,36 @@ interface Props {
   // t3code-style state (client-persisted)
   pinnedOrder: string[];
   snoozed: Record<string, number>;
-  settled: string[];
   archived: string[];
   unread: string[];
-  onReorderPinned(order: string[]): void;
   onTogglePin(path: string): void;
   onToggleSnooze(path: string, until?: number): void;
-  onToggleSettle(path: string): void;
   onToggleUnread(path: string): void;
   onToggleArchive(path: string): void;
   onRename(path: string): void;
   onCopy(kind: "path" | "id" | "branch", session: SessionMeta): void;
+  onCreateHandoff?(path: string): void;
+  onConsumeHandoff?(path: string): void;
   showArchived: boolean;
   onToggleShowArchived(): void;
   agentState?: "running" | "blocked" | "needs-input" | "done";
+  /** Per-session liveness keyed by session path. Falls back to agentState/activeStreaming when absent. */
+  sessionStatus?: Record<string, { streaming: boolean; agentStatus: "running" | "blocked" | "needs-input" | "done" }>;
+  /** Live agents dock (herdr-style): threads/subagents/workflows to jump to or stop. */
+  agents?: AgentDockItem[];
+  onOpenAgent?(agent: AgentDockItem): void;
+  onStopAgent?(agent: AgentDockItem): void;
+  /** User-curated space folders. The session index is never auto-imported. */
+  spaceCwds: string[];
+  onAddSpace(): void;
+  onRemoveSpace(cwd: string): void;
+  /** Explicitly opened tabs per space. Stay open until closed. */
+  openTabs: Record<string, string[]>;
+  onCloseTab(cwd: string, path: string): void;
   activeBranch?: string;
   gitStatuses?: Record<string, GitStatusResult>;
   onRefreshGitStatus?: (cwd: string) => void;
 }
-
-const SETTLED_INITIAL = 10;
-const SETTLED_PAGE = 25;
 
 export default function Sidebar(props: Props) {
   const {
@@ -461,17 +509,15 @@ export default function Sidebar(props: Props) {
     onOpen, onPrefetch, onNew, onNewSessionIn, onDeleteSession,
     onOpenFolder, onOpenTree, onSearch,
     projectFilter, onProjectFilterChange,
-    pinnedOrder, snoozed, settled, archived, unread,
-    onReorderPinned, onTogglePin, onToggleSnooze, onToggleSettle, onToggleUnread, onToggleArchive, onRename, onCopy,
-    agentState, activeBranch, gitStatuses, onRefreshGitStatus,
+    pinnedOrder, snoozed, archived, unread,
+    onTogglePin, onToggleSnooze, onToggleUnread, onToggleArchive, onRename, onCopy,
+    onCreateHandoff, onConsumeHandoff,
+    agentState, sessionStatus, agents, onOpenAgent, onStopAgent, spaceCwds, onAddSpace, onRemoveSpace, openTabs, onCloseTab, activeBranch, gitStatuses, onRefreshGitStatus,
     showArchived, onToggleShowArchived,
   } = props;
 
   const [snoozedExpanded, setSnoozedExpanded] = useState(true);
-  const [settledExpanded, setSettledExpanded] = useState(true);
-  const [settledVisible, setSettledVisible] = useState(SETTLED_INITIAL);
-  const [dragIndex, setDragIndex] = useState<number | null>(null);
-  const [overIndex, setOverIndex] = useState<number | null>(null);
+
 
   const [width, setWidth] = useState(() => {
     const w = Number(localStorage.getItem("babylon:sidebar-width"));
@@ -497,7 +543,6 @@ export default function Sidebar(props: Props) {
   };
 
   const pinnedSet = useMemo(() => new Set(pinnedOrder), [pinnedOrder]);
-  const settledSet = useMemo(() => new Set(settled), [settled]);
   const archivedSet = useMemo(() => new Set(archived), [archived]);
   const unreadSet = useMemo(() => new Set(unread), [unread]);
 
@@ -505,60 +550,76 @@ export default function Sidebar(props: Props) {
     () => groups.flatMap((g) => g.sessions.map((s) => ({ session: s, cwd: g.cwd }))),
     [groups]
   );
-  const projectCwds = useMemo(() => groups.map((g) => g.cwd), [groups]);
-
   const now = Date.now();
   const classify = (path: string): Section => {
     if (archivedSet.has(path)) return "archived";
     if (pinnedSet.has(path)) return "pinned";
     const su = snoozed[path];
     if (su != null && su > now) return "snoozed";
-    if (settledSet.has(path)) return "settled";
     return "active";
   };
 
-  const visible = useMemo(
-    () => flat.filter(({ session }) => projectFilter === "all" || session.cwd === projectFilter),
-    [flat, projectFilter]
-  );
-
-  const pinnedList = useMemo(() => {
-    const pinned = visible.filter(({ session }) => pinnedSet.has(session.path));
-    const inOrder = pinnedOrder.filter((p) => pinnedSet.has(p));
-    const ordered = inOrder
-      .map((p) => pinned.find((x) => x.session.path === p))
-      .filter(Boolean) as { session: SessionMeta; cwd: string }[];
-    const remainder = pinned
-      .filter((x) => !inOrder.includes(x.session.path))
-      .sort((a, b) => b.session.mtime - a.session.mtime);
-    return [...ordered, ...remainder];
-  }, [visible, pinnedOrder, pinnedSet]);
-
-  const activeList = useMemo(
-    () => visible.filter(({ session }) => classify(session.path) === "active").sort((a, b) => b.session.mtime - a.session.mtime),
-    [visible, pinnedSet, snoozed, settledSet, archivedSet]
-  );
+  const isSnoozedPath = (path: string) => snoozed[path] != null && snoozed[path] > now;
   const snoozedList = useMemo(
-    () => visible.filter(({ session }) => classify(session.path) === "snoozed").sort((a, b) => (snoozed[a.session.path] ?? 0) - (snoozed[b.session.path] ?? 0)),
-    [visible, pinnedSet, snoozed, settledSet, archivedSet]
-  );
-  const settledList = useMemo(
-    () => visible.filter(({ session }) => classify(session.path) === "settled").sort((a, b) => b.session.mtime - a.session.mtime),
-    [visible, pinnedSet, snoozed, settledSet, archivedSet]
+    () => flat.filter(({ session }) => classify(session.path) === "snoozed").sort((a, b) => (snoozed[a.session.path] ?? 0) - (snoozed[b.session.path] ?? 0)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [flat, pinnedSet, snoozed, archivedSet]
   );
   const archivedList = useMemo(
-    () => visible.filter(({ session }) => archivedSet.has(session.path)).sort((a, b) => b.session.mtime - a.session.mtime),
-    [visible, archivedSet]
+    () => flat.filter(({ session }) => archivedSet.has(session.path)).sort((a, b) => b.session.mtime - a.session.mtime),
+    [flat, archivedSet]
   );
+  // Spaces (herdr): user-curated only, never auto-imported from the session
+  // index. The active project always shows (transiently) so you see where
+  // you are; everything else appears only after you add it. Counts exclude
+  // archived and snoozed sessions; resume lives in Search.
+  const spaces = useMemo(() => {
+    const cwds = [...spaceCwds];
+    if (activeCwd && !cwds.includes(activeCwd)) cwds.unshift(activeCwd);
+    const byCwd = new Map(groups.map((g) => [g.cwd, g.sessions]));
+    const rows = cwds.map((cwd) => {
+      const sessions = [...(byCwd.get(cwd) ?? [])].sort((a, b) => b.mtime - a.mtime);
+      const usable = sessions.filter((s) => !archivedSet.has(s.path) && !isSnoozedPath(s.path));
+      const live = usable.filter((s) => sessionStatus?.[s.path]?.agentStatus === "running").length;
+      return { cwd, usable, live, latest: usable[0]?.mtime ?? 0 };
+    });
+    return rows.sort((a, b) => {
+      if (a.cwd === activeCwd) return -1;
+      if (b.cwd === activeCwd) return 1;
+      return b.latest - a.latest;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groups, archivedSet, snoozed, sessionStatus, activeCwd, spaceCwds]);
+  // Tabs of the active space (herdr): explicitly opened views that stay open
+  // until you close them. Opening any session adds it; pinned sessions are
+  // permanent tabs; the active session always shows (transiently) even with
+  // its tab closed. Nothing auto-fills from recency.
+  const tabs = useMemo(() => {
+    if (!activeCwd) return [];
+    const byPath = new Map(flat.map((e) => [e.session.path, e]));
+    const ids = [...(openTabs[activeCwd] ?? [])];
+    for (const p of pinnedOrder) if (!ids.includes(p)) ids.push(p);
+    if (activePath && !ids.includes(activePath)) ids.push(activePath);
+    const out: { session: SessionMeta; cwd: string }[] = [];
+    for (const p of ids) {
+      const e = byPath.get(p);
+      if (!e || e.cwd !== activeCwd || archivedSet.has(p) || isSnoozedPath(p)) continue;
+      if (!out.some((x) => x.session.path === p)) out.push(e);
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flat, activeCwd, activePath, archivedSet, snoozed, pinnedOrder, openTabs]);
 
-  const handlePinnedDrop = (to: number) => {
-    if (dragIndex == null) return;
-    const ids = pinnedList.map((x) => x.session.path);
-    const [moved] = ids.splice(dragIndex, 1);
-    ids.splice(to, 0, moved);
-    onReorderPinned(ids);
-    setDragIndex(null);
-    setOverIndex(null);
+  // Switching spaces opens the space's most recent open tab, else its most
+  // recent session as a tab (herdr: switching workspaces changes the entire
+  // context). Empty spaces start a fresh tab.
+  const openSpace = (cwd: string, usable: SessionMeta[]) => {
+    const tabsHere = (openTabs[cwd] ?? []).filter((p) => usable.some((s) => s.path === p));
+    const target = tabsHere[tabsHere.length - 1] ?? usable[0]?.path;
+    const meta = usable.find((s) => s.path === target);
+    if (meta) onOpen(meta.path, cwd);
+    else if (onNewSessionIn) void onNewSessionIn(cwd);
+    else onNew();
   };
 
   if (minimized) {
@@ -567,46 +628,40 @@ export default function Sidebar(props: Props) {
     return null;
   }
 
-  const renderRow = (entry: { session: SessionMeta; cwd: string }, section: Section, index: number) => {
+  const renderRow = (entry: { session: SessionMeta; cwd: string }, section: Section, hideProject = false) => {
     const active = activePath === entry.session.path;
+    const live = sessionStatus?.[entry.session.path];
     return (
     <SessionRow
       key={`${entry.session.path}:${section}`}
       session={entry.session}
       cwd={entry.cwd}
       section={section}
-      index={index}
       active={activePath === entry.session.path}
       pinned={section === "pinned"}
+      hideProject={hideProject}
       snoozedUntil={snoozed[entry.session.path]}
-      settled={settledSet.has(entry.session.path)}
       unread={unreadSet.has(entry.session.path)}
       archived={archivedSet.has(entry.session.path)}
-      streaming={activePath === entry.session.path && !!activeStreaming}
-      agentStatus={agentState ?? "done"}
+      streaming={live?.streaming ?? (activePath === entry.session.path && !!activeStreaming)}
+      agentStatus={live?.agentStatus ?? agentState ?? "done"}
       branch={activePath === entry.session.path ? activeBranch : undefined}
       gitStatus={gitStatuses?.[entry.cwd] ?? null}
       onRefreshGitStatus={gitStatuses?.[entry.cwd] ? () => onRefreshGitStatus?.(entry.cwd) : undefined}
-      dragIndex={dragIndex}
       onOpen={onOpen}
       onPrefetch={onPrefetch}
       onDelete={onDeleteSession}
       onTogglePin={onTogglePin}
-      onToggleSettle={onToggleSettle}
       onToggleSnooze={onToggleSnooze}
       onToggleUnread={onToggleUnread}
       onToggleArchive={onToggleArchive}
       onRename={onRename}
       onCopy={onCopy}
-      onDragStart={() => setDragIndex(index)}
-      onDragOver={(e) => { e.preventDefault(); setOverIndex(index); }}
-      onDrop={(e) => { e.preventDefault(); handlePinnedDrop(index); }}
+      onCreateHandoff={onCreateHandoff}
+      onConsumeHandoff={onConsumeHandoff}
     />
     );
   }
-
-  const totalThreads =
-    pinnedList.length + activeList.length + snoozedList.length + settledList.length + archivedList.length;
 
   return (
     <aside className="app-sidebar flex shrink-0 flex-col" style={{ width }}>
@@ -630,11 +685,11 @@ export default function Sidebar(props: Props) {
         }}
         onMouseDown={startResize}
       />
-      <div className="titlebar flex h-16 shrink-0 items-center gap-2 pl-[88px] pr-3">
-        {projectCwds.length > 1 ? (
+      <div className="titlebar flex h-11 shrink-0 items-center gap-2 pl-[88px] pr-3">
+        {spaces.length > 1 ? (
           <div className="min-w-0 flex-1">
             <ProjectFilter
-              projects={projectCwds.map((c) => ({ cwd: c, name: projectName(c) }))}
+              projects={spaces.map((sp) => ({ cwd: sp.cwd, name: projectName(sp.cwd) }))}
               value={projectFilter}
               onChange={onProjectFilterChange}
             />
@@ -653,7 +708,7 @@ export default function Sidebar(props: Props) {
       <nav aria-label="Workspace" className="px-2.5">
         <button onClick={onNew} className="sidebar-action">
           <PlusIcon size={16} className="sidebar-action-icon" />
-          <span>New session</span>
+          <span>New tab</span>
         </button>
         <button onClick={onSearch} className="sidebar-action">
           <SearchIcon size={16} className="sidebar-action-icon" />
@@ -667,16 +722,108 @@ export default function Sidebar(props: Props) {
       </nav>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-2.5 py-2">
-        {totalThreads === 0 ? (
-          <p className="px-3 py-3 text-[14px] leading-6 text-dim">
-            {projectFilter !== "all" ? "No chats in this project." : "Open a folder to start your first session."}
-          </p>
+        {spaces.length === 0 ? (
+          <div className="px-3 py-3">
+            <p className="text-[14px] leading-6 text-dim">No spaces yet. Add a project to start.</p>
+            <button type="button" onClick={onAddSpace} className="mt-2 rounded-lg bg-accent px-3 py-1.5 text-[12.5px] font-semibold text-bg hover:opacity-90">
+              Add a space
+            </button>
+          </div>
         ) : (
           <>
-            {pinnedList.map((entry, i) => renderRow(entry, "pinned", i))}
-            {pinnedList.length > 0 && <div className="sidebar-section-divider mx-2.5 my-2" />}
-
-            {activeList.map((entry, i) => renderRow(entry, "active", i))}
+            <div className="flex items-center gap-1 px-2.5 pb-1 pt-1">
+              <span className="shelf-label">Spaces{spaces.length > 0 ? ` (${spaces.length})` : ""}</span>
+              <span className="shelf-divider" />
+              <button type="button" onClick={onAddSpace} title="Add a space (pick a project folder)" className="thread-action thread-action-text text-[12px]">
+                Add
+              </button>
+            </div>
+            {spaces.map((sp) => {
+              const isActiveSpace = sp.cwd === activeCwd;
+              const pc = Effect.runSync(projectColorEffect(sp.cwd));
+              const branch = gitStatuses?.[sp.cwd]?.branch;
+              return (
+                <div key={sp.cwd}>
+                  <div className={`group/space flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 ${isActiveSpace ? "bg-accent/10" : "hover:bg-raised"}`}>
+                  <button
+                    type="button"
+                    onClick={() => openSpace(sp.cwd, sp.usable)}
+                    onMouseEnter={() => {
+                      onRefreshGitStatus?.(sp.cwd);
+                      if (!isActiveSpace && sp.usable[0]) onPrefetch?.(sp.usable[0].path);
+                    }}
+                    title={`${sp.cwd}${branch ? `\n${branch}` : ""}`}
+                    aria-current={isActiveSpace ? "true" : undefined}
+                    className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                  >
+                    <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: pc }} aria-hidden />
+                    <span className="min-w-0 flex-1 truncate text-[13px] font-semibold">{projectName(sp.cwd)}</span>
+                    {branch && branch !== "main" && branch !== "master" ? (
+                      <span className="max-w-[12ch] shrink-0 truncate text-[11px] text-dim">{branch}</span>
+                    ) : null}
+                    {sp.live > 0 ? <span className="inline-block h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-[var(--ok)]" title={`${sp.live} running`} /> : null}
+                    <span className="shrink-0 text-[11px] tabular-nums text-dim">{sp.usable.length}</span>
+                  </button>
+                  {!isActiveSpace ? (
+                    <button
+                      type="button"
+                      onClick={() => onRemoveSpace(sp.cwd)}
+                      title={`Remove ${projectName(sp.cwd)} from Spaces (sessions stay on disk and in Search)`}
+                      aria-label={`Remove ${projectName(sp.cwd)} from Spaces`}
+                      className="hidden shrink-0 rounded px-1 text-[12px] text-dim hover:text-err group-hover/space:block"
+                    >
+                      ×
+                    </button>
+                  ) : null}
+                  </div>
+                  {isActiveSpace ? (
+                    <div className="ml-3 border-l border-line/60 pl-1">
+                      {tabs.map((entry) => (
+                        <div key={entry.session.path} className="group/tab flex items-center gap-0.5">
+                          <div className="min-w-0 flex-1">
+                          {renderRow(
+                            { session: entry.session, cwd: entry.cwd },
+                            pinnedSet.has(entry.session.path) ? "pinned" : "active",
+                            true
+                          )}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (pinnedSet.has(entry.session.path)) onTogglePin(entry.session.path);
+                              onCloseTab(entry.cwd, entry.session.path);
+                            }}
+                            title="Close tab (session stays on disk and in Search)"
+                            aria-label={`Close tab ${entry.session.name ?? entry.session.id}`}
+                            className="hidden shrink-0 rounded px-1 text-[12px] text-dim hover:text-err group-hover/tab:block"
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                      <button
+                        type="button"
+                        onClick={() => (onNewSessionIn ? void onNewSessionIn(sp.cwd) : onNew())}
+                        title={`New tab in ${projectName(sp.cwd)}`}
+                        className="flex w-full items-center gap-2 rounded-md px-2.5 py-1 text-left text-[12px] text-dim hover:text-fg"
+                      >
+                        <PlusIcon size={13} /> New tab
+                      </button>
+                      {sp.usable.length > tabs.length ? (
+                        <button
+                          type="button"
+                          onClick={onSearch}
+                          title="Older sessions live in Search, resume is rare, browsing is not the job"
+                          className="flex w-full items-center gap-2 rounded-md px-2.5 py-1 text-left text-[12px] text-dim hover:text-fg"
+                        >
+                          All {sp.usable.length} in Search ⌘K
+                        </button>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
 
             {snoozedList.length > 0 && (
               <>
@@ -685,24 +832,7 @@ export default function Sidebar(props: Props) {
                   <span className="shelf-divider" />
                   <ChevronIcon size={12} className={`shelf-chevron transition-transform ${snoozedExpanded ? "rotate-180" : ""}`} />
                 </button>
-                {snoozedExpanded && snoozedList.map((entry, i) => renderRow(entry, "snoozed", i))}
-              </>
-            )}
-
-            {settledList.length > 0 && (
-              <>
-                <button type="button" onClick={() => setSettledExpanded((v) => !v)} aria-expanded={settledExpanded} className="sidebar-shelf-toggle">
-                  <span className="shelf-label">{settledExpanded ? "Settled" : `Settled (${settledList.length})`}</span>
-                  <span className="shelf-divider" />
-                  <ChevronIcon size={12} className={`shelf-chevron transition-transform ${settledExpanded ? "rotate-180" : ""}`} />
-                </button>
-                {settledExpanded &&
-                  settledList.slice(0, settledVisible).map((entry, i) => renderRow(entry, "settled", i))}
-                {settledExpanded && settledVisible < settledList.length && (
-                  <button type="button" onClick={() => setSettledVisible((n) => n + SETTLED_PAGE)} className="flex h-9 w-full items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] text-dim hover:bg-[var(--pressed)] hover:text-fg">
-                    <PlusIcon size={14} /> Show {Math.min(SETTLED_PAGE, settledList.length - settledVisible)} more
-                  </button>
-                )}
+                {snoozedExpanded && snoozedList.map((entry) => renderRow(entry, "snoozed"))}
               </>
             )}
 
@@ -710,26 +840,70 @@ export default function Sidebar(props: Props) {
               <>
                 <div className="sidebar-section-divider mx-2.5 my-2" />
                 <div className="sidebar-section-label px-5 pb-1 pt-3">Archived</div>
-                {archivedList.map((entry, i) => renderRow(entry, "archived", i))}
+                {archivedList.map((entry) => renderRow(entry, "archived"))}
               </>
             )}
+
           </>
         )}
       </div>
 
+      <div className="shrink-0 overflow-y-auto border-t border-line px-2.5 py-2" style={{ maxHeight: "32%" }}>
+        <>
+          <div className="sidebar-section-label px-5 pb-1 pt-1">Agents</div>
+              {agents && agents.length > 0 ? (
+                agents.map((a) => {
+                  const dot =
+                    a.status === "running" ? "bg-[var(--ok)] animate-pulse" : a.status === "blocked" ? "bg-err" : "bg-warn";
+                  return (
+                    <div key={`${a.kind}:${a.id}`} className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 hover:bg-raised">
+                      <span className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${dot}`} title={a.status} />
+                      <button
+                        type="button"
+                        onClick={() => onOpenAgent?.(a)}
+                        title={`${a.label}, ${a.kind} · ${a.status}${a.cwd ? ` · ${a.cwd}` : ""}`}
+                        className="min-w-0 flex-1 text-left"
+                      >
+                        <span className="block truncate text-[13px]">{a.label}</span>
+                        <span className="block truncate text-[11px] text-dim">
+                          {a.kind}
+                          {a.cwd ? ` · ${projectName(a.cwd)}` : ""}
+                        </span>
+                      </button>
+                      {a.status === "running" ? (
+                        <button
+                          type="button"
+                          onClick={() => onStopAgent?.(a)}
+                          title={`Stop ${a.kind}`}
+                          className="shrink-0 rounded-md border border-err/30 px-1.5 py-0.5 text-[11px] font-semibold text-err hover:bg-err/10"
+                        >
+                          Stop
+                        </button>
+                      ) : (
+                        <span className="shrink-0 text-[11px] text-dim">{a.status === "blocked" ? "blocked" : "waiting"}</span>
+                      )}
+                    </div>
+                  );
+                })
+              ) : (
+                <p className="px-3 py-1 text-[12.5px] text-dim">No live agents.</p>
+              )}
+        </>
+      </div>
+
       <div className="sidebar-footer">
         <button onClick={onOpenFolder} className="sidebar-action">
-          <FolderIcon size={14} className="sidebar-action-icon" />
+          <FolderIcon size={16} className="sidebar-action-icon" />
           <span>Open folder…</span>
         </button>
         {archivedList.length > 0 && (
           <button onClick={onToggleShowArchived} className="sidebar-action mt-0.5">
-            <ArchiveIcon size={14} className="sidebar-action-icon" />
+            <ArchiveIcon size={16} className="sidebar-action-icon" />
             <span>{showArchived ? "Hide archived" : `Archived (${archivedList.length})`}</span>
           </button>
         )}
         <button type="button" onClick={onOpenSettings} className="sidebar-action mt-0.5" aria-haspopup="dialog">
-          <GearIcon size={14} className="sidebar-action-icon" />
+          <GearIcon size={16} className="sidebar-action-icon" />
           <span>Settings</span>
         </button>
       </div>

@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { getNumberWithFallback } from "../lib/storage";
 import {
   bridge,
   type GitBranchInfo,
@@ -8,6 +9,8 @@ import {
   type GitStatusResult,
 } from "../bridge";
 import { renderDiff, renderPlainDiff, type DiffRow } from "../lib/diff-highlight";
+import { renderPlainDiffEffect } from "../lib/diff-highlight.effect";
+import * as Effect from "effect/Effect";
 import { ArrowDownIcon, ArrowUpIcon, BranchIcon, CheckIcon, ChevronIcon, PlusIcon, RefreshIcon, XIcon } from "./icons";
 
 interface Props {
@@ -205,7 +208,7 @@ export default function GitView({ cwd, sidebarStatus, onChanged, onClose, toast 
   const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
   const [treeWidth, setTreeWidth] = useState(() => {
-    const stored = Number(localStorage.getItem("pideck:git-tree-width"));
+    const stored = getNumberWithFallback("git-tree-width", NaN);
     return Number.isFinite(stored) && stored >= 180 && stored <= 420 ? stored : 300;
   });
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -289,7 +292,7 @@ export default function GitView({ cwd, sidebarStatus, onChanged, onClose, toast 
       .gitDiffFile(cwd, selectedPath)
       .then((diff) => {
         if (!active) return;
-        setRows(renderPlainDiff(diff));
+        setRows(Effect.runSync(renderPlainDiffEffect(diff)));
         setRowsLoading(false);
         // Always paint the fast plain diff first; Shiki is a non-blocking
         // visual upgrade and is cached across sidebar closes.
@@ -368,7 +371,7 @@ export default function GitView({ cwd, sidebarStatus, onChanged, onClose, toast 
       window.removeEventListener("blur", finish);
       document.documentElement.classList.remove("is-git-tree-resizing");
       setTreeWidth((width) => {
-        localStorage.setItem("pideck:git-tree-width", String(width));
+        localStorage.setItem("babylon:git-tree-width", String(width));
         return width;
       });
     };

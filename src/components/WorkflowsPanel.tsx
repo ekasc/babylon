@@ -16,6 +16,7 @@ import {
 } from "../bridge";
 import { fmtTokens } from "../store";
 import Markdown from "./Markdown";
+import { WorkflowsTimeline } from "./WorkflowsTimeline";
 import {
   ChevronIcon,
   LayersIcon,
@@ -83,8 +84,44 @@ function fmtCost(t?: WorkflowTokenUsage): string {
   return `$${t.cost < 0.01 ? t.cost.toFixed(4) : t.cost.toFixed(2)}`;
 }
 
-function clampText(s: string, max = 600): string {
+const PREVIEW_LIMIT = 600;
+const TOOL_PREVIEW_LIMIT = 400;
+const TOOL_TEXT_LIMIT = 500;
+const HISTORY_TEXT_LIMIT = 800;
+const ERROR_LIMIT = 2000;
+const PROMPT_LIMIT = 3000;
+const RESULT_LIMIT = 4000;
+const STDERR_LIMIT = 3000;
+const RUN_OUTPUT_MAX = 10000;
+
+function clampText(s: string, max = PREVIEW_LIMIT): string {
   return s.length > max ? s.slice(0, max) + "…" : s;
+}
+
+function extractAgentPrompt(raw: unknown): { text: string; label?: string } {
+  if (typeof raw === "string") return { text: raw.trim() };
+  if (raw && typeof raw === "object") {
+    const r = raw as Record<string, unknown>;
+    const text = typeof r.prompt === "string" ? (r.prompt as string).trim() : "";
+    const label = typeof r.label === "string" ? String(r.label) : undefined;
+    return { text, label };
+  }
+  return { text: "" };
+}
+
+function TranscriptContent({ recent, run, thread }: { recent?: Array<{ at: string; role: string; text: string }>; run?: any; thread?: any }) {
+  if (recent?.length) return <MiniChat messages={recent} />;
+  if (run?.output) return <Markdown text={clampText(run.output, RUN_OUTPUT_MAX)} />;
+  if ((run as any)?.error || (run as any)?.failureReason) {
+    return (
+      <div className="rounded-lg border border-err/20 bg-err/5 px-3 py-3">
+        <p className="text-[13px] font-medium text-err">Subagent failed</p>
+        <p className="mt-1 font-mono text-[12px] leading-5 text-err">{(run as any).error ?? (run as any).failureReason}</p>
+      </div>
+    );
+  }
+  if (thread?.latestSummary) return <Markdown text={thread.latestSummary} />;
+  return <p className="text-[14px] text-dim">No transcript messages available yet.</p>;
 }
 
 function stringifyResult(r: unknown): string {
@@ -160,7 +197,7 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props)
           return d.agents?.find((a) => a.id === id) ?? prevA;
         });
       } catch {
-        /* transient — next poll tick will retry */
+        /* transient, next poll tick will retry */
       }
     },
     []
@@ -361,7 +398,7 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props)
         ) : agent ? (
           <AgentView agent={agent} />
         ) : detail ? (
-          <RunDetailView run={detail} onControl={control} onDelete={remove} onOpenAgent={setAgent} />
+          <WorkflowsTimeline run={detail} onControl={control} onDelete={remove} onOpenAgent={setAgent} />
         ) : runs.length === 0 ? (
           <div className="flex flex-col items-center gap-3 px-4 py-14 text-center">
             <LayersIcon size={30} className="text-dim" />
@@ -381,12 +418,24 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props)
 }
 
 /* ---------------------------------------------------------------------------
-   Level 1 — runs list
+   Level 1, runs list
 --------------------------------------------------------------------------- */
 function RunList({ runs, onOpen }: { runs: WorkflowRunSummary[]; onOpen(runId: string): void }) {
+  const ROW_H = 86;
+  const listRef = useRef<HTMLDivElement>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const total = runs.length;
+  const viewportH = 520;
+  const needsVirt = total > 20;
+  const start = needsVirt ? Math.max(0, Math.floor(scrollTop / ROW_H) - 4) : 0;
+  const end = needsVirt ? Math.min(total, Math.ceil((scrollTop + viewportH) / ROW_H) + 4) : total;
+  const slice = needsVirt ? runs.slice(start, end) : runs;
+  const topPad = needsVirt ? start * ROW_H : 0;
+  const botPad = needsVirt ? (total - end) * ROW_H : 0;
   return (
-    <div className="flex flex-col gap-1.5">
-      {runs.map((r) => {
+    <div ref={listRef} onScroll={(e) => setScrollTop((e.target as HTMLDivElement).scrollTop)} className="flex flex-col gap-1.5 overflow-y-auto" style={needsVirt ? { maxHeight: viewportH, contain: "strict" } as any : undefined}>
+      {needsVirt && <div style={{ height: topPad, flexShrink: 0 }} />}
+      {slice.map((r) => {
         const meta = RUN_STATUS[r.status] ?? RUN_STATUS.pending;
         const nAgents = r.agents?.length ?? 0;
         const nPhases = r.phases.length;
@@ -403,7 +452,7 @@ function RunList({ runs, onOpen }: { runs: WorkflowRunSummary[]; onOpen(runId: s
             key={r.runId}
             onClick={() => onOpen(r.runId)}
             className="activity-row group flex w-full items-start gap-2.5 px-2.5 py-3 text-left"
-            title={`${r.workflowName} — ${meta.label}`}
+            title={`${r.workflowName}, ${meta.label}`}
           >
             <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${meta.dot}`} />
             <span className="min-w-0 flex-1">
@@ -431,12 +480,13 @@ function RunList({ runs, onOpen }: { runs: WorkflowRunSummary[]; onOpen(runId: s
           </button>
         );
       })}
+      {needsVirt && <div style={{ height: botPad, flexShrink: 0 }} />}
     </div>
   );
 }
 
 /* ---------------------------------------------------------------------------
-   Level 2 — run detail (phases + agents + controls)
+   Level 2, run detail (phases + agents + controls)
 --------------------------------------------------------------------------- */
 export function RunDetailView({
   run,
@@ -488,7 +538,7 @@ export function RunDetailView({
         {run.pauseReason && (
           <p className="mt-1.5 rounded-md border border-warn/30 bg-warn/10 px-2 py-1 text-[14px] leading-snug text-warn">
             Paused: {run.pauseReason}
-            {run.resetHint ? ` — ${run.resetHint}` : ""}
+            {run.resetHint ? `, ${run.resetHint}` : ""}
           </p>
         )}
         {run.error && (
@@ -511,7 +561,7 @@ export function RunDetailView({
           ) : foreign ? (
             <span
               className="cursor-default rounded-md border border-line/40 px-2 py-1 text-[14px] text-dim opacity-70"
-              title="This run was started in another pi session — control it from there"
+              title="This run was started in another pi session, control it from there"
             >
               read-only · other session
             </span>
@@ -600,7 +650,7 @@ export function RunDetailView({
           )}
         </SectionLabel>
         {agents.length === 0 ? (
-          <p className="px-1 py-2 text-[14px] text-dim">No agents yet — queued runs appear here once they start.</p>
+          <p className="px-1 py-2 text-[14px] text-dim">No agents yet, queued runs appear here once they start.</p>
         ) : (
           <div className="flex flex-col gap-1">
             {agents.map((a) => (
@@ -618,7 +668,7 @@ export function RunDetailView({
           </summary>
           <div className="mt-1.5 flex max-h-56 flex-col gap-1 overflow-y-auto border-t border-line/30 pt-1.5 font-mono text-[14px] leading-relaxed text-dim">
             {run.logs.map((l, i) => (
-              <span key={i}>{clampText(l, 400)}</span>
+              <span key={i}>{clampText(l, TOOL_PREVIEW_LIMIT)}</span>
             ))}
           </div>
         </details>
@@ -658,7 +708,7 @@ function AgentRow({ agent, onOpen }: { agent: WorkflowAgentDetail; onOpen(): voi
         <span className="block text-[14px] tracking-[0.02em] text-dim">
           {[agent.model ? agent.model.split("/").pop() : "", agent.tokens != null ? `${fmtTokens(agent.tokens)} tok` : ""]
             .filter(Boolean)
-            .join(" · ") || "—"}
+            .join(" · ") || ","}
         </span>
       </span>
       <ChevronIcon size={12} className="shrink-0 text-dim" />
@@ -667,25 +717,14 @@ function AgentRow({ agent, onOpen }: { agent: WorkflowAgentDetail; onOpen(): voi
 }
 
 /* ---------------------------------------------------------------------------
-   Level 3 — agent detail (prompt / result / error / history)
+   Level 3, agent detail (prompt / result / error / history)
 --------------------------------------------------------------------------- */
 export function AgentView({ agent }: { agent: WorkflowAgentDetail }) {
   const meta = AGENT_STATUS[agent.status] ?? { label: agent.status, dot: "bg-dim", text: "text-dim" };
   const result = stringifyResult(agent.result);
-  // The prompt is stored as the agent-options object ({ label, phase, tier,
-  // prompt, ... }) in real run files — extract the instruction text.
-  const prompt =
-    typeof agent.prompt === "string"
-      ? agent.prompt.trim()
-      : agent.prompt && typeof agent.prompt === "object" && typeof (agent.prompt as any).prompt === "string"
-        ? ((agent.prompt as any).prompt as string).trim()
-        : "";
-  const promptLabel =
-    typeof agent.prompt === "object" && (agent.prompt as any)?.label
-      ? String((agent.prompt as any).label)
-      : undefined;
+  const { text: prompt, label: promptLabel } = extractAgentPrompt(agent.prompt);
   // resultPreview carries the readable markdown summary when the raw result is
-  // a structured object — prefer it for display.
+  // a structured object, prefer it for display.
   const displayResult =
     typeof agent.result === "object" && typeof agent.resultPreview === "string" && agent.resultPreview.trim()
       ? agent.resultPreview.trim()
@@ -721,7 +760,7 @@ export function AgentView({ agent }: { agent: WorkflowAgentDetail }) {
         <div className="rounded-lg border border-err/30 bg-err/10 px-3 py-2">
           <p className="text-[14px] font-semibold text-err">Error</p>
           <p className="mt-1 whitespace-pre-wrap text-[14px] leading-relaxed text-err/90">
-            {clampText(agent.error, 2000)}
+            {clampText(agent.error, ERROR_LIMIT)}
           </p>
           {agent.errorCode && (
             <span className="mt-1 inline-block rounded bg-err/15 px-1.5 py-px font-mono text-[14px] text-err">
@@ -735,7 +774,7 @@ export function AgentView({ agent }: { agent: WorkflowAgentDetail }) {
         <div>
           <SectionLabel>{promptLabel ?? "Prompt"}</SectionLabel>
           <div className="max-h-64 overflow-y-auto whitespace-pre-wrap rounded-lg border border-line/50 bg-bg/40 px-3 py-2 text-[14px] leading-relaxed text-fg/85">
-            {clampText(prompt, 3000)}
+            {clampText(prompt, PROMPT_LIMIT)}
           </div>
         </div>
       )}
@@ -749,7 +788,7 @@ export function AgentView({ agent }: { agent: WorkflowAgentDetail }) {
             </div>
           ) : (
             <pre className="max-h-72 overflow-y-auto whitespace-pre-wrap break-all rounded-lg border border-line/50 bg-bg/40 px-3 py-2 font-mono text-[14px] leading-relaxed text-fg/85">
-              {clampText(displayResult, 4000)}
+              {clampText(displayResult, RESULT_LIMIT)}
             </pre>
           )}
         </div>
@@ -844,7 +883,7 @@ function AgentDetail({ item, toast, onOpenSession, onUpdate }: { item: AgentItem
     : ["starting", "running"].includes(status);
   const badge = thread ? "thread" : run!.persistent ? "persistent" : "bounded";
   const description = thread ? thread.goal : (run!.task ?? run!.goal);
-  const model = thread ? thread.model : (run!.requestedModel ?? "—");
+  const model = thread ? thread.model : (run!.requestedModel ?? ",");
   const profile = thread ? thread.profile : run!.profile;
   const milestones = thread ? thread.milestones : run!.milestones;
   const recent = thread ? thread.recentMessages : run!.recentMessages;
@@ -895,13 +934,13 @@ function AgentDetail({ item, toast, onOpenSession, onUpdate }: { item: AgentItem
     <div className="border-b border-line pb-4">
       <div className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full ${live ? "bg-accent" : status === "failed" || status === "routing_mismatch" ? "bg-err" : status === "blocked" ? "bg-warn" : status === "completed" || status === "idle" ? "bg-ok" : "bg-dim"}`} /><h2 className="min-w-0 flex-1 truncate text-[16px] font-semibold">{name}</h2><span className="shrink-0 rounded bg-inset px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-dim">{badge}</span><span className="text-[13px] text-dim">{status.replace("_", " ")}</span></div>
       {!recent?.length && description ? <p className="mt-2 text-[14px] leading-6 text-dim">{description}</p> : null}
-      <p className="mt-2 text-[12px] text-dim">{model} · {profile ?? "—"} · {id.slice(0, 8)}</p>
-      {milestones?.length ? <div className="mt-3 rounded-lg border border-line bg-inset/40 px-3 py-2"><span className="text-[11px] font-semibold uppercase tracking-wide text-dim">Milestones</span><ul className="mt-1 space-y-1">{milestones.map((m, index) => <li key={`${m.at}-${index}`} className="flex items-start gap-2 text-[13px]"><span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-ok" /><span className="min-w-0"><span className="font-medium">{m.name}</span>{m.note ? <span className="text-dim"> — {m.note}</span> : null}<span className="ml-1 text-[11px] text-dim">{new Date(m.at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</span></span></li>)}</ul></div> : null}
+      <p className="mt-2 text-[12px] text-dim">{model} · {profile ?? ","} · {id.slice(0, 8)}</p>
+      {milestones?.length ? <div className="mt-3 rounded-lg border border-line bg-inset/40 px-3 py-2"><span className="text-[11px] font-semibold uppercase tracking-wide text-dim">Milestones</span><ul className="mt-1 space-y-1">{milestones.map((m, index) => <li key={`${m.at}-${index}`} className="flex items-start gap-2 text-[13px]"><span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-ok" /><span className="min-w-0"><span className="font-medium">{m.name}</span>{m.note ? <span className="text-dim">, {m.note}</span> : null}<span className="ml-1 text-[11px] text-dim">{new Date(m.at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</span></span></li>)}</ul></div> : null}
     </div>
     <div ref={scrollRef} className="max-h-[46vh] overflow-y-auto py-4">
-      {recent?.length ? <MiniChat messages={recent} /> : run?.output ? <Markdown text={clampText(run.output, 10000)} /> : (run as any)?.error || (run as any)?.failureReason ? <div className="rounded-lg border border-err/20 bg-err/5 px-3 py-3"><p className="text-[13px] font-medium text-err">Subagent failed</p><p className="mt-1 font-mono text-[12px] leading-5 text-err">{(run as any).error ?? (run as any).failureReason}</p></div> : thread?.latestSummary ? <Markdown text={thread.latestSummary} /> : <p className="text-[14px] text-dim">No transcript messages available yet.</p>}
+      <TranscriptContent recent={recent} run={run} thread={thread} />
     </div>
-    {run?.stderr ? <pre className="max-h-48 overflow-auto border-t border-line py-3 font-mono text-[12px] text-warn">{clampText(run.stderr, 3000)}</pre> : null}
+    {run?.stderr ? <pre className="max-h-48 overflow-auto border-t border-line py-3 font-mono text-[12px] text-warn">{clampText(run.stderr, STDERR_LIMIT)}</pre> : null}
     <div className="flex flex-wrap gap-2 border-t border-line pt-3">{sessionFile && onOpenSession ? <button onClick={() => void promote()} disabled={live} title={live ? "Stop or wait for the active turn first" : "Move this conversation into the main workspace"} className="context-button disabled:opacity-50">Open as session</button> : null}{controllable ? <><button onClick={() => void control("steer")} className="context-button is-primary">Steer</button><button onClick={() => void control("follow-up")} className="context-button">Follow up</button><button onClick={() => void control("stop")} className="context-button text-err">Stop</button></> : <span className="text-[13px] text-dim">This agent is read-only.</span>}</div>
   </div>;
 }
@@ -920,7 +959,7 @@ function HistoryTranscript({ history }: { history: WorkflowHistoryEntry[] }) {
               className="rounded-md border border-line/50 bg-inset/40 px-2.5 py-1.5 font-mono text-[14px] leading-relaxed text-fg/80"
             >
               <span className="font-semibold tracking-[0.02em] text-accent">tool · {h.toolName ?? "?"}</span>
-              <span className="mt-0.5 block break-all whitespace-pre-wrap text-dim">{clampText(h.text, 500)}</span>
+              <span className="mt-0.5 block break-all whitespace-pre-wrap text-dim">{clampText(h.text, TOOL_TEXT_LIMIT)}</span>
             </div>
           );
         }
@@ -933,7 +972,7 @@ function HistoryTranscript({ history }: { history: WorkflowHistoryEntry[] }) {
               }`}
             >
               {h.toolName ? <span className="font-semibold tracking-[0.02em]">{h.toolName}</span> : null}
-              <span className="mt-0.5 block break-all whitespace-pre-wrap">{clampText(h.text, 500)}</span>
+              <span className="mt-0.5 block break-all whitespace-pre-wrap">{clampText(h.text, TOOL_TEXT_LIMIT)}</span>
             </div>
           );
         }
@@ -941,20 +980,20 @@ function HistoryTranscript({ history }: { history: WorkflowHistoryEntry[] }) {
           return (
             <div key={i} className="rounded-md bg-accent-soft/60 px-2.5 py-1.5 text-[14px] leading-relaxed text-fg/90">
               <span className="font-semibold text-accent">you</span>
-              <span className="mt-0.5 block break-words whitespace-pre-wrap">{clampText(h.text, 800)}</span>
+              <span className="mt-0.5 block break-words whitespace-pre-wrap">{clampText(h.text, HISTORY_TEXT_LIMIT)}</span>
             </div>
           );
         }
         if (h.kind === "error") {
           return (
             <div key={i} className="rounded-md border border-err/25 bg-err/10 px-2.5 py-1.5 text-[14px] leading-relaxed text-err/90">
-              {clampText(h.text, 800)}
+              {clampText(h.text, HISTORY_TEXT_LIMIT)}
             </div>
           );
         }
         return (
           <div key={i} className="rounded-md bg-bg/40 px-2.5 py-1.5 text-[14px] leading-relaxed text-fg/85">
-            {clampText(h.text, 800)}
+            {clampText(h.text, HISTORY_TEXT_LIMIT)}
           </div>
         );
       })}

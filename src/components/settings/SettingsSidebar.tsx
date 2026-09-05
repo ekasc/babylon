@@ -1,7 +1,8 @@
-export type SettingsSectionId = "models" | "context" | "permissions" | "git" | "background" | "appearance" | "advanced";
+export type SettingsSectionId = "models" | "context" | "permissions" | "bots" | "git" | "background" | "appearance" | "advanced";
 
 export const SECTIONS: Array<{ id: SettingsSectionId; label: string; group: string }> = [
   { id: "models", label: "Models", group: "AGENT" },
+  { id: "bots", label: "Bots", group: "AGENT" },
   { id: "context", label: "Context", group: "AGENT" },
   { id: "permissions", label: "Permissions", group: "AGENT" },
   { id: "git", label: "Git", group: "WORKSPACE" },

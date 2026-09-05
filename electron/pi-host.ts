@@ -3,7 +3,7 @@
 // Instead of spawning `pi --mode rpc` per session, this hosts the pi SDK
 // directly in the Electron main process: one shared ModelRuntime + one shared
 // resource loader + one AgentSessionRuntime. Sessions are reopened in ~1ms
-// (vs ~1.3s for an RPC switch_session) because nothing is rebuilt — the loader
+// (vs ~1.3s for an RPC switch_session) because nothing is rebuilt, the loader
 // and model runtime are constructed once and reused, exactly how T3 Code hosts
 // the OpenCode SDK in its backend process.
 //
@@ -21,6 +21,7 @@ import { SnapshotStore, type RestoreChange, type SnapshotCapture } from "./snaps
 import { toPiImages } from "./prompt-images";
 import { clampToolOutput, readSessionTail, readToolOutput } from "./sessions";
 import { RecapStore } from "./recap-store";
+import { mergeSkillEntries, readUserSkillEntries } from "./user-skills";
 import { DEFAULT_GIT_COMMIT_MODEL, type PiSettings } from "./app-settings";
 import { getSettings as defaultGetSettings, saveSettings as defaultSaveSettings } from "./app-settings";
 import { buildGitCommitPrompt, extractModelText, parseGeneratedCommitMessage, type GeneratedCommitMessage } from "./git-commit-message";
@@ -60,6 +61,13 @@ function messageText(message: any): string {
   return content.map((block: any) => typeof block === "string" ? block : block?.text ?? "").join("");
 }
 
+/** A read failed because the session file was never flushed (canonical
+ *  future path of a brand-new session), not because state is corrupt. */
+function isMissingFileError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  return (err as any).code === "ENOENT" || /no such file|ENOENT/i.test(err.message);
+}
+
 function changedExclusions(
   before: SnapshotCapture["excluded"],
   after: SnapshotCapture["excluded"]
@@ -96,6 +104,8 @@ export interface HostOptions {
   hookManager?: HookManager;
   /** Resolve the owning task id for a session file, if any. */
   getTaskIdForSessionFile?: (sessionFile: string | null) => string | undefined;
+  /** Resolve the owning bot id for a session file, if any. */
+  getBotIdForSessionFile?: (sessionFile: string | null) => string | undefined;
   /** Settings provider for daemon vs Electron. */
   settingsProvider?: { getSettings(): PiSettings; saveSettings(patch: Partial<PiSettings>): PiSettings };
 }
@@ -113,6 +123,18 @@ export class PiHost {
   private readonly recaps: RecapStore;
   private readonly recapping = new Set<string>();
   private readonly snapcompact: ArchiveStore;
+  /**
+   * Bot Mode system-prompt overlay (Hermes SOUL.md equivalent). Set by the
+   * owner before `open()` so the cwd-bound resource loader picks it up as pi
+   * `appendSystemPrompt`. Null = plain session, no overlay. Stable per bot so
+   * provider prefix-caching is preserved within a bot's sessions.
+   */
+  private botSystemPrompt: string | null = null;
+
+  /** Set (or clear) the Bot Mode prompt overlay for subsequently opened sessions. */
+  setBotSystemPrompt(prompt: string | null): void {
+    this.botSystemPrompt = prompt && prompt.length > 0 ? prompt : null;
+  }
   /** Session file → last observed message timestamp (ms). Event-driven, so the
    *  sweep never reads the session file unless a recap might be due. */
   private readonly lastMessageAt = new Map<string, number>();
@@ -171,6 +193,15 @@ export class PiHost {
   }
   get cwd(): string {
     return this.runtime.cwd ?? this._cwd;
+  }
+  /** True while the live session is streaming a turn. Drivers (group rounds,
+   *  bot DMs) refuse to start when busy, single runtime, no queue-jumping. */
+  get isStreaming(): boolean {
+    try {
+      return !!this.runtime?.session?.isStreaming;
+    } catch {
+      return false;
+    }
   }
 
   /** One-time boot: share the model catalogue, but rebuild every cwd-bound service on replacement. */
@@ -256,6 +287,7 @@ export class PiHost {
         settingsManager,
         modelRuntime: this.modelRuntime,
         resourceLoaderOptions: {
+          ...(this.botSystemPrompt ? { appendSystemPrompt: [this.botSystemPrompt] } : {}),
           extensionsOverride: (base) => ({
             ...base,
             extensions: [
@@ -284,7 +316,7 @@ export class PiHost {
       });
       try {
         const hasAsk = !!(result.session as any).getToolDefinition?.("ask_question");
-        console.log(`[Babylon] ask_question registered: ${hasAsk} — tools:`, (() => { try { return (result.session as any).getToolDefinitions?.() ? Object.keys((result.session as any).getToolDefinitions()) : "unknown"; } catch { return "err"; } })());
+        console.log(`[Babylon] ask_question registered: ${hasAsk}, tools:`, (() => { try { return (result.session as any).getToolDefinitions?.() ? Object.keys((result.session as any).getToolDefinitions()) : "unknown"; } catch { return "err"; } })());
       } catch {}
       const out: CreateAgentSessionRuntimeResult = {
         session: result.session,
@@ -426,7 +458,7 @@ export class PiHost {
         // Lifecycle noise: extension async init (e.g. MCP server startup) that
         // was still in flight when the session was replaced hits pi's stale-ctx
         // guard. The extension self-heals via its own generation guard, so this
-        // is expected during fast session switches — don't surface it as an
+        // is expected during fast session switches, don't surface it as an
         // error toast.
         if (typeof msg === "string" && msg.includes("extension ctx is stale")) return;
         this.opts.onEvent({ type: "extension_error", extensionPath: err?.extensionPath, event: err?.event, error: msg });
@@ -531,7 +563,7 @@ export class PiHost {
       sample;
     const text = await this.askCheap(prompt, 1024);
     if (!text) return null;
-    return text.replace(/^["'“”]+|["'“”]+$/g, "").slice(0, 60);
+    return text.replace(/^["'""]+|["'""]+$/g, "").slice(0, 60);
   }
 
   async generateGitCommitMessage(context: PreparedCommitContext): Promise<GeneratedCommitMessage> {
@@ -544,9 +576,9 @@ export class PiHost {
           `Select an installed model in Settings → Pi → Git commit model.`
       );
     }
-    if (context.fileCount === 0) throw new Error("No staged files to describe — commit context is empty");
+    if (context.fileCount === 0) throw new Error("No staged files to describe, commit context is empty");
     if (context.stagedPatch.trim().length === 0 && context.stagedSummary.trim().length === 0) {
-      throw new Error("Staged patch is empty — nothing to commit");
+      throw new Error("Staged patch is empty, nothing to commit");
     }
 
     const complete = (prompt: string) =>
@@ -668,7 +700,7 @@ export class PiHost {
     this.recapping.add(file);
     try {
       // The in-memory session manager keeps message content out of getEntries()
-      // for large sessions, so the delta is read from the append-only file —
+      // for large sessions, so the delta is read from the append-only file ,
       // the same projection the transcript uses, with entryIds attached.
       const { messages } = await readSessionTail(file);
       if (!messages.length) return;
@@ -776,15 +808,23 @@ export class PiHost {
     await this.ensureSession();
     if (opts.path) {
       if (this.runtime.session.sessionFile === opts.path) {
-        if (!this.runtime.session.isStreaming) this.syncSessionFromDisk(opts.path, opts.cwd);
+        if (!this.runtime.session.isStreaming) {
+          try {
+            this.syncSessionFromDisk(opts.path, opts.cwd);
+          } catch (err) {
+            // Unflushed new session (canonical future path, nothing on disk
+            // yet): the live session already is the source of truth.
+            if (!isMissingFileError(err)) throw err;
+          }
+        }
       } else {
         try {
           // switchSession builds the target SessionManager with a cwd override
-          // and reuses our shared services via createRuntime — ~1ms.
+          // and reuses our shared services via createRuntime, ~1ms.
           await this.runtime.switchSession(opts.path, { cwdOverride: opts.cwd });
         } catch (err) {
           // The session's stored cwd doesn't exist (project moved/deleted).
-          // Ask for a new location and retry with the override — mirroring pi's
+          // Ask for a new location and retry with the override, mirroring pi's
           // interactive-mode prompt.
           if (this.isMissingCwdError(err) && this.opts.onMissingCwd) {
             const storedCwd = opts.cwd;
@@ -832,7 +872,12 @@ export class PiHost {
     return this.enqueueTransition(async () => {
       await this.ensureSession();
       if (this.runtime.session.sessionFile !== sessionPath || this.runtime.session.isStreaming) return false;
-      this.syncSessionFromDisk(sessionPath, this.cwd);
+      try {
+        this.syncSessionFromDisk(sessionPath, this.cwd);
+      } catch (err) {
+        // Unflushed new session: nothing on disk to pull; live state stands.
+        if (!isMissingFileError(err)) throw err;
+      }
       await this.restoreActiveRollbackLeaf();
       const state = await this.getState();
       this.opts.onStatus({ status: "ready", cwd: this.cwd, sessionPath, state });
@@ -1124,11 +1169,16 @@ export class PiHost {
       argumentHint: prompt.argumentHint,
       source: "prompt",
     }));
-    const skills = this.runtime.services.resourceLoader.getSkills().skills.map((skill) => ({
-      name: `skill:${skill.name}`,
-      description: skill.description,
-      source: "skill",
-    }));
+    const skills = mergeSkillEntries(
+      this.runtime.services.resourceLoader.getSkills().skills.map((skill) => ({
+        name: `skill:${skill.name}`,
+        description: skill.description,
+        source: "skill",
+      })),
+      // User skills pi's loader misses, filters, or hasn't picked up yet.
+      // Same list shape, so `/`, `$`, and palette stay consistent.
+      readUserSkillEntries().map((skill) => ({ ...skill, source: "skill" as const }))
+    );
     const seen = new Set<string>();
     return [...extensionCommands, ...prompts, ...skills].filter((command) => {
       if (seen.has(command.name)) return false;
@@ -1480,20 +1530,22 @@ export class PiHost {
     await this.runtime.session.sendCustomMessage({
       customType: "babylon_thread_activity",
       content,
-      display: true,
+      // CLI-invisible: pi renders custom messages only when display is true.
+      // Babylon reads these by customType (see src/store.ts), old and new.
+      display: false,
       details: { threadId: thread.threadId, action, message },
     });
   }
 
   /** Milestone-watching notifications: the main agent learns when a thread
-   *  reaches a checkpoint, blocks, or finishes — without polling. */
+   *  reaches a checkpoint, blocks, or finishes, without polling. */
   async notifyThreadEvent(thread: { threadId: string; name: string | null; parentSessionId?: string | null }, event: any): Promise<void> {
     if (!thread.parentSessionId || thread.parentSessionId !== this.runtime.session.sessionId) return;
     const label = thread.name ?? thread.threadId.slice(0, 8);
     let content: string;
     if (event?.type === "milestone") {
       const name = event.milestone?.name ?? "checkpoint";
-      content = `[Babylon Thread Activity]\nThread ${label} reached a milestone — ${name}${event.milestone?.note ? `: ${event.milestone.note}` : ""}`;
+      content = `[Babylon Thread Activity]\nThread ${label} reached a milestone, ${name}${event.milestone?.note ? `: ${event.milestone.note}` : ""}`;
     } else if (event?.type === "blocked") {
       content = `[Babylon Thread Activity]\nThread ${label} is blocked${event.blocker ? `: ${event.blocker}` : ""}.`;
     } else {
@@ -1503,14 +1555,26 @@ export class PiHost {
     await this.runtime.session.sendCustomMessage({
       customType: "babylon_thread_activity",
       content,
-      display: true,
+      // CLI-invisible (see above); Babylon reads by customType.
+      display: false,
       details: { threadId: thread.threadId, ...event },
     });
     // Custom messages emit no renderer event on their own; deliver a
     // message_start so the line appears in the visible chat immediately.
     this.opts.onEvent({
       type: "message_start",
-      message: { role: "custom", customType: "babylon_thread_activity", content, display: true },
+      message: { role: "custom", customType: "babylon_thread_activity", content, display: false },
+    });
+    // Live status + log for the matching LaunchCard in the parent chat:
+    // babylon_thread_activity pings update the card instead of a stray line.
+    this.opts.onEvent({
+      type: "babylon_launch_update",
+      runId: thread.threadId,
+      runKind: "thread",
+      log: content,
+      status: event?.status === "failed" ? "failed" : event?.status === "stopped" ? "stopped" : event?.status === "completed" ? "completed" : undefined,
+      sessionId: this.runtime.session.sessionId,
+      sessionFile: this.runtime.session.sessionFile,
     });
   }
 
@@ -1525,21 +1589,93 @@ export class PiHost {
     await this.runtime.session.sendCustomMessage({
       customType: "babylon_subagent_activity",
       content,
-      display: true,
+      // CLI-invisible (see babylon_thread_activity above); Babylon reads by customType.
+      display: false,
       details: { runId: record.runId, action, message },
     });
     // Surface custom messages in the visible chat (they emit no renderer event).
     this.opts.onEvent({
       type: "message_start",
-      message: { role: "custom", customType: "babylon_subagent_activity", content, display: true },
+      message: { role: "custom", customType: "babylon_subagent_activity", content, display: false },
+    });
+    // Live status + log for the matching LaunchCard in the parent chat.
+    this.opts.onEvent({
+      type: "babylon_launch_update",
+      runId: record.runId,
+      runKind: "subagent",
+      log: content,
+      status: action === "stop" ? "stopped" : undefined,
+      sessionId: this.runtime.session.sessionId,
+      sessionFile: this.runtime.session.sessionFile,
+    });
+  }
+
+  /** Room turn presence for the renderer ("@x is thinking…"). Carries the
+   *  live session identity so stale-session filtering keeps working. */
+  emitRoomEvent(ev: Record<string, unknown>): void {
+    this.opts.onEvent({
+      ...ev,
+      sessionId: this.runtime?.session?.sessionId,
+      sessionFile: this.runtime?.session?.sessionFile ?? null,
+    });
+  }
+
+  /**
+   * Bot-to-bot relay line in the live session: an attributed, display-only
+   * custom message (same channel as subagent/thread activity) plus the live
+   * event the renderer needs to show it without a refresh. Never fakes a
+   * user or assistant turn, the transcript stays truthful about who spoke.
+   */
+  async postBotMessage(content: string, details?: Record<string, unknown>): Promise<void> {
+    await this.ensureSession();
+    await this.runtime.session.sendCustomMessage({
+      customType: "babylon_bot_message",
+      content,
+      // CLI-invisible (see babylon_thread_activity above); Babylon reads by customType.
+      display: false,
+      details: details ?? {},
+    });
+    // Surface custom messages in the visible chat (they emit no renderer event).
+    this.opts.onEvent({
+      type: "message_start",
+      message: { role: "custom", customType: "babylon_bot_message", content, display: false },
+    });
+  }
+
+  /** Cheap-model summary call for explicit handoff authoring (never the auto sweep). */
+  async summarizeHandoff(promptText: string): Promise<string | null> {
+    await this.ensureSession();
+    return this.askCheap(promptText, 4096);
+  }
+
+  /** Install a handoff summary as a native compaction boundary in the live chat.
+   *  Refuses when the live session moved on or is mid-turn, honesty over convenience. */
+  async consumeHandoff(liveFile: string, summary: string, estimatedTokensBefore: number): Promise<void> {
+    return this.enqueueTransition(async () => {
+      await this.ensureSession();
+      if (this.runtime.session.sessionFile !== liveFile) {
+        throw new Error("Live chat changed, reconsume into the current chat");
+      }
+      if (this.runtime.session.isStreaming) throw new Error("Wait for the live turn to finish first");
+      const leafId = this.runtime.session.sessionManager.getLeafId();
+      this.runtime.session.sessionManager.appendCompaction(summary, leafId ?? "", estimatedTokensBefore, {
+        kind: "babylon-handoff",
+      });
+    });
+  }
+
+  /** Handoff-consumed presence for the renderer card. Same agent-events channel. */
+  emitHandoffEvent(ev: Record<string, unknown>): void {
+    this.opts.onEvent({
+      ...ev,
+      sessionId: this.runtime?.session?.sessionId,
+      sessionFile: this.runtime?.session?.sessionFile ?? null,
     });
   }
 
   async controlSubagent(action: SubagentControlAction, runId: string, message?: string): Promise<any> {
     return this.managedSubagents.control(this.cwd, action, runId, message);
-  }
-
-  async promoteSubagent(runId: string): Promise<{ sessionFile: string; cwd: string; parentSessionFile: string | null }> {
+  }  async promoteSubagent(runId: string): Promise<{ sessionFile: string; cwd: string; parentSessionFile: string | null }> {
     return this.managedSubagents.promote(this.cwd, runId);
   }
 
@@ -1592,12 +1728,13 @@ export class PiHost {
       await this.runtime.session.sendCustomMessage({
         customType: "babylon_diagnostics",
         content,
-        display: true,
+        // CLI-invisible (see babylon_thread_activity above); Babylon reads by customType.
+        display: false,
         details: { diagnostics: bounded },
       } as unknown as Parameters<(typeof this.runtime.session)["sendCustomMessage"]>[0]);
       this.opts.onEvent({
         type: "message_start",
-        message: { role: "custom", customType: "babylon_diagnostics", content, display: true },
+        message: { role: "custom", customType: "babylon_diagnostics", content, display: false },
       });
     } catch {
       // Best-effort; diagnostics should never break the session.

@@ -1,14 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import type { PiSettings } from "../../bridge";
-import { applyMonoFont, applySystemFonts, applyTheme, monoStack, MONO_FONTS, type ThemePref } from "../../lib/theme";
+import { applyMonoFont, applySystemFonts, applyTheme, applyThemeId, monoStack, MONO_FONTS, type ThemeId, type ThemePref } from "../../lib/theme";
 import { SettingSection } from "./SettingSection";
 
-function ThemePreview({ mode, active }: { mode: ThemePref; active: boolean }) {
+function ModePreview({ mode, active }: { mode: ThemePref; active: boolean }) {
   const isDark = mode === "dark";
   const isSystem = mode === "system";
+  const bg = isDark ? "bg-[#1a1a1a] text-zinc-100" : isSystem ? "bg-[#f6f6f6] text-zinc-900" : "bg-white text-zinc-900";
   return (
     <div className={`rounded-md border overflow-hidden ${active ? "border-accent" : "border-line/40"}`}>
-      <div className={isDark ? "bg-[#1a1a1a] text-zinc-100" : isSystem ? "bg-[#f6f6f6] text-zinc-900" : "bg-white text-zinc-900"}>
+      <div className={bg}>
         <div className="flex items-center gap-1 px-2 py-1.5 border-b border-black/10">
           <span className="h-2 w-2 rounded-full bg-red-400" /><span className="h-2 w-2 rounded-full bg-yellow-400" /><span className="h-2 w-2 rounded-full bg-green-400" />
           <span className="ml-2 text-[10px] tracking-wide uppercase opacity-60">{mode}</span>
@@ -21,8 +22,27 @@ function ThemePreview({ mode, active }: { mode: ThemePref; active: boolean }) {
     </div>
   );
 }
+function ThemeIdPreview({ id, active }: { id: ThemeId; active: boolean }) {
+  const isExcal = id === "excalidraw";
+  const bg = isExcal ? "bg-[#fdf8ef] text-[#1a1a1a]" : "bg-white text-zinc-900";
+  const label = isExcal ? "EXCALI" : "TERMINAL";
+  return (
+    <div className={`rounded-md border overflow-hidden ${active ? "border-accent" : "border-line/40"} ${isExcal ? "rotate-[-0.5deg]" : ""}`} style={isExcal ? { borderRadius: "255px 15px 225px 15px / 15px 225px 15px 255px" } : undefined}>
+      <div className={bg}>
+        <div className="flex items-center gap-1 px-2 py-1.5 border-b border-black/10">
+          <span className="h-2 w-2 rounded-full bg-red-400" /><span className="h-2 w-2 rounded-full bg-yellow-400" /><span className="h-2 w-2 rounded-full bg-green-400" />
+          <span className="ml-2 text-[10px] tracking-wide uppercase opacity-60" style={isExcal ? { fontFamily: '"Virgil", cursive' } : undefined}>{label}</span>
+        </div>
+        <div className="p-2 space-y-1">
+          <div className={`h-2 w-3/4 rounded ${isExcal ? "bg-[#e8dcc6]" : "bg-black/10"}`} style={isExcal ? { borderRadius: "255px 15px" } : undefined} />
+          <div className={`h-2 w-1/2 rounded ${isExcal ? "bg-[#e8dcc6]/70" : "bg-black/5"}`} />
+        </div>
+      </div>
+    </div>
+  );
+}
 
-export function SettingsAppearance({ settings, onSave, theme, onThemeChange }: { settings: PiSettings | null; onSave: (p: Partial<PiSettings>) => void; theme: ThemePref; onThemeChange: (t: ThemePref) => void }) {
+export function SettingsAppearance({ settings, onSave, theme, onThemeChange, themeId, onThemeIdChange }: { settings: PiSettings | null; onSave: (p: Partial<PiSettings>) => void; theme: ThemePref; onThemeChange: (t: ThemePref) => void; themeId: ThemeId; onThemeIdChange: (id: ThemeId) => void }) {
   const [systemFonts, setSystemFonts] = useState<string[]>([]);
   const [filter, setFilter] = useState("");
   const [open, setOpen] = useState(false);
@@ -52,28 +72,39 @@ export function SettingsAppearance({ settings, onSave, theme, onThemeChange }: {
     return base.filter((f) => f.toLowerCase().includes(q)).slice(0, 400);
   }, [systemFonts, filter]);
 
-  const setTheme = (t: ThemePref) => { applyTheme(t); onThemeChange(t); onSave({ appearance: { ...(settings?.appearance ?? {}), theme: t } }); };
+  const setTheme = (t: ThemePref) => { applyTheme(t); onThemeChange(t); onSave({ appearance: { ...(settings?.appearance ?? {}), theme: t as "light" | "dark" | "system" } }); };
+  const setThemeId = (id: ThemeId) => { applyThemeId(id); onThemeIdChange(id); };
 
   return (
     <div>
       <h2 className="text-[24px] font-semibold tracking-[-0.02em] text-fg">Appearance</h2>
       <p className="text-[15px] leading-6 text-fg/60 mt-2">Theme and typography.</p>
 
-      <SettingSection title="Theme">
-        <div className="grid grid-cols-3 gap-3 max-w-[560px]">
-          {(["light", "dark", "system"] as ThemePref[]).map((t) => (
+      <SettingSection title="Mode" hint="Light / Dark mirrors Pi, System follows OS">
+        <div className="grid grid-cols-3 gap-3 max-w-[480px]">
+          {( ["light", "dark", "system"] as ThemePref[]).map((t) => (
             <button key={t} onClick={() => setTheme(t)} aria-pressed={theme === t} className="text-left">
-              <ThemePreview mode={t} active={theme === t} />
+              <ModePreview mode={t} active={theme === t} />
               <span className={`mt-1.5 block text-[12.5px] ${theme === t ? "font-medium text-fg" : "text-dim"}`}>{t === "system" ? "System" : t === "dark" ? "Dark" : "Light"}</span>
             </button>
           ))}
         </div>
       </SettingSection>
+      <SettingSection title="Theme" hint="Each theme has its own Light + Dark, pick the sketch.">
+        <div className="grid grid-cols-2 gap-3 max-w-[480px]">
+          {( ["terminal", "excalidraw"] as ThemeId[]).map((id) => (
+            <button key={id} onClick={() => setThemeId(id)} aria-pressed={themeId === id} className="text-left">
+              <ThemeIdPreview id={id} active={themeId === id} />
+              <span className={`mt-1.5 block text-[12.5px] ${themeId === id ? "font-medium text-fg" : "text-dim"}`}>{id === "excalidraw" ? "Excalidraw" : "Terminal"}</span>
+            </button>
+          ))}
+        </div>
+      </SettingSection>
 
-      <SettingSection title="Typography" hint="Pick any font installed on this Mac — no font files are shipped. Preview shows the monospace stack.">
+      <SettingSection title="Typography" hint="Pick any font installed on this Mac, no font files are shipped. Preview shows the monospace stack.">
         <label className="flex items-center justify-between rounded-md px-3 py-2.5 hover:bg-inset cursor-pointer border border-transparent hover:border-line/30">
           <span className="text-[13px]">Use system fonts</span>
-          <input type="checkbox" checked={settings?.appearance?.useSystemFonts ?? true} onChange={(e) => { const enabled = e.target.checked; applySystemFonts(enabled); localStorage.setItem("pideck:useSystemFonts", String(enabled)); onSave({ appearance: { ...(settings?.appearance ?? {}), useSystemFonts: enabled } }); }} className="h-4 w-4 accent-accent" />
+          <input type="checkbox" checked={settings?.appearance?.useSystemFonts ?? true} onChange={(e) => { const enabled = e.target.checked; applySystemFonts(enabled); localStorage.setItem("babylon:useSystemFonts", String(enabled)); onSave({ appearance: { ...(settings?.appearance ?? {}), useSystemFonts: enabled } }); }} className="h-4 w-4 accent-accent" />
         </label>
         <div className="mt-3 max-w-[480px]">
           <label className="block text-[12px] font-medium text-dim mb-1.5">Monospace font</label>
@@ -95,7 +126,7 @@ export function SettingsAppearance({ settings, onSave, theme, onThemeChange }: {
             ) : null}
           </div>
           <div className="mt-2 rounded-md border border-line/30 bg-inset/20 px-3 py-2.5">
-            <p className="text-[11px] font-medium tracking-wide uppercase text-dim">Preview — {currentFamily}</p>
+            <p className="text-[11px] font-medium tracking-wide uppercase text-dim">Preview, {currentFamily}</p>
             <p className="mt-1 truncate text-[13px]" style={{ fontFamily: monoStack(currentFamily) }}>{`const answer = 42 // ${currentFamily}`}</p>
             <p className="truncate text-[13px]" style={{ fontFamily: monoStack(currentFamily) }}>The quick brown fox jumps 0123456789</p>
           </div>

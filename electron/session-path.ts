@@ -3,7 +3,7 @@ import { isAbsolute, relative, resolve } from "node:path";
 
 function contained(root: string, target: string): boolean {
   const rel = relative(root, target);
-  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+  return rel !== "" && !rel.startsWith("..");
 }
 
 /** Canonicalize an existing transcript and reject symlinks escaping the session store. */

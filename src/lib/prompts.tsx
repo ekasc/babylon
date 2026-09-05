@@ -114,7 +114,7 @@ function PromptCard({ request }: { request: Pending }) {
   const confirmLabel = request.kind === "input" ? (request.confirmLabel ?? "Save") : (request.confirmLabel ?? "Confirm");
 
   return (
-    <div className="fade-in fixed inset-0 z-50 grid place-items-center bg-[var(--scrim)] p-6" onMouseDown={cancel}>
+    <div className="fade-in fixed inset-0 z-[70] grid place-items-center bg-[var(--scrim)] p-6" onMouseDown={cancel}>
       <div
         ref={cardRef}
         role="dialog"

@@ -19,6 +19,8 @@ export type ChatItem =
       blocks: Block[];
       model?: string;
       streaming?: boolean;
+      /** Group-room speaker handle (director-attributed). Drives the member header. */
+      speaker?: string;
     }
   | {
       kind: "tool";
@@ -55,7 +57,8 @@ export type ChatItem =
     }
   | { kind: "system"; key: string; text: string }
   | { kind: "recap"; key: string; text: string; at: number }
-  | { kind: "launch"; key: string; runKind: "subagent" | "thread" | "workflow"; runId: string; label: string; status: "running" | "completed" | "failed" | "stopped" };
+  | { kind: "launch"; key: string; runKind: "subagent" | "thread" | "workflow"; runId: string; label: string; status: "running" | "completed" | "failed" | "stopped"; log?: string }
+  | { kind: "compaction"; key: string; status: "compacting" | "compacted" | "aborted" | "failed"; reason?: string; result?: { tokensBefore?: number; estimatedTokensAfter?: number }; error?: string };
 
 export type DialogMethod = "select" | "confirm" | "input" | "editor";
 
@@ -75,6 +78,13 @@ export interface Toast {
   text: string;
 }
 
+import { isPassReply, parseRoomTurn } from "./bots";
+
+export interface RoomPresence {
+  handle: string;
+  phase: "started";
+}
+
 export interface State {
   items: ChatItem[];
   streaming: boolean;
@@ -83,6 +93,8 @@ export interface State {
   dialogs: Dialog[];
   toasts: Toast[];
   settledNonce: number;
+  /** Live group-room turn ("@x is thinking…"). Cleared on reply/settle, never persisted. */
+  roomTurn: RoomPresence | null;
 }
 
 export type Action =
@@ -90,6 +102,7 @@ export type Action =
   | { type: "rebuild"; messages: any[] }
   | { type: "event"; event: any }
   | { type: "local-user"; text: string; images?: string[] }
+  | { type: "local-user-rollback"; text: string }
   | { type: "dialog-dismiss"; id: string }
   | { type: "toast"; toast: Omit<Toast, "id"> }
   | { type: "toast-dismiss"; id: number };
@@ -117,6 +130,7 @@ export const initialState: State = {
   dialogs: [],
   toasts: [],
   settledNonce: 0,
+  roomTurn: null,
 };
 
 export function textOf(content: any): string {
@@ -150,12 +164,22 @@ export function mergeLiveMessages(loaded: any[], live: any[]): any[] {
 export function messagesToItems(messages: any[]): ChatItem[] {
   const items: ChatItem[] = [];
   const toolById = new Map<string, Extract<ChatItem, { kind: "tool" }>>();
+  // Group-room machinery, collapsed at render: a director prompt addresses a
+  // member (never a user bubble); a PASS reply is dropped entirely, quiet
+  // members leave no trace. Nothing is dropped from the session file.
+  let pendingRoomHandle: string | null = null;
 
   for (let messageIndex = 0; messageIndex < (messages?.length ?? 0); messageIndex++) {
     const m = messages[messageIndex];
     switch (m?.role) {
       case "user": {
         const text = textOf(m.content).trim();
+        const roomHandle = parseRoomTurn(text);
+        if (roomHandle) {
+          pendingRoomHandle = roomHandle;
+          break;
+        }
+        pendingRoomHandle = null;
         const images: string[] = [];
         if (Array.isArray(m.content)) {
           for (const b of m.content) {
@@ -213,7 +237,21 @@ export function messagesToItems(messages: any[]): ChatItem[] {
           }
         }
         if (blocks.length) {
-          items.push({ kind: "assistant", key: msgKey("a", m, messageIndex), blocks, model: m.model });
+          const handle = pendingRoomHandle;
+          pendingRoomHandle = null;
+          const replyText = blocks.length === 1 && blocks[0].type === "text" ? blocks[0].text : null;
+          const passed = handle && tools.length === 0 && replyText != null && isPassReply(replyText);
+          if (!passed) {
+            items.push({
+              kind: "assistant",
+              key: msgKey("a", m, messageIndex),
+              blocks,
+              model: m.model,
+              ...(handle ? { speaker: handle } : {}),
+            });
+          }
+        } else {
+          pendingRoomHandle = null;
         }
         items.push(...tools);
         break;
@@ -252,7 +290,9 @@ export function messagesToItems(messages: any[]): ChatItem[] {
       case "custom": {
         if (m.display && m.customType === "babylon_recap") {
           items.push({ kind: "recap", key: msgKey("c", m, messageIndex), text: textOf(m.content), at: typeof m.timestamp === "number" ? m.timestamp : 0 });
-        } else if (m.display && (m.customType === "babylon_subagent_activity" || m.customType === "babylon_thread_activity")) {
+        } else if (m.customType === "babylon_subagent_activity" || m.customType === "babylon_thread_activity" || m.customType === "babylon_bot_message") {
+          // Matched by type, not display: new writes are display:false (CLI-invisible)
+          // while legacy files carry display:true. Recap above stays display-gated.
           items.push({ kind: "system", key: msgKey("c", m, messageIndex), text: textOf(m.content) });
         }
         break;
@@ -268,18 +308,19 @@ export function reducer(state: State, action: Action): State {
       return { ...initialState, toasts: state.toasts };
     case "rebuild": {
       const fromMessages = messagesToItems(action.messages);
-      // Launch cards are not part of the agent's session file; preserve any
+      // Launch and compaction cards are not part of the agent's session file; preserve any
       // live rows so the user doesn't lose sight of running work after a
       // session-rebuild (e.g. settings change, agent_settled replay).
       const preserved = state.items.filter(
-        (it) => it.kind === "launch" && !fromMessages.some((row) => row.key === it.key)
+        (it) => (it.kind === "launch" || it.kind === "compaction") && !fromMessages.some((row) => row.key === it.key)
       );
       return {
         ...state,
         items: reconcileItems(state.items, [...fromMessages, ...preserved]),
-        streaming: false,
-        steering: [],
-        followUp: [],
+        streaming: state.streaming,
+        steering: state.steering,
+        followUp: state.followUp,
+        roomTurn: null,
       };
     }
     case "local-user":
@@ -297,6 +338,13 @@ export function reducer(state: State, action: Action): State {
           },
         ],
       };
+    case "local-user-rollback": {
+      const idx = state.items.findLastIndex((it) => it.kind === "user" && it.optimistic && it.text === action.text);
+      if (idx < 0) return state;
+      const items = state.items.slice();
+      items.splice(idx, 1);
+      return { ...state, items };
+    }
     case "dialog-dismiss":
       return { ...state, dialogs: state.dialogs.filter((d) => d.id !== action.id) };
     case "toast": {
@@ -316,8 +364,25 @@ function applyEvent(state: State, ev: any): State {
     case "agent_start":
       return { ...state, streaming: true };
 
-    case "agent_settled":
-      return { ...state, streaming: false, settledNonce: state.settledNonce + 1 };
+    case "agent_settled": {
+      const items = state.items.slice();
+      let needsAbortedNotice = false;
+      for (let i = items.length - 1; i >= 0; i--) {
+        const it = items[i];
+        if (it.kind === "assistant" && (it as any).streaming) {
+          items[i] = { ...(it as any), streaming: false };
+          needsAbortedNotice = true;
+          break;
+        }
+        if (it.kind === "assistant" || it.kind === "user") break;
+      }
+      let next: State = { ...state, items, streaming: false, settledNonce: state.settledNonce + 1, roomTurn: null };
+      if (needsAbortedNotice && (ev as any)?.aborted) {
+        next = withToast(next, "warning", "Chat aborted");
+        next.items = [...next.items, { kind: "system", key: nextKey("s"), text: "Chat aborted, no response completed." }];
+      }
+      return next;
+    }
 
     case "babylon_recap": {
       const text = ev.recap?.text;
@@ -354,6 +419,32 @@ function applyEvent(state: State, ev: any): State {
       return { ...state, items };
     }
 
+    case "babylon_launch_update": {
+      const { runId, status, log } = ev;
+      if (!runId) return state;
+      const items = state.items.slice();
+      const idx = items.findIndex((it) => it.kind === "launch" && it.runId === runId);
+      if (idx < 0) return state;
+      const current = items[idx];
+      if (current.kind !== "launch") return state;
+      // Only a terminal status overrides; progress events just refresh the log.
+      const nextStatus = status != null && (status === "completed" || status === "failed" || status === "stopped") ? status : current.status;
+      items[idx] = { ...current, status: nextStatus, log: log ?? current.log };
+      return { ...state, items };
+    }
+
+    case "babylon_room_turn": {
+      // Group-room presence ("@x is thinking…"). Live-only: replied, passed,
+      // stopped, and settled all clear it; rebuilds clear it too.
+      const phase = (ev as any)?.phase;
+      const handle = typeof (ev as any)?.handle === "string" ? (ev as any).handle : "";
+      if (phase === "started" && handle) {
+        return { ...state, roomTurn: { handle, phase: "started" } };
+      }
+      if (!state.roomTurn) return state;
+      return { ...state, roomTurn: null };
+    }
+
     case "pideck_history_changed":
       return { ...state, settledNonce: state.settledNonce + 1 };
 
@@ -368,16 +459,32 @@ function applyEvent(state: State, ev: any): State {
           ],
         };
       }
-      if (m?.role === "custom" && m.display && (m.customType === "babylon_subagent_activity" || m.customType === "babylon_thread_activity")) {
-        return { ...state, items: [...state.items, { kind: "system", key: nextKey("c"), text: textOf(m.content) }] };
+      if (m?.role === "custom" && (m.customType === "babylon_subagent_activity" || m.customType === "babylon_thread_activity")) {
+        // These activity pings are surfaced on the launch card via
+        // babylon_launch_update (single surface, no duplicate chat line).
+        return state;
+      }
+      if (m?.role === "custom" && m.customType === "babylon_bot_message") {
+        // Bot-to-bot relay lines have no launch card, render them live.
+        const text = textOf(m.content).trim();
+        if (text) {
+          return {
+            ...state,
+            items: [...state.items, { kind: "system", key: nextKey("s"), text }],
+          };
+        }
+        return state;
       }
       if (m?.role === "user") {
         const text = textOf(m.content).trim();
+        // Room director prompts never render as user bubbles (the rebuild
+        // path collapses them the same way).
+        if (text && parseRoomTurn(text)) return state;
         if (text) {
           const last = state.items[state.items.length - 1];
           // The composer adds an optimistic row; the authoritative message_start
           // for the same prompt must not render a duplicate copy.
-          if (last?.kind === "user" && last.text === text && last.key.startsWith("u")) {
+          if (last?.kind === "user" && last.text === text && last.optimistic) {
             const authoritative = messagesToItems([m])[0];
             if (authoritative?.kind === "user" && authoritative.images?.length && !last.images?.length) {
               const items = state.items.slice();
@@ -504,19 +611,80 @@ function applyEvent(state: State, ev: any): State {
       return state;
     }
 
-    case "compaction_start":
-      return withToast(state, "info", "Compacting context…");
+    case "compaction_start": {
+      const compactionItem: Extract<ChatItem, { kind: "compaction" }> = {
+        kind: "compaction",
+        key: nextKey("compaction"),
+        status: "compacting",
+        reason: ev.reason ?? "auto",
+      };
+      return {
+        ...withToast(state, "info", "Compacting context…"),
+        items: [...state.items, compactionItem],
+      };
+    }
 
     case "compaction_end": {
-      if (ev.aborted) return withToast(state, "warning", "Compaction aborted");
-      if (ev.errorMessage) return withToast(state, "error", `Compaction failed: ${ev.errorMessage}`);
+      const items = state.items.slice();
+      let idx = -1;
+      for (let i = items.length - 1; i >= 0; i--) {
+        if (items[i].kind === "compaction" && (items[i] as Extract<ChatItem, { kind: "compaction" }>).status === "compacting") {
+          idx = i;
+          break;
+        }
+      }
+      let nextState: State = state;
+      if (idx >= 0) {
+        const cur = items[idx] as Extract<ChatItem, { kind: "compaction" }>;
+        if (ev.aborted) {
+          items[idx] = { ...cur, status: "aborted" as const };
+        } else if (ev.errorMessage) {
+          items[idx] = { ...cur, status: "failed" as const, error: ev.errorMessage };
+        } else {
+          items[idx] = { ...cur, status: "compacted" as const, result: ev.result ? { tokensBefore: ev.result.tokensBefore, estimatedTokensAfter: ev.result.estimatedTokensAfter } : undefined };
+        }
+        nextState = { ...state, items };
+      } else {
+        const status = ev.aborted ? ("aborted" as const) : ev.errorMessage ? ("failed" as const) : ("compacted" as const);
+        const compactionItem: Extract<ChatItem, { kind: "compaction" }> = {
+          kind: "compaction",
+          key: nextKey("compaction"),
+          status,
+          reason: ev.reason ?? "auto",
+          result: ev.result ? { tokensBefore: ev.result.tokensBefore, estimatedTokensAfter: ev.result.estimatedTokensAfter } : undefined,
+          error: ev.errorMessage,
+        };
+        nextState = { ...state, items: [...state.items, compactionItem] };
+      }
+      if (ev.aborted) return withToast(nextState, "warning", "Compaction aborted");
+      if (ev.errorMessage) return withToast(nextState, "error", `Compaction failed: ${ev.errorMessage}`);
       const r = ev.result;
       return withToast(
-        state,
+        nextState,
         "info",
-        r
-          ? `Context compacted: ${fmtTokens(r.tokensBefore)} → ~${fmtTokens(r.estimatedTokensAfter)} tokens`
-          : "Context compacted"
+        r ? `Context compacted: ${fmtTokens(r.tokensBefore)} → ~${fmtTokens(r.estimatedTokensAfter)} tokens` : "Context compacted"
+      );
+    }
+
+    case "babylon_handoff_consumed": {
+      // A handoff summary was installed as a compaction boundary in the live
+      // chat. Renders with the CompactionCard vocabulary (context boundary,
+      // not a message) and survives rebuilds like any settled compaction row.
+      const sourceName = typeof ev.sourceName === "string" && ev.sourceName ? ev.sourceName : "history";
+      const item: Extract<ChatItem, { kind: "compaction" }> = {
+        kind: "compaction",
+        key: nextKey("compaction"),
+        status: "compacted",
+        reason: `handoff from ${sourceName}`,
+        result: {
+          tokensBefore: typeof ev.tokensBefore === "number" ? ev.tokensBefore : undefined,
+          estimatedTokensAfter: typeof ev.estimatedTokensAfter === "number" ? ev.estimatedTokensAfter : undefined,
+        },
+      };
+      return withToast(
+        { ...state, items: [...state.items, item] },
+        "info",
+        `Handoff from ${sourceName} installed`
       );
     }
 
@@ -568,6 +736,7 @@ function sameItem(a: ChatItem, b: ChatItem): boolean {
   if (a.kind === "assistant" && b.kind === "assistant") {
     return (
       a.model === b.model &&
+      a.speaker === b.speaker &&
       !!a.streaming === !!b.streaming &&
       a.blocks.length === b.blocks.length &&
       a.blocks.every((block, index) => {
@@ -590,7 +759,10 @@ function sameItem(a: ChatItem, b: ChatItem): boolean {
   if (a.kind === "system" && b.kind === "system") return a.text === b.text;
   if (a.kind === "recap" && b.kind === "recap") return a.text === b.text && a.at === b.at;
   if (a.kind === "launch" && b.kind === "launch") {
-    return a.runId === b.runId && a.status === b.status && a.label === b.label;
+    return a.runId === b.runId && a.status === b.status && a.label === b.label && a.log === b.log;
+  }
+  if (a.kind === "compaction" && b.kind === "compaction") {
+    return a.status === b.status && a.reason === b.reason && a.error === b.error && cheapSig(a.result) === cheapSig(b.result);
   }
   return false;
 }
@@ -614,9 +786,8 @@ function cheapSig(value: any): string {
   return "?";
 }
 
+import { formatTokens as formatTokensRaw } from "./lib/usageFormat";
 export function fmtTokens(n?: number): string {
   if (n == null) return "0";
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
-  if (n >= 1000) return (n / 1000).toFixed(1) + "k";
-  return String(n);
+  return formatTokensRaw(n);
 }

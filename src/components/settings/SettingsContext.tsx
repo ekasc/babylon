@@ -2,7 +2,10 @@ import { useMemo, useState } from "react";
 import type { PiSettings } from "../../bridge";
 import { SettingSection } from "./SettingSection";
 import { filterModels, getProviders } from "../../lib/model-helpers";
+import { filterModelsEffect, getProvidersEffect } from "../../lib/model-helpers.effect";
+import * as Effect from "effect/Effect";
 import { formatNumber } from "../../lib/format";
+import { formatNumberEffect } from "../../lib/format.effect";
 import { modelSupportsImages } from "../../../electron/snapcompact/model-profiles";
 
 type Mode = "summary" | "automatic" | "snapcompact";
@@ -47,9 +50,9 @@ export function SettingsContext({
     onSave({ contextWindowOverrides: next });
   };
 
-  const filtered = useMemo(() => filterModels(models, q, providerFilter), [models, q, providerFilter]);
+  const filtered = useMemo(() => Effect.runSync(filterModelsEffect(models, q, providerFilter)), [models, q, providerFilter]);
 
-  const providers = useMemo(() => getProviders(models), [models]);
+  const providers = useMemo(() => Effect.runSync(getProvidersEffect(models)), [models]);
   const modifiedCount = Object.keys(overrides).length;
 
   return (
@@ -105,9 +108,9 @@ export function SettingsContext({
                   return (
                     <tr key={key} className={`border-t border-line/20 ${isModified ? "bg-amber-500/5" : ""}`}>
                       <td className="px-2 py-1.5"><span className="block truncate max-w-[260px]">{m.name ?? m.id}</span><span className="font-mono text-[11px] text-dim">{key}</span></td>
-                      <td className="px-2 py-1.5 text-right font-mono text-dim">{formatNumber(m.contextWindow)}</td>
+                      <td className="px-2 py-1.5 text-right font-mono text-dim">{Effect.runSync(formatNumberEffect(m.contextWindow))}</td>
                       <td className="px-2 py-1.5 text-right"><input type="number" inputMode="numeric" min={0} placeholder="—" value={value} onChange={(e) => setDraft((d) => ({ ...d, [key]: e.target.value }))} onBlur={(e) => commit(m.provider, m.id, e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }} className="settings-input w-[120px] text-right" aria-label={`Override for ${key}`} /></td>
-                      <td className="px-2 py-1.5 text-right font-mono">{formatNumber(effective(m))}</td>
+                      <td className="px-2 py-1.5 text-right font-mono">{Effect.runSync(formatNumberEffect(effective(m)))}</td>
                       <td className="px-2 py-1.5 text-right">{isModified ? <button onClick={() => { const next = { ...overrides }; delete next[key]; onSave({ contextWindowOverrides: next }); setDraft((d) => { const c = { ...d }; delete c[key]; return c; }); }} className="text-[11px] text-dim hover:text-fg">↺</button> : null}</td>
                     </tr>
                   );

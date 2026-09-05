@@ -164,7 +164,6 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
           try {
             if (sm?.buildContextEntries) return sm.buildContextEntries();
             if (sm?.getBranch) return sm.getBranch();
-            if (sm?.getEntries) return sm.getEntries();
           } catch {}
           return [];
         };
@@ -294,11 +293,7 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
       const markerIndex = event.messages.findIndex(
         (m: any) => m?.role === "compactionSummary" && m?.summary === entry.summary,
       );
-      console.log(`[snapcompact] context: markerIndex=${markerIndex} eventMessages=${event.messages.length} entrySummary=${entry.summary.slice(0,60)} fbLen=${fb?.length}`);
-      if (markerIndex < 0) {
-        console.log(`[snapcompact] context: marker not found, event first 3:`, event.messages.slice(0,3).map((m:any)=>({role:m.role, summary:m.summary?.slice(0,30)})));
-        return undefined;
-      }
+      if (markerIndex < 0) return undefined;
       const before = event.messages.slice(0, markerIndex);
       const after = event.messages.slice(markerIndex + 1);
       // If the active branch was compacted with Snapcompact, the durable
@@ -315,7 +310,6 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
         if (!fb) return undefined;
         return { messages: [...before, { role: "user", content: [{ type: "text", text: fb }] }, ...after] };
       }
-      console.log(`[snapcompact] context: found entry ${generationId} archive=${archive.compactionGenerationId} sessionId=${sessionId} archiveSessionId=${archive.sessionId} version=${archive.version} frames=${archive.frames.length} mode=${mode} model=${model?.provider}/${model?.id} input=${(model as any)?.input}`);
       const decision = pickStrategy({
         model,
         mode,
@@ -323,7 +317,6 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
         archiveProducible: true,
         archiveMatchesSession: archive.sessionId === sessionId,
       });
-      console.log(`[snapcompact] context decision: strategy=${decision.strategy} reason=${decision.reason} supportsImages=${modelSupportsImages(model as any)}`);
       if (decision.strategy !== "snapcompact") {
         if (fb) return { messages: [...before, { role: "user", content: [{ type: "text", text: fb }] }, ...after] };
         return undefined;

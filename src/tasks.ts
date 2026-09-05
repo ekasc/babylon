@@ -1,3 +1,7 @@
+import { nextTerminalId } from "./lib/terminalLabels";
+import { nextTerminalIdEffect } from "./lib/terminalLabels.effect";
+import * as Effect from "effect/Effect";
+
 // Task-Owned Worktrees model for Parallel Work.
 //
 // A parallel implementation task owns a Pi session, a git branch, a git
@@ -97,6 +101,13 @@ export function addTerminal(registry: TaskRegistry, id: string, terminalId: stri
   const task = registry.tasks[id];
   if (!task || task.terminalIds.includes(terminalId)) return registry;
   return updateTask(registry, id, { terminalIds: [...task.terminalIds, terminalId] });
+}
+
+export function allocateTerminal(registry: TaskRegistry, id: string): { registry: TaskRegistry; terminalId: string } | null {
+  const task = registry.tasks[id];
+  if (!task) return null;
+  const terminalId = Effect.runSync(nextTerminalIdEffect(task.terminalIds));
+  return { registry: addTerminal(registry, id, terminalId), terminalId };
 }
 
 export function removeTerminal(registry: TaskRegistry, id: string, terminalId: string): TaskRegistry {

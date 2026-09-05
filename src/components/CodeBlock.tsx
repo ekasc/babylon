@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { cachedHighlight, highlight } from "../lib/highlight";
+import { cachedHighlightEffect, highlightEffect } from "../lib/highlight.effect";
+import * as Effect from "effect/Effect";
 
 interface Props {
   code: string;
@@ -13,24 +15,23 @@ interface Props {
 }
 
 export default function CodeBlock({ code, lang, bare, collapsed: startCollapsed, annotations = [] }: Props) {
-  const [html, setHtml] = useState<string | null>(() => cachedHighlight(code, lang));
+  const [html, setHtml] = useState<string | null>(() => Effect.runSync(cachedHighlightEffect(code, lang)));
   const [copied, setCopied] = useState(false);
   const [open, setOpen] = useState(startCollapsed ? false : true);
   const [lineToast, setLineToast] = useState<number | null>(null);
 
   useEffect(() => {
-    if (cachedHighlight(code, lang) != null) return; // nothing to re-render
+    if (Effect.runSync(cachedHighlightEffect(code, lang)) != null) return; // nothing to re-render
     let alive = true;
-    // Small debounce: streaming markdown churns code blocks per delta.
     const timer = setTimeout(() => {
-      highlight(code, lang)
+      Effect.runPromise(highlightEffect(code, lang))
         .then((h) => {
           if (alive) setHtml(h);
         })
         .catch(() => {
           if (alive) setHtml(null);
         });
-    }, 120);
+    }, 16);
     return () => {
       alive = false;
       clearTimeout(timer);
@@ -94,8 +95,9 @@ export default function CodeBlock({ code, lang, bare, collapsed: startCollapsed,
     );
   }
 
+  const isShell = lang ? ["shell", "shellscript", "bash", "sh", "zsh", "console"].includes(lang.toLowerCase()) : false;
   return (
-    <div className="codeblock">
+    <div className={`codeblock ${isShell ? "is-shell" : ""}`} data-language={lang ?? "text"}>
       {!bare && (
         <div className="codeblock-bar">
           <span>{lang ?? "text"}</span>
@@ -105,29 +107,43 @@ export default function CodeBlock({ code, lang, bare, collapsed: startCollapsed,
           </button>
         </div>
       )}
-      {html ? (
-        <div className="codeblock-linewrap">
-          {lines.map((line, i) => {
-            const annotation = annotations.find((a) => a.startsWith(`${i + 1}:`));
-            return (
-              <div
-                key={i}
-                className={`codeblock-line ${lineToast === i ? "is-toast" : ""}`}
-                onClick={(e) => {
-                  if ((e.target as HTMLElement).closest("button")) return;
-                  if (e.altKey || e.metaKey) copyWithContext(line, i);
-                  else copyLine(line, i);
-                }}
-                title="Click to copy · Alt/⌘-Click for ±3 lines"
-              >
-                <span className="codeblock-lineno">{i + 1}</span>
-                <span className="codeblock-linebody" dangerouslySetInnerHTML={{ __html: lineShiki(line) }} />
-                {annotation ? <span className="codeblock-note">// {annotation.slice(annotation.indexOf(":") + 1).trim()}</span> : null}
-              </div>
-            );
-          })}
-        </div>
-      ) : (
+      {html ? (() => {
+          const inner = html.replace(/^<pre[^>]*><code[^>]*>/, "").replace(/<\/code><\/pre>\s*$/, "");
+          let lineHtmls: string[];
+          if (inner.includes('class="line"')) {
+            const rawLines = inner.split("\n");
+            lineHtmls = rawLines.map((l) => {
+              const m = l.match(/^<span class="line">(.*)<\/span>$/);
+              return m ? m[1] : l;
+            });
+          } else {
+            lineHtmls = inner.split("\n");
+          }
+          return (
+            <div className="codeblock-linewrap">
+              {lines.map((line, i) => {
+                const annotation = annotations.find((a) => a.startsWith(`${i + 1}:`));
+                const htmlLine = lineHtmls[i] ?? (line ? lineShiki(line) : " ");
+                return (
+                  <div
+                    key={i}
+                    className={`codeblock-line ${lineToast === i ? "is-toast" : ""}`}
+                    onClick={(e) => {
+                      if ((e.target as HTMLElement).closest("button")) return;
+                      if (e.altKey || e.metaKey) copyWithContext(line, i);
+                      else copyLine(line, i);
+                    }}
+                    title="Click to copy · Alt/⌘-Click for ±3 lines"
+                  >
+                    <span className="codeblock-lineno">{i + 1}</span>
+                    <span className="codeblock-linebody shiki" dangerouslySetInnerHTML={{ __html: htmlLine || " " }} />
+                    {annotation ? <span className="codeblock-note">// {annotation.slice(annotation.indexOf(":") + 1).trim()}</span> : null}
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })() : (
         <pre className="codeblock-fallback">
           {lines.map((line, i) => (
             <div key={i} className="codeblock-line">
@@ -147,7 +163,7 @@ export default function CodeBlock({ code, lang, bare, collapsed: startCollapsed,
 // keep the cost bounded by the line length.
 function lineShiki(line: string): string {
   if (!line) return " ";
-  const cached = cachedHighlight(line);
+  const cached = Effect.runSync(cachedHighlightEffect(line));
   if (cached) {
     // Strip the wrapper <pre><code>…</code></pre> so we can splice just the inner HTML.
     return cached.replace(/^<pre[^>]*><code[^>]*>/, "").replace(/<\/code><\/pre>$/, "");

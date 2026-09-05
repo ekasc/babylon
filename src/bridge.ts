@@ -1,5 +1,14 @@
 import type { Task } from "./tasks";
+import type { Bot, BotGroup, BotPatch, DefaultBot, DefaultBotPatch, NewBotInput, NewGroupInput } from "./bots";
+import type { Handoff } from "./handoff";
 import type { PiSettings } from "./lib/settings-shared";
+
+export interface ProjectSettings {
+  projectPath: string;
+  defaultBot: DefaultBot;
+  memberIds: string[];
+  freeSpeak: boolean;
+}
 
 export interface SessionMeta {
   id: string;
@@ -20,6 +29,9 @@ export interface ProjectGroup {
 }
 
 export interface CommandInfo {
+  /** Invocation token. Skills are namespaced as "skill:<name>", so a skill
+   *  command sends only "/skill:<name>"; the agent reads SKILL.md itself and
+   *  the markdown body is never user-pasted into the transcript. */
   name: string;
   description?: string;
   argumentHint?: string;
@@ -189,7 +201,7 @@ export interface ActivityUpdate {
 }
 
 /* -------------------------------------------------------------------------
-   Workflows (pi-dynamic-workflows extension) — run state contract.
+   Workflows (pi-dynamic-workflows extension), run state contract.
    Runs persist as JSON files at <project cwd>/.pi/workflows/runs/*.json
    (PersistedRunState). The Electron bridge (electron/workflows.ts) polls that
    dir and exposes summaries/details over IPC; these types mirror the on-disk
@@ -235,7 +247,7 @@ export interface WorkflowRunSummary {
   workflowName: string;
   description?: string;
   status: WorkflowRunStatus;
-  /** Owning pi session — absent for legacy/global runs (read-only in GUI). */
+  /** Owning pi session, absent for legacy/global runs (read-only in GUI). */
   sessionId?: string;
   phases: string[];
   currentPhase?: string;
@@ -257,7 +269,7 @@ export interface WorkflowHistoryEntry {
 }
 
 export interface WorkflowAgentDetail extends WorkflowAgentSummary {
-  /** Real run files persist the agent-options object ({ label, phase, tier, prompt }) —
+  /** Real run files persist the agent-options object ({ label, phase, tier, prompt }) ,
       treat as opaque; extract the instruction text for display. */
   prompt?: unknown;
   result?: unknown;
@@ -443,7 +455,35 @@ export interface Bridge {
   getToolOutput(toolCallId: string): Promise<{ content: string; truncated: boolean }>;
   deleteSession(path: string): Promise<void>;
   pickFolder(): Promise<string | null>;
-  openSession(opts: { path?: string; cwd: string; requestId?: number }): Promise<void>;
+  openSession(opts: { path?: string; cwd: string; requestId?: number; botId?: string }): Promise<void>;
+  botsList(): Promise<Bot[]>;
+  botsCreate(input: NewBotInput): Promise<Bot>;
+  botsUpdate(id: string, patch: BotPatch): Promise<Bot>;
+  botsDelete(id: string): Promise<{ removed: boolean }>;
+  botsOpen(id: string): Promise<{ sessionFile: string | null; bot: Bot }>;
+  onBotsUpdate(cb: (bots: Bot[]) => void): () => void;
+  groupsList(): Promise<BotGroup[]>;
+  groupsCreate(input: NewGroupInput): Promise<BotGroup>;
+  groupsUpdate(id: string, patch: { name?: string; memberIds?: string[]; cwd?: string }): Promise<BotGroup>;
+  groupsDelete(id: string): Promise<{ removed: boolean }>;
+  groupsOpen(id: string): Promise<{ sessionFile: string | null; group: BotGroup }>;
+  onGroupsUpdate(cb: (groups: BotGroup[]) => void): () => void;
+  /** Room round driver: sends text, then runs serial member turns (≤3 rounds,
+   *  ≤10 turns). Resolves when the room settles or stops. */
+  groupSend(groupId: string, text: string): Promise<{ rounds: number; turns: number; spoke: number; stopped: boolean }>;
+  /** Bot-to-bot DM: runs one attributed turn in the target's chat and relays
+   *  the reply into the origin as a bot-message line. Idle sessions only. */
+  botsMessage(targetId: string, text: string, fromId?: string): Promise<{ reply: string | null; pass: boolean }>;
+  botsDefaultGet(): Promise<DefaultBot>;
+  botsDefaultSet(input: DefaultBot): Promise<DefaultBot>;
+  projectSettingsGet(cwd: string): Promise<{ settings: ProjectSettings; hash: string }>;
+  projectSettingsMembers(hash: string, memberIds: string[]): Promise<ProjectSettings>;
+  projectSettingsFreespeak(hash: string, on: boolean): Promise<ProjectSettings>;
+  projectDefaultUpdate(hash: string, patch: DefaultBotPatch): Promise<ProjectSettings>;
+  projectDefaultReset(hash: string): Promise<ProjectSettings>;
+  handoffCreate(projectHash: string, sourceFile: string): Promise<Handoff>;
+  handoffList(sourceFile: string): Promise<Handoff[]>;
+  handoffConsume(handoffId: string, liveFile: string): Promise<{ consumedInto: string }>;
 
   prompt(message: string, images?: any[], streamingBehavior?: "steer" | "followUp"): Promise<any>;
   abort(): Promise<any>;
@@ -618,7 +658,7 @@ declare global {
 /**
  * Fail-safe bridge access. If the preload script failed to load (or the
  * renderer is opened outside Electron), `window.pideck` is undefined and the
- * old `export const bridge = window.pideck` made every effect call throw —
+ * old `export const bridge = window.pideck` made every effect call throw ,
  * React then unmounted the whole tree and the window went completely blank
  * (#161616, no UI, no error). Instead we surface the condition explicitly
  * (`bridgeAvailable`) and fall back to a no-op stub so the app can render a
@@ -634,6 +674,31 @@ export const bridge: Bridge = window.pideck ?? {
   deleteSession: () => Promise.reject(new Error("bridge unavailable")),
   pickFolder: () => Promise.resolve(null),
   openSession: () => Promise.resolve(),
+
+  botsList: () => Promise.resolve([]),
+  botsCreate: () => Promise.reject(new Error("bridge unavailable")),
+  botsUpdate: () => Promise.reject(new Error("bridge unavailable")),
+  botsDelete: () => Promise.resolve({ removed: false }),
+  botsOpen: () => Promise.reject(new Error("bridge unavailable")),
+  onBotsUpdate: () => () => {},
+  groupsList: () => Promise.resolve([]),
+  groupsCreate: () => Promise.reject(new Error("bridge unavailable")),
+  groupsUpdate: () => Promise.reject(new Error("bridge unavailable")),
+  groupsDelete: () => Promise.resolve({ removed: false }),
+  groupsOpen: () => Promise.reject(new Error("bridge unavailable")),
+  onGroupsUpdate: () => () => {},
+  groupSend: () => Promise.reject(new Error("bridge unavailable")),
+  botsMessage: () => Promise.reject(new Error("bridge unavailable")),
+  botsDefaultGet: () => Promise.reject(new Error("bridge unavailable")),
+  botsDefaultSet: () => Promise.reject(new Error("bridge unavailable")),
+  projectSettingsGet: () => Promise.reject(new Error("bridge unavailable")),
+  projectSettingsMembers: () => Promise.reject(new Error("bridge unavailable")),
+  projectSettingsFreespeak: () => Promise.reject(new Error("bridge unavailable")),
+  projectDefaultUpdate: () => Promise.reject(new Error("bridge unavailable")),
+  projectDefaultReset: () => Promise.reject(new Error("bridge unavailable")),
+  handoffCreate: () => Promise.reject(new Error("bridge unavailable")),
+  handoffList: () => Promise.reject(new Error("bridge unavailable")),
+  handoffConsume: () => Promise.reject(new Error("bridge unavailable")),
 
   prompt: () => Promise.resolve(),
   abort: () => Promise.resolve(),

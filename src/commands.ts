@@ -1,4 +1,5 @@
 import type { CommandInfo } from "./bridge";
+import { normalizeSearchQuery, scoreQueryMatch } from "./lib/searchRanking";
 
 export function commandTokenAtStart(text: string): string | null {
   if (!text.startsWith("/") || text.includes("\n")) return null;
@@ -7,24 +8,38 @@ export function commandTokenAtStart(text: string): string | null {
 }
 
 export function rankCommands(commands: CommandInfo[], query: string, limit = 20): CommandInfo[] {
-  const needle = query.toLowerCase();
-  return commands
+  const needle = normalizeSearchQuery(query);
+  if (!needle) return commands.slice(0, limit);
+  const ranked = commands
     .map((command, index) => {
-      const name = command.name.toLowerCase();
-      const description = command.description?.toLowerCase() ?? "";
-      let score = -1;
-      if (!needle) score = 10;
-      else if (name === needle) score = 100;
-      else if (name.startsWith(needle)) score = 80;
-      else if (name.split(/[-:]/).some((part) => part.startsWith(needle))) score = 60;
-      else if (name.includes(needle)) score = 40;
-      else if (description.includes(needle)) score = 20;
-      return { command, score, index };
+      const name = normalizeSearchQuery(command.name);
+      const description = normalizeSearchQuery(command.description ?? "");
+      const nameScore = scoreQueryMatch({
+        value: name,
+        query: needle,
+        exactBase: 0,
+        prefixBase: 10,
+        boundaryBase: 20,
+        includesBase: 40,
+        fuzzyBase: 80,
+      });
+      const descScore = description
+        ? scoreQueryMatch({
+            value: description,
+            query: needle,
+            exactBase: 50,
+            includesBase: 60,
+            fuzzyBase: 90,
+          })
+        : null;
+      const score = nameScore !== null ? nameScore : descScore !== null ? descScore + 100 : null;
+      return score !== null ? { command, score, index } : null;
     })
-    .filter((entry) => entry.score >= 0)
-    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .filter((e): e is NonNullable<typeof e> => e !== null)
+    .sort((a, b) => a.score - b.score || a.index - b.index)
     .slice(0, limit)
     .map((entry) => entry.command);
+  return ranked;
 }
 
 export function insertCommand(command: CommandInfo): string {

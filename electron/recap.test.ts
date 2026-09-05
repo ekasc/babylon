@@ -4,14 +4,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RecapStore } from "./recap-store";
 import {
+  buildHandoffPrompt,
   buildRecapPrompt,
   mergeRecaps,
   mergeRecapsIntoWindow,
+  normalizeHandoffText,
   normalizeRecapText,
   pickRecapDelta,
   recapDue,
   recapWorthy,
   RECAP_INTERVAL_MS,
+  transcriptText,
   type Recap,
 } from "./recap";
 
@@ -21,7 +24,7 @@ function entry(id: string, role: string, text: string, ts: string): any {
 
 describe("mergeRecaps interleaving", () => {
   // Regression: when projected messages lacked timestamps, the merge sorted
-  // every recap after every message — a pile of back-to-back "Recap:" lines at
+  // every recap after every message, a pile of back-to-back "Recap:" lines at
   // the tail instead of one recap per turn.
   it("places each recap right after the exchange it summarizes", () => {
     const messages = [
@@ -184,5 +187,33 @@ describe("RecapStore", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("handoff prompt + transcript projection", () => {
+  it("projects user/assistant text and drops director machinery", () => {
+    const text = transcriptText([
+      { role: "user", content: "fix the login bug" },
+      { role: "user", content: "[Room turn] @brain, respond briefly in your voice to the room above (or reply exactly PASS if you have nothing new)." },
+      { role: "assistant", content: [{ type: "text", text: "done" }, { type: "thinking", thinking: "hmm" }] },
+      { role: "toolResult", content: "noise" },
+    ]);
+    expect(text).toContain("fix the login bug");
+    expect(text).toContain("done");
+    expect(text).not.toContain("Room turn");
+    expect(text).not.toContain("noise");
+  });
+
+  it("builds a structured handoff prompt in the author's voice", () => {
+    const prompt = buildHandoffPrompt("user: hi", { name: "Helper", persona: "Be terse." });
+    expect(prompt).toContain("HANDOFF for Helper");
+    expect(prompt).toContain("## Goal");
+    expect(prompt).toContain("## Open loops");
+    expect(prompt).toContain("Be terse.");
+  });
+
+  it("normalizes handoff markdown with caps", () => {
+    expect(normalizeHandoffText("   ")).toBeNull();
+    expect(normalizeHandoffText("## Goal\n\n\ndone")).toBe("## Goal\n\ndone");
   });
 });
