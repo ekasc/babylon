@@ -1,6 +1,4 @@
 import { nextTerminalId } from "./lib/terminalLabels";
-import { nextTerminalIdEffect } from "./lib/terminalLabels.effect";
-import * as Effect from "effect/Effect";
 
 // Task-Owned Worktrees model for Parallel Work.
 //
@@ -12,7 +10,7 @@ import * as Effect from "effect/Effect";
 
 export type TaskStatus = "proposed" | "running" | "paused" | "completed" | "failed" | "cancelled";
 
-export interface Task {
+export type Task = {
   id: string;
   title: string;
   status: TaskStatus;
@@ -106,7 +104,7 @@ export function addTerminal(registry: TaskRegistry, id: string, terminalId: stri
 export function allocateTerminal(registry: TaskRegistry, id: string): { registry: TaskRegistry; terminalId: string } | null {
   const task = registry.tasks[id];
   if (!task) return null;
-  const terminalId = Effect.runSync(nextTerminalIdEffect(task.terminalIds));
+  const terminalId = nextTerminalId(task.terminalIds);
   return { registry: addTerminal(registry, id, terminalId), terminalId };
 }
 

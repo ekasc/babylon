@@ -79,7 +79,7 @@ function DialogCard({
       className="operator-popover pointer-events-auto w-full max-w-md p-4"
     >
       <h2 id={`dialog-title-${dialog.id}`} className="text-[14px] font-semibold tracking-tight break-words">{dialog.title ?? "Extension request"}</h2>
-      {dialog.message && <div className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md border border-line/60 bg-inset/40 px-3 py-2 text-[12.5px] leading-[1.6] text-dim">{dialog.message}</div>}
+      {dialog.message && <div className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md border border-line/60 bg-inset/40 px-3 py-2 text-[13px] leading-[1.6] text-dim">{dialog.message}</div>}
 
       <div className="mt-3">
         {dialog.method === "select" && (
@@ -98,12 +98,12 @@ function DialogCard({
 
         {dialog.method === "confirm" && (
           <div className="flex justify-end gap-2">
-            <button onClick={cancel} className="rounded-lg border border-line px-3 py-1.5 text-[12.5px]">
+            <button onClick={cancel} className="rounded-lg border border-line px-3 py-1.5 text-[13px]">
               Cancel
             </button>
             <button
               onClick={() => void respond({ confirmed: true })}
-              className="rounded-lg bg-accent px-3 py-1.5 text-[12.5px] font-semibold text-bg"
+              className="rounded-lg bg-accent px-3 py-1.5 text-[13px] font-semibold text-bg"
             >
               Confirm
             </button>
@@ -131,12 +131,12 @@ function DialogCard({
               />
             )}
             <div className="flex justify-end gap-2">
-              <button onClick={cancel} className="rounded-lg border border-line px-3 py-1.5 text-[12.5px]">
+              <button onClick={cancel} className="rounded-lg border border-line px-3 py-1.5 text-[13px]">
                 Cancel
               </button>
               <button
                 onClick={() => void respond({ value })}
-                className="rounded-lg bg-accent px-3 py-1.5 text-[12.5px] font-semibold text-bg"
+                className="rounded-lg bg-accent px-3 py-1.5 text-[13px] font-semibold text-bg"
               >
                 Submit
               </button>

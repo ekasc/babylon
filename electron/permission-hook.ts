@@ -53,12 +53,12 @@ export function installAgentGuards(
 
     const action = mapToolToAction(ctx?.toolCall?.name ?? "", ctx?.args, opts.cwd);
     if (action) {
-      const result = opts.controller.evaluate(action);
+      const result = opts.controller.evaluate(action, opts.sessionId);
       if (result.decision === "deny") {
         return { block: true, reason: result.reason ?? "Blocked by Babylon permission policy" };
       }
       if (result.decision === "ask") {
-        const allowed = await opts.controller.requestApproval(action, result.risk ?? "uncertain");
+        const allowed = await opts.controller.requestApproval(action, result.risk ?? "uncertain", opts.sessionId);
         if (!allowed) return { block: true, reason: "Denied by user approval" };
       }
     }

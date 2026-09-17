@@ -1,0 +1,12 @@
+{
+  "ts": "2026-08-31T04:44:00.935308+00:00",
+  "sessionFile": "/Users/ekassinghchhabra/.pi/agent/sessions/--Users-ekassinghchhabra-Projects-native--/2026-08-31T00-21-53-924Z_01a05531-ac84-7491-937d-278dabf032dd.jsonl",
+  "lines": 1180,
+  "totalChars": 10896822,
+  "description": "Current context snapshot for testing summary vs snapcompact",
+  "model": "opencode-go/muse-spark-1.2-contributor",
+  "contextWindow": 1048576,
+  "tokensBefore": 676795,
+  "firstKept": "f5cd64de",
+  "note": "Manual snapshot after clearing previous snapcompact and applying 10M budget fix"
+}

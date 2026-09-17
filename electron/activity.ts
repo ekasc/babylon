@@ -143,6 +143,12 @@ export class ActivityBridge {
     return this.last;
   }
 
+  /** Last published snapshot without forcing a rescan. The registry reads
+   *  this so aggregate pushes never flap on bridges that haven't polled. */
+  snapshot(): ActivityUpdate {
+    return this.last;
+  }
+
   async refresh(notify = true): Promise<void> {
     const [threadScan, subagentScan] = await Promise.all([this.scanThreads(), this.scanSubagents()]);
     const signature = `${threadScan.signature}|${subagentScan.signature}`;
@@ -361,5 +367,94 @@ async function readTail(path: string, maxBytes: number): Promise<string> {
     return buffer.toString("utf8", 0, bytesRead);
   } finally {
     await handle.close();
+  }
+}
+
+/**
+ * Process-wide activity observation, keyed by project.
+ *
+ * Foreground navigation must never stop, hide, or re-scope tracking: one
+ * ActivityBridge lives per project ever opened, keeps its own poll rhythm
+ * (the disk scan IS the authoritative lifecycle signal for file-backed
+ * thread/subagent state — there is no push channel for their completion),
+ * and the renderer always receives the aggregate across every tracked
+ * project. Entries disappear only when a bridge's own snapshot drops them
+ * (completion, abort, deletion) — never because another project was opened.
+ */
+export class ActivityRegistry {
+  private readonly bridges = new Map<string, ActivityBridge>();
+  private activeCwd: string | null = null;
+
+  constructor(
+    private readonly options: {
+      pollIntervalMs?: number;
+      resolveParentSessionFile?: (sessionId: string) => Promise<string | null>;
+      onUpdate: (update: ActivityUpdate) => void;
+    }
+  ) {}
+
+  /** Foreground a project for tracking. Creates its bridge on first sight;
+   *  never destroys or resets any other project's bridge. */
+  ensure(cwd: string): ActivityBridge | null {
+    if (!cwd) return null;
+    this.activeCwd = cwd;
+    let bridge = this.bridges.get(cwd);
+    if (!bridge) {
+      bridge = new ActivityBridge({
+        cwd,
+        pollIntervalMs: this.options.pollIntervalMs,
+        resolveParentSessionFile: this.options.resolveParentSessionFile,
+        onUpdate: () => this.publish(),
+      });
+      this.bridges.set(cwd, bridge);
+      bridge.start();
+    }
+    return bridge;
+  }
+
+  tracked(): string[] {
+    return [...this.bridges.keys()];
+  }
+
+  /** Aggregate snapshot across every tracked project (stable entry identity:
+   *  thread ids and subagent run ids are globally unique). */
+  snapshot(): ActivityUpdate {
+    const threads: ThreadActivity[] = [];
+    const subagents: SubagentActivity[] = [];
+    for (const bridge of this.bridges.values()) {
+      const snap = bridge.snapshot();
+      threads.push(...snap.threads);
+      subagents.push(...snap.subagents);
+    }
+    return { threads, subagents };
+  }
+
+  publish(): void {
+    this.options.onUpdate(this.snapshot());
+  }
+
+  /** Sub-second transient rows (subagent tool start/end) belong to the live
+   *  stream, which always runs under the foregrounded project; the persisted
+   *  records surface through each project's own poll. Routing them everywhere
+   *  would duplicate the same pending entry once per tracked project. */
+  observeAgentEvent(event: any): void {
+    if (!this.activeCwd) return;
+    this.bridges.get(this.activeCwd)?.observeAgentEvent(event);
+  }
+
+  /** Force every tracked project to rescan (after control actions). */
+  async refreshAll(): Promise<void> {
+    await Promise.all([...this.bridges.values()].map((bridge) => bridge.refresh()));
+  }
+
+  async listAll(): Promise<ActivityUpdate> {
+    await this.refreshAll();
+    return this.snapshot();
+  }
+
+  disposeAll(): void {
+    for (const bridge of this.bridges.values()) bridge.dispose();
+    this.bridges.clear();
+    this.activeCwd = null;
   }
 }

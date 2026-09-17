@@ -1,8 +1,7 @@
-import { memo, useEffect, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import type { ChatItem } from "../store";
 import { bridge, type HistoryTurn } from "../bridge";
 import { parseSkillRef } from "../lib/skillRef";
-import CodeBlock from "./CodeBlock";
 import Markdown from "./Markdown";
 import BashCard from "./BashCard";
 
@@ -12,7 +11,7 @@ export const UserMessage = memo(function UserMessage({ item, historyTurn, rollba
   const [expandSkill, setExpandSkill] = useState(false);
   return (
     <article className={`conversation-user group/user relative ${item.optimistic ? "conversation-user-sent" : ""}`}>
-      <div className="whitespace-pre-wrap text-[15px] leading-[1.55]">
+      <div className="whitespace-pre-wrap text-[length:var(--chat-r-15)] leading-[1.55]">
       {item.images && item.images.length > 0 && (
         <span className="mb-3 flex flex-wrap gap-2">
           {item.images.map((src, i) => (
@@ -29,17 +28,17 @@ export const UserMessage = memo(function UserMessage({ item, historyTurn, rollba
       )}
       {skillRef ? (
         <span className="inline-flex flex-col gap-1.5">
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-line bg-inset px-2.5 py-1 font-mono text-[12px] leading-none text-dim">
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-line bg-inset px-2.5 py-1 text-[11px] leading-none text-dim">
             <span className="h-1.5 w-1.5 rounded-full bg-accent" aria-hidden />
             /skill:{skillRef.name}
           </span>
           {skillRef.full ? (
             <>
-              <button onClick={() => setExpandSkill((v) => !v)} className="self-start rounded-full px-1.5 py-0.5 text-[11px] text-dim hover:bg-line hover:text-fg">{expandSkill ? "hide" : "show"} SKILL.md</button>
-              {expandSkill ? <span className="block max-h-64 overflow-auto rounded-lg border border-line bg-inset/50 px-3 py-2 font-mono text-[12px] leading-5">{item.text}</span> : null}
+              <button onClick={() => setExpandSkill((v) => !v)} className="self-start rounded-full px-1.5 py-0.5 text-[length:var(--chat-r-11)] text-dim hover:bg-line hover:text-fg">{expandSkill ? "hide" : "show"} SKILL.md</button>
+              {expandSkill ? <span className="block max-h-64 overflow-auto rounded-lg border border-line bg-inset/50 px-3 py-2 font-mono text-[length:var(--code-font)] leading-[1.55]">{item.text}</span> : null}
             </>
           ) : afterChip ? (
-            <span className="whitespace-pre-wrap text-[15px] leading-[1.55]">{afterChip}</span>
+            <span className="whitespace-pre-wrap text-[length:var(--chat-r-15)] leading-[1.55]">{afterChip}</span>
           ) : null}
         </span>
       ) : item.text}
@@ -69,60 +68,89 @@ const TextBlock = memo(function TextBlock({ text, streaming }: { text: string; s
 
 export const AssistantMessage = memo(function AssistantMessage({ item, hideThinking = false }: { item: Extract<ChatItem, { kind: "assistant" }>; hideThinking?: boolean }) {
   const blocks = hideThinking ? item.blocks.filter((b) => b.type === "text") : item.blocks;
+  // Non-streaming holds every delta back until message_end, so the article
+  // would otherwise sit visually empty for the whole run. Show an explicit,
+  // announced in-flight row instead of a bare aria-hidden caret.
+  const inFlight = !!item.streaming && item.blocks.length === 0;
+  const [elapsed, setElapsed] = useState(0);
+  const startedAt = useRef<number | null>(null);
+  useEffect(() => {
+    if (!inFlight) return;
+    if (startedAt.current == null) startedAt.current = Date.now();
+    const tick = () => setElapsed(Math.floor((Date.now() - (startedAt.current as number)) / 1000));
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, [inFlight]);
   const lastTextIdx = (() => {
     for (let i = blocks.length - 1; i >= 0; i--) if (blocks[i].type === "text" && blocks[i].text.trim()) return i;
     return -1;
   })();
   const hasPreceding = lastTextIdx > 0 && blocks.slice(0, lastTextIdx).some((b) => b.type === "thinking" || b.text.trim());
   return (
-    <article className="conversation-assistant" style={{ ["viewTransitionName" as any]: `msg-${item.key}` } as any}>
+    <article className="conversation-assistant" aria-busy={inFlight || undefined}>
       <div className="flex flex-col gap-3">
       {blocks.map((b, i) => {
         const isLastText = i === lastTextIdx;
         const showDivider = isLastText && hasPreceding && !item.streaming;
         return b.type === "text" ? (
-          <div key={i} className="text-[15px] leading-[1.68]">
+          <div key={i} className="text-[length:var(--chat-r-15)] leading-[1.68]">
             {showDivider ? <hr className="assistant-divider" /> : null}
             <TextBlock text={b.text} streaming={!!item.streaming && i === item.blocks.length - 1} />
           </div>
         ) : (
-          <Thinking key={i} text={b.text} open={!!item.streaming} />
+          <Thinking key={i} text={b.text} streaming={!!item.streaming} />
         );
       })}
-      {item.streaming && <span aria-hidden="true" className="h-4 w-[2px] animate-pulse bg-accent" />}
+      {inFlight ? (
+        <div role="status" aria-live="polite" className="flex items-center gap-2 text-[12px] text-dim">
+          <span className="thinking-dot is-pulse" aria-hidden />
+          <span>Working{elapsed > 0 ? ` · ${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, "0")}` : "…"}</span>
+        </div>
+      ) : item.streaming ? (
+        <span aria-hidden="true" className="h-4 w-[2px] animate-pulse bg-accent" />
+      ) : null}
       </div>
     </article>
   );
 });
 
-function Thinking({ text, open }: { text: string; open: boolean }) {
-  const [expanded, setExpanded] = useState(open);
-  useEffect(() => {
-    if (open) setExpanded(true);
-  }, [open]);
-  const isStreaming = open;
+function Thinking({ text, streaming }: { text: string; streaming: boolean }) {
+  // Reasoning renders as a single collapsed line by default and never
+  // auto-expands; the full text is one click away. `streaming` only drives
+  // the live pulse, so a run's rationale is always discoverable without
+  // swallowing the transcript.
+  const [expanded, setExpanded] = useState(false);
+  const isStreaming = streaming;
   const firstLine = text.split("\n").find((l) => l.trim()) ?? "";
   const label = firstLine.length > 100 ? firstLine.slice(0, 100) + "…" : firstLine;
+  // The header already shows the first line: the expanded body continues
+  // after it instead of repeating it. Single-line reasoning falls back to
+  // the full text so the body is never empty.
+  const lines = text.split("\n");
+  const firstIdx = lines.findIndex((l) => l.trim());
+  const afterFirst = firstIdx >= 0 ? lines.slice(firstIdx + 1).join("\n").replace(/^\s+/, "") : "";
+  const bodyText = afterFirst ? afterFirst : text;
   return (
     <details
-      className={`thinking-card ${expanded ? "is-open" : ""} ${isStreaming ? "is-streaming" : ""}`}
+      className={`thinking-card ${expanded ? "is-open" : "is-collapsed"} ${isStreaming ? "is-streaming" : ""}`}
       open={expanded}
       onToggle={(e) => setExpanded((e.target as HTMLDetailsElement).open)}
     >
       <summary className="thinking-summary">
         <span className={`thinking-dot ${isStreaming ? "is-pulse" : ""}`} aria-hidden />
-        <span className="thinking-label font-mono">// {label || (isStreaming ? "thinking…" : "thought")}</span>
+        <span className="thinking-label">// {label || (isStreaming ? "thinking…" : "thought")}</span>
         <span className="thinking-hint">{isStreaming ? "Streaming" : expanded ? "Hide" : "Show"}</span>
       </summary>
       <div className="thinking-body">
-        <div className="thinking-content">{text}</div>
+        <div className="thinking-content">{bodyText}</div>
       </div>
     </details>
   );
 }
 
 export const SystemLine = memo(function SystemLine({ text }: { text: string }) {
-  return <p className="conversation-system-in my-4 rounded-md border border-line bg-inset/50 px-3 py-1.5 text-[13px] text-dim">{text}</p>;
+  return <p className="conversation-system-in my-4 rounded-md border border-line bg-inset/50 px-3 py-1.5 text-[length:var(--chat-r-13)] text-dim">{text}</p>;
 });
 
 /** Distinct launch card for a model-spawned subagent / thread / workflow.
@@ -145,21 +173,21 @@ export const LaunchCard = memo(function LaunchCard({ item, onOpen, onControl }: 
         className="flex min-w-0 flex-1 items-center gap-3 text-left"
       >
         <span className="grid h-7 w-7 shrink-0 place-items-center" aria-hidden="true">
-          <span className={`grid h-7 w-7 place-items-center rounded-full text-[11px] font-bold leading-none ${iconBg}`}>
+          <span className={`grid h-7 w-7 place-items-center rounded-full text-[length:var(--chat-r-11)] font-bold leading-none ${iconBg}`}>
             {runKind === "subagent" ? "◈" : runKind === "thread" ? "⬢" : "⬣"}
           </span>
         </span>
         <span className="flex min-w-0 flex-1 flex-col gap-0.5 text-left">
           <span className="flex items-center gap-2">
-            <span className="text-[13px] font-semibold capitalize tracking-tight text-fg">{runKind}</span>
-            <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] font-semibold tracking-wide ${isRunning ? "bg-accent-soft text-accent" : status === "completed" ? "bg-ok/10 text-ok" : status === "failed" ? "bg-err/10 text-err" : "bg-inset text-dim"}`}>
+            <span className="text-[12px] font-semibold capitalize tracking-tight text-fg">{runKind}</span>
+            <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[length:var(--chat-r-11)] font-semibold tracking-wide ${isRunning ? "bg-accent-soft text-accent" : status === "completed" ? "bg-ok/10 text-ok" : status === "failed" ? "bg-err/10 text-err" : "bg-inset text-dim"}`}>
               {isRunning ? <span className="h-3 w-3 animate-spin rounded-full border-2 border-accent border-t-transparent" aria-hidden="true" /> : <span className={`inline-block h-1.5 w-1.5 rounded-full ${dot}`} />}
               {verb}
             </span>
           </span>
-          <span className="truncate font-mono text-[12px] leading-snug text-dim" title={label}>{label}</span>
+          <span className="truncate text-[11px] leading-snug text-dim" title={label}>{label}</span>
           {log ? (
-            <span className="truncate font-mono text-[11px] leading-snug text-dim" title={log}>{log}</span>
+            <span className="truncate font-mono text-[length:var(--chat-r-11)] leading-snug text-dim" title={log}>{log}</span>
           ) : null}
         </span>
       </button>
@@ -168,18 +196,18 @@ export const LaunchCard = memo(function LaunchCard({ item, onOpen, onControl }: 
           type="button"
           onClick={(e) => { e.stopPropagation(); onControl?.(runId, runKind, "stop"); }}
           title={`Stop ${runKind}`}
-          className="flex shrink-0 items-center gap-1 rounded-md border border-err/30 bg-err/10 px-2 py-1 text-[11px] font-semibold text-err transition-colors hover:bg-err/20"
+          className="flex shrink-0 items-center gap-1 rounded-md border border-err/30 bg-err/10 px-2 py-1 text-[length:var(--chat-r-11)] font-semibold text-err transition-colors hover:bg-err/20"
         >
-          <span aria-hidden className="text-[9px] leading-none">■</span> Stop
+          <span aria-hidden className="text-[length:var(--chat-r-10)] leading-none">■</span> Stop
         </button>
       ) : null}
       <button
         type="button"
         onClick={() => onOpen?.(runId, runKind)}
         title={`Open ${runKind} ${runId} in Activity`}
-        className="flex shrink-0 items-center gap-1 text-[12px] font-medium text-accent"
+        className="flex shrink-0 items-center gap-1 text-[11px] font-medium text-accent"
       >
-        Open <span aria-hidden="true" className="text-[10px]">↗</span>
+        Open <span aria-hidden="true" className="text-[length:var(--chat-r-10)]">↗</span>
       </button>
     </div>
   );
@@ -190,8 +218,8 @@ export const LaunchCard = memo(function LaunchCard({ item, onOpen, onControl }: 
 export const RecapLine = memo(function RecapLine({ text }: { text: string }) {
   return (
     <div className="conversation-system-in my-4 rounded-md border border-line bg-inset/60 px-4 py-3">
-      <p className="text-[11px] font-semibold uppercase tracking-wider text-accent">Recap</p>
-      <p className="mt-1.5 whitespace-pre-wrap text-[14px] leading-6">{text}</p>
+      <p className="text-[length:var(--chat-r-11)] font-semibold uppercase tracking-wider text-accent">Recap</p>
+      <p className="mt-1.5 whitespace-pre-wrap text-[length:var(--chat-r-14)] leading-[1.55]">{text}</p>
     </div>
   );
 });
@@ -241,12 +269,13 @@ export function miniPatch(patch: string, maxLines = 6): string {
   return out.join("\n");
 }
 
-export const ToolCard = memo(function ToolCard({ item, staggerMs }: { item: Extract<ChatItem, { kind: "tool" }>; staggerMs?: number }) {
+export const ToolCard = memo(function ToolCard({ item, onDisclosureToggle }: { item: Extract<ChatItem, { kind: "tool" }>; onDisclosureToggle?: () => void }) {
   const [open, setOpen] = useState(false);
   const [fullOutput, setFullOutput] = useState<string | null>(null);
 
   useEffect(() => {
-    if (item.status === "running" || item.status === "error") setOpen(true);
+    // Expanded only for failures; a run in progress never force-opens a card.
+    if (item.status === "error") setOpen(true);
   }, [item.status]);
 
   const patch = item.details?.patch ?? item.details?.diff;
@@ -261,9 +290,9 @@ export const ToolCard = memo(function ToolCard({ item, staggerMs }: { item: Extr
   }
 
   return (
-    <div className={`tool-row ${item.status === "running" ? "is-running" : item.status === "error" ? "is-error" : ""}`} style={staggerMs ? { animationDelay: `${staggerMs}ms` } as any : undefined}>
+    <div className={`tool-row ${item.status === "running" ? "is-running" : item.status === "error" ? "is-error" : ""}`}>
       <button
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => { onDisclosureToggle?.(); setOpen((o) => !o); }}
         className="tool-row-header"
         aria-expanded={open}
       >
@@ -308,16 +337,16 @@ export const ToolCard = memo(function ToolCard({ item, staggerMs }: { item: Extr
 });
 
 /** Collapses a run of consecutive tool calls into one summary row. */
-export const ToolGroup = memo(function ToolGroup({ tools, staggerMs }: { tools: Array<Extract<ChatItem, { kind: "tool" }>>; staggerMs?: number }) {
+export const ToolGroup = memo(function ToolGroup({ tools, onDisclosureToggle }: { tools: Array<Extract<ChatItem, { kind: "tool" }>>; onDisclosureToggle?: () => void }) {
   const [open, setOpen] = useState(false);
   const anyRunning = tools.some((t) => t.status === "running" || t.status === "pending");
   const anyError = tools.some((t) => t.status === "error");
   const aggregate: "running" | "error" | "done" = anyRunning ? "running" : anyError ? "error" : "done";
 
   return (
-    <div className="tool-group" style={staggerMs ? { animationDelay: `${staggerMs}ms` } as any : undefined}>
+    <div className="tool-group">
       <button
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => { onDisclosureToggle?.(); setOpen((o) => !o); }}
         className="tool-group-header"
         aria-expanded={open}
       >
@@ -328,7 +357,7 @@ export const ToolGroup = memo(function ToolGroup({ tools, staggerMs }: { tools: 
       {open ? (
         <div className="tool-group-list">
           {tools.map((t) => (
-            <ToolCard key={t.key} item={t} />
+            <ToolCard key={t.key} item={t} onDisclosureToggle={onDisclosureToggle} />
           ))}
         </div>
       ) : null}

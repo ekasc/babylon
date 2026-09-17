@@ -2,8 +2,8 @@ import type { RuntimeFacade } from "./runtime-facade";
 import type { Task } from "./tasks";
 import type { CompletionContract } from "./completion-contracts";
 import type { HookDefinition } from "./hooks";
-import type { AttentionRegistry, AttentionItem } from "./attention";
-import { connectDaemonClient, type DaemonClient } from "./daemon-client";
+import type { AttentionRegistry } from "./attention";
+import type { DaemonClient } from "./daemon-client";
 
 export function createDaemonRuntime(client: DaemonClient): RuntimeFacade {
   return {
@@ -84,7 +84,7 @@ export function createDaemonRuntime(client: DaemonClient): RuntimeFacade {
     },
     async getMessages() {
       const res = await client.request("pi.getMessages", {});
-      return res.payload as unknown[];
+      return (res.payload as { messages?: unknown[] }).messages ?? [];
     },
     async getToolOutput(id) {
       const res = await client.request("pi.getToolOutput", { toolCallId: id });
@@ -92,7 +92,11 @@ export function createDaemonRuntime(client: DaemonClient): RuntimeFacade {
     },
     async getModels() {
       const res = await client.request("pi.getModels", {});
-      return res.payload as unknown[];
+      return (res.payload as { models?: unknown[] }).models ?? [];
+    },
+    async warmProject(cwd) {
+      const res = await client.request("pi.warmProject", { cwd });
+      return res.payload;
     },
     async setModel(p, id) {
       const res = await client.request("pi.setModel", { provider: p, modelId: id });
@@ -100,7 +104,7 @@ export function createDaemonRuntime(client: DaemonClient): RuntimeFacade {
     },
     async getThinkingLevels() {
       const res = await client.request("pi.getThinkingLevels", {});
-      return res.payload as string[];
+      return (res.payload as { levels?: string[] }).levels ?? [];
     },
     async setThinking(l) {
       const res = await client.request("pi.setThinking", { level: l });
@@ -152,7 +156,7 @@ export function createDaemonRuntime(client: DaemonClient): RuntimeFacade {
     },
     async getForkMessages() {
       const res = await client.request("pi.getForkMessages", {});
-      return res.payload as unknown[];
+      return (res.payload as { messages?: unknown[] }).messages ?? [];
     },
     async fork(e) {
       const res = await client.request("pi.fork", { entryId: e });
@@ -168,7 +172,7 @@ export function createDaemonRuntime(client: DaemonClient): RuntimeFacade {
     },
     async getRecaps(f) {
       const res = await client.request("pi.getRecaps", { sessionFile: f });
-      return res.payload;
+      return (res.payload as { recaps?: unknown }).recaps ?? [];
     },
     async refreshFromDisk(f) {
       const res = await client.request("pi.refreshFromDisk", { sessionFile: f });
@@ -218,7 +222,7 @@ export function createDaemonRuntime(client: DaemonClient): RuntimeFacade {
           }).catch(() => {});
         }
       };
-      return client.onEvent(handler as never);
+      return client.onEvent(handler);
     },
     onAttentionUpdate(cb) {
       const handler = (env: { type: string }) => {
@@ -229,7 +233,7 @@ export function createDaemonRuntime(client: DaemonClient): RuntimeFacade {
           }).catch(() => {});
         }
       };
-      return client.onEvent(handler as never);
+      return client.onEvent(handler);
     },
     onAgentEvent(cb) {
       return client.onEvent((env) => {

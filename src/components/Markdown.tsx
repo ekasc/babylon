@@ -88,7 +88,6 @@ function processMath(text: string): string {
   }
   const inFenceAt = (pos: number) => fences.some(([a, b]) => pos >= a && pos < b);
   let result = "";
-  let j = 0;
   const blockRe = /\$\$([\s\S]+?)\$\$/g;
   let last = 0;
   while ((m = blockRe.exec(out))) {
@@ -99,7 +98,6 @@ function processMath(text: string): string {
   result += out.slice(last);
   const inlineRe = /\$([^$\n]+?)\$/g;
   let result2 = "";
-  let k = 0;
   let last2 = 0;
   while ((m = inlineRe.exec(result))) {
     if (inFenceAt(m.index)) continue;
@@ -157,52 +155,44 @@ function escapeMarkdownCell(text: string): string {
 
 function MarkdownTable({ children, ...props }: React.ComponentProps<"table">) {
   const tableRef = useRef<HTMLTableElement>(null);
-  const [expanded, setExpanded] = useState(false);
-  const [copiedFormat, setCopiedFormat] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(true);
+  const [copied, setCopied] = useState(false);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const handleCopy = (format: "markdown" | "csv") => {
+  const handleCopy = () => {
     const table = tableRef.current;
     if (!table || typeof navigator === "undefined" || !navigator.clipboard) return;
     const rows = [...table.querySelectorAll("tr")].map((tr) =>
       [...tr.querySelectorAll("th, td")].map((cell) => cell.textContent?.trim() ?? "")
     );
     if (!rows.length) return;
-    let textOut = "";
-    if (format === "markdown") {
-      const escaped = rows.map((r) => r.map(escapeMarkdownCell));
-      textOut = escaped.map((r) => `| ${r.join(" | ")} |`).join("\n");
-      const header = escaped[0];
-      if (header) {
-        const separator = `| ${header.map(() => "---").join(" | ")} |`;
-        textOut = `${escaped.map((r) => `| ${r.join(" | ")} |`).join("\n").split("\n")[0]}\n${separator}` + (escaped.length > 1 ? `\n${escaped.slice(1).map((r) => `| ${r.join(" | ")} |`).join("\n")}` : "");
-      }
-    } else {
-      textOut = rows.map((r) => r.map((c) => `"${c.replace(/"/g, '""')}"`).join(",")).join("\n");
+    const escaped = rows.map((r) => r.map(escapeMarkdownCell));
+    let textOut = escaped.map((r) => `| ${r.join(" | ")} |`).join("\n");
+    const header = escaped[0];
+    if (header) {
+      const separator = `| ${header.map(() => "---").join(" | ")} |`;
+      textOut = `${escaped.map((r) => `| ${r.join(" | ")} |`).join("\n").split("\n")[0]}\n${separator}` + (escaped.length > 1 ? `\n${escaped.slice(1).map((r) => `| ${r.join(" | ")} |`).join("\n")}` : "");
     }
     void navigator.clipboard.writeText(textOut).then(() => {
-      setCopiedFormat(format);
+      setCopied(true);
       if (copyTimer.current) clearTimeout(copyTimer.current);
-      copyTimer.current = setTimeout(() => setCopiedFormat(null), 1200);
+      copyTimer.current = setTimeout(() => setCopied(false), 1200);
     }).catch(() => {});
   };
   useEffect(() => () => { if (copyTimer.current) clearTimeout(copyTimer.current); }, []);
   return (
-    <div className="my-3 overflow-hidden rounded-lg border border-line bg-[var(--raised)]" data-expanded={expanded ? "true" : "false"}>
+    <div className="my-3 overflow-hidden rounded-lg border border-line bg-raised" data-expanded={expanded ? "true" : "false"}>
       <div className="overflow-x-auto">
-        <table ref={tableRef} {...props} className="w-full text-[13px]" style={{ border: 0, margin: 0, borderRadius: 0 }}>
+        <table ref={tableRef} {...props} className="w-full text-[length:var(--chat-r-13)]" style={{ border: 0, margin: 0, borderRadius: 0 }}>
           {children}
         </table>
       </div>
-      <div className="flex items-center justify-between border-t border-line bg-inset px-2 py-1">
-        <button onClick={() => setExpanded((v) => !v)} aria-pressed={expanded} className="rounded px-2 py-1 text-[11px] text-dim hover:text-fg">
+      <div className="flex items-center justify-between border-t border-line px-2 py-1">
+        <button onClick={() => setExpanded((v) => !v)} aria-pressed={expanded} className="context-header-button">
           {expanded ? "Collapse cells" : "Expand cells"}
         </button>
         <div className="flex items-center gap-1">
-          <button onClick={() => handleCopy("markdown")} className="rounded px-2 py-1 text-[11px] text-dim hover:text-fg">
-            {copiedFormat === "markdown" ? "Copied" : "Copy Markdown"}
-          </button>
-          <button onClick={() => handleCopy("csv")} className="rounded px-2 py-1 text-[11px] text-dim hover:text-fg">
-            {copiedFormat === "csv" ? "Copied" : "Copy CSV"}
+          <button onClick={handleCopy} className="context-header-button">
+            {copied ? "Copied" : "Copy Markdown"}
           </button>
         </div>
       </div>

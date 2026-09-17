@@ -1,7 +1,8 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import type { CommandInfo, ProjectGroup, SessionMeta } from "../bridge";
+import type { CommandInfo, ProjectGroup } from "../bridge";
 import { buildPaletteIndex, searchPalette, type PaletteResult } from "../paletteSearch";
-import { PiMark } from "./icons";
+import { SearchIcon } from "./icons";
+import { ModalDialog } from "./ui/Dialog";
 
 export type RailFilter =
   | "all"
@@ -103,7 +104,6 @@ export default function CommandPalette({
   const [workerAvailable, setWorkerAvailable] = useState(false);
   const deferred = useDeferredValue(query.trim().toLowerCase());
   const inputRef = useRef<HTMLInputElement>(null);
-  const dialogRef = useRef<HTMLDivElement>(null);
   const workerRef = useRef<Worker | null>(null);
   const queryIdRef = useRef(0);
   const listRef = useRef<HTMLDivElement>(null);
@@ -227,11 +227,9 @@ export default function CommandPalette({
   const end = Math.min(displayItems.length, findFirst(scrollTop + viewportH) + OVERSCAN);
   const virtual = displayItems.slice(start, end);
 
-  useEffect(() => {
-    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    inputRef.current?.focus();
-    return () => previousFocus?.focus();
-  }, []);
+  // Base UI ModalDialog owns focus entry/restoration, Tab trapping,
+  // Escape, and outside-press dismissal. The input keeps Babylon's
+  // ArrowUp/Down/Enter selection model; Escape is handled by the dialog.
   useEffect(() => {
     setSelected(0);
     setScrollTop(0);
@@ -254,39 +252,22 @@ export default function CommandPalette({
   };
 
   return (
-    <div
-      className="fade-in fixed inset-0 z-[70] flex items-start justify-center bg-[var(--scrim)] px-4 pt-[12vh]"
-      onMouseDown={onClose}
+    <ModalDialog
+      onClose={onClose}
+      backdropClassName="fade-in fixed inset-0 z-[70] bg-[var(--scrim)]"
+      viewportClassName="fixed inset-0 z-[70] flex items-start justify-center px-4 pt-[12vh]"
+      popupClassName="command-palette w-full max-w-2xl overflow-hidden"
+      ariaLabel="Command palette"
+      initialFocus={inputRef}
     >
-      <div
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-label="Command palette"
-        className="command-palette w-full max-w-2xl overflow-hidden"
-        onMouseDown={(event) => event.stopPropagation()}
-        onKeyDown={(event) => {
-          if (event.key !== "Tab" || !dialogRef.current) return;
-          const focusable = [
-            ...dialogRef.current.querySelectorAll<HTMLElement>("input, button, [tabindex]:not([tabindex='-1'])"),
-          ];
-          const first = focusable[0];
-          const last = focusable[focusable.length - 1];
-          if ((event.shiftKey && document.activeElement === first) || (!event.shiftKey && document.activeElement === last)) {
-            event.preventDefault();
-            (event.shiftKey ? last : first)?.focus();
-          }
-        }}
-      >
         <div className="flex items-center gap-3 border-b border-line px-4 py-3.5">
-          <PiMark size={18} className="text-accent" />
+          <SearchIcon size={18} className="shrink-0 text-dim" />
           <input
             ref={inputRef}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === "Escape") onClose();
-              else if (event.key === "ArrowDown") {
+              if (event.key === "ArrowDown") {
                 event.preventDefault();
                 if (!rowItems.length) return;
                 setSelected((index) => (index + 1) % rowItems.length);
@@ -300,7 +281,7 @@ export default function CommandPalette({
               }
             }}
             placeholder="Jump to a session, skill, or command…"
-            className="min-w-0 flex-1 bg-transparent text-[16px] outline-none placeholder:text-dim"
+            className="min-w-0 flex-1 bg-transparent text-[16px] outline-none placeholder:text-dim focus-visible:outline-none"
           />
           <kbd className="rounded border border-line bg-inset px-2 py-1 text-[12px] text-dim">Esc</kbd>
         </div>
@@ -375,8 +356,7 @@ export default function CommandPalette({
         <div className="border-t border-line px-4 py-2.5 text-[12px] text-dim">
           ↑↓ Navigate · Enter to open · ⌘K to close
         </div>
-      </div>
-    </div>
+    </ModalDialog>
   );
 }
 

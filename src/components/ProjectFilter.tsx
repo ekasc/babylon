@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
+import { Popover } from "@base-ui/react/popover";
 import { CheckIcon, ChevronIcon } from "./icons";
 
 interface Props {
@@ -9,60 +10,58 @@ interface Props {
 
 export default function ProjectFilter({ projects, value, onChange }: Props) {
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDoc = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+  const rootRef = useRef<HTMLDivElement>(null);
 
   const options = [{ cwd: "all", name: "All projects" }, ...projects];
   const current = options.find((o) => o.cwd === value) ?? options[0];
 
+  // Base UI Popover owns open state, Escape, outside-press dismissal, and
+  // floating placement. Anchored to the root (not the trigger) with the
+  // anchor-width so the list keeps its old full-width `left-0 right-0` look.
   return (
-    <div className="relative" ref={ref}>
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        title={current.name}
-        className="flex min-w-0 items-center gap-1 rounded-md px-1.5 py-1 text-[15px] font-semibold tracking-[-0.01em] hover:bg-inset"
-      >
-        <span className="truncate">{current.name}</span>
-        <ChevronIcon size={13} className={`shrink-0 text-dim transition-transform ${open ? "rotate-180" : ""}`} />
-      </button>
-      {open && (
-        <div className="thread-menu absolute left-0 right-0 z-50 mt-1 max-h-64 overflow-y-auto">
-          {options.map((o) => (
-            <button
-              key={o.cwd}
-              type="button"
-              role="option"
-              aria-selected={o.cwd === value}
-              onClick={() => {
-                onChange(o.cwd);
-                setOpen(false);
-              }}
-              className={`thread-menu-item ${o.cwd === value ? "is-selected" : ""}`}
+    <Popover.Root open={open} onOpenChange={(next) => setOpen(next)}>
+      <div ref={rootRef}>
+        <Popover.Trigger
+          type="button"
+          title={current.name}
+          className="flex min-w-0 items-center gap-1 rounded-md px-1.5 py-1 text-[15px] font-semibold tracking-[-0.01em] hover:bg-inset"
+        >
+          <span className="truncate">{current.name}</span>
+          <ChevronIcon size={13} className={`shrink-0 text-dim transition-transform ${open ? "rotate-180" : ""}`} />
+        </Popover.Trigger>
+        <Popover.Portal>
+          <Popover.Positioner
+            anchor={rootRef}
+            side="bottom"
+            align="start"
+            sideOffset={4}
+            className="z-50"
+          >
+            <Popover.Popup
+              initialFocus={false}
+              style={{ width: "var(--anchor-width)" }}
+              className="thread-menu max-h-64 overflow-y-auto"
             >
-              <span className="truncate">{o.name}</span>
-              {o.cwd === value && <CheckIcon size={14} className="shrink-0 text-accent" />}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
+              {options.map((o) => (
+                <button
+                  key={o.cwd}
+                  type="button"
+                  role="option"
+                  aria-selected={o.cwd === value}
+                  onClick={() => {
+                    onChange(o.cwd);
+                    setOpen(false);
+                  }}
+                  className={`thread-menu-item ${o.cwd === value ? "is-selected" : ""}`}
+                >
+                  <span className="truncate">{o.name}</span>
+                  {o.cwd === value && <CheckIcon size={14} className="shrink-0 text-accent" />}
+                </button>
+              ))}
+            </Popover.Popup>
+          </Popover.Positioner>
+        </Popover.Portal>
+      </div>
+    </Popover.Root>
   );
 }

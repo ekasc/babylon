@@ -2,7 +2,6 @@
 // real compaction boundary (`session_before_compact`) and the
 // transient context projection event (`context`).
 
-import { randomUUID } from "node:crypto";
 import type { CompactionResult, Extension, SourceInfo } from "@earendil-works/pi-coding-agent";
 import { buildArchive, ArchiveBudgetError } from "./build";
 import { modelSupportsImages, profileForModel } from "./model-profiles";

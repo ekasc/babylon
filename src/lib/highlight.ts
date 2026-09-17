@@ -8,19 +8,6 @@
 
 import type { HighlighterCore } from "shiki/core";
 
-const CORE_LANGS = [
-  "typescript",
-  "javascript",
-  "tsx",
-  "jsx",
-  "json",
-  "shellscript",
-  "markdown",
-  "diff",
-  "yaml",
-  "python",
-] as const;
-
 const HEAVY_LANGS: Record<string, () => Promise<unknown>> = {
   c: () => import("shiki/langs/c.mjs"),
   cpp: () => import("shiki/langs/cpp.mjs"),

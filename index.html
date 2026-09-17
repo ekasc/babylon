@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws://127.0.0.1:5173 http://127.0.0.1:5173; font-src 'self' data:; object-src 'none'; base-uri 'self'" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://www.plantuml.com; connect-src 'self' ws://127.0.0.1:5173 http://127.0.0.1:5173; font-src 'self' data:; object-src 'none'; base-uri 'self'" />
     <meta name="theme-color" content="#f4f6fa" media="(prefers-color-scheme: light)" />
     <meta name="theme-color" content="#03050b" media="(prefers-color-scheme: dark)" />
     <title>Babylon</title>
@@ -91,7 +91,7 @@
   <body>
     <div id="root">
       <div id="boot-shell">
-        <div id="boot-shell-card" aria-label="Babylon splash screen">&#960;</div>
+        <div id="boot-shell-card" aria-label="Loading"></div>
       </div>
     </div>
     <script type="module" src="/src/main.tsx"></script>

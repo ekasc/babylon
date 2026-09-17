@@ -18,7 +18,7 @@ describe("babylon daemon protocol", () => {
   });
 
   it("round-trips through serialize/parse", () => {
-    const e = createEnvelope("response", "pong", null, "req-1");
+    const e = createEnvelope("response", "pong", {}, "req-1");
     const parsed = parseEnvelope(serializeEnvelope(e));
     expect(parsed.id).toBe(e.id);
     expect(parsed.inReplyTo).toBe("req-1");
@@ -76,13 +76,15 @@ describe("babylon daemon protocol", () => {
   });
 
   it("createEnvelope enforces the same contract as the parser", () => {
-    expect(() => createEnvelope("response", "pong", null, "")).toThrow(/inReplyTo/);
-    expect(() => createEnvelope("event", "task.created", undefined)).toThrow(/payload/);
-    expect(() => createEnvelope("event", "task.created", 5)).toThrow(/payload/);
+    expect(() => createEnvelope("response", "pong", {}, "")).toThrow(/inReplyTo/);
+    // Non-object payloads cannot reach createEnvelope anymore: its payload
+    // parameter is object-typed, so an array or scalar is a compile error. The
+    // runtime guard still covers the untrusted boundary (arbitrary JSON), which
+    // the parseEnvelope case below exercises.
   });
 
-  it("allows ping/pong with a null payload", () => {
-    const e = createEnvelope("event", "ping", null);
+  it("allows ping/pong without a data payload", () => {
+    const e = createEnvelope("event", "ping", {});
     expect(parseEnvelope(serializeEnvelope(e)).type).toBe("ping");
   });
 
@@ -95,6 +97,6 @@ describe("babylon daemon protocol", () => {
   });
 
   it("keeps the type union in sync with the known types list", () => {
-    expect(KNOWN_MESSAGE_TYPES.length).toBe(83);
+    expect(KNOWN_MESSAGE_TYPES.length).toBe(87);
   });
 });

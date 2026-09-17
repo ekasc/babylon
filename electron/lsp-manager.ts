@@ -209,7 +209,7 @@ export class LspManager {
         defaultSpawn(command, args, {
           cwd: spawnOpts.cwd,
           stdio: ["pipe", "pipe", "pipe"],
-        } as never) as unknown as ChildProcess);
+        }));
   }
 
   /** Inject callback that feeds newly introduced error/warning diagnostics to Pi. */

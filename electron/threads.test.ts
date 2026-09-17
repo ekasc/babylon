@@ -53,7 +53,7 @@ describe("ThreadManager controls", () => {
       threadId,
       message: "change direction",
       delivery: "steer",
-    });
+    }, "019ff998-c4bf-77af-813d-649121d268eb");
     expect(onParentMessage).toHaveBeenCalledWith(
       expect.objectContaining({ threadId }),
       "steer",
@@ -70,7 +70,7 @@ describe("ThreadManager controls", () => {
     const runTool = vi.fn(async () => ({ isError: true, content: [{ type: "text", text: "thread gone" }] }));
     const manager = new ThreadManager({ runTool });
     await expect(manager.control(cwd, "stop", threadId)).rejects.toThrow("thread gone");
-    expect(runTool).toHaveBeenCalledWith("close_thread", expect.objectContaining({ threadId }));
+    expect(runTool).toHaveBeenCalledWith("close_thread", expect.objectContaining({ threadId }), "019ff998-c4bf-77af-813d-649121d268eb");
   });
 });
 

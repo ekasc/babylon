@@ -103,6 +103,7 @@ export type Action =
   | { type: "event"; event: any }
   | { type: "local-user"; text: string; images?: string[] }
   | { type: "local-user-rollback"; text: string }
+  | { type: "notice"; text: string }
   | { type: "dialog-dismiss"; id: string }
   | { type: "toast"; toast: Omit<Toast, "id"> }
   | { type: "toast-dismiss"; id: number };
@@ -345,6 +346,11 @@ export function reducer(state: State, action: Action): State {
       items.splice(idx, 1);
       return { ...state, items };
     }
+    case "notice":
+      return {
+        ...state,
+        items: [...state.items, { kind: "system", key: nextKey("s"), text: action.text }],
+      };
     case "dialog-dismiss":
       return { ...state, dialogs: state.dialogs.filter((d) => d.id !== action.id) };
     case "toast": {
@@ -532,11 +538,19 @@ function applyEvent(state: State, ev: any): State {
 
     case "message_end": {
       if (ev.message?.role !== "assistant") return state;
+      // Authoritative final content. In non-streaming mode message_update was
+      // suppressed, so this is what renders the completed reply; in streaming
+      // mode it is a faithful re-statement of the accumulated blocks.
+      const finalBlocks: Block[] = [];
+      for (const b of ev.message.content ?? []) {
+        if (b?.type === "text" && b.text?.trim()) finalBlocks.push({ type: "text", text: b.text });
+        else if (b?.type === "thinking" && b.thinking?.trim()) finalBlocks.push({ type: "thinking", text: b.thinking });
+      }
       const items = state.items.slice();
       for (let i = items.length - 1; i >= 0; i--) {
         const it = items[i];
         if (it.kind === "assistant" && it.streaming) {
-          items[i] = { ...it, streaming: false };
+          items[i] = { ...it, blocks: finalBlocks.length ? finalBlocks : it.blocks, streaming: false };
           return { ...state, items };
         }
       }
@@ -786,8 +800,5 @@ function cheapSig(value: any): string {
   return "?";
 }
 
-import { formatTokens as formatTokensRaw } from "./lib/usageFormat";
-export function fmtTokens(n?: number): string {
-  if (n == null) return "0";
-  return formatTokensRaw(n);
-}
+import { formatTokens } from "./lib/format";
+export const fmtTokens = formatTokens;

@@ -1,8 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
+import { PopoverPanel, PopoverRoot, PopoverTrigger } from "./ui/Popover";
 import { fmtTokens } from "../store";
-import { formatTokensEffect } from "../lib/usageFormat.effect";
-import * as Effect from "effect/Effect";
-const fmtTokensE = (n?: number) => Effect.runSync(n == null ? Effect.succeed("0") : formatTokensEffect(n));
 import { CompressIcon, GaugeIcon } from "./icons";
 
 interface Stats {
@@ -35,7 +33,7 @@ function Row({ label, value, sub }: { label: string; value: string; sub?: string
         {label}
         {sub && <span className="ml-1 text-[12px] opacity-70">{sub}</span>}
       </span>
-      <span className="font-mono text-[13px] text-fg">{value}</span>
+      <span className="text-[13px] text-fg">{value}</span>
     </div>
   );
 }
@@ -44,47 +42,37 @@ export default function StatsPopover({ stats, hasSession, onCompact }: Props) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-
   const cu = stats?.contextUsage;
   const pct = cu?.percent ?? null;
   const hasData = !!stats && !!hasSession;
 
   return (
     <div ref={rootRef} className="relative">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        disabled={!hasData}
-        title="Session usage"
-        className="operator-meta-control flex h-8 items-center gap-1.5 px-2.5 text-[13px] disabled:opacity-40"
-      >
-        <GaugeIcon size={12} className="shrink-0 text-dim" />
-        <span className="tabular-nums">{pct != null ? `${Math.round(pct)}%` : "—"}</span>
-      </button>
+      <PopoverRoot open={open} onOpenChange={setOpen}>
+        <PopoverTrigger
+          disabled={!hasData}
+          title="Session usage"
+          className="operator-meta-control flex h-8 items-center gap-1.5 px-2.5 text-[13px] disabled:opacity-40"
+        >
+          <GaugeIcon size={12} className="shrink-0 text-dim" />
+          <span className="tabular-nums">{pct != null ? `${Math.round(pct)}%` : "—"}</span>
+        </PopoverTrigger>
 
-      {open && (
-        <div className="operator-popover absolute bottom-full right-0 z-50 mb-2 w-[320px] overflow-hidden">
-          <div className="border-b border-line/60 px-4 py-3.5">
+        <PopoverPanel
+          container={rootRef.current}
+          side="top"
+          align="end"
+          sideOffset={8}
+          matchTriggerWidth={false}
+          positionerClassName="z-50"
+          className="operator-popover w-[320px] overflow-hidden"
+        >          <div className="border-b border-line/60 px-4 py-3.5">
             <div className="mb-1 flex items-baseline justify-between">
               <span className="text-[13px] font-semibold text-dim">
                 Context window
               </span>
-              <span className="font-mono text-[12px] text-dim">
-                {cu?.tokens != null ? fmtTokensE(cu.tokens) : "—"} / {cu?.contextWindow ? fmtTokensE(cu.contextWindow) : "—"}
+              <span className="text-[12px] text-dim">
+                {cu?.tokens != null ? fmtTokens(cu.tokens) : "—"} / {cu?.contextWindow ? fmtTokens(cu.contextWindow) : "—"}
               </span>
             </div>
             <div className="h-1.5 overflow-hidden rounded-full bg-inset">
@@ -96,9 +84,9 @@ export default function StatsPopover({ stats, hasSession, onCompact }: Props) {
           </div>
 
           <div className="px-4 py-3">
-            <Row label="Tokens" value={fmtTokensE(stats?.tokens?.total)} />
-            <Row label="input" sub="output" value={`${fmtTokensE(stats?.tokens?.input)} / ${fmtTokensE(stats?.tokens?.output)}`} />
-            <Row label="cache" sub="read / write" value={`${fmtTokensE(stats?.tokens?.cacheRead)} / ${fmtTokensE(stats?.tokens?.cacheWrite)}`} />
+            <Row label="Tokens" value={fmtTokens(stats?.tokens?.total)} />
+            <Row label="input" sub="output" value={`${fmtTokens(stats?.tokens?.input)} / ${fmtTokens(stats?.tokens?.output)}`} />
+            <Row label="cache" sub="read / write" value={`${fmtTokens(stats?.tokens?.cacheRead)} / ${fmtTokens(stats?.tokens?.cacheWrite)}`} />
             <Row label="Cost" value={fmtUsd(stats?.cost)} />
             <div className="my-1.5 border-t border-line/60" />
             <Row label="Messages" value={`${stats?.totalMessages ?? 0}`} />
@@ -109,14 +97,14 @@ export default function StatsPopover({ stats, hasSession, onCompact }: Props) {
           <div className="border-t border-line/60 p-2">
             <button
               onClick={onCompact}
-              className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[13px] text-fg hover:bg-inset"
+              className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-[13px] text-fg hover:bg-inset"
             >
               <CompressIcon size={13} className="text-dim" />
               Compact conversation context
             </button>
           </div>
-        </div>
-      )}
+        </PopoverPanel>
+      </PopoverRoot>
     </div>
   );
 }

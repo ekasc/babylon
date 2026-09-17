@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { CheckIcon, ChevronIcon, CpuIcon, SparkleIcon } from "./icons";
+import { PopoverPanel, PopoverRoot, PopoverTrigger } from "./ui/Popover";
 
 interface Model {
   id: string;
@@ -164,26 +165,12 @@ export default function ModelPicker({ models, current, disabled, align = "left",
     [open]
   );
 
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    window.addEventListener("mousedown", onDown);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-    };
-  }, [open]);
-
-  // Keyboard: ↑↓ move within the pane, ←→ switch provider tabs, Enter picks,
-  // Escape closes.
+  // Keyboard: ↑↓ move within the pane, ←→ switch provider tabs, Enter picks.
+  // Escape/outside-press dismissal is owned by the popover primitive.
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        setOpen(false);
-      } else if (e.key === "ArrowDown") {
+      if (e.key === "ArrowDown") {
         e.preventDefault();
         setHi((i) => Math.min(i + 1, flat.length - 1));
       } else if (e.key === "ArrowUp") {
@@ -222,12 +209,10 @@ export default function ModelPicker({ models, current, disabled, align = "left",
 
   return (
     <div ref={rootRef} className="relative">
-      <button
-        onClick={() => setOpen((v) => !v)}
+      <PopoverRoot open={open} onOpenChange={setOpen}>
+      <PopoverTrigger
         disabled={disabled || !models.length}
         title={currentKey ? `Switch model — ${currentKey}` : "Switch model"}
-        aria-haspopup="dialog"
-        aria-expanded={open}
         className="operator-meta-control flex h-8 max-w-[220px] items-center gap-1.5 px-2.5 text-[13px] disabled:opacity-50"
       >
         <CpuIcon size={12} className="shrink-0 text-dim" />
@@ -240,13 +225,18 @@ export default function ModelPicker({ models, current, disabled, align = "left",
           <span className="min-w-0 truncate text-dim">select model</span>
         )}
         <ChevronIcon size={10} className={`shrink-0 text-dim transition-transform ${open ? "rotate-90" : ""}`} />
-      </button>
+      </PopoverTrigger>
 
-      {open && (
-        <>
-          {wide && <div className="fixed inset-0 z-40 bg-black/20" onClick={() => setOpen(false)} aria-hidden />}
-          <div className={`operator-popover absolute top-full ${align === "right" ? "right-0" : "left-0"} z-50 mt-2 overflow-hidden p-1.5 ${wide ? "w-[560px] max-w-[min(560px,calc(100vw-24px))] rounded-xl border border-white/15 bg-[#0F0F0F] shadow-2xl flex flex-col max-h-[min(560px,calc(100vh-80px))]" : "w-[460px] max-w-[calc(100vw-32px)]"}`}>
-            {wide && <div className="pointer-events-none absolute -top-1.5 right-[140px] h-3 w-3 rotate-45 border-l border-t border-white/15 bg-[#0F0F0F]" aria-hidden />}
+      {open && wide && <div className="fixed inset-0 z-40 bg-black/20" aria-hidden />}
+      <PopoverPanel
+        container={rootRef.current}
+        side="bottom"
+        align={align === "right" ? "end" : "start"}
+        sideOffset={8}
+        positionerClassName="z-50"
+        className={`operator-popover overflow-hidden p-1.5 ${wide ? "w-[560px] max-w-[min(560px,calc(100vw-24px))] rounded-xl border border-line bg-bg flex flex-col max-h-[min(560px,calc(100vh-80px))]" : "w-[460px] max-w-[calc(100vw-32px)]"}`}
+      >
+          {wide && <div className="pointer-events-none absolute -top-1.5 right-[140px] h-3 w-3 rotate-45 border-l border-t border-line bg-bg" aria-hidden />}
           <div className="border-b border-line/60 p-2">
             <input
               ref={searchRef}
@@ -254,12 +244,12 @@ export default function ModelPicker({ models, current, disabled, align = "left",
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search…"
               aria-label="Search models"
-              className="w-full rounded-md border border-white/10 bg-transparent px-2.5 py-1.5 text-[12px] placeholder:text-white/40 outline-none focus:border-white/15"
+              className="w-full rounded-[var(--radius-sm)] border border-line bg-transparent px-2.5 py-1.5 text-[12px] placeholder:text-dim outline-none focus:border-line-strong"
             />
           </div>
           {!searching && tabs.length > 0 ? (
             <div className={wide ? "flex flex-1 min-h-0" : "flex h-[340px]"}>
-              <div role="tablist" aria-label="Providers" className={wide ? "w-[150px] shrink-0 overflow-y-auto border-r border-white/10 bg-white/[0.02] py-2" : "w-[128px] shrink-0 overflow-y-auto border-r border-line/60 py-1"}>
+              <div role="tablist" aria-label="Providers" className={wide ? "w-[150px] shrink-0 overflow-y-auto border-r border-line/60 py-2" : "w-[128px] shrink-0 overflow-y-auto border-r border-line/60 py-1"}>
                 {tabs.map((t) => {
                   const selected = t.label === activeLabel;
                   return (
@@ -275,8 +265,8 @@ export default function ModelPicker({ models, current, disabled, align = "left",
                         selected ? "font-medium text-accent" : "text-dim hover:text-fg"
                       }`}
                     >
-                      <span className="min-w-0 truncate text-[12.5px]">{t.label}</span>
-                      <span className="shrink-0 font-mono text-[10px] text-dim/70">{t.models.length}</span>
+                      <span className="min-w-0 truncate text-[13px]">{t.label}</span>
+                      <span className="shrink-0 text-[10px] text-dim/70">{t.models.length}</span>
                     </button>
                   );
                 })}
@@ -308,13 +298,13 @@ export default function ModelPicker({ models, current, disabled, align = "left",
                             <SparkleIcon size={9} className="shrink-0 text-dim" />
                           )}
                         </span>
-                        <span className="mt-px block truncate font-mono text-[11px] leading-4 text-dim/80">
+                        <span className="mt-px block truncate text-[11px] leading-4 text-dim/80">
                           {fmtWin(m.contextWindow)} ctx · in {fmtCost(m.cost?.input)} / out {fmtCost(m.cost?.output)}
                         </span>
                       </span>
                       {isCurrent && <CheckIcon size={11} className="shrink-0 text-accent" />}
                       {!isCurrent && active && (
-                        <kbd className="shrink-0 rounded border border-line bg-bg px-1.5 py-px font-mono text-[10px] leading-4 text-dim">↵</kbd>
+                        <kbd className="shrink-0 rounded border border-line bg-bg px-1.5 py-px text-[10px] leading-4 text-dim">↵</kbd>
                       )}
                     </button>
                   );
@@ -352,22 +342,21 @@ export default function ModelPicker({ models, current, disabled, align = "left",
                           <SparkleIcon size={9} className="shrink-0 text-dim" />
                         )}
                       </span>
-                      <span className="mt-px block truncate font-mono text-[11px] leading-4 text-dim/80">
+                      <span className="mt-px block truncate text-[11px] leading-4 text-dim/80">
                         {m.provider}/{m.id} · {fmtWin(m.contextWindow)} ctx · in {fmtCost(m.cost?.input)} / out {fmtCost(m.cost?.output)}
                       </span>
                     </span>
                     {isCurrent && <CheckIcon size={11} className="shrink-0 text-accent" />}
                     {!isCurrent && active && (
-                      <kbd className="shrink-0 rounded border border-line bg-bg px-1.5 py-px font-mono text-[10px] leading-4 text-dim">↵</kbd>
+                      <kbd className="shrink-0 rounded border border-line bg-bg px-1.5 py-px text-[10px] leading-4 text-dim">↵</kbd>
                     )}
                   </button>
                 );
               })}
             </div>
           )}
-        </div>
-        </>
-      )}
+      </PopoverPanel>
+      </PopoverRoot>
     </div>
   );
 }

@@ -15,6 +15,7 @@ import {
   type WorkflowTokenUsage,
 } from "../bridge";
 import { fmtTokens } from "../store";
+import { inScope, isActiveWorkflow, isRunningSubagent, isRunningThread, subagentCwd, threadCwd, workflowCwd } from "../lib/activity";
 import Markdown from "./Markdown";
 import { WorkflowsTimeline } from "./WorkflowsTimeline";
 import {
@@ -30,6 +31,12 @@ import {
 interface Props {
   onClose(): void;
   onOpenSession?(path: string, cwd?: string, parentPath?: string): void;  toast(type: "info" | "warning" | "error", text: string): void;
+  /** Current space: only live agents in it are listed. */
+  cwd?: string | null;
+  /** Map a session file to its project cwd, to attribute agents to a space. */
+  resolveCwd?(file: string | null | undefined): string | null;
+  /** Map a run's sessionId to its project cwd, to scope workflow runs. */
+  resolveRunCwd?(sessionId: string | null | undefined): string | null;
 }
 
 type ActivityTab = "workflows" | "agents";
@@ -57,7 +64,7 @@ const AGENT_STATUS: Record<string, { label: string; dot: string; text: string }>
 };
 
 function active(r: WorkflowRunSummary): boolean {
-  return r.status === "running" || r.status === "paused" || r.status === "pending";
+  return isActiveWorkflow(r.status);
 }
 
 function timeAgo(iso?: string): string {
@@ -109,14 +116,21 @@ function extractAgentPrompt(raw: unknown): { text: string; label?: string } {
   return { text: "" };
 }
 
-function TranscriptContent({ recent, run, thread }: { recent?: Array<{ at: string; role: string; text: string }>; run?: any; thread?: any }) {
-  if (recent?.length) return <MiniChat messages={recent} />;
+/** Agent transcript. While the agent works we surface only the messages it
+ *  sends to the user (role "assistant") — never the tool activity pills or the
+ *  prompts that triggered them. Once finished, everything collapses to just
+ *  the final message. When there are no assistant messages at all the older
+ *  fallbacks (output / error / summary) still speak for the run. */
+export function TranscriptContent({ recent, run, thread, live }: { recent?: Array<{ at: string; role: string; text: string }>; run?: any; thread?: any; live: boolean }) {
+  const messages = recent ?? [];
+  const agentMessages = messages.filter((m) => m.role === "assistant");
+  if (agentMessages.length) return <MiniChat messages={live ? agentMessages : [agentMessages[agentMessages.length - 1]]} />;
   if (run?.output) return <Markdown text={clampText(run.output, RUN_OUTPUT_MAX)} />;
   if ((run as any)?.error || (run as any)?.failureReason) {
     return (
       <div className="rounded-lg border border-err/20 bg-err/5 px-3 py-3">
         <p className="text-[13px] font-medium text-err">Subagent failed</p>
-        <p className="mt-1 font-mono text-[12px] leading-5 text-err">{(run as any).error ?? (run as any).failureReason}</p>
+        <p className="mt-1 text-[12px] leading-5 text-err">{(run as any).error ?? (run as any).failureReason}</p>
       </div>
     );
   }
@@ -134,7 +148,7 @@ function stringifyResult(r: unknown): string {
   }
 }
 
-export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props) {
+export default function WorkflowsPanel({ onClose, onOpenSession, toast, cwd = null, resolveCwd, resolveRunCwd }: Props) {
   const [tab, setTab] = useState<ActivityTab>("workflows");
   const [activity, setActivity] = useState<ActivityUpdate>({ threads: [], subagents: [] });
   const [runs, setRuns] = useState<WorkflowRunSummary[]>([]);
@@ -313,13 +327,39 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props)
     return () => window.removeEventListener("keydown", onKey);
   }, [agent, detail, selectedAgent, back, onClose]);
 
-  const live = useMemo(
+  // Everything here is "running work in the current space": running subagents,
+  // persistent threads, and active workflow runs. Finished history is not
+  // shown — it lives in the session, not in this monitor. Unknown-cwd items
+  // are kept so live work never vanishes for missing attribution.
+  const visibleRuns = useMemo(
     () =>
-      runs.some(active) ||
-      activity.threads.some((thread) => ["queued", "starting", "running", "interrupting"].includes(thread.status)) ||
-      activity.subagents.some((subagent) => subagent.status === "running"),
-    [runs, activity]
+      runs
+        .filter(active)
+        .filter((r) => inScope(workflowCwd(r, resolveRunCwd), cwd))
+        .sort(
+          (a, b) =>
+            Date.parse(b.updatedAt ?? b.startedAt ?? "") - Date.parse(a.updatedAt ?? a.startedAt ?? "")
+        ),
+    [runs, cwd, resolveRunCwd]
   );
+  const agentItems = useMemo<AgentItem[]>(() => {
+    const all: AgentItem[] = [
+      ...activity.threads.map((thread) => ({ kind: "thread" as const, thread })),
+      ...activity.subagents.map((run) => ({ kind: "subagent" as const, run })),
+    ];
+    const updatedAt = (item: AgentItem) =>
+      item.kind === "thread" ? item.thread.updatedAt : item.run.updatedAt;
+    return all
+      .filter((item) =>
+        item.kind === "thread"
+          ? isRunningThread(item.thread.status) && inScope(threadCwd(item.thread, resolveCwd), cwd)
+          : isRunningSubagent(item.run.status) && inScope(subagentCwd(item.run, resolveCwd), cwd)
+      )
+      .sort((a, b) => Date.parse(updatedAt(b)) - Date.parse(updatedAt(a)));
+  }, [activity, cwd, resolveCwd]);
+  const live = visibleRuns.length > 0 || agentItems.length > 0;
+  const agentTotal = activity.threads.length + activity.subagents.length;
+  const scopeName = cwd ? cwd.split("/").filter(Boolean).pop() || cwd : null;
 
   return (
     <section aria-label="Activity workspace" className="context-pane flex h-full min-w-0 flex-col">
@@ -376,7 +416,7 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props)
             }}
             className={`px-2 py-2.5 text-[14px] font-semibold capitalize tracking-wide ${tab === value ? "is-active" : ""}`}
           >
-            {value} · {value === "workflows" ? runs.length : activity.threads.length + activity.subagents.length}
+            {value} · {value === "workflows" ? visibleRuns.length : agentItems.length}
           </button>
         ))}
       </div>
@@ -387,7 +427,7 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props)
           selectedAgent ? (
             <AgentDetail item={selectedAgent} toast={toast} onOpenSession={onOpenSession} onUpdate={setSelectedAgent} />
           ) : (
-            <AgentsView threads={activity.threads} subagents={activity.subagents} onOpen={setSelectedAgent} />
+            <AgentsView items={agentItems} scoped={agentTotal > agentItems.length} scopeName={scopeName} onOpen={setSelectedAgent} />
           )
         ) : loading ? (
           <p className="px-2 py-8 text-center text-[14px] text-dim">Loading runs…</p>
@@ -399,18 +439,22 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props)
           <AgentView agent={agent} />
         ) : detail ? (
           <WorkflowsTimeline run={detail} onControl={control} onDelete={remove} onOpenAgent={setAgent} />
-        ) : runs.length === 0 ? (
+        ) : visibleRuns.length === 0 ? (
           <div className="flex flex-col items-center gap-3 px-4 py-14 text-center">
             <LayersIcon size={30} className="text-dim" />
             <div>
-              <p className="text-[14px] font-medium text-fg">No workflow runs yet</p>
+              <p className="text-[14px] font-medium text-fg">
+                {runs.length > 0 && cwd ? "No running workflows here" : "No running workflows"}
+              </p>
               <p className="mt-1 text-[14px] leading-relaxed text-dim">
-                Run a workflow from pi to see it here.
+                {runs.length > 0 && cwd
+                  ? `Only active runs in ${scopeName ?? "this project"} are listed; finished runs are hidden.`
+                  : "Run a workflow from pi to see it here."}
               </p>
             </div>
           </div>
         ) : (
-          <RunList runs={runs} onOpen={openRun} />
+          <RunList runs={visibleRuns} onOpen={openRun} />
         )}
       </div>
     </section>
@@ -544,7 +588,7 @@ export function RunDetailView({
         {run.error && (
           <p className="mt-1.5 rounded-md border border-err/30 bg-err/10 px-2 py-1 text-[14px] leading-snug text-err">
             {run.error}
-            {run.errorCode ? <span className="ml-1 font-mono text-[14px] opacity-80">[{run.errorCode}]</span> : null}
+            {run.errorCode ? <span className="ml-1 text-[14px] opacity-80">[{run.errorCode}]</span> : null}
           </p>
         )}
 
@@ -694,7 +738,7 @@ function AgentRow({ agent, onOpen }: { agent: WorkflowAgentDetail; onOpen(): voi
       <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${meta.dot}`} />
       <span className="min-w-0 flex-1">
         <span className="flex items-baseline gap-1.5">
-          <span className="shrink-0 font-mono text-[14px] text-dim">#{agent.id}</span>
+          <span className="shrink-0 text-[14px] text-dim">#{agent.id}</span>
           <span className="truncate text-[14px] font-medium tracking-tight text-fg">{agent.label}</span>
         </span>
         {(agent.error || agent.waitReason) && (
@@ -738,7 +782,7 @@ export function AgentView({ agent }: { agent: WorkflowAgentDetail }) {
           <span className="min-w-0 flex-1 truncate text-[14px] font-semibold tracking-tight text-fg">
             {agent.label}
           </span>
-          <span className={`shrink-0 font-mono text-[14px] text-dim`}>#{agent.id}</span>
+          <span className={`shrink-0 text-[14px] text-dim`}>#{agent.id}</span>
           <span className={`shrink-0 text-[14px] font-medium tracking-[0.02em] ${meta.text}`}>{meta.label}</span>
         </div>
         <p className="mt-1.5 text-[14px] tracking-[0.02em] text-dim">
@@ -763,7 +807,7 @@ export function AgentView({ agent }: { agent: WorkflowAgentDetail }) {
             {clampText(agent.error, ERROR_LIMIT)}
           </p>
           {agent.errorCode && (
-            <span className="mt-1 inline-block rounded bg-err/15 px-1.5 py-px font-mono text-[14px] text-err">
+            <span className="mt-1 inline-block rounded bg-err/15 px-1.5 py-px text-[14px] text-err">
               {agent.errorCode}
             </span>
           )}
@@ -804,16 +848,19 @@ export function AgentView({ agent }: { agent: WorkflowAgentDetail }) {
   );
 }
 
-function AgentsView({ threads, subagents, onOpen }: { threads: ThreadActivity[]; subagents: SubagentActivity[]; onOpen(item: AgentItem): void }) {
-  const items: AgentItem[] = [
-    ...threads.map((thread) => ({ kind: "thread" as const, thread })),
-    ...subagents.map((run) => ({ kind: "subagent" as const, run })),
-  ].sort(
-    (a, b) =>
-      Date.parse(b.kind === "thread" ? b.thread.updatedAt : b.run.updatedAt) -
-      Date.parse(a.kind === "thread" ? a.thread.updatedAt : a.run.updatedAt)
-  );
-  if (!items.length) return <EmptyActivity icon="diamond" title="No agents yet" text="Subagents and persistent threads appear here. Spawn one from the chat." />;
+function AgentsView({ items, scoped, scopeName, onOpen }: { items: AgentItem[]; scoped: boolean; scopeName: string | null; onOpen(item: AgentItem): void }) {
+  if (!items.length)
+    return (
+      <EmptyActivity
+        icon="diamond"
+        title={scoped ? "No running agents here" : "No agents yet"}
+        text={
+          scoped
+            ? `Only live agents in ${scopeName ?? "this project"} are listed; finished agents are hidden.`
+            : "Subagents and persistent threads appear here. Spawn one from the chat."
+        }
+      />
+    );
   const attach = useFlipList(items.map((item) => (item.kind === "thread" ? item.thread.threadId : item.run.runId)));
   return <div className="divide-y divide-line">{items.map((item) => {
     const id = item.kind === "thread" ? item.thread.threadId : item.run.runId;
@@ -855,7 +902,7 @@ function MiniChat({ messages }: { messages: Array<{ at: string; role: string; te
         }
         if (m.role === "assistant") {
           return (
-            <div key={key} title={stamp} className="max-w-[94%] whitespace-pre-wrap text-[13.5px] leading-6">
+            <div key={key} title={stamp} className="max-w-[94%] whitespace-pre-wrap text-[14px] leading-6">
               {m.text}
             </div>
           );
@@ -938,14 +985,14 @@ function AgentDetail({ item, toast, onOpenSession, onUpdate }: { item: AgentItem
       {milestones?.length ? <div className="mt-3 rounded-lg border border-line bg-inset/40 px-3 py-2"><span className="text-[11px] font-semibold uppercase tracking-wide text-dim">Milestones</span><ul className="mt-1 space-y-1">{milestones.map((m, index) => <li key={`${m.at}-${index}`} className="flex items-start gap-2 text-[13px]"><span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-ok" /><span className="min-w-0"><span className="font-medium">{m.name}</span>{m.note ? <span className="text-dim">, {m.note}</span> : null}<span className="ml-1 text-[11px] text-dim">{new Date(m.at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</span></span></li>)}</ul></div> : null}
     </div>
     <div ref={scrollRef} className="max-h-[46vh] overflow-y-auto py-4">
-      <TranscriptContent recent={recent} run={run} thread={thread} />
+      <TranscriptContent recent={recent} run={run} thread={thread} live={live} />
     </div>
     {run?.stderr ? <pre className="max-h-48 overflow-auto border-t border-line py-3 font-mono text-[12px] text-warn">{clampText(run.stderr, STDERR_LIMIT)}</pre> : null}
     <div className="flex flex-wrap gap-2 border-t border-line pt-3">{sessionFile && onOpenSession ? <button onClick={() => void promote()} disabled={live} title={live ? "Stop or wait for the active turn first" : "Move this conversation into the main workspace"} className="context-button disabled:opacity-50">Open as session</button> : null}{controllable ? <><button onClick={() => void control("steer")} className="context-button is-primary">Steer</button><button onClick={() => void control("follow-up")} className="context-button">Follow up</button><button onClick={() => void control("stop")} className="context-button text-err">Stop</button></> : <span className="text-[13px] text-dim">This agent is read-only.</span>}</div>
   </div>;
 }
 function EmptyActivity({ icon, title, text }: { icon: string; title: string; text: string }) {
-  return <div className="flex flex-col items-center gap-2 px-6 py-16 text-center"><span className="text-3xl text-dim">{icon}</span><p className="text-[14px] font-medium">{title}</p><p className="text-[14px] leading-relaxed text-dim">{text}</p></div>;
+  return <div className="flex flex-col items-center gap-2 px-6 py-16 text-center"><span className="text-[24px] text-dim">{icon}</span><p className="text-[14px] font-medium">{title}</p><p className="text-[14px] leading-relaxed text-dim">{text}</p></div>;
 }
 
 function HistoryTranscript({ history }: { history: WorkflowHistoryEntry[] }) {

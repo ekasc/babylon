@@ -5,7 +5,6 @@ import {
   DEFAULT_CHAT_MODEL,
   DEFAULT_GIT_COMMIT_MODEL,
   DEFAULT_GIT_COMMIT_PROMPT,
-  type ModelRef,
   type PiSettings,
 } from "../src/lib/settings-shared";
 
@@ -94,6 +93,7 @@ export function saveSettings(patch: Partial<PiSettings>): PiSettings {
   }
   // Handle explicit null-style resets for model refs
   if ("chatModel" in patch) next.chatModel = patch.chatModel;
+  if ("imageModel" in patch) next.imageModel = patch.imageModel;
   if ("titleModel" in patch) next.titleModel = patch.titleModel;
   if ("gitCommitModel" in patch) next.gitCommitModel = patch.gitCommitModel;
   cache = next;
@@ -124,7 +124,7 @@ export function getSettingsPath(): string {
 export function validateImportedSettings(data: unknown): { ok: true; value: PiSettings } | { ok: false; error: string } {
   if (!data || typeof data !== "object" || Array.isArray(data)) return { ok: false, error: "Settings must be an object" };
   const obj = data as Record<string, unknown>;
-  const allowed = new Set(["chatModel", "chatReasoning", "titleModel", "titleReasoning", "gitCommitModel", "gitCommitPrompt", "contextWindowOverrides", "appearance", "compaction", "daemon"]);
+  const allowed = new Set(["chatModel", "chatReasoning", "imageModel", "titleModel", "titleReasoning", "gitCommitModel", "gitCommitPrompt", "contextWindowOverrides", "appearance", "compaction", "daemon"]);
   for (const k of Object.keys(obj)) if (!allowed.has(k)) return { ok: false, error: `Unknown key: ${k}` };
   // shallow type checks
   if (obj.contextWindowOverrides !== undefined) {

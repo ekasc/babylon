@@ -1,42 +1,70 @@
-import { app, BrowserWindow, dialog, ipcMain, screen, shell, type IpcMainInvokeEvent } from "electron";
+import { app, BrowserWindow, ipcMain, screen, type IpcMainInvokeEvent } from "electron";
 import { randomUUID } from "node:crypto";
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import * as net from "node:net";
 import { existsSync, promises as fsp, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { promisify } from "node:util";
 import { AgentEventBuffer } from "./event-buffer";
-import * as gitOps from "./git";
+import { registerGitIpc } from "./git-ipc";
+import { registerRuntimeIpc } from "./runtime-ipc";
+import { registerLspProcessIpc } from "./lsp-process-ipc";
+import { registerSimIpc } from "./sim-ipc";
+import { SimController } from "./sim-controller";
+import { registerSessionRuntimeIpc } from "./session-runtime-ipc";
+import { registerActivityIpc } from "./activity-ipc";
+import { registerSessionsIpc } from "./sessions-ipc";
+import { registerBotsIpc } from "./bots-ipc";
+import { registerPermissionsIpc } from "./permissions-ipc";
+import { registerWorktreeIpc } from "./worktree-ipc";
 import { getSettings } from "./app-settings";
-import { PiHost } from "./pi-host";
+import { PiHost, defaultStateDir } from "./pi-host";
 import { PermissionEngine, type AgentAction, type Risk } from "./permissions";
-import { mergeRecaps, mergeRecapsIntoWindow } from "./recap";
 import { isTrustedRendererUrl } from "./navigation";
 import { validateSessionPath } from "./session-path";
-import { SessionIndex, readSessionRange, readSessionTail } from "./sessions";
-import { ProcessManager, validateCommand, validateCwd, validateId } from "./process-manager";
+import { SessionIndex } from "./sessions";
+import { ProcessManager, validateCwd } from "./process-manager";
 import { TaskManager } from "./task-manager";
-import { LspManager, validateCwd as validateLspCwd } from "./lsp-manager";
+import { LspManager } from "./lsp-manager";
 import { HookManager } from "./hook-manager";
 import { AttentionManager } from "./attention-manager";
 import { BotStore } from "./bots";
 import { ProjectSettingsStore, projectHashForCwd } from "./project-settings";
-import { HandoffStore } from "./handoff-store";
-import { buildHandoffPrompt, normalizeHandoffText, transcriptText } from "./recap";
-import { botChatForProject, botHandle, buildBotSystemPrompt, buildDefaultBotSystemPrompt, buildGroupSystemPrompt, groupAnchorCwd, isPassReply, parseBotMentions, resolveSharedChatOrder } from "../src/bots";
+import { ActivityRegistry } from "./activity";
+import { resolveParentSessionFile } from "./threads";
+import { buildBotSystemPrompt, buildDefaultBotSystemPrompt, buildGroupSystemPrompt, resolveSharedChatOrder } from "../src/bots";
 import { driveRoomTurns } from "./room-driver";
-import { type CheckResult, type CompletionContract } from "../src/completion-contracts";
+import type { CompletionContract } from "../src/completion-contracts";
 import { connectDaemonClient, type DaemonClient } from "../src/daemon-client";
+import { DAEMON_PROTOCOL_VERSION } from "../src/daemon-protocol";
+import { readDaemonPid, retireDaemon, type RetirePort } from "./daemon-supervisor";
+import { importLoginShellEnv } from "./shell-env";
 import { createLocalRuntime } from "../src/local-runtime";
 import { createDaemonRuntime } from "../src/daemon-runtime";
 import type { RuntimeFacade } from "../src/runtime-facade";
 
+const DEV_SERVER = !!process.env.VITE_DEV_SERVER_URL;
+
+// Dev and packaged builds must never share app state. userData holds the
+// detached daemon's socket and snapshot, settings, window bounds, and Chromium
+// storage (localStorage), so a shared path lets one build's daemon serve the
+// other and lets two running builds clobber each other's persisted UI state.
+//
+// Gated on app.isPackaged rather than an env var: a packaged build must never
+// be divertable to a different profile, or a released update would silently
+// start against an empty profile and look like data loss.
+// Must run before app.whenReady() and before any app.getPath("userData").
+if (!app.isPackaged) app.setPath("userData", join(app.getPath("appData"), "Babylon Dev"));
+
 // Pi engine session store (mirrors electron/threads.ts).
 const PI_SESSIONS_ROOT = join(homedir(), ".pi", "agent", "sessions");
 
-const DEV_SERVER = !!process.env.VITE_DEV_SERVER_URL;
+// Babylon-owned runtime state (rollback snapshots/ledgers, recaps, compaction
+// archives). The in-process host and the daemon must both point here: a split
+// would strand rollback history and force a cold rollback shadow index (a full
+// worktree hash) on every switch of runtime ownership.
+const PI_STATE_ROOT = defaultStateDir();
 
 // ---------------------------------------------------------------------------
 // Window bounds persistence, dev restarts reopen at the same place instead
@@ -83,7 +111,6 @@ function rememberBounds(): void {
   }, 400);
 }
 
-const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const RENDERER_ENTRY = pathToFileURL(join(__dirname, "../dist/index.html")).href;
@@ -93,6 +120,19 @@ let host: PiHost | null = null;
 let hostReady: Promise<void> | null = null;
 let activeCwd = "";
 
+// In-app browser simulator: single shared controller for the renderer IPC
+// surface and the agent tools. Created once; the window is resolved lazily.
+const simController = new SimController({
+  getWindow: () => win,
+  notify: (payload) => {
+    try {
+      win?.webContents.send("pideck:sim-event", payload);
+    } catch {
+      /* window gone */
+    }
+  },
+});
+
 // Babylon permission system (Phase 1).
 let permissionEngine: PermissionEngine | null = null;
 interface PendingApproval {
@@ -100,6 +140,9 @@ interface PendingApproval {
   risk: Risk;
   resolve: (allowed: boolean) => void;
   timer: ReturnType<typeof setTimeout>;
+  /** Owning session id (exact, from the requesting hook). Renderer resolves
+   *  it to a path for attribution; absent for legacy unattributed requests. */
+  sessionId: string | null;
 }
 const pendingApprovals = new Map<string, PendingApproval>();
 
@@ -112,7 +155,7 @@ function notifyPermissionsChanged(): void {
 
 /** Ask the renderer for an interactive approval decision. Fails closed (deny)
  *  if the user never responds. */
-function requestApproval(action: AgentAction, risk: Risk): Promise<boolean> {
+function requestApproval(action: AgentAction, risk: Risk, sessionId?: string): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
     const id = randomUUID();
     const timeoutMs = Number(process.env.PIDECK_APPROVAL_TIMEOUT_MS) || 15 * 60_000;
@@ -120,7 +163,7 @@ function requestApproval(action: AgentAction, risk: Risk): Promise<boolean> {
       pendingApprovals.delete(id);
       resolve(false);
     }, timeoutMs);
-    pendingApprovals.set(id, { action, risk, resolve, timer });
+    pendingApprovals.set(id, { action, risk, resolve, timer, sessionId: sessionId ?? null });
     win?.webContents.send("pideck:approval-requested", { id, action, risk });
   });
 }
@@ -129,6 +172,7 @@ function resolveApproval(id: string, choice: "allow_once" | "allow_session" | "a
   const pending = pendingApprovals.get(id);
   if (!pending) return;
   clearTimeout(pending.timer);
+  const sessionId = pending.sessionId ?? null;
   pendingApprovals.delete(id);
   if (choice === "allow_once") {
     pending.resolve(true);
@@ -137,6 +181,7 @@ function resolveApproval(id: string, choice: "allow_once" | "allow_session" | "a
       category: pending.action.category,
       decision: "deny",
       scope: "session",
+      sessionId: pending.sessionId ?? undefined,
       match: pending.action.command
         ? { commandPattern: pending.action.command }
         : pending.action.paths
@@ -149,6 +194,7 @@ function resolveApproval(id: string, choice: "allow_once" | "allow_session" | "a
       category: pending.action.category,
       decision: "allow",
       scope: choice === "allow_always" ? "always" : "session",
+      sessionId: choice === "allow_always" ? undefined : (pending.sessionId ?? undefined),
       match: pending.action.command
         ? { commandPattern: pending.action.command }
         : pending.action.paths
@@ -158,11 +204,15 @@ function resolveApproval(id: string, choice: "allow_once" | "allow_session" | "a
     pending.resolve(true);
   }
   notifyPermissionsChanged();
-  // Let the renderer drop the matching attention-inbox item.
-  win?.webContents.send("pideck:approval-resolved", { id, choice });
+  // Let the renderer drop the matching attention-inbox item. The owning
+  // session travels along so background resolutions land on the right run.
+  win?.webContents.send("pideck:approval-resolved", { id, choice, sessionId });
 }
 let workflowsBridge: any = null;
-let activityBridge: any = null;
+/** Process-wide activity observation: one bridge per project ever opened,
+ *  aggregated to the renderer. Navigation only foregrounds; it never
+ *  destroys tracking (see ActivityRegistry). */
+let activityRegistry: ActivityRegistry | null = null;
 const sessionIndex = new SessionIndex(PI_SESSIONS_ROOT);
 const processManager = new ProcessManager();
 const taskManager = new TaskManager(processManager);
@@ -305,6 +355,7 @@ function daemonPaths() {
   return {
     socketPath: join(app.getPath("userData"), "daemon.sock"),
     snapshotPath: join(app.getPath("userData"), "daemon-state.json"),
+    pidPath: join(app.getPath("userData"), "daemon.pid"),
   };
 }
 
@@ -441,18 +492,35 @@ function applyCwd(cwd: string): void {
   if (!cwd) return;
   activeCwd = cwd;
   taskManager.resumeForSession(host?.activeSessionFile);
+  updateActivityBridge(cwd);
   // LSP: set active project; failures are best-effort (e.g. cwd deleted).
   void lspManager.setActiveProject(cwd).catch(() => undefined);
 }
 
-function updateActivityBridge(_cwd: string): void {
-  // Threads/subagents activity lives inside PiHost's private ThreadManager /
-  // ManagedSubagents. PiHost must expose them (or an activity snapshot) before
-  // this bridge can be wired, follow-up to the OMP→PiHost swap.
-}
-
-function updateWorkflowsBridge(_cwd: string): void {
-  // The pi-dynamic-workflows run-state bridge needs the same PiHost exposure.
+function updateActivityBridge(cwd: string): void {
+  // Foreground a project for tracking, creating its bridge on first sight.
+  // Bridges for other projects keep polling: switching projects changes what
+  // Babylon displays, never what it believes is still running.
+  if (!cwd) return;
+  try {
+    if (!activityRegistry) {
+      activityRegistry = new ActivityRegistry({
+        onUpdate: (update) => {
+          // Windows may all be closed on macOS while the host (and polling)
+          // stays alive: never send into a destroyed webContents.
+          try {
+            if (win && !win.isDestroyed()) win.webContents.send("pideck:activity-update", update);
+          } catch {
+            /* best effort */
+          }
+        },
+        resolveParentSessionFile: (sessionId) => resolveParentSessionFile(sessionId),
+      });
+    }
+    activityRegistry.ensure(cwd);
+  } catch {
+    /* best effort; the renderer keeps its event-layer state */
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -499,6 +567,17 @@ function createWindow(): void {
   win.webContents.on("will-navigate", (event, url) => {
     if (!isTrustedRendererUrl(url, devUrl, RENDERER_ENTRY)) event.preventDefault();
   });
+  // Renderer reloads (Cmd+R, Vite full-reload) destroy React without running
+  // unmount cleanups, so SimSidebar's simDetach never fires and the guests
+  // keep painting over the fresh UI. Detach on every load; the sidebar
+  // re-binds its slot when it remounts.
+  win.webContents.on("did-finish-load", () => {
+    try {
+      simController.detachAll();
+    } catch {
+      /* controller gone */
+    }
+  });
 
   if (devUrl) {
     void win.loadURL(devUrl);
@@ -528,183 +607,6 @@ function createWindow(): void {
 
 function sendStatus(status: string, extra: Record<string, unknown> = {}): void {
   win?.webContents.send("pideck:session-status", { status, cwd: activeCwd, ...extra });
-}
-
-// ---------------------------------------------------------------------------
-// git + session-file helpers (worktrees)
-// ---------------------------------------------------------------------------
-
-async function git(args: string[], cwd: string): Promise<string> {
-  const { stdout } = await execFileAsync("git", args, {
-    cwd,
-    timeout: 20_000,
-    maxBuffer: 16 * 1024 * 1024,
-  });
-  return stdout.trim();
-}
-
-interface GitInfo {
-  isRepo: boolean;
-  root?: string;
-  branch?: string;
-  isLinkedWorktree?: boolean;
-}
-
-async function gitInfo(cwd: string): Promise<GitInfo> {
-  try {
-    const inside = await git(["rev-parse", "--is-inside-work-tree"], cwd);
-    if (inside !== "true") return { isRepo: false };
-    const [root, branch, gitDir] = await Promise.all([
-      git(["rev-parse", "--show-toplevel"], cwd),
-      git(["rev-parse", "--abbrev-ref", "HEAD"], cwd).catch(() => "HEAD"),
-      git(["rev-parse", "--git-dir"], cwd),
-    ]);
-    return {
-      isRepo: true,
-      root,
-      branch,
-      isLinkedWorktree: gitDir.replace(/\\/g, "/").includes(".git/worktrees/"),
-    };
-  } catch {
-    return { isRepo: false };
-  }
-}
-
-interface GitFileChange {
-  path: string;
-  status: string;
-}
-
-interface GitStatusResult {
-  isRepo: boolean;
-  root?: string;
-  branch?: string;
-  isWorktree?: boolean;
-  dirty: GitFileChange[];
-  ahead: number;
-  behind: number;
-}
-
-/** Computes the full working-tree git status for a directory. */
-async function gitStatus(cwd: string): Promise<GitStatusResult> {
-  const base = await gitInfo(cwd);
-  if (!base.isRepo) return { isRepo: false, dirty: [], ahead: 0, behind: 0 };
-  const result: GitStatusResult = {
-    isRepo: true,
-    root: base.root,
-    branch: base.branch,
-    isWorktree: base.isLinkedWorktree,
-    dirty: [],
-    ahead: 0,
-    behind: 0,
-  };
-  try {
-    // List concrete untracked files while retaining Git's standard ignore,
-    // info/exclude, and global-excludes behavior.
-    const porcelain = await git(["-c", "core.quotepath=false", "status", "--porcelain", "--untracked-files=all"], cwd);
-    result.dirty = porcelain
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => ({ status: line.slice(0, 2).trim(), path: line.slice(3) }));
-  } catch {
-    /* not a repo or git unavailable */
-  }
-  try {
-    const counts = await git(["rev-list", "--left-right", "--count", "@{upstream}...HEAD"], cwd);
-    const [behind, ahead] = counts.split("\t").map((n) => parseInt(n, 10) || 0);
-    result.behind = behind;
-    result.ahead = ahead;
-  } catch {
-    /* no upstream configured */
-  }
-  return result;
-}
-
-async function readSessionHeader(file: string): Promise<any> {
-  try {
-    const fd = await fsp.open(file, "r");
-    try {
-      const buf = Buffer.alloc(16 * 1024);
-      const { bytesRead } = await fd.read(buf, 0, buf.length, 0);
-      const firstLine = buf.toString("utf8", 0, bytesRead).split("\n")[0];
-      return JSON.parse(firstLine);
-    } finally {
-      await fd.close();
-    }
-  } catch {
-    return null;
-  }
-}
-
-/** Ensure a cloned session file exists on disk for task resume and header patching. */
-async function ensureClonedSessionFile(
-  clonedPath: string,
-  originalPath: string,
-  cwd: string,
-  sessionId?: string
-): Promise<void> {
-  for (let i = 0; i < 15 && !existsSync(clonedPath); i++) {
-    await new Promise((r) => setTimeout(r, 200));
-  }
-  if (existsSync(clonedPath)) return;
-  const raw = await fsp.readFile(originalPath, "utf8").catch(() => "");
-  const nl = raw.indexOf("\n");
-  const entries = nl === -1 ? "" : raw.slice(nl);
-  const header = {
-    type: "session",
-    version: 3,
-    id: sessionId ?? `forked-${Date.now()}`,
-    timestamp: new Date().toISOString(),
-    cwd,
-    parentSession: originalPath,
-  };
-  await fsp.writeFile(clonedPath, `${JSON.stringify(header)}\n${entries}`);
-}
-
-/** Rewrite cloned-session ownership metadata while the agent is idle. */
-async function rewriteSessionHeader(
-  file: string,
-  patch: { cwd?: string; parentSession?: string }
-): Promise<void> {
-  for (let i = 0; i < 15 && !existsSync(file); i++) {
-    await new Promise((r) => setTimeout(r, 200));
-  }
-  const raw = await fsp.readFile(file, "utf8");
-  const nl = raw.indexOf("\n");
-  const header = JSON.parse(nl === -1 ? raw : raw.slice(0, nl));
-  if (patch.cwd) header.cwd = patch.cwd;
-  if (patch.parentSession) header.parentSession = patch.parentSession;
-  await fsp.writeFile(file, JSON.stringify(header) + (nl === -1 ? "\n" : raw.slice(nl)));
-}
-
-function sanitizeWorktreeName(s: string): string {
-  return s
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 40);
-}
-
-function uniquePath(base: string): string {
-  let p = base;
-  let i = 2;
-  while (existsSync(p)) p = `${base}-${i++}`;
-  return p;
-}
-
-function cwdWithin(parent: string, candidate: string): boolean {
-  const rel = relative(resolve(parent), resolve(candidate));
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-}
-
-async function branchExists(root: string, branch: string): Promise<boolean> {
-  try {
-    await git(["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], root);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -750,18 +652,29 @@ async function startHost(): Promise<void> {
     }
     host = new PiHost({
       cwd,
+      stateDir: PI_STATE_ROOT,
       permission: permissionEngine
         ? {
-            evaluate: (action) => permissionEngine!.evaluate(action),
+            evaluate: (action, sessionId) => permissionEngine!.evaluate(action, sessionId),
             requestApproval,
-            clearSessionRules: () => permissionEngine!.clearSessionRules(),
+            clearSessionRules: (sessionId) => permissionEngine!.clearSessionRules(sessionId),
+            getMode: () => permissionEngine!.getMode(),
+            listRules: () => permissionEngine!.listRules(),
           }
         : undefined,
       hookManager,
       getTaskIdForSessionFile: (file) => taskManager.findBySessionFile(file)?.id,
       getBotIdForSessionFile: (file) => botStore.findBySessionFile(file)?.id,
+      getSimController: () => simController,
       onEvent: (ev) => {
         agentEvents.push(ev);
+        // Transient subagent rows (tool start/end) ride the same event flow
+        // the renderer already consumes; each project's poll picks up the rest.
+        try {
+          activityRegistry?.observeAgentEvent(ev);
+        } catch {
+          /* best effort */
+        }
         if (ev?.type === "message_end" || ev?.type === "agent_settled" || ev?.type === "session_info_changed") {
           sessionIndex.touch();
         }
@@ -813,1272 +726,98 @@ function registerIpc(): void {
     });
   };
 
-  handle("pideck:list-sessions", () => sessionIndex.list());
-  handle("pideck:get-session-messages", async (_e, path: string) => {
-    const target = await validateSessionPath(PI_SESSIONS_ROOT, path);
-    const window = await readSessionTail(target);
-    return { ...window, messages: mergeRecaps(window.messages, await getRuntime().getRecaps(target) as any) };
+  registerSessionsIpc(handle, {
+    sessionsRoot: PI_SESSIONS_ROOT,
+    sessionIndex,
+    getRuntime,
+    getHost,
+    isDaemonOwned,
+    requireDaemonClient,
+    daemonTaskBySessionFile,
+    getWindow: () => win,
+    getHostReady: () => hostReady,
+    botStore,
+    overlayForSessionFile,
+    taskManager,
   });
 
-  handle("pideck:get-session-window", async (_e, path: string, endOffset: number, countBytes?: number) => {
-    const target = await validateSessionPath(PI_SESSIONS_ROOT, path);
-    if (!Number.isSafeInteger(endOffset) || endOffset < 0) throw new Error("invalid session window offset");
-    const maxBytes = Math.min(Math.max(countBytes ?? 2 * 1024 * 1024, 256 * 1024), 16 * 1024 * 1024);
-    const window = await readSessionRange(target, endOffset, maxBytes);
-    return { ...window, messages: mergeRecapsIntoWindow(window.messages, await getRuntime().getRecaps(target) as any) };
+  registerBotsIpc(handle, {
+    sessionsRoot: PI_SESSIONS_ROOT,
+    botStore,
+    projectSettings,
+    sessionIndex,
+    taskManager,
+    getRuntime,
+    getHost,
+    isDaemonOwned,
+    getHostReady: () => hostReady,
+    getActiveCwd: () => activeCwd,
+    broadcastBots,
+    broadcastGroups,
+    projectSettingsForCwd,
+    resolveCanonicalSessionFile,
+    overlayForSessionFile,
+    driveExtrasIO,
+    lastAssistantText,
   });
 
-  handle("pideck:get-tool-output", async (_e, toolCallId: string) => {
-    if (typeof toolCallId !== "string" || !/^[a-zA-Z0-9|_\-:.]{1,200}$/.test(toolCallId)) throw new Error("invalid tool call id");
-    return getRuntime().getToolOutput(toolCallId);
+  registerSessionRuntimeIpc(handle, {
+    sessionsRoot: PI_SESSIONS_ROOT,
+    getRuntime,
+    getHost,
+    isDaemonOwned,
+    requireDaemonClient,
+    driveSharedChatExtras,
+  });
+  registerGitIpc(handle, { getRuntime });
+
+  registerRuntimeIpc(handle, { getRuntime, daemonOnly, getWindow: () => win });
+
+  registerWorktreeIpc(handle, {
+    getRuntime,
+    isDaemonOwned,
+    daemonOnly,
+    requireDaemonClient,
+    daemonTaskBySessionFile,
+    daemonTaskBySessionFileStrict,
+    taskManager,
+    processManager,
+    getActiveCwd: () => activeCwd,
+    applyCwd,
+    sendStatus,
   });
 
-  handle("pideck:delete-session", async (_e, path: string) => {
-    const target = await validateSessionPath(PI_SESSIONS_ROOT, path);
-    const active = await getRuntime().getActiveSessionFile();
-    if (active === target) {
-      throw new Error("Close this chat before deleting it");
-    }
-    await fsp.rm(target, { force: true });
-    sessionIndex.touch();
+  registerPermissionsIpc(handle, {
+    getPermissionEngine: () => permissionEngine,
+    pendingApprovals,
+    notifyPermissionsChanged,
+    resolveApproval,
+    isDaemonOwned,
+    requireDaemonClient,
+    getWindow: () => win,
   });
 
-  handle("pideck:pick-folder", async () => {
-    const r = await dialog.showOpenDialog(win!, {
-      title: "Choose project folder",
-      properties: ["openDirectory", "createDirectory"],
-    });
-    return r.canceled ? null : r.filePaths[0];
+  registerActivityIpc(handle, {
+    getRuntime,
+    getActivityRegistry: () => activityRegistry,
+    getWorkflowsBridge: () => workflowsBridge,
   });
 
-  handle(
-    "pideck:open-session",
-    async (_e, opts: { path?: string; cwd: string; requestId?: number; botId?: string }) => {
-      if (!opts || typeof opts.cwd !== "string" || opts.cwd.length > 4096) throw new Error("invalid session options");
-      if (hostReady) await hostReady;
-      let path: string | undefined;
-      if (opts.path !== undefined) {
-        try {
-          path = await validateSessionPath(PI_SESSIONS_ROOT, opts.path);
-        } catch (err) {
-          // A brand-new session (e.g. a bot's first chat) has a canonical
-          // future path before its first flush, so it isn't on disk yet. If
-          // the live host already owns exactly that file, resolve it
-          // lexically (still containment-checked) and let PiHost sync from
-          // the in-memory session instead of rejecting a session we own.
-          const missing =
-            err instanceof Error && err.message === "session path does not exist" &&
-            typeof opts.path === "string" && opts.path.endsWith(".jsonl");
-          const lexical = missing ? resolve(opts.path) : null;
-          const rel = lexical ? relative(resolve(PI_SESSIONS_ROOT), lexical) : "";
-          const inside = !!lexical && rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
-          let owned: string | null = null;
-          try {
-            owned = getHost().activeSessionFile;
-          } catch {}
-          if (inside && lexical && owned && resolve(owned) === lexical) {
-            path = lexical;
-          } else {
-            throw err;
-          }
-        }
-      }
-      if (isDaemonOwned()) {
-        const client = requireDaemonClient();
-        const res = await client.request("pi.openSession", { ...opts, path });
-        const state = res.payload as { sessionFile?: string };
-        const t = await daemonTaskBySessionFile(state?.sessionFile ?? null);
-        if (t?.status === "paused") await client.request("task.updated", { id: t.id, patch: { status: "running" } });
-        return state;
-      }
-      // Bot Mode: opening with a botId installs that bot's persona overlay for
-      // the new runtime; opening a bot's canonical chat file does the same via
-      // lookup so every entry point (sidebar rows, history, prefetch) agrees.
-      // Any other file in a project gets the project default (rule 3); files
-      // with no project context resolve null so prompts never leak across bots.
-      if (opts.botId !== undefined) {
-        const bot = botStore.get(opts.botId);
-        if (!bot) throw new Error("Bot not found");
-        getHost().setBotSystemPrompt(buildBotSystemPrompt(bot, botStore.list()));
-      } else if (path !== undefined) {
-        getHost().setBotSystemPrompt(overlayForSessionFile(path, opts.cwd));
-      } else {
-        getHost().setBotSystemPrompt(null);
-      }
-      const state = (await getRuntime().openSession({ ...opts, path })) as { sessionFile?: string } | null | undefined;
-      taskManager.resumeForSession((state as { sessionFile?: string } | null | undefined)?.sessionFile);
-      return state;
-    }
-  );
-
-  // -------------------------------------------------------------------------
-  // Bot Mode (Hermes-style Bots: named specialists with a canonical chat)
-  // -------------------------------------------------------------------------
-
-  handle("pideck:bots-list", () => botStore.list());
-
-  handle("pideck:bots-create", async (_e, input: { name: string; title?: string; description?: string; persona?: string; model?: { provider: string; modelId: string }; cwd?: string }) => {
-    if (!input || typeof input.name !== "string") throw new Error("invalid bot");
-    if (input.cwd !== undefined && typeof input.cwd !== "string") throw new Error("invalid bot home project");
-    const created = botStore.create({
-      name: input.name,
-      ...(input.title !== undefined ? { title: input.title } : {}),
-      ...(input.description !== undefined ? { description: input.description } : {}),
-      ...(input.persona !== undefined ? { persona: input.persona } : {}),
-      ...(input.model !== undefined ? { model: input.model } : {}),
-      ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
-    });
-    broadcastBots();
-    return created;
+  registerLspProcessIpc(handle, {
+    lspManager,
+    processManager,
+    taskManager,
+    getHost: () => host,
+    isDaemonOwned,
+    requireDaemonClient,
+    daemonActiveSessionFileStrict,
+    daemonTaskBySessionFileStrict,
+    daemonClientTasksStrict,
+    getWindow: () => win,
   });
 
-  handle("pideck:bots-update", async (_e, id: string, patch: Record<string, unknown>) => {
-    if (typeof id !== "string" || !patch || typeof patch !== "object") throw new Error("invalid bot update");
-    const allowed: Record<string, true> = {
-      name: true, title: true, description: true, persona: true, model: true, cwd: true, hidden: true, mainSessionFile: true,
-    };
-    const clean: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(patch)) if (allowed[k]) clean[k] = v;
-    const updated = botStore.update(id, clean as Parameters<BotStore["update"]>[1]);
-    broadcastBots();
-    return updated;
-  });
-
-  handle("pideck:bots-delete", async (_e, id: string) => {
-    if (typeof id !== "string") throw new Error("invalid bot id");
-    const removed = botStore.remove(id);
-    broadcastBots();
-    return { removed };
-  });
-
-  handle("pideck:bots-open", async (_e, id: string, requestId?: number) => {
-    if (typeof id !== "string") throw new Error("invalid bot id");
-    if (isDaemonOwned()) throw new Error("Bot chats need the local runtime (turn off the daemon to use Bots)");
-    if (hostReady) await hostReady;
-    const bot = botStore.get(id);
-    if (!bot) throw new Error("Bot not found");
-    getHost().setBotSystemPrompt(buildBotSystemPrompt(bot, botStore.list()));
-    const cwd = bot.cwd && bot.cwd.length > 0 ? bot.cwd : activeCwd || homedir();
-    const projectHash = projectHashForCwd(cwd);
-    // Per-project chat first, legacy canonical second (owned-or-on-disk).
-    const path = await resolveCanonicalSessionFile(botChatForProject(bot, projectHash));
-    const state = (await getRuntime().openSession({ path, cwd, ...(requestId !== undefined ? { requestId } : {}) })) as {
-      sessionFile?: string;
-    } | null | undefined;
-    const sessionFile = state?.sessionFile ?? null;
-    if (sessionFile && sessionFile !== botChatForProject(bot, projectHash)) {
-      botStore.setProjectSession(id, projectHash, sessionFile);
-      broadcastBots();
-    }
-    if (bot.model) {
-      try {
-        await getHost().setModel(bot.model.provider, bot.model.modelId);
-      } catch (err) {
-        console.warn(`[pideck] bot model pin unavailable (${bot.model.provider}/${bot.model.modelId}):`, err);
-      }
-    }
-    taskManager.resumeForSession(sessionFile);
-    return { sessionFile, bot: botStore.get(id) };
-  });
-
-  // -------------------------------------------------------------------------
-  // Group rooms: one shared session, serial member turns driven here.
-  // -------------------------------------------------------------------------
-
-  handle("pideck:groups-list", () => botStore.listGroups());
-
-  handle("pideck:groups-create", async (_e, input: { name: string; memberIds: string[]; cwd?: string }) => {
-    if (!input || typeof input.name !== "string" || !Array.isArray(input.memberIds)) {
-      throw new Error("invalid group");
-    }
-    const created = botStore.createGroup({
-      name: input.name,
-      memberIds: input.memberIds,
-      ...(typeof input.cwd === "string" && input.cwd ? { cwd: input.cwd } : {}),
-    });
-    broadcastGroups();
-    return created;
-  });
-
-  handle("pideck:groups-update", async (_e, id: string, patch: Record<string, unknown>) => {
-    if (typeof id !== "string" || !patch || typeof patch !== "object") throw new Error("invalid group update");
-    const clean: { name?: string; memberIds?: string[]; cwd?: string } = {};
-    if (typeof patch.name === "string") clean.name = patch.name;
-    if (Array.isArray(patch.memberIds)) clean.memberIds = patch.memberIds.filter((m): m is string => typeof m === "string");
-    if (patch.cwd === undefined || typeof patch.cwd === "string") clean.cwd = (patch.cwd as string | undefined) ?? "";
-    const updated = botStore.updateGroup(id, clean);
-    broadcastGroups();
-    return updated;
-  });
-
-  handle("pideck:groups-delete", async (_e, id: string) => {
-    if (typeof id !== "string") throw new Error("invalid group id");
-    const removed = botStore.removeGroup(id);
-    broadcastGroups();
-    return { removed };
-  });
-
-  /** Ensure the room session is live with the group overlay; create the
-   *  canonical file on first open. Returns the room file (possibly unflushed). */
-  async function ensureGroupRoom(groupId: string): Promise<{ sessionFile: string; group: NonNullable<ReturnType<BotStore["getGroup"]>>; members: NonNullable<ReturnType<BotStore["get"]>>[] }> {
-    const group = botStore.getGroup(groupId);
-    if (!group) throw new Error("Group not found");
-    const members = group.memberIds
-      .map((mid) => botStore.get(mid))
-      .filter((b): b is NonNullable<typeof b> => !!b);
-    if (members.length < 2) throw new Error("A group needs at least 2 bots");
-    if (!group.projectHash) {
-      // One-time anchor for pre-project groups; same fallback chain as cwd below.
-      const anchorCwd = groupAnchorCwd(group, botStore.list()) ?? activeCwd ?? homedir();
-      try {
-        botStore.updateGroup(group.id, { projectHash: projectHashForCwd(anchorCwd) });
-        broadcastGroups();
-      } catch {
-        // Anchor persists on the next open instead.
-      }
-    }
-    getHost().setBotSystemPrompt(buildGroupSystemPrompt(group, members));
-    const cwd = group.cwd && group.cwd.length > 0 ? group.cwd : members[0]?.cwd && members[0].cwd.length > 0 ? members[0].cwd! : activeCwd || homedir();
-    const path = await resolveCanonicalSessionFile(group.mainSessionFile);
-    const state = (await getRuntime().openSession({ path, cwd })) as { sessionFile?: string } | null | undefined;
-    const sessionFile = state?.sessionFile ?? null;
-    if (!sessionFile) throw new Error("could not open group room");
-    if (sessionFile !== group.mainSessionFile) {
-      botStore.setGroupRoom(groupId, sessionFile);
-      broadcastGroups();
-    }
-    taskManager.resumeForSession(sessionFile);
-    return { sessionFile, group: botStore.getGroup(groupId)!, members };
-  }
-
-  handle("pideck:groups-open", async (_e, id: string) => {
-    if (typeof id !== "string") throw new Error("invalid group id");
-    if (isDaemonOwned()) throw new Error("Group rooms need the local runtime (turn off the daemon to use Bots)");
-    if (hostReady) await hostReady;
-    const { sessionFile, group } = await ensureGroupRoom(id);
-    return { sessionFile, group };
-  });
-
-  handle("pideck:group-send", async (_e, groupId: string, text: string) => {
-    if (typeof groupId !== "string" || typeof text !== "string" || !text.trim() || text.length > 200_000) {
-      throw new Error("invalid group send");
-    }
-    if (isDaemonOwned()) throw new Error("Group rooms need the local runtime (turn off the daemon to use Bots)");
-    if (hostReady) await hostReady;
-    if (getHost().isStreaming) throw new Error("The agent is busy, wait for this turn to finish");
-    const { group, members } = await ensureGroupRoom(groupId);
-    const runtime = getRuntime();
-    // The user's message streams like any normal turn.
-    await runtime.prompt(text);
-    // Mention-only by default: extras speak only when asked. Projects that opt
-    // into free-speak keep the legacy full rotation. Caps + quiet-settle live
-    // in the driver; abort (or any turn failure) stops.
-    const settings = group.projectHash ? projectSettings.getByHash(group.projectHash) : undefined;
-    const freeSpeak = settings?.freeSpeak === true;
-    const mentioned = new Set(
-      parseBotMentions(text).flatMap((h) =>
-        members.filter((m) => botHandle(m) === h || m.name.toLowerCase() === h).map((m) => m.id)
-      )
-    );
-    const order = mentioned.size > 0 ? members.filter((m) => mentioned.has(m.id)) : freeSpeak ? members : [];
-    if (order.length === 0) {
-      return { rounds: 0, turns: 0, spoke: 0, stopped: false, sessionFile: group.mainSessionFile };
-    }
-    // Serial member turns as a mention-routed queue. The opening order is the
-    // roster (or the mentioned subset); a spoke turn naming @someone jumps
-    // them to the front, an explicit mention overrides a quiet streak, but
-    // the turn/round caps still bound ping-pong loops. A drained queue
-    // refills for the next round; an all-quiet drain settles the room.
-    // Abort (or any turn failure) stops.
-    const result = await driveRoomTurns({ groupId, members, order, io: driveExtrasIO() });
-    return { ...result, sessionFile: group.mainSessionFile };
-  });
-
-  // -------------------------------------------------------------------------
-  // Project settings + app-default (per-project bots metadata; userData side).
-  // -------------------------------------------------------------------------
-
-  handle("pideck:project-settings-get", async (_e, cwd: string) => {
-    if (typeof cwd !== "string" || !cwd) throw new Error("invalid cwd");
-    const { settings, hash } = projectSettingsForCwd(cwd);
-    return { settings: { ...settings, memberIds: settings.memberIds.filter((id) => botStore.get(id)) }, hash };
-  });
-
-  handle("pideck:project-settings-members", async (_e, hash: string, memberIds: string[]) => {
-    if (typeof hash !== "string" || !Array.isArray(memberIds)) throw new Error("invalid project members");
-    for (const id of memberIds) {
-      if (typeof id !== "string" || !botStore.get(id)) throw new Error("Members must be existing bots");
-    }
-    return projectSettings.setMembers(hash, memberIds);
-  });
-
-  handle("pideck:project-settings-freespeak", async (_e, hash: string, on: boolean) => {
-    if (typeof hash !== "string") throw new Error("invalid project");
-    return projectSettings.setFreeSpeak(hash, on === true);
-  });
-
-  handle("pideck:project-default-update", async (_e, hash: string, patch: Record<string, unknown>) => {
-    if (typeof hash !== "string" || !patch || typeof patch !== "object") throw new Error("invalid default update");
-    const allowed = ["name", "title", "description", "persona", "model"] as const;
-    const clean: Record<string, unknown> = {};
-    for (const k of allowed) if (patch[k] !== undefined) clean[k] = patch[k];
-    return projectSettings.updateDefaultBot(hash, clean as Parameters<ProjectSettingsStore["updateDefaultBot"]>[1]);
-  });
-
-  handle("pideck:project-default-reset", async (_e, hash: string) => {
-    if (typeof hash !== "string") throw new Error("invalid project");
-    return projectSettings.resetDefaultBot(hash, botStore.getDefaultBot());
-  });
-
-  const handoffStore = new HandoffStore(join(app.getPath("userData"), "pideck-state", "handoffs"));
-
-  handle("pideck:handoff-create", async (_e, projectHash: string, sourceFile: string) => {
-    if (typeof projectHash !== "string" || typeof sourceFile !== "string" || !sourceFile) {
-      throw new Error("invalid handoff request");
-    }
-    const settings = projectSettings.getByHash(projectHash);
-    if (!settings) throw new Error("Open the project first, it needs settings to author the handoff");
-    const target = await validateSessionPath(PI_SESSIONS_ROOT, sourceFile);
-    const { messages } = await readSessionTail(target);
-    const deltaText = transcriptText(messages);
-    if (!deltaText.trim()) throw new Error("Nothing to summarize yet, the thread is still fresh");
-    if (hostReady) await hostReady;
-    const summary = normalizeHandoffText(
-      (await getHost().summarizeHandoff(buildHandoffPrompt(deltaText, settings.defaultBot))) ?? ""
-    );
-    if (!summary) throw new Error("Summarization came back empty, try again");
-    return handoffStore.append(target, {
-      summary,
-      author: settings.defaultBot.name,
-      sourceChars: deltaText.length,
-    });
-  });
-
-  handle("pideck:handoff-list", async (_e, sourceFile: string) => {
-    if (typeof sourceFile !== "string" || !sourceFile) throw new Error("invalid handoff request");
-    const target = await validateSessionPath(PI_SESSIONS_ROOT, sourceFile);
-    return handoffStore.forSource(target);
-  });
-
-  handle("pideck:handoff-consume", async (_e, handoffId: string, liveFile: string) => {
-    if (typeof handoffId !== "string" || typeof liveFile !== "string" || !liveFile) {
-      throw new Error("invalid handoff request");
-    }
-    const handoff = await handoffStore.findById(handoffId);
-    if (!handoff) throw new Error("Handoff not found");
-    const live = await validateSessionPath(PI_SESSIONS_ROOT, liveFile);
-    if (hostReady) await hostReady;
-    if (getHost().isStreaming) throw new Error("Wait for the live turn to finish first");
-    const estimatedTokensBefore = Math.max(1, Math.round(handoff.sourceChars / 4));
-    const estimatedTokensAfter = Math.max(1, Math.round(handoff.summary.length / 4));
-    await getHost().consumeHandoff(live, handoff.summary, estimatedTokensBefore);
-    await handoffStore.markConsumed(handoffId, live);
-    getHost().emitHandoffEvent({
-      type: "babylon_handoff_consumed",
-      handoffId,
-      sourceName: handoff.sourceFile.split("/").pop() ?? handoff.sourceFile,
-      author: handoff.author,
-      tokensBefore: estimatedTokensBefore,
-      estimatedTokensAfter,
-    });
-    sessionIndex.touch();
-    return { consumedInto: live };
-  });
-
-  handle("pideck:bots-default-get", () => botStore.getDefaultBot());
-
-  handle("pideck:bots-default-set", async (_e, input: unknown) => {
-    if (!input || typeof input !== "object") throw new Error("invalid default bot");
-    const updated = botStore.setDefaultBot(input as Parameters<BotStore["setDefaultBot"]>[0]);
-    broadcastBots();
-    return updated;
-  });
-
-  // -------------------------------------------------------------------------
-  // Bot-to-bot DM: one attributed turn in the target's chat, reply relayed
-  // into the origin as a bot-message line. Idle sessions only, the single
-  // runtime cannot background turns, so delivery is synchronous and visible.
-  // -------------------------------------------------------------------------
-
-  handle("pideck:bots-message", async (_e, targetId: string, text: string, fromId?: string) => {
-    if (typeof targetId !== "string" || typeof text !== "string" || !text.trim() || text.length > 200_000) {
-      throw new Error("invalid bot message");
-    }
-    if (isDaemonOwned()) throw new Error("Bot chats need the local runtime (turn off the daemon to use Bots)");
-    if (hostReady) await hostReady;
-    const target = botStore.get(targetId);
-    if (!target) throw new Error("Bot not found");
-    const from = typeof fromId === "string" ? botStore.get(fromId) : undefined;
-    if (getHost().isStreaming) throw new Error("The agent is busy, wait for this turn to finish");
-    const origin = getHost().activeSessionFile;
-    if (!origin) throw new Error("Open a chat first, replies need a home");
-    const originCwd = getHost().cwd;
-    // Run the target turn in the target's canonical chat.
-    getHost().setBotSystemPrompt(buildBotSystemPrompt(target, botStore.list()));
-    const targetCwd = target.cwd && target.cwd.length > 0 ? target.cwd : activeCwd || homedir();
-    const targetHash = projectHashForCwd(targetCwd);
-    const targetPath = await resolveCanonicalSessionFile(botChatForProject(target, targetHash));
-    const targetState = (await getRuntime().openSession({ path: targetPath, cwd: targetCwd })) as {
-      sessionFile?: string;
-    } | null | undefined;
-    const targetFile = targetState?.sessionFile ?? null;
-    if (targetFile && targetFile !== botChatForProject(target, targetHash)) {
-      botStore.setProjectSession(targetId, targetHash, targetFile);
-      broadcastBots();
-    }
-    if (target.model) {
-      try {
-        await getHost().setModel(target.model.provider, target.model.modelId);
-      } catch (err) {
-        console.warn(`[pideck] bot model pin unavailable (${target.model.provider}/${target.model.modelId}):`, err);
-      }
-    }
-    const sender = from ? `@${botHandle(from)} (${from.name})` : "you (the human)";
-    await getRuntime().prompt(`[DM from ${sender}, reply briefly in your voice, or PASS if nothing to add]\n\n${text}`);
-    const reply = lastAssistantText(await getRuntime().getMessages());
-    const pass = isPassReply(reply);
-    // Switch home and relay the reply as an attributed activity line.
-    getHost().setBotSystemPrompt(overlayForSessionFile(origin, originCwd));
-    await getRuntime().openSession({ path: origin, cwd: originCwd });
-    if (!pass) {
-      const clipped = reply.length > 6000 ? `${reply.slice(0, 6000)}\n… (truncated, full reply lives in @${botHandle(target)}'s chat)` : reply;
-      await getHost().postBotMessage(
-        `[Babylon Bot Message]\n@${from ? botHandle(from) : "you"} asked @${botHandle(target)}: ${text.length > 500 ? `${text.slice(0, 500)}…` : text}\n\n@${botHandle(target)} replied:\n\n${clipped}`,
-        { fromId: from?.id ?? null, targetId, text: text.slice(0, 500) }
-      );
-    }
-    taskManager.resumeForSession(origin);
-    sessionIndex.touch();
-    return { reply: pass ? null : reply, pass };
-  });
-
-  handle("pideck:prompt", async (_e, message: string, images?: any[], streamingBehavior?: string) => {
-    if (typeof message !== "string" || message.length > 2_000_000) throw new Error("invalid prompt payload");
-    if (streamingBehavior !== undefined && streamingBehavior !== "steer" && streamingBehavior !== "followUp") {
-      throw new Error("invalid streaming behavior");
-    }
-    if (images !== undefined) {
-      if (!Array.isArray(images) || images.length > 20) throw new Error("invalid image payload");
-      for (const image of images) {
-        if (image?.type !== "image" || typeof image.data !== "string" || image.data.length > 15_000_000) {
-          throw new Error("invalid image payload");
-        }
-        if (typeof image.mimeType !== "string" || !image.mimeType.startsWith("image/")) {
-          throw new Error("invalid image MIME type");
-        }
-      }
-    }
-    if (isDaemonOwned()) {
-      const client = requireDaemonClient();
-      const res = await client.request("pi.prompt", { message, images, streamingBehavior });
-      return res.payload;
-    }
-    const result = await getRuntime().prompt(message, images, streamingBehavior);
-    // Shared project chats: after the default bot's turn settles, staffed
-    // extras speak when asked (or freely when the project opted in). Never on
-    // mid-stream steer/follow-up turns, and never loudly, a skipped driver is
-    // the common case and must not fail the send.
-    if (!streamingBehavior) {
-      await driveSharedChatExtras(message).catch((err) =>
-        console.warn("[pideck] shared-chat extras skipped:", err)
-      );
-    }
-    return result;
-  });
-  handle("pideck:abort", async () => {
-    if (isDaemonOwned()) {
-      const client = requireDaemonClient();
-      const res = await client.request("pi.abort", {});
-      return res.payload;
-    }
-    return getRuntime().abort();
-  });
-  handle("pideck:refresh-session", async (_e, path: string) => {
-    const p = await validateSessionPath(PI_SESSIONS_ROOT, path);
-    // Route through the runtime facade so local and daemon modes behave the
-    // same: the daemon returns { refreshed: boolean } via pi.refreshFromDisk,
-    // not a raw pi.getState payload.
-    return getRuntime().refreshFromDisk(p);
-  });
-  handle("pideck:get-messages", async () => {
-    if (isDaemonOwned()) {
-      const client = requireDaemonClient();
-      const res = await client.request("pi.getMessages", {});
-      return res.payload;
-    }
-    return getRuntime().getMessages();
-  });
-  handle("pideck:get-state", async () => {
-    if (isDaemonOwned()) {
-      const client = requireDaemonClient();
-      const res = await client.request("pi.getState", {});
-      return res.payload;
-    }
-    return getRuntime().getState();
-  });
-  handle("pideck:get-stats", async () => {
-    if (isDaemonOwned()) {
-      const client = requireDaemonClient();
-      const res = await client.request("pi.getStats", {});
-      return res.payload;
-    }
-    return (getRuntime() as any).getStats?.() ?? (getHost() as any).getStats();
-  });
-  handle("pideck:git-status", async (_e, cwd: unknown) => {
-    if (typeof cwd !== "string" || cwd.length > 4096) throw new Error("invalid cwd");
-    try {
-      return await gitStatus(cwd);
-    } catch {
-      return { isRepo: false, dirty: [], ahead: 0, behind: 0 };
-    }
-  });
-  // Git integration (status, commit/push/pull, branches, pull requests)
-  const requireCwd = (cwd: unknown): string => {
-    if (typeof cwd !== "string" || cwd.length === 0 || cwd.length > 4096) throw new Error("invalid cwd");
-    return cwd;
-  };
-  handle("pideck:git-status-details", async (_e, cwd: unknown) => {
-    try {
-      return await gitOps.statusDetails(requireCwd(cwd));
-    } catch {
-      return { isRepo: false };
-    }
-  });
-  handle("pideck:git-branches", (_e, cwd: unknown) => gitOps.listBranches(requireCwd(cwd)));
-  handle("pideck:git-diff-file", async (_e, cwd: unknown, file: unknown) => {
-    const root = requireCwd(cwd);
-    if (typeof file !== "string" || file.length === 0 || file.length > 1024 || file.includes("\u0000")) {
-      throw new Error("invalid file path");
-    }
-    return gitOps.diffForFile(root, file);
-  });
-  handle("pideck:git-branch-create", (_e, cwd: unknown, name: unknown, switchTo: unknown) => {
-    if (typeof name !== "string" || name.length > 200) throw new Error("invalid branch name");
-    return gitOps.createBranch(requireCwd(cwd), name, switchTo === true);
-  });
-  handle("pideck:git-branch-switch", (_e, cwd: unknown, name: unknown, options: unknown) => {
-    if (typeof name !== "string" || name.length > 200) throw new Error("invalid branch name");
-    if (options !== undefined && (typeof options !== "object" || options === null || typeof (options as any).stash !== "boolean")) {
-      throw new Error("invalid switch options");
-    }
-    return gitOps.switchBranch(requireCwd(cwd), name, options as { stash?: boolean } | undefined);
-  });
-  handle("pideck:git-commit-push", async (event, cwd: unknown, requestId: unknown) => {
-    const root = requireCwd(cwd);
-    if (typeof requestId !== "string" || requestId.length === 0 || requestId.length > 100) throw new Error("invalid request id");
-    if (!/^[a-zA-Z0-9_-]+$/.test(requestId)) throw new Error("invalid request id format");
-    const emit = (phase: string, message: string) => {
-      if (!event.sender.isDestroyed()) event.sender.send("pideck:git-commit-push-progress", { requestId, phase, message });
-    };
-    let committed = false;
-    let stagedForRecovery = false;
-    let prepared: import("./git").PreparedCommitContext | null = null;
-    try {
-      emit("preparing", "Staging changes and preparing diff context");
-      prepared = await gitOps.prepareCommitContext(root);
-      const context = prepared;
-      stagedForRecovery = true;
-      if (context.truncatedPatch) emit("generating", "Generating commit message (patch truncated, using file summary for remaining changes)");
-      else emit("generating", "Generating commit message");
-      const generated = await getRuntime().generateCommitMessage(context) as any;
-      emit("committing", `Committing ${generated.subject}`);
-      const commit = await gitOps.commitStaged(root, generated.message);
-      committed = true;
-      stagedForRecovery = false;
-      emit("pushing", "Pushing current branch");
-      const push = await gitOps.pushCurrentBranch(root);
-      const pushLabel = push.status === "skipped_up_to_date" ? `Already up to date on ${push.branch}` : `Committed and pushed ${push.branch}`;
-      emit("done", pushLabel);
-      return { generated, commit, push };
-    } catch (cause) {
-      // If we staged via prepareCommitContext but failed before commit, restore
-      // the user's pre-existing staged selection instead of leaving a
-      // half-staged state.
-      if (stagedForRecovery && !committed) {
-        await gitOps.resetStaged(root, prepared ?? undefined);
-        emit("error", `${cause instanceof Error ? cause.message : String(cause)}, staged changes were unstaged`);
-      }
-      const detail = cause instanceof Error ? cause.message : String(cause);
-      const message = committed ? `Commit succeeded, but push failed: ${detail}` : detail;
-      if (!stagedForRecovery || committed) emit("error", message);
-      throw new Error(message);
-    }
-  });
-  handle("pideck:git-commit", (_e, cwd: unknown, message: unknown) => {
-    if (typeof message !== "string" || message.length > 20_000) throw new Error("invalid commit message");
-    return gitOps.commitAll(requireCwd(cwd), message);
-  });
-  handle("pideck:git-push", (_e, cwd: unknown) => gitOps.pushCurrentBranch(requireCwd(cwd)));
-  handle("pideck:git-pull", (_e, cwd: unknown) => gitOps.pullCurrentBranch(requireCwd(cwd)));
-  handle("pideck:git-pr-context", (_e, cwd: unknown) => gitOps.prContext(requireCwd(cwd)));
-  handle("pideck:git-pr-suggest", (_e, cwd: unknown) => gitOps.suggestPrContent(requireCwd(cwd)));
-  handle("pideck:git-pr-create", (_e, cwd: unknown, input: unknown) => {
-    const title = (input as any)?.title;
-    const body = (input as any)?.body;
-    if (typeof title !== "string" || title.length > 500) throw new Error("invalid PR title");
-    if (body !== undefined && (typeof body !== "string" || body.length > 100_000)) throw new Error("invalid PR body");
-    return gitOps.createPr(requireCwd(cwd), { title, body: typeof body === "string" ? body : "" });
-  });
-  handle("pideck:git-stage-file", (_e, cwd: unknown, file: unknown) => {
-    if (typeof file !== "string" || !file.trim() || file.length > 4096) throw new Error("invalid file");
-    return gitOps.stageFile(requireCwd(cwd), file);
-  });
-  handle("pideck:git-unstage-file", (_e, cwd: unknown, file: unknown) => {
-    if (typeof file !== "string" || !file.trim() || file.length > 4096) throw new Error("invalid file");
-    return gitOps.unstageFile(requireCwd(cwd), file);
-  });
-  handle("pideck:git-discard-file", (_e, cwd: unknown, file: unknown) => {
-    if (typeof file !== "string" || !file.trim() || file.length > 4096) throw new Error("invalid file");
-    return gitOps.discardFile(requireCwd(cwd), file);
-  });
-  handle("pideck:git-stage-hunk", (_e, cwd: unknown, file: unknown, patch: unknown) => {
-    if (typeof file !== "string" || !file.trim() || file.length > 4096) throw new Error("invalid file");
-    if (typeof patch !== "string" || !patch.trim() || patch.length > 200_000) throw new Error("invalid patch");
-    return gitOps.stageHunk(requireCwd(cwd), file, patch);
-  });
-  handle("pideck:git-discard-hunk", (_e, cwd: unknown, file: unknown, patch: unknown) => {
-    if (typeof file !== "string" || !file.trim() || file.length > 4096) throw new Error("invalid file");
-    if (typeof patch !== "string" || !patch.trim() || patch.length > 200_000) throw new Error("invalid patch");
-    return gitOps.discardHunk(requireCwd(cwd), file, patch);
-  });
-
-  handle("pideck:get-models", () => getRuntime().getModels());
-  handle("pideck:get-commands", () => getRuntime().getCommands());
-  handle("pideck:set-model", (_e, provider: string, modelId: string) =>
-    getRuntime().setModel(provider, modelId)
-  );
-  handle("pideck:set-thinking", (_e, level: string) => getRuntime().setThinking(level));
-  handle("pideck:get-thinking-levels", () => getRuntime().getThinkingLevels());
-  handle("pideck:list-fonts", async () => {
-    const { execFile } = await import("node:child_process");
-    const { promisify } = await import("node:util");
-    const pexec = promisify((await import("node:child_process")).exec);
-    const all = new Set<string>();
-    all.add("System Default");
-    // 1) Try font-list (may be inside asar, may fallback)
-    try {
-      const { getFonts } = await import("font-list");
-      const fonts: string[] = await (getFonts as any)({ disableQuoting: true });
-      for (const f of fonts) {
-        const c = f.replace(/^[\"']|[\"']$/g, "").trim();
-        if (c) all.add(c);
-      }
-    } catch {}
-    // 2) system_profiler, most reliable on macOS, includes Miracode
-    try {
-      const { stdout } = await pexec(`system_profiler SPFontsDataType 2>/dev/null | grep "Family:" | awk -F: '{print $2}' | sort | uniq`, { maxBuffer: 10 * 1024 * 1024 }) as any;
-      for (const line of String(stdout).split("\n")) {
-        const c = line.trim();
-        if (c) all.add(c);
-      }
-    } catch {}
-    // 3) Direct font file scan, catches newly installed .ttf/.otf like Miracode.ttf
-    try {
-      const { readdirSync, existsSync } = await import("node:fs");
-      const { homedir } = await import("node:os");
-      const { join, basename } = await import("node:path");
-      for (const dir of [join(homedir(), "Library/Fonts"), "/Library/Fonts", "/System/Library/Fonts"]) {
-        if (!existsSync(dir)) continue;
-        for (const f of readdirSync(dir)) {
-          if (/\.(ttf|otf|ttc)$/i.test(f)) {
-            const name = basename(f).replace(/\.(ttf|otf|ttc)$/i, "").replace(/[-_]/g, " ").trim();
-            if (name) all.add(name);
-            // Also add the raw family name without mangling for exact match
-            const raw = basename(f).replace(/\.(ttf|otf|ttc)$/i, "");
-            if (raw && raw !== name) all.add(raw);
-          }
-        }
-      }
-      // Ensure Miracode.ttf is explicitly added if present
-      if (existsSync(join(homedir(), "Library/Fonts/Miracode.ttf"))) all.add("Miracode");
-    } catch {}
-    const cleaned = [...all].sort((a, b) => a.localeCompare(b));
-    // Ensure System Default is first
-    const sorted = ["System Default", ...cleaned.filter((f) => f !== "System Default")];
-    return sorted;
-  });
-  handle("pideck:get-settings", () => getRuntime().getSettings());
-  handle("pideck:set-settings", (_e, patch: any) => getRuntime().setSettings(patch));
-  handle("pideck:set-session-name", (_e, name: string) => {
-    if (typeof name !== "string" || name.length > 500) throw new Error("invalid session name");
-    return getRuntime().setSessionName(name);
-  });
-  handle("pideck:compact", () => getRuntime().compact());
-
-  // Branching / worktrees
-  handle("pideck:get-tree", () => getRuntime().getTree());
-  handle("pideck:get-history", () => getRuntime().getHistory());
-  handle("pideck:turn-changes", (_e, entryId: unknown) => {
-    if (typeof entryId !== "string" || entryId.length < 1 || entryId.length > 200) throw new Error("invalid history entry ID");
-    return getRuntime().getTurnChanges(entryId);
-  });
-  handle("pideck:turn-file-diff", (_e, entryId: unknown, path: unknown) => {
-    if (typeof entryId !== "string" || entryId.length < 1 || entryId.length > 200) throw new Error("invalid history entry ID");
-    if (typeof path !== "string" || path.length < 1 || path.length > 4096) throw new Error("invalid file path");
-    return getRuntime().getTurnFileDiff(entryId, path);
-  });
-  handle("pideck:rollback:prepare", (_e, entryId: string) => {
-    if (typeof entryId !== "string" || entryId.length < 1 || entryId.length > 200) throw new Error("invalid history entry ID");
-    return getRuntime().prepareRollback(entryId);
-  });
-  handle("pideck:rollback:commit", (_e, planId: string) => {
-    if (typeof planId !== "string" || !/^[0-9a-f-]{36}$/i.test(planId)) throw new Error("invalid rollback plan ID");
-    return getRuntime().commitRollback(planId);
-  });
-  handle("pideck:rollback:undo", () => getRuntime().undoRollback());
-  handle("pideck:get-fork-messages", () => getRuntime().getForkMessages());
-  handle("pideck:fork", (_e, entryId: string) => {
-    if (typeof entryId !== "string" || entryId.length < 1 || entryId.length > 200) throw new Error("invalid history entry ID");
-    return getRuntime().fork(entryId);
-  });
-  handle("pideck:clone", () => getRuntime().clone());
-  handle("pideck:task-list", async () => getRuntime().taskList());
-  handle("pideck:task-get", async (_e, id: unknown) => {
-    if (typeof id !== "string" || id.length === 0 || id.length > 200) throw new Error("invalid task id");
-    return getRuntime().taskGet(id);
-  });
-  handle("pideck:task-set-contract", async (_e, taskId: unknown, contract: unknown) => {
-    const id = validateId(taskId);
-    if (!contract || typeof (contract as CompletionContract).id !== "string") throw new Error("invalid contract");
-    const c = contract as CompletionContract;
-    await getRuntime().contractSet(c);
-    // Also set contractId on task via facade
-    const task = await getRuntime().taskGet(id);
-    if (task) await getRuntime().taskUpdate(id, { contractId: c.id } as never);
-    return c;
-  });
-  handle("pideck:task-complete", async (_e, taskId: unknown, results: unknown) => {
-    const id = validateId(taskId);
-    const runtime = getRuntime();
-    const task = await runtime.taskGet(id);
-    if (!task) throw new Error("unknown task");
-    const checkResults = Array.isArray(results) ? (results as CheckResult[]) : [];
-    const hooks = await runtime.hooksList();
-    const registry = { hooks: Object.fromEntries(hooks.map((h) => [h.id, h])), order: hooks.map((h) => h.id) } as import("../src/hooks").HookRegistry;
-    const { dispatchHooks } = await import("../src/hook-dispatcher");
-    const hookOutcome = await dispatchHooks(
-      registry,
-      "before_stop",
-      { sessionId: task.sessionId ?? "", taskId: id },
-      async (def) => {
-        if (def.action === "block") return { block: { reason: `Blocked by hook ${def.id}` } };
-        return {};
-      }
-    );
-    if (hookOutcome.blocked) {
-      await runtime.attentionRaise({
-        id: `hook-${id}-${Date.now()}`,
-        type: "blocked_task",
-        title: `Task blocked by hook: ${task.title}`,
-        detail: hookOutcome.blocked.result.block?.reason ?? "blocked",
-        source: id,
-        createdAt: Date.now(),
-        resolved: false,
-      });
-      return { blocked: true, reason: hookOutcome.blocked.result.block?.reason, hookId: hookOutcome.blocked.id };
-    }
-    // The daemon owns the contract gate when enabled: it evaluates the
-    // persisted contract and raises failed_task attention atomically, so the
-    // gate survives client restarts. The local runtime mirrors that logic.
-    const outcome = await runtime.taskComplete(id, checkResults);
-    if (outcome.blocked && daemonOnly()) {
-      // Surface the daemon-raised failed_task item on the attention channel
-      // like any attention.raised event.
-      daemonOnly()
-        ?.request("state.get", {})
-        .then((res) => {
-          const runtimeState = (res.payload as { runtime?: { attention?: unknown } })?.runtime;
-          win?.webContents.send("pideck:attention-update", runtimeState?.attention ?? { items: {} });
-        })
-        .catch(() => {});
-    }
-    return outcome;
-  });
-  handle("pideck:hooks-list", async () => getRuntime().hooksList());
-  handle("pideck:hooks-register", async (_e, hook: unknown) => {
-    if (!hook || typeof (hook as { id?: unknown }).id !== "string") throw new Error("invalid hook");
-    await getRuntime().hooksRegister(hook as import("../src/hooks").HookDefinition);
-    return getRuntime().hooksList();
-  });
-  handle("pideck:hooks-remove", async (_e, id: unknown) => {
-    await getRuntime().hooksRemove(validateId(id));
-    return getRuntime().hooksList();
-  });
-  handle("pideck:contracts-list", async () => getRuntime().contractsList());
-  handle("pideck:contracts-get", async (_e, id: unknown) => getRuntime().contractGet(validateId(id as string)));
-  handle("pideck:attention-list", async () => getRuntime().attentionList());
-  handle("pideck:attention-resolve", async (_e, id: unknown) => {
-    await getRuntime().attentionResolve(validateId(id));
-    return getRuntime().attentionList();
-  });
-
-  handle("pideck:worktree-info", async () => {
-    try {
-      const state = await getRuntime().getState() as any;
-      const file = state?.sessionFile;
-      const header = file ? await readSessionHeader(file) : null;
-      const task = isDaemonOwned()
-        ? await daemonTaskBySessionFile(file)
-        : taskManager.findBySessionFile(file);
-      const parentSession = header?.parentSession ?? task?.parentSessionFile;
-      const cwd = header?.cwd ?? task?.cwd ?? activeCwd;
-      const g = cwd ? await gitInfo(cwd) : { isRepo: false };
-      return {
-        isWorktree: !!parentSession,
-        sessionFile: file,
-        parentSession,
-        cwd,
-        task,
-        git: g,
-      };
-    } catch {
-      return { isWorktree: false, git: { isRepo: false } };
-    }
-  });
-
-  handle(
-    "pideck:worktree-create",
-    async (_e, opts: { name: string; description?: string; useGit?: boolean }) => {
-      if (!opts || typeof opts.name !== "string" || opts.name.length > 200) throw new Error("invalid worktree name");
-      if (opts.description !== undefined && (typeof opts.description !== "string" || opts.description.length > 20_000)) {
-        throw new Error("invalid worktree description");
-      }
-      const before: any = await getRuntime().getState();
-      if (!before?.sessionFile) {
-        throw new Error("no persisted session to worktree yet, send at least one message first");
-      }
-      const originalPath = before.sessionFile;
-      const originalCwd = activeCwd;
-      let worktreePath: string | undefined;
-      let gitWorktree: { path: string; branch: string; baseBranch?: string } | null = null;
-      let gitRoot: string | undefined;
-
-      try {
-        const cloneRes: any = await getRuntime().clone();
-        if (cloneRes?.cancelled) throw new Error("worktree cancelled by extension");
-        worktreePath = (await getRuntime().getState() as any)?.sessionFile;
-        if (!worktreePath || worktreePath === originalPath) throw new Error("clone did not produce a session file");
-
-        const safeName = sanitizeWorktreeName(opts.name) || `exp-${Date.now().toString(36)}`;
-        await getRuntime().setSessionName(`worktree: ${safeName}`);
-        const afterNameState: any = await getRuntime().getState();
-        await ensureClonedSessionFile(worktreePath, originalPath, activeCwd, afterNameState?.sessionId);
-        let workCwd = activeCwd;
-
-        if (opts.useGit) {
-          const header = (await readSessionHeader(worktreePath)) ?? {};
-          const baseCwd = header.cwd ?? activeCwd;
-          const info = await gitInfo(baseCwd);
-          if (!info.isRepo || !info.root) {
-            throw new Error("project is not a git repository, uncheck the git worktree option");
-          }
-          gitRoot = info.root;
-          let branch = `pideck/${safeName}`;
-          for (let i = 2; await branchExists(info.root, branch); i++) branch = `pideck/${safeName}-${i}`;
-          const wtPath = uniquePath(join(dirname(info.root), `${basename(info.root)}--${safeName}`));
-          await git(["worktree", "add", "-b", branch, wtPath], info.root);
-          gitWorktree = { path: wtPath, branch, baseBranch: info.branch };
-          await rewriteSessionHeader(worktreePath, { cwd: wtPath });
-          await getRuntime().switchTo(worktreePath as any);
-          workCwd = wtPath;
-          applyCwd(wtPath);
-        }
-
-        if (opts.description?.trim()) {
-          await getRuntime()
-            .prompt(
-              `[Experimental worktree "${safeName}"${gitWorktree ? `, git branch ${gitWorktree.branch}` : ""}] ${opts.description.trim()}`
-            )
-            .catch(() => {});
-        }
-
-        const state: any = await getRuntime().getState();
-        if (!state?.sessionId) throw new Error("cloned session has no runtime identity");
-        let task: import("../src/tasks").Task;
-        if (isDaemonOwned()) {
-          const client = requireDaemonClient();
-          const payload = {
-            id: randomUUID(),
-            title: safeName,
-            status: "running" as const,
-            ownerSession: before.sessionId,
-            sessionId: state.sessionId,
-            sessionFile: worktreePath,
-            parentSessionFile: originalPath,
-            cwd: workCwd,
-            branch: gitWorktree?.branch,
-            worktreePath: gitWorktree?.path,
-            dirty: false,
-            terminalIds: [],
-            checkpointIds: [],
-            createdAt: Date.now(),
-          };
-          const res = await client.request("task.created", payload);
-          task = res.payload as import("../src/tasks").Task;
-        } else {
-          task = taskManager.register({
-            title: safeName,
-            ownerSession: before.sessionId,
-            sessionId: state.sessionId,
-            sessionFile: worktreePath,
-            parentSessionFile: originalPath,
-            cwd: workCwd,
-            branch: gitWorktree?.branch,
-            worktreePath: gitWorktree?.path,
-          });
-        }
-        sendStatus("ready", { state, sessionPath: worktreePath, cwd: workCwd });
-        return { task, taskId: task.id, worktreePath, originalPath, gitWorktree };
-      } catch (error) {
-        // Clone + git worktree creation is transactional: restore the original
-        // runtime first, then remove only artifacts this attempt created.
-        let restored = false;
-        try {
-          await getRuntime().switchTo(originalPath as any);
-          restored = true;
-          applyCwd(originalCwd);
-        } catch {
-          // Preserve the cloned session if restoration failed; deleting the
-          // active file would make recovery harder.
-        }
-        if (gitWorktree && gitRoot) {
-          await git(["worktree", "remove", "--force", gitWorktree.path], gitRoot).catch(() => {});
-          await git(["branch", "-D", gitWorktree.branch], gitRoot).catch(() => {});
-        }
-        if (restored && worktreePath) await fsp.rm(worktreePath, { force: true }).catch(() => {});
-        throw error;
-      }
-    }
-  );
-
-  handle("pideck:worktree-exit", async (_e, opts: { keep: boolean }) => {
-    if (!opts || typeof opts.keep !== "boolean") throw new Error("invalid worktree exit options");
-    const state: any = await getRuntime().getState();
-    const file = state?.sessionFile;
-    if (!file) throw new Error("no active session");
-    const header = await readSessionHeader(file);
-    const task = isDaemonOwned()
-      ? await daemonTaskBySessionFileStrict(requireDaemonClient(), file)
-      : taskManager.findBySessionFile(file);
-    const originalPath = header?.parentSession ?? task?.parentSessionFile;
-    if (!originalPath || !existsSync(originalPath)) {
-      throw new Error("this session has no original to return to");
-    }
-    const workCwd = header?.cwd ?? task?.cwd;
-    const gitWorktree = workCwd ? await gitInfo(workCwd) : { isRepo: false };
-    const dirty = gitWorktree.isLinkedWorktree
-      ? (await gitOps.statusDetails(workCwd)).hasChanges
-      : false;
-
-    const cleanup = async () => {
-      await getRuntime().switchTo(originalPath as any);
-
-      let gitRemoved = false;
-      if (!opts.keep) {
-        if (workCwd && gitWorktree.isLinkedWorktree) {
-          const branch = await git(["rev-parse", "--abbrev-ref", "HEAD"], workCwd).catch(() => "");
-          const commonDir = await git(["rev-parse", "--git-common-dir"], workCwd);
-          const mainRoot = dirname(commonDir.startsWith("/") ? commonDir : join(workCwd, commonDir));
-          await git(["worktree", "remove", "--force", workCwd], mainRoot);
-          if (branch.startsWith("pideck/")) await git(["branch", "-D", branch], mainRoot).catch(() => {});
-          gitRemoved = true;
-        }
-        await fsp.rm(file);
-      }
-
-      const newState: any = await getRuntime().getState();
-      const origHeader = await readSessionHeader(originalPath);
-      applyCwd(origHeader?.cwd ?? activeCwd);
-      sendStatus("ready", { state: newState, sessionPath: originalPath, cwd: activeCwd });
-      return { originalPath, kept: opts.keep, gitRemoved };
-    };
-
-    if (task) {
-      if (isDaemonOwned()) {
-        // The task lives in the daemon. A local `taskManager.exit` would
-        // remove a task the daemon does not know we removed, and the
-        // task.updated/task.removed calls below need a live socket.
-        const client = requireDaemonClient();
-        if (!opts.keep && dirty) throw new Error("Cannot discard a task worktree with uncommitted changes");
-        await processManager.killByOwner(task.id).catch(() => {});
-        const result = await cleanup();
-        if (opts.keep) {
-          await client.request("task.updated", { id: task.id, patch: { status: "paused", dirty } });
-        } else {
-          await client.request("task.removed", { id: task.id });
-        }
-        return { ...result, task, removed: !opts.keep };
-      }
-      return taskManager.exit({ taskId: task.id, keep: opts.keep, dirty, cleanup });
-    }
-    if (isDaemonOwned() && !daemonOnly()) {
-      // No task resolved (daemon has none for this session, *or* the socket
-      // is down and we could not tell which). Refuse rather than run cleanup
-      // while the daemon still believes a task is running.
-      throw new Error("daemon is reconnecting, try again shortly");
-    }
-    if (!opts.keep && dirty) throw new Error("Cannot discard a task worktree with uncommitted changes");
-    return cleanup();
-  });
-
-  handle("pideck:ui-respond", (_e, resp: { id: string; [k: string]: unknown }) => {
-    if (!resp || typeof resp.id !== "string" || resp.id.length > 200) throw new Error("invalid dialog response");
-    return getRuntime().respondUi(resp.id, resp);
-  });
-  handle("pideck:open-external", async (_e, url: string) => {
-    let parsed: URL;
-    try {
-      parsed = new URL(url);
-    } catch {
-      throw new Error("invalid external URL");
-    }
-    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-      throw new Error(`blocked external URL protocol: ${parsed.protocol}`);
-    }
-    await shell.openExternal(parsed.toString());
-  });
-
-  // ---------------------------------------------------------------------------
-  // Permission system (Phase 1): modes, rules, and approval resolution.
-  // ---------------------------------------------------------------------------
-
-  handle("pideck:permissions:get", async () => {
-    if (isDaemonOwned()) {
-      // The daemon is the authority for policy when it owns the runtime.
-      // Return its current state directly. A disconnected daemon
-      // surfaces as a thrown error (the UI shows a reconnecting
-      // indicator) rather than a fabricated `auto` default that would
-      // silently downgrade the agent's effective permissions.
-      const client = requireDaemonClient();
-      const res = await client.request("permissions.get", {});
-      return res.payload;
-    }
-    if (!permissionEngine) return { mode: "auto" as const, rules: [] };
-    return { mode: permissionEngine.getMode(), rules: permissionEngine.listRules() };
-  });
-  handle("pideck:permissions:set-mode", async (_e, mode: string) => {
-    if (mode !== "supervised" && mode !== "auto" && mode !== "full_access") {
-      throw new Error("invalid execution mode");
-    }
-    if (isDaemonOwned()) {
-      const client = requireDaemonClient();
-      const res = await client.request("permissions.set-mode", { mode });
-      return res.payload;
-    }
-    if (!permissionEngine) throw new Error("permission engine not ready");
-    void permissionEngine.setModeAndPersist(mode as any);
-    // A mode change retroactively re-evaluates what the agent is blocked on:
-    // under Full Access the pending approvals are no longer required, so
-    // release them instead of leaving the agent waiting on stale gates.
-    if (mode === "full_access") {
-      for (const [id, pending] of pendingApprovals) {
-        clearTimeout(pending.timer);
-        pendingApprovals.delete(id);
-        win?.webContents.send("pideck:approval-cleared", { id });
-        pending.resolve(true);
-      }
-    }
-    notifyPermissionsChanged();
-    return { mode: permissionEngine.getMode() };
-  });
-  handle("pideck:permissions:add-rule", async (_e, input: any) => {
-    if (!input || typeof input.category !== "string" || (input.decision !== "allow" && input.decision !== "deny")) {
-      throw new Error("invalid rule");
-    }
-    if (input.scope !== "always" && input.scope !== "session") {
-      throw new Error("invalid rule scope");
-    }
-    if (isDaemonOwned()) {
-      const client = requireDaemonClient();
-      const res = await client.request("permissions.add-rule", input);
-      return res.payload;
-    }
-    if (!permissionEngine) throw new Error("permission engine not ready");
-    const rule = permissionEngine.addRule({
-      category: input.category,
-      decision: input.decision,
-      scope: input.scope,
-      match: input.match,
-      note: input.note,
-    });
-    notifyPermissionsChanged();
-    return rule;
-  });
-  handle("pideck:permissions:remove-rule", async (_e, id: string) => {
-    if (typeof id !== "string" || id.length < 1 || id.length > 200) throw new Error("invalid rule id");
-    if (isDaemonOwned()) {
-      const client = requireDaemonClient();
-      const res = await client.request("permissions.remove-rule", { id });
-      return res.payload;
-    }
-    if (!permissionEngine) throw new Error("permission engine not ready");
-    const removed = permissionEngine.removeRule(id);
-    notifyPermissionsChanged();
-    return { removed };
-  });
-  handle("pideck:permissions:resolve-approval", async (_e, payload: { id: string; choice: string }) => {
-    if (!payload || typeof payload.id !== "string" || typeof payload.choice !== "string") {
-      throw new Error("invalid approval resolution");
-    }
-    if (isDaemonOwned()) {
-      // Approvals are owned by the daemon in daemon mode. A local resolution
-      // here would return { ok: true } while the daemon never hears about
-      // the choice; the agent would then wait on a gate that no one will
-      // ever open. Refuse loudly when the socket is down rather than lie.
-      const client = requireDaemonClient();
-      await client.request("approval.resolved", { id: payload.id, choice: payload.choice });
-      win?.webContents.send("pideck:approval-resolved", { id: payload.id, choice: payload.choice });
-      return { ok: true };
-    }
-    resolveApproval(payload.id, payload.choice as any);
-    return { ok: true };
-  });
-
-  // Threads + subagents (project-local extension state)
-  handle("pideck:activity:list", () =>
-    activityBridge?.list() ?? Promise.resolve({ threads: [], subagents: [] })
-  );
-  handle(
-    "pideck:threads:control",
-    async (_e, opts: { action: "steer" | "follow-up" | "stop"; threadId: string; message?: string }) => {
-      if (!/^[a-f0-9-]{8,}$/i.test(opts.threadId)) throw new Error("invalid thread id");
-      if (opts.action !== "steer" && opts.action !== "follow-up" && opts.action !== "stop") {
-        throw new Error("invalid thread action");
-      }
-      if (opts.action !== "stop" && !opts.message?.trim()) throw new Error("message is required");
-      const result = await getRuntime().controlThread(opts.action, opts.threadId, opts.message?.trim());
-      await activityBridge?.refresh();
-      return result;
-    }
-  );
-  handle("pideck:threads:promote", async (_e, threadId: string) => {
-    if (!/^[a-f0-9-]{8,}$/i.test(threadId)) throw new Error("invalid thread id");
-    const result = await getRuntime().promoteThread(threadId);
-    await activityBridge?.refresh();
-    return result;
-  });
-  handle(
-    "pideck:subagents:control",
-    async (_e, opts: { action: "steer" | "follow-up" | "stop"; runId: string; message?: string }) => {
-      if (!/^[a-f0-9-]{20,}$/i.test(opts.runId)) throw new Error("invalid subagent run id");
-      if (opts.action !== "steer" && opts.action !== "follow-up" && opts.action !== "stop") throw new Error("invalid subagent action");
-      if (opts.action !== "stop" && !opts.message?.trim()) throw new Error("message is required");
-      const result = await getRuntime().controlSubagent(opts.action, opts.runId, opts.message?.trim());
-      await activityBridge?.refresh();
-      return result;
-    }
-  );
-  handle("pideck:subagents:promote", async (_e, runId: string) => {
-    if (!/^[a-f0-9-]{20,}$/i.test(runId)) throw new Error("invalid subagent run id");
-    const result = await getRuntime().promoteSubagent(runId);
-    await activityBridge?.refresh();
-    return result;
-  });
-
-  // Workflows (pi-dynamic-workflows run state)
-  handle("pideck:workflows:list", () => workflowsBridge?.list() ?? Promise.resolve([]));
-  handle("pideck:workflows:get", (_e, runId: string) =>
-    workflowsBridge?.get(runId) ?? Promise.resolve(null)
-  );
-  handle("pideck:workflows:delete", (_e, runId: string) =>
-    workflowsBridge?.delete(runId) ?? Promise.resolve(false)
-  );
-  handle(
-    "pideck:workflows:control",
-    (_e, opts: { action: string; runId: string }) => {
-      if (!workflowsBridge) throw new Error("workflows bridge not ready");
-      return workflowsBridge.control(opts.action, opts.runId);
-    }
-  );
-
-  // LSP diagnostics loop
-  handle("pideck:lsp-get-snapshot", (_e, cwd: unknown) => {
-    if (typeof cwd !== "string" || cwd.length > 4096) throw new Error("invalid cwd");
-    const validated = validateLspCwd(cwd);
-    return lspManager.getSnapshot(validated);
-  });
-  handle("pideck:lsp-list-snapshots", () => lspManager.listSnapshots());
-  handle("pideck:lsp-set-project", (_e, cwd: unknown) => {
-    if (cwd !== null && (typeof cwd !== "string" || cwd.length > 4096)) throw new Error("invalid cwd");
-    if (cwd !== null && (cwd as string).includes("\0")) throw new Error("invalid cwd");
-    if (cwd === null) return lspManager.setActiveProject(null);
-    const validated = validateLspCwd(cwd as string);
-    return lspManager.setActiveProject(validated);
-  });
-  handle("pideck:lsp-refresh", (_e, cwd: unknown) => {
-    if (typeof cwd !== "string" || cwd.length > 4096) throw new Error("invalid cwd");
-    const validated = validateLspCwd(cwd);
-    return lspManager.refresh(validated);
-  });
-
-  // Subscribe to LSP updates
-  lspManager.subscribe((snapshots) => {
-    win?.webContents.send("pideck:lsp-update", snapshots);
-  });
-
-  // Process manager (Electron-owned manual and task-owned project commands)
-  handle("pideck:process-list", () => processManager.list());
-  handle("pideck:process-spawn", async (_e, opts: unknown) => {
-    const command = validateCommand((opts as { command?: unknown })?.command);
-    const cwd = validateCwd((opts as { cwd?: unknown })?.cwd);
-    if (isDaemonOwned()) {
-      // Tasks live in the daemon when it owns the runtime. Resolving them
-      // from the local TaskManager (which is empty in daemon mode) would
-      // produce an ownerless process that the daemon knows nothing about.
-      const client = requireDaemonClient();
-      const activeFile = await daemonActiveSessionFileStrict(client);
-      const activeTask = await daemonTaskBySessionFileStrict(client, activeFile);
-      if (activeTask) {
-        const proc = processManager.spawn({ command, cwd, owner: activeTask.id, ownerSession: activeTask.sessionId });
-        await client.request("task.updated", { id: activeTask.id, patch: { terminalIds: [...(activeTask.terminalIds ?? []), proc.id] } }).catch(() => {});
-        return proc;
-      }
-      // No daemon task to attach to. Spawn ownerless; the process itself is
-      // local (Electron owns the processManager), and there is no daemon
-      // state to mutate.
-      const owner = typeof (opts as { owner?: unknown })?.owner === "string" ? (opts as { owner: string }).owner.slice(0, 500) : undefined;
-      const ownerSession =
-        typeof (opts as { ownerSession?: unknown })?.ownerSession === "string"
-          ? (opts as { ownerSession: string }).ownerSession.slice(0, 500)
-          : undefined;
-      return processManager.spawn({ command, cwd, owner, ownerSession });
-    }
-    const activeFile = host?.activeSessionFile ?? null;
-    const activeTask = taskManager.findBySessionFile(activeFile);
-    if (activeTask) {
-      return taskManager.spawn(activeTask.id, command, cwd);
-    }
-    const owner = typeof (opts as { owner?: unknown })?.owner === "string" ? (opts as { owner: string }).owner.slice(0, 500) : undefined;
-    const ownerSession =
-      typeof (opts as { ownerSession?: unknown })?.ownerSession === "string"
-        ? (opts as { ownerSession: string }).ownerSession.slice(0, 500)
-        : undefined;
-    return processManager.spawn({ command, cwd, owner, ownerSession });
-  });
-  handle("pideck:task-spawn", async (_e, taskId: unknown, command: unknown, cwd: unknown) => {
-    const id = validateId(taskId);
-    const validatedCommand = validateCommand(command);
-    const validatedCwd = validateCwd(cwd);
-    if (isDaemonOwned()) {
-      // Tasks are daemon-owned in daemon mode. Falling through to the local
-      // TaskManager (empty in daemon mode) would report "unknown task" while
-      // the daemon is the actual authority and might have just lost the
-      // socket for a moment. Use the strict fetch: a connected daemon that
-      // fails the request is not "no such task".
-      const client = requireDaemonClient();
-      const task = (await daemonClientTasksStrict(client)).find((t) => t.id === id);
-      if (!task) throw new Error("unknown task");
-      if (task.status !== "running") throw new Error("task is not running");
-      if (!task.cwd || !cwdWithin(task.cwd, validatedCwd)) throw new Error("process cwd does not match task cwd");
-      const proc = processManager.spawn({ command: validatedCommand, cwd: validatedCwd, owner: task.id, ownerSession: task.sessionId });
-      await client.request("task.updated", { id: task.id, patch: { terminalIds: [...(task.terminalIds ?? []), proc.id] } }).catch(() => {});
-      return proc;
-    }
-    return taskManager.spawn(id, validatedCommand, validatedCwd);
-  });
-  handle("pideck:process-kill", (_e, id: unknown) => {
-    const validated = validateId(id);
-    return processManager.kill(validated);
+  registerSimIpc(handle, {
+    getSimController: () => simController,
   });
 }
 
@@ -2090,12 +829,14 @@ function registerIpc(): void {
  * Spawn the standalone daemon when the user enabled it. The daemon outlives
  * the GUI: it is detached and never killed on quit, so background execution
  * keeps running after the window closes. A daemon that already answers on the
- * socket is reused rather than replaced.
+ * socket is reused, but only when it speaks this build's protocol: an app
+ * update does not replace the running daemon, so an incompatible one must be
+ * retired rather than fed requests it cannot answer.
  */
-async function ensureDaemon(): Promise<boolean> {
-  if (!isDaemonEnabled()) return false;
-  const { socketPath, snapshotPath } = daemonPaths();
-  const alive = await new Promise<boolean>((resolve) => {
+
+/** True when something is listening on the unix socket right now. */
+function probeSocket(socketPath: string, timeoutMs = 1_000): Promise<boolean> {
+  return new Promise((resolve) => {
     const probe = net.connect(socketPath);
     probe.once("connect", () => {
       probe.destroy();
@@ -2105,31 +846,98 @@ async function ensureDaemon(): Promise<boolean> {
     setTimeout(() => {
       probe.destroy();
       resolve(false);
-    }, 1_000);
+    }, timeoutMs);
   });
+}
+
+/** Protocol version a live daemon advertises, or undefined when it is
+ *  unreachable or predates versioned handshakes. */
+async function daemonProtocolVersion(socketPath: string): Promise<number | undefined> {
+  const probe = connectDaemonClient({ listen: { socketPath }, reconnect: false });
+  try {
+    const res = await probe.request("ping", { protocol: DAEMON_PROTOCOL_VERSION }, 2_000);
+    const version = (res.payload as { protocol?: unknown }).protocol;
+    return typeof version === "number" ? version : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    probe.close();
+  }
+}
+
+/** Ask a mismatched daemon to exit and, if it refuses, force it out by the pid
+ *  it recorded at startup. Returns false when it could not be removed. */
+const retirePort: RetirePort = {
+  probe: probeSocket,
+  requestShutdown: async (socketPath) => {
+    const client = connectDaemonClient({ listen: { socketPath }, reconnect: false });
+    try {
+      await client.request("daemon.shutdown", {}, 2_000);
+    } finally {
+      client.close();
+    }
+  },
+  signal: (pid, signal) => process.kill(pid, signal),
+  readPidFile: readDaemonPid,
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  now: () => Date.now(),
+  log: (message) => console.warn(message),
+};
+
+function spawnDaemon(entry: string, socketPath: string, snapshotPath: string, pidPath: string): void {
+  const child = spawn(process.execPath, [entry], {
+    env: {
+      ...process.env,
+      ELECTRON_RUN_AS_NODE: "1",
+      BABYLON_DAEMON_SOCKET: socketPath,
+      BABYLON_DAEMON_SNAPSHOT: snapshotPath,
+      BABYLON_DAEMON_PID_FILE: pidPath,
+      BABYLON_DAEMON_STATE_DIR: PI_STATE_ROOT,
+      BABYLON_DAEMON_PERMISSIONS_DIR: permissionDir(),
+      BABYLON_SETTINGS_PATH: app.getPath("userData") + "/pideck-settings.json",
+    },
+    detached: true,
+    stdio: "ignore",
+  });
+  child.unref();
+}
+
+async function ensureDaemon(): Promise<boolean> {
+  if (!isDaemonEnabled()) return false;
+  const { socketPath, snapshotPath, pidPath } = daemonPaths();
   const entry = join(__dirname, "..", "dist-daemon", "main.mjs");
   const entryExists = existsSync(entry);
-  if (!alive) {
+
+  if (await probeSocket(socketPath)) {
+    const running = await daemonProtocolVersion(socketPath);
+    if (running !== DAEMON_PROTOCOL_VERSION) {
+      console.warn(
+        `[pideck] daemon speaks protocol ${running ?? "unknown"}, this build speaks ${DAEMON_PROTOCOL_VERSION}; retiring it`
+      );
+      if (!(await retireDaemon(socketPath, pidPath, retirePort))) {
+        // Fail closed: speaking a mismatched protocol risks corrupting the
+        // daemon's authoritative state, so use the in-process host instead.
+        console.error("[pideck] could not retire the incompatible daemon; falling back to the in-process host");
+        return false;
+      }
+    }
+  }
+
+  if (!(await probeSocket(socketPath))) {
     if (!entryExists) {
       console.warn("daemon.enabled is set but dist-daemon/main.mjs is missing; run pnpm build:daemon, falling back to in-process host");
       return false;
     }
-    const child = spawn(process.execPath, [entry], {
-      env: {
-        ...process.env,
-        ELECTRON_RUN_AS_NODE: "1",
-        BABYLON_DAEMON_SOCKET: socketPath,
-        BABYLON_DAEMON_SNAPSHOT: snapshotPath,
-        BABYLON_DAEMON_PERMISSIONS_DIR: permissionDir(),
-        BABYLON_SETTINGS_PATH: app.getPath("userData") + "/pideck-settings.json",
-      },
-      detached: true,
-      stdio: "ignore",
-    });
-    child.unref();
+    spawnDaemon(entry, socketPath, snapshotPath, pidPath);
   }
   if (!daemonClient) {
-    daemonClient = connectDaemonClient({ listen: { socketPath }, reconnect: { initialDelayMs: 100, maxDelayMs: 5000 } });
+    daemonClient = connectDaemonClient({
+      listen: { socketPath },
+      reconnect: { initialDelayMs: 100, maxDelayMs: 5000 },
+      // Without this the transport's own failures (an oversized frame, a bad
+      // envelope) are swallowed and the reconnect loop looks unexplained.
+      log: (message) => console.warn(`[pideck] daemon: ${message}`),
+    });
     // Track daemon liveness. The socket-level connection callback is the
     // source of truth (not a protocol event). It only flips `daemonConnected`;
     // `runtimeOwner` is set once by the startup handshake and is never
@@ -2141,6 +949,16 @@ async function ensureDaemon(): Promise<boolean> {
       // only marks the socket unreachable until the client reconnects.
       const wasConnected = daemonConnected;
       daemonConnected = state === "connected";
+      // The renderer reconciles ephemeral runtime state on transitions (drop
+      // non-active entries on reconnect; warn on loss). Guarded: windows may
+      // be gone while the client lives on.
+      try {
+        if (win && !win.isDestroyed()) {
+          win.webContents.send("pideck:daemon-status", { connected: daemonConnected });
+        }
+      } catch {
+        /* best effort */
+      }
       // If the daemon owns the runtime and the socket just came back, install
       // the daemon LSP notifier (it was deferred at startup if the socket
       // happened to be down at that exact moment).
@@ -2206,7 +1024,13 @@ async function ensureDaemon(): Promise<boolean> {
 async function handshakeDaemon(): Promise<boolean> {
   if (!isDaemonEnabled() || !daemonClient) return false;
   try {
-    await daemonClient.request("ping", {}, 5_000);
+    const pong = await daemonClient.request("ping", { protocol: DAEMON_PROTOCOL_VERSION }, 5_000);
+    // ensureDaemon() should have retired a mismatched daemon already; this is
+    // the last line of defense against speaking the wrong protocol.
+    if ((pong.payload as { protocol?: unknown }).protocol !== DAEMON_PROTOCOL_VERSION) {
+      console.error("[pideck] daemon protocol mismatch during handshake; falling back to the in-process host");
+      return false;
+    }
   } catch {
     return false;
   }
@@ -2231,6 +1055,13 @@ async function handshakeDaemon(): Promise<boolean> {
 app.whenReady().then(async () => {
   registerIpc();
   createWindow();
+  // Source the login shell's environment before any child process is spawned.
+  // A Finder-launched app inherits the minimal GUI environment, so without this
+  // the agent's shell tool, git, and language servers cannot see homebrew,
+  // fnm/asdf, or JAVA_HOME/GOPATH-style variables. Runs after createWindow so
+  // the delay never holds up the window, and before ensureDaemon/startHost so
+  // they inherit the fixed environment.
+  await importLoginShellEnv();
   // ensureDaemon() awaits the initial ping handshake, so by the time it
   // returns, `runtimeOwner` is authoritative ("daemon" only when the daemon
   // round-tripped a ping; "local" on a missing binary, refused socket, or
@@ -2287,7 +1118,8 @@ app.on("window-all-closed", () => {
     lspManager.dispose();
     processManager.dispose();
     sessionIndex.dispose();
-    activityBridge?.dispose();
+    activityRegistry?.disposeAll();
+    activityRegistry = null;
     workflowsBridge?.dispose();
     void host?.dispose();
     app.quit();
@@ -2305,7 +1137,8 @@ app.on("before-quit", () => {
   lspManager.dispose();
   processManager.dispose();
   sessionIndex.dispose();
-  activityBridge?.dispose();
+  activityRegistry?.disposeAll();
+    activityRegistry = null;
   workflowsBridge?.dispose();
   void host?.dispose();
 });

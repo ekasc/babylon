@@ -20,11 +20,13 @@ import {
   createEnvelope,
   parseEnvelope,
   serializeEnvelope,
+  toPayload,
   type ProtocolEnvelope,
 } from "./daemon-protocol";
 import { registerHook, removeHook, type HookDefinition } from "./hooks";
 import type { HookManager } from "../electron/hook-manager";
-import { createFrameDecoder, encodeFrame, type FrameDecoder } from "./daemon-transport";
+import { createFrameDecoder, encodeFrame, DEFAULT_MAX_FRAME_BYTES, type FrameDecoder } from "./daemon-transport";
+import { verifyToken } from "./remote-auth";
 import { dispatchRequest } from "./daemon-host";
 import {
   restoreRuntime,
@@ -45,7 +47,16 @@ import {
   type RunnerResult,
 } from "./automation-runner";
 import type { PiHost } from "../electron/pi-host";
-import { applyApproval, PermissionEngine, type AgentAction, type Risk } from "../electron/permissions";
+import { isPiDiagnostics } from "../electron/pi-host";
+import {
+  applyApproval,
+  isApprovalChoice,
+  isPermissionMatch,
+  isPolicyCategory,
+  PermissionEngine,
+  type AgentAction,
+  type Risk,
+} from "../electron/permissions";
 import {
   defaultPolicy,
   type BackgroundPolicy,
@@ -80,10 +91,24 @@ export interface DaemonServerOptions {
   piHost?: PiHost;
   /** Permission engine enforced for daemon-owned agent sessions. */
   permissionEngine?: PermissionEngine;
+  /**
+   * SHA-256 hex of the owner bearer token. When set (TCP mode), every
+   * connection must complete `daemon.auth` before any other request;
+   * Unix-socket mode leaves it unset and keeps filesystem-permission trust.
+   */
+  authTokenHash?: string;
   /** HookManager used by the daemon-owned PiHost. Mutating this is what
    *  makes `pre_tool_use` / `post_tool_use` actually fire on the PiHost side
    *  in daemon mode. */
   hookManager?: HookManager;
+  /** Transport frame budget, both directions. Defaults to
+   *  DEFAULT_MAX_FRAME_BYTES; tests inject a small value to exercise the
+   *  oversize guard without allocating a real transcript. */
+  maxFrameBytes?: number;
+  /** Invoked after a `daemon.shutdown` request is acknowledged. The daemon
+   *  entry point wires this to its own stop path so a newer client can retire
+   *  a daemon built from incompatible source. Omit to ignore the request. */
+  onShutdown?: () => void | Promise<void>;
 }
 
 export interface DaemonServer {
@@ -93,7 +118,7 @@ export interface DaemonServer {
   /** Run one background-policy tick now (also runs automatically on the timer). */
   tick(now?: number): Promise<void>;
   /** Request interactive approval for an agent action; resolves true to allow. */
-  requestApproval(action: AgentAction, risk: Risk): Promise<boolean>;
+  requestApproval(action: AgentAction, risk: Risk, sessionId?: string): Promise<boolean>;
   /** Flush pending persistence, stop the loop, disconnect clients, close. */
   close(): Promise<void>;
 }
@@ -216,13 +241,37 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
 
   const clients = new Set<net.Socket>();
   const decoders = new WeakMap<net.Socket, FrameDecoder>();
+  // Sockets that completed `daemon.auth`. Only consulted when
+  // options.authTokenHash is set (TCP mode); empty means no gate.
+  const authed = new Set<net.Socket>();
 
+  const maxFrameBytes = options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES;
   const send = (socket: net.Socket, envelope: ProtocolEnvelope): void => {
     if (socket.destroyed) return;
-    socket.write(encodeFrame(serializeEnvelope(envelope)));
+    const frame = encodeFrame(serializeEnvelope(envelope));
+    // The peer's decoder measures the line without its trailing newline.
+    if (frame.length - 1 > maxFrameBytes) {
+      log(`dropping oversized ${envelope.kind} ${envelope.type} (${frame.length} bytes)`);
+      if (envelope.kind === "response" && envelope.inReplyTo) {
+        socket.write(
+          encodeFrame(
+            serializeEnvelope(
+              createEnvelope(
+                "response",
+                "error",
+                { error: `${envelope.type} response exceeds the transport frame limit (${frame.length} bytes)` },
+                envelope.inReplyTo
+              )
+            )
+          )
+        );
+      }
+      return;
+    }
+    socket.write(frame);
   };
   const broadcast = (type: ProtocolEnvelope["type"], payload: unknown, except?: net.Socket): void => {
-    const event = createEnvelope("event", type, payload);
+    const event = createEnvelope("event", type, toPayload(payload));
     for (const client of clients) {
       if (client !== except) send(client, event);
     }
@@ -233,7 +282,7 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
   // first client to answer wins; an unanswered ask fails closed on timeout.
   const pendingApprovals = new Map<
     string,
-    { action: AgentAction; resolve: (allowed: boolean) => void; timer: NodeJS.Timeout }
+    { action: AgentAction; risk: Risk; sessionId?: string; resolve: (allowed: boolean) => void; timer: NodeJS.Timeout }
   >();
 
   const permissionSnapshot = (): { mode: string; rules: unknown[] } =>
@@ -241,7 +290,7 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
       ? { mode: options.permissionEngine.getMode(), rules: options.permissionEngine.listRules() }
       : { mode: "auto", rules: [] };
 
-  const requestApproval = (action: AgentAction, risk: Risk): Promise<boolean> =>
+  const requestApproval = (action: AgentAction, risk: Risk, sessionId?: string): Promise<boolean> =>
     new Promise<boolean>((resolve) => {
       const id = randomUUID();
       const timeoutMs = Number(process.env.PIDECK_APPROVAL_TIMEOUT_MS) || 15 * 60_000;
@@ -250,8 +299,8 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
         resolve(false);
       }, timeoutMs);
       timer.unref();
-      pendingApprovals.set(id, { action, resolve, timer });
-      broadcast("approval.requested", { id, action, risk });
+      pendingApprovals.set(id, { action, risk, sessionId, resolve, timer });
+      broadcast("approval.requested", { id, action, risk, ...(sessionId ? { sessionId } : {}) });
     });
 
   const resolveApproval = (id: string, choice: string): void => {
@@ -259,8 +308,8 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
     if (!pending) return;
     clearTimeout(pending.timer);
     pendingApprovals.delete(id);
-    if (options.permissionEngine) {
-      applyApproval(options.permissionEngine, pending.action, choice as never);
+    if (options.permissionEngine && isApprovalChoice(choice)) {
+      applyApproval(options.permissionEngine, pending.action, choice, pending.sessionId);
     }
     pending.resolve(choice !== "deny");
     broadcast("permissions.changed", permissionSnapshot());
@@ -280,6 +329,40 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
       request = parseEnvelope(json);
     } catch (err) {
       send(socket, createEnvelope("response", "error", { error: err instanceof Error ? err.message : String(err) }));
+      return;
+    }
+
+    // TCP mode gates everything behind `daemon.auth`; the Unix socket keeps
+    // filesystem-permission trust and never sets authTokenHash.
+    if (options.authTokenHash && !authed.has(socket)) {
+      if (request.type !== "daemon.auth") {
+        send(socket, createEnvelope("response", "error", { error: "daemon authentication required" }, request.id));
+        return;
+      }
+      const token = (request.payload as { token?: unknown } | null)?.token;
+      if (typeof token === "string" && verifyToken(token, options.authTokenHash)) {
+        authed.add(socket);
+        send(socket, createEnvelope("response", "daemon.auth", { ok: true }, request.id));
+      } else {
+        send(socket, createEnvelope("response", "error", { error: "daemon authentication failed" }, request.id));
+      }
+      return;
+    }
+
+    if (request.type === "daemon.auth") {
+      send(socket, createEnvelope("response", "daemon.auth", { ok: true }, request.id));
+      return;
+    }
+
+    if (request.type === "daemon.shutdown") {
+      send(socket, createEnvelope("response", "daemon.shutdown", { ok: true }, request.id));
+      const shutdown = options.onShutdown;
+      if (shutdown) {
+        // Ack first: the caller is waiting on this response, and stop() tears
+        // the socket down. The timer keeps the write from racing the exit.
+        const timer = setTimeout(() => void shutdown(), 50);
+        timer.unref();
+      }
       return;
     }
 
@@ -383,8 +466,8 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
         send(socket, createEnvelope("response", "error", { error: "permission engine not available in daemon" }, request.id));
         return;
       }
-      const input = request.payload as { category?: string; decision?: string; scope?: string; match?: unknown; note?: unknown };
-      if (!input || typeof input.category !== "string" || (input.decision !== "allow" && input.decision !== "deny")) {
+      const input = request.payload as { category?: unknown; decision?: unknown; scope?: unknown; match?: unknown; note?: unknown };
+      if (!input || !isPolicyCategory(input.category) || (input.decision !== "allow" && input.decision !== "deny")) {
         send(socket, createEnvelope("response", "error", { error: "invalid rule" }, request.id));
         return;
       }
@@ -392,15 +475,31 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
         send(socket, createEnvelope("response", "error", { error: "invalid rule scope" }, request.id));
         return;
       }
+      if (input.match !== undefined && !isPermissionMatch(input.match)) {
+        send(socket, createEnvelope("response", "error", { error: "invalid rule match" }, request.id));
+        return;
+      }
+      if (input.note !== undefined && typeof input.note !== "string") {
+        send(socket, createEnvelope("response", "error", { error: "invalid rule note" }, request.id));
+        return;
+      }
       const rule = engine.addRule({
-        category: input.category as never,
+        category: input.category,
         decision: input.decision,
         scope: input.scope,
-        match: input.match as never,
-        note: input.note as never,
+        match: input.match,
+        note: input.note,
       });
-      send(socket, createEnvelope("response", "permissions.add-rule", rule, request.id));
-      broadcast("permissions.changed", permissionSnapshot());
+      void (async () => {
+        try {
+          await engine.flush();
+        } catch (err) {
+          send(socket, createEnvelope("response", "error", { error: err instanceof Error ? err.message : String(err) }, request.id));
+          return;
+        }
+        send(socket, createEnvelope("response", "permissions.add-rule", rule, request.id));
+        broadcast("permissions.changed", permissionSnapshot());
+      })();
       return;
     }
 
@@ -416,13 +515,43 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
         return;
       }
       const removed = engine.removeRule(id);
-      send(socket, createEnvelope("response", "permissions.remove-rule", { id, ok: true, removed }, request.id));
-      if (removed) broadcast("permissions.changed", permissionSnapshot());
+      void (async () => {
+        try {
+          await engine.flush();
+        } catch (err) {
+          send(socket, createEnvelope("response", "error", { error: err instanceof Error ? err.message : String(err) }, request.id));
+          return;
+        }
+        send(socket, createEnvelope("response", "permissions.remove-rule", { id, ok: true, removed }, request.id));
+        if (removed) broadcast("permissions.changed", permissionSnapshot());
+      })();
       return;
     }
 
-    if (request.type === "approval.resolved") {
-      const { id, choice } = (request.payload ?? {}) as { id?: string; choice?: string };
+    // Detached-renderer recovery: list approvals still waiting so a
+    // reloaded GUI can re-raise them (timers keep running; resolved or
+    // timed-out entries vanish from this list on their own).
+    if (request.type === "approval.list") {
+      send(
+        socket,
+        createEnvelope(
+          "response",
+          "approval.list",
+          {
+            approvals: [...pendingApprovals.entries()].map(([id, pending]) => ({
+              id,
+              action: pending.action,
+              risk: pending.risk,
+              ...(pending.sessionId ? { sessionId: pending.sessionId } : {}),
+            })),
+          },
+          request.id
+        )
+      );
+      return;
+    }
+
+    if (request.type === "approval.resolved") {      const { id, choice } = (request.payload ?? {}) as { id?: string; choice?: string };
       const validChoice =
         choice === "allow_once" || choice === "allow_session" || choice === "allow_always" || choice === "deny";
       if (!id || !validChoice) {
@@ -450,7 +579,9 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
               payload = await piHost.getState();
               break;
             case "pi.getMessages":
-              payload = await piHost.getMessages();
+              // The protocol rejects bare array payloads, so array results are
+              // wrapped under a named key (same as pi.getCommands).
+              payload = { messages: await piHost.getMessages() };
               break;
             case "pi.getStats":
               payload = await piHost.getStats();
@@ -467,7 +598,10 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
             }
             case "pi.prompt": {
               const { message, images, streamingBehavior } = request.payload as { message: string; images?: unknown[]; streamingBehavior?: string };
-              payload = await piHost.prompt(message, images as never, streamingBehavior as never);
+              // Narrow the wire string to the union the host accepts rather than
+              // asserting it; an unknown value simply means "no streaming mode".
+              const behavior = streamingBehavior === "steer" || streamingBehavior === "followUp" ? streamingBehavior : undefined;
+              payload = await piHost.prompt(message, images, behavior);
               break;
             }
             case "pi.abort":
@@ -475,13 +609,17 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
               break;
             case "pi.ui.respond": {
               const { id, resp } = request.payload as { id: string; resp: unknown };
-              piHost.respondUi(id, resp as never);
+              piHost.respondUi(id, resp);
               payload = { ok: true };
               break;
             }
             case "pi.notifyDiagnostics": {
-              const { diagnostics } = request.payload as { diagnostics: unknown[] };
-              await piHost.notifyDiagnostics(diagnostics as never);
+              const { diagnostics } = request.payload as { diagnostics: unknown };
+              if (!isPiDiagnostics(diagnostics)) {
+                send(socket, createEnvelope("response", "error", { error: "invalid diagnostics" }, request.id));
+                return;
+              }
+              await piHost.notifyDiagnostics(diagnostics);
               payload = { ok: true };
               break;
             }
@@ -491,15 +629,20 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
               break;
             }
             case "pi.getModels":
-              payload = await piHost.getModels();
+              payload = { models: await piHost.getModels() };
               break;
+            case "pi.warmProject": {
+              const { cwd } = request.payload as { cwd: string };
+              payload = piHost.warmProject(cwd);
+              break;
+            }
             case "pi.setModel": {
               const { provider, modelId } = request.payload as { provider: string; modelId: string };
               payload = await piHost.setModel(provider, modelId);
               break;
             }
             case "pi.getThinkingLevels":
-              payload = await piHost.getThinkingLevels();
+              payload = { levels: await piHost.getThinkingLevels() };
               break;
             case "pi.setThinking": {
               const { level } = request.payload as { level: string };
@@ -552,7 +695,7 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
               payload = await piHost.undoRollback();
               break;
             case "pi.getForkMessages":
-              payload = await piHost.getForkMessages();
+              payload = { messages: await piHost.getForkMessages() };
               break;
             case "pi.fork": {
               const { entryId } = request.payload as { entryId: string };
@@ -569,7 +712,7 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
             }
             case "pi.getRecaps": {
               const { sessionFile } = request.payload as { sessionFile: string };
-              payload = await piHost.getRecaps(sessionFile);
+              payload = { recaps: await piHost.getRecaps(sessionFile) };
               break;
             }
             case "pi.refreshFromDisk": {
@@ -610,7 +753,11 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
               send(socket, createEnvelope("response", "error", { error: `unsupported pi request ${request.type}` }, request.id));
               return;
           }
-          send(socket, createEnvelope("response", request.type, payload as never, request.id));
+          // A handler's raw result becomes a wire payload here. `toPayload`
+          // validates object-ness instead of asserting it: the previous
+          // `as never` let an array through the type check, which is what
+          // produced "payload for pi.getModels must be an object" on the wire.
+          send(socket, createEnvelope("response", request.type, toPayload(payload), request.id));
         } catch (err) {
           send(socket, createEnvelope("response", "error", { error: err instanceof Error ? err.message : String(err) }, request.id));
         }
@@ -620,32 +767,48 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
 
     if ((request as any).type === "hooks.register") {
       const hook = (request as any).payload as HookDefinition;
-      if (options.hookManager) {
-        options.hookManager.register(hook);
-      }
-      const beforeHooks = state.runtime.hooks;
-      const afterHooks = registerHook(beforeHooks, hook);
-      if (afterHooks !== beforeHooks) {
-        state = { ...state, runtime: { ...state.runtime, hooks: afterHooks } };
-        persist();
-        broadcast("hooks.updated" as any, afterHooks as any, socket);
+      try {
+        if (!hook || typeof hook !== "object" || typeof hook.id !== "string" || hook.id.length === 0) {
+          throw new Error("hooks.register requires a hook object with a non-empty string id");
+        }
+        if (options.hookManager) {
+          options.hookManager.register(hook);
+        }
+        const beforeHooks = state.runtime.hooks;
+        const afterHooks = registerHook(beforeHooks, hook);
+        if (afterHooks !== beforeHooks) {
+          state = { ...state, runtime: { ...state.runtime, hooks: afterHooks } };
+          persist();
+          broadcast("hooks.updated" as any, afterHooks as any, socket);
+        }
+      } catch (err) {
+        send(socket, createEnvelope("response", "error", { error: err instanceof Error ? err.message : String(err) }, request.id));
+        return;
       }
       send(socket, createEnvelope("response", "hooks.register" as any, { ok: true } as any, request.id));
       return;
     }
     if ((request as any).type === "hooks.remove") {
-      const { id } = (request as any).payload as { id: string };
-      if (options.hookManager) {
-        options.hookManager.remove(id);
+      const { id } = ((request as any).payload ?? {}) as { id?: unknown };
+      if (typeof id !== "string" || id.length === 0) {
+        send(socket, createEnvelope("response", "error", { error: "hooks.remove requires a non-empty string id" }, request.id));
+        return;
       }
-      const beforeHooks = state.runtime.hooks;
-      const afterHooks = removeHook(beforeHooks, id);
-      if (afterHooks !== beforeHooks) {
-        state = { ...state, runtime: { ...state.runtime, hooks: afterHooks } };
-        persist();
-        broadcast("hooks.updated" as any, afterHooks as any, socket);
+      try {
+        if (options.hookManager) {
+          options.hookManager.remove(id);
+        }
+        const beforeHooks = state.runtime.hooks;
+        const afterHooks = removeHook(beforeHooks, id);
+        if (afterHooks !== beforeHooks) {
+          state = { ...state, runtime: { ...state.runtime, hooks: afterHooks } };
+          persist();
+          broadcast("hooks.updated" as any, afterHooks as any, socket);
+        }
+        send(socket, createEnvelope("response", "hooks.remove" as any, { ok: true, removed: afterHooks !== beforeHooks } as any, request.id));
+      } catch (err) {
+        send(socket, createEnvelope("response", "error", { error: err instanceof Error ? err.message : String(err) }, request.id));
       }
-      send(socket, createEnvelope("response", "hooks.remove" as any, { ok: true, removed: afterHooks !== beforeHooks } as any, request.id));
       return;
     }
 
@@ -674,7 +837,7 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
 
   const wireClient = (socket: net.Socket): void => {
     clients.add(socket);
-    const decoder = createFrameDecoder();
+    const decoder = createFrameDecoder(maxFrameBytes);
     decoders.set(socket, decoder);
     socket.on("data", (chunk: Buffer) => {
       const d = decoders.get(socket);
@@ -693,6 +856,7 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
     });
     const drop = (): void => {
       clients.delete(socket);
+      authed.delete(socket);
     };
     socket.on("close", drop);
     socket.on("error", drop);

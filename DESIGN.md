@@ -35,6 +35,8 @@ System stack only: `-apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica
 "Segoe UI", sans-serif`. No display pairing, no fluid clamps; 16px base, 1.5 line height.
 One family carries headings, labels, body, and data (product register: a well-tuned sans).
 Monospace reserved for code and diffs via the Markdown renderer.
+Type scale (integer px only, no fractional sizes): 10 micro/badge, 11 label,
+12 meta, 13 UI body, 14 primary, 15 lead/input, 16 base, 20/24 display.
 
 ## Components
 

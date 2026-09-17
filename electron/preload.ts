@@ -55,7 +55,9 @@ const api = {
 
   prompt: (message: string, images?: any[], streamingBehavior?: "steer" | "followUp"): Promise<any> =>
     ipcRenderer.invoke("pideck:prompt", message, images, streamingBehavior),
-  abort: (): Promise<any> => ipcRenderer.invoke("pideck:abort"),
+  abort: (sessionFile?: string): Promise<any> => ipcRenderer.invoke("pideck:abort", { sessionFile }),
+  releaseSession: (path: string): Promise<{ released: boolean }> =>
+    ipcRenderer.invoke("pideck:session:release", path),
   refreshSession: (path: string): Promise<boolean> => ipcRenderer.invoke("pideck:refresh-session", path),
 
   getMessages: (): Promise<any[]> => ipcRenderer.invoke("pideck:get-messages"),
@@ -84,6 +86,7 @@ const api = {
   gitStageHunk: (cwd: string, file: string, patch: string): Promise<void> => ipcRenderer.invoke("pideck:git-stage-hunk", cwd, file, patch),
   gitDiscardHunk: (cwd: string, file: string, patch: string): Promise<void> => ipcRenderer.invoke("pideck:git-discard-hunk", cwd, file, patch),
   getModels: (): Promise<any[]> => ipcRenderer.invoke("pideck:get-models"),
+  warmProject: (cwd: string): Promise<any> => ipcRenderer.invoke("pideck:warm-project", cwd),
   getCommands: (): Promise<any[]> => ipcRenderer.invoke("pideck:get-commands"),
   setModel: (provider: string, modelId: string): Promise<any> =>
     ipcRenderer.invoke("pideck:set-model", provider, modelId),
@@ -135,6 +138,47 @@ const api = {
     ipcRenderer.invoke("pideck:ui-respond", resp),
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke("pideck:open-external", url),
 
+  // Device simulator (tabbed separate-process guests + CDP emulation)
+  simOpenTab: (url?: string): Promise<{ id: string; url: string; title: string | null; loading: boolean }> =>
+    ipcRenderer.invoke("pideck:sim-open-tab", { url: url ?? null }),
+  simActivate: (tabId: string): Promise<{ id: string; url: string; title: string | null; loading: boolean }> =>
+    ipcRenderer.invoke("pideck:sim-activate", { tabId }),
+  simCloseTab: (tabId?: string | null): Promise<{ closed: boolean }> =>
+    ipcRenderer.invoke("pideck:sim-close-tab", { tabId: tabId ?? null }),
+  simTabs: (): Promise<{ tabs: unknown[]; activeId: string | null }> =>
+    ipcRenderer.invoke("pideck:sim-tabs"),
+  simAttach: (): Promise<{ tabs: unknown[]; activeId: string | null; emulation: unknown }> =>
+    ipcRenderer.invoke("pideck:sim-attach"),
+  simDetach: (): Promise<void> => ipcRenderer.invoke("pideck:sim-detach"),
+  simClose: (): Promise<void> => ipcRenderer.invoke("pideck:sim-close"),
+  simBounds: (tabId: string | undefined, rect: { x: number; y: number; width: number; height: number }): Promise<void> =>
+    ipcRenderer.invoke("pideck:sim-bounds", { tabId: tabId ?? null, rect }),
+  simEmulate: (tabId: string | undefined, emulation: unknown): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke("pideck:sim-emulate", { tabId: tabId ?? null, emulation }),
+  simViewport: (tabId: string | undefined, viewport: unknown): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke("pideck:sim-viewport", { tabId: tabId ?? null, viewport }),
+  simZoom: (tabId: string | undefined, factor: number): Promise<{ zoomFactor: number }> =>
+    ipcRenderer.invoke("pideck:sim-zoom", { tabId: tabId ?? null, factor }),
+  simFitZoom: (tabId: string | undefined, scale: number): Promise<void> =>
+    ipcRenderer.invoke("pideck:sim-fit-zoom", { tabId: tabId ?? null, scale }),
+  simHardReload: (tabId?: string | null): Promise<void> =>
+    ipcRenderer.invoke("pideck:sim-hard-reload", { tabId: tabId ?? null }),
+  simDevTools: (tabId?: string | null): Promise<void> =>
+    ipcRenderer.invoke("pideck:sim-devtools", { tabId: tabId ?? null }),
+  simClearCookies: (tabId?: string | null): Promise<void> =>
+    ipcRenderer.invoke("pideck:sim-clear-cookies", { tabId: tabId ?? null }),
+  simClearCache: (tabId?: string | null): Promise<void> =>
+    ipcRenderer.invoke("pideck:sim-clear-cache", { tabId: tabId ?? null }),
+  simMenu: (opts: { tabId?: string | null; showDeviceToolbar: boolean }): Promise<{ deviceToolbar?: boolean; dismissed?: boolean }> =>
+    ipcRenderer.invoke("pideck:sim-menu", { tabId: opts.tabId ?? null, showDeviceToolbar: opts.showDeviceToolbar }),
+  simNavigate: (tabId: string | undefined, url: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke("pideck:sim-navigate", { tabId: tabId ?? null, url }),
+  simReload: (tabId?: string | null): Promise<void> => ipcRenderer.invoke("pideck:sim-reload", { tabId: tabId ?? null }),
+  simBack: (tabId?: string | null): Promise<void> => ipcRenderer.invoke("pideck:sim-back", { tabId: tabId ?? null }),
+  simForward: (tabId?: string | null): Promise<void> => ipcRenderer.invoke("pideck:sim-forward", { tabId: tabId ?? null }),
+  simProbe: (port: number): Promise<{ open: boolean }> => ipcRenderer.invoke("pideck:sim-probe", port),
+  onSimEvent: (cb: any) => on("pideck:sim-event", cb),
+
   // Threads + subagents activity
   activityList: (): Promise<any> => ipcRenderer.invoke("pideck:activity:list"),
   threadsControl: (action: string, threadId: string, message?: string): Promise<any> =>
@@ -173,6 +217,8 @@ const api = {
   onApprovalRequested: (cb: any) => on("pideck:approval-requested", cb),
   onApprovalCleared: (cb: any) => on("pideck:approval-cleared", cb),
   onApprovalResolved: (cb: any) => on("pideck:approval-resolved", cb),
+  approvalsPending: (): Promise<any[]> => ipcRenderer.invoke("pideck:approvals:pending"),
+  onDaemonStatus: (cb: any) => on("pideck:daemon-status", cb),
   onPermissionsChanged: (cb: any) => on("pideck:permissions-changed", cb),
 
   lspGetSnapshot: (cwd: string): Promise<any> => ipcRenderer.invoke("pideck:lsp-get-snapshot", cwd),

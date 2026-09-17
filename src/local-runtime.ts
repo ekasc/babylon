@@ -4,6 +4,7 @@ import { AttentionManager } from "../electron/attention-manager";
 import { HookManager } from "../electron/hook-manager";
 import { PiHost } from "../electron/pi-host";
 import type { Task } from "./tasks";
+import type { PiSettings } from "./lib/settings-shared";
 import {
   evaluateContract,
   type CheckResult,
@@ -23,7 +24,6 @@ export function createLocalRuntime(opts: {
     async taskGet(id) { return taskManager.get(id) ?? null; },
     async taskCreate(task) {
       // Use TaskManager's register via direct add to avoid private access
-      const before = taskManager.list().length;
       // TaskManager doesn't have a direct create from Task, so we use its internal registry via taskManager's public API
       // For local, we can just add via taskManager's register if task matches TaskResources, otherwise directly insert
       (taskManager as unknown as { registry: { tasks: Record<string, Task> } }).registry.tasks[task.id] = task;
@@ -85,20 +85,30 @@ export function createLocalRuntime(opts: {
     async hooksRegister(h) { hookManager.register(h); },
     async hooksRemove(id) { hookManager.remove(id); },
     async attentionList() { return attentionManager.list(); },
-    async attentionRaise(item) { attentionManager.add(item as never); },
+    async attentionRaise(item) { attentionManager.add(item); },
     async attentionResolve(id) { attentionManager.resolve(id); },
-    async openSession(o) { return piHost.open(o as never); },
-    async prompt(m, i, s) { return piHost.prompt(m, i as never, s as never); },
-    async abort() { return piHost.abort(); },
+    async openSession(o) { return piHost.open(o); },
+    async prompt(m, i, s) {
+      const behavior = s === "steer" || s === "followUp" ? s : undefined;
+      return piHost.prompt(m, i, behavior);
+    },
+    async abort(sessionFile?: string) { return piHost.abort(sessionFile); },
+    async releaseSession(path: string) { return (piHost as any).releaseSession?.(path) ?? { released: false }; },
     async getState() { return piHost.getState(); },
     async getMessages() { return piHost.getMessages(); },
     async getToolOutput(id) { return piHost.getToolOutput(id); },
     async getModels() { return piHost.getModels(); },
+    async warmProject(cwd) { return piHost.warmProject(cwd); },
     async setModel(p, id) { return piHost.setModel(p, id); },
     async getThinkingLevels() { return piHost.getThinkingLevels(); },
     async setThinking(l) { return piHost.setThinking(l); },
     async getSettings() { return piHost.getSettings(); },
-    async setSettings(p) { return piHost.setSettings(p as never); },
+    async setSettings(p) {
+      // The renderer sends a partial settings object and `saveSettings` merges
+      // it over defaults; enforce object-ness here. Per-field validation is not
+      // done (pre-existing), so a malformed field is still merged through.
+      return piHost.setSettings(p !== null && typeof p === "object" && !Array.isArray(p) ? (p as Partial<PiSettings>) : {});
+    },
     async setSessionName(n) { return piHost.setSessionName(n); },
     async compact() { return piHost.compact(); },
     async getTree() { return piHost.getTree(); },
@@ -124,7 +134,7 @@ export function createLocalRuntime(opts: {
     async promoteSubagent(id) { return (piHost as any).promoteSubagent(id); },
     async getStats() { return (piHost as any).getStats?.(); },
     onTaskUpdate(cb) { return taskManager.subscribe(cb); },
-    onAttentionUpdate(cb) { return attentionManager.subscribe(cb as never); },
+    onAttentionUpdate(cb) { return attentionManager.subscribe(cb); },
     onAgentEvent() { return () => {}; },
     onStatus() { return () => {}; },
   };

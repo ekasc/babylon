@@ -29,8 +29,9 @@ export function ApprovalGate() {
   }, []);
 
   const resolve = async (id: string, choice: ApprovalChoice) => {
+    const result = await bridge.permissionsResolveApproval(id, choice);
+    if (!result.ok) throw new Error("The approval was not accepted. Please try again.");
     setRequests((prev) => prev.filter((r) => r.id !== id));
-    await bridge.permissionsResolveApproval(id, choice).catch(() => undefined);
   };
 
   if (requests.length === 0) return null;
@@ -52,8 +53,21 @@ function ApprovalCard({
   onResolve,
 }: {
   req: ApprovalRequest;
-  onResolve(id: string, choice: ApprovalChoice): void;
+  onResolve(id: string, choice: ApprovalChoice): Promise<void>;
 }) {
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const respond = async (choice: ApprovalChoice) => {
+    setPending(true);
+    setError(null);
+    try {
+      await onResolve(req.id, choice);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Could not send your decision. Please try again.");
+    } finally {
+      setPending(false);
+    }
+  };
   // Focus lands on the first action for keyboard flow, but nothing is trapped:
   // the gate is a popover, not a modal. There is deliberately no Escape
   // dismiss — denying is an explicit choice, never a keyboard accident.
@@ -79,12 +93,12 @@ function ApprovalCard({
     <div ref={cardRef} role="dialog" aria-labelledby={`approval-title-${req.id}`} className="operator-popover pointer-events-auto w-full max-w-md p-4">
       <div className="flex items-center gap-2">
         <span className={`pill ${riskClass}`}>{riskLabel}</span>
-        <span className="text-[11.5px] uppercase tracking-wide text-dim">
+        <span className="text-[12px] uppercase tracking-wide text-dim">
           {req.action.category.replace(/_/g, " ")}
         </span>
       </div>
       <h2 id={`approval-title-${req.id}`} className="mt-2 text-[14px] font-semibold tracking-tight">Permission required</h2>
-      <p className="mt-1 text-[12.5px] text-dim">
+      <p className="mt-1 text-[13px] text-dim">
         {req.action.description ?? "The agent wants to run a consequential action."}
       </p>
       {req.action.command ? (
@@ -101,32 +115,38 @@ function ApprovalCard({
           ))}
         </ul>
       ) : null}
-      <div className="mt-3 grid grid-cols-2 gap-2">
+      {error ? <p role="alert" className="mt-2 text-[13px] text-err">{error}</p> : null}
+      {pending ? <p role="status" className="mt-2 text-[13px] text-dim">Sending decision…</p> : null}
+      <fieldset disabled={pending} aria-busy={pending} className="mt-3 grid grid-cols-2 gap-2">
         <button
-          onClick={() => onResolve(req.id, "allow_once")}
-          className="rounded-lg border border-line px-3 py-1.5 text-[12.5px] hover:border-accent"
+          disabled={pending}
+          onClick={() => void respond("allow_once")}
+          className="rounded-lg border border-line px-3 py-1.5 text-[13px] hover:border-accent"
         >
           Allow once
         </button>
         <button
-          onClick={() => onResolve(req.id, "allow_session")}
-          className="rounded-lg border border-line px-3 py-1.5 text-[12.5px] hover:border-accent"
+          disabled={pending}
+          onClick={() => void respond("allow_session")}
+          className="rounded-lg border border-line px-3 py-1.5 text-[13px] hover:border-accent"
         >
           Allow for session
         </button>
         <button
-          onClick={() => onResolve(req.id, "allow_always")}
-          className="rounded-lg bg-accent px-3 py-1.5 text-[12.5px] font-semibold text-bg hover:opacity-90"
+          disabled={pending}
+          onClick={() => void respond("allow_always")}
+          className="rounded-lg bg-accent px-3 py-1.5 text-[13px] font-semibold text-bg hover:opacity-90"
         >
           Always allow
         </button>
         <button
-          onClick={() => onResolve(req.id, "deny")}
-          className="rounded-lg border border-err bg-err/15 px-3 py-1.5 text-[12.5px] font-semibold text-err hover:bg-err/25"
+          disabled={pending}
+          onClick={() => void respond("deny")}
+          className="rounded-lg border border-err bg-err/15 px-3 py-1.5 text-[13px] font-semibold text-err hover:bg-err/25"
         >
           Deny
         </button>
-      </div>
+      </fieldset>
     </div>
   );
 }

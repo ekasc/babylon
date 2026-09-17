@@ -3,16 +3,33 @@ import { createPortal } from "react-dom";
 import type { CommandInfo } from "../bridge";
 import type { Bot } from "../bots";
 import { botHandle, rankBots } from "../bots";
-import { insertCommand } from "../commands";
-import { rankCommandsEffect } from "../commands.effect";
+import { insertCommand, rankCommands } from "../commands";
 import { expandSkillMentions, stripSkillPrefix } from "../lib/skillRef";
-import { detectComposerTriggerEffect } from "../lib/composerTrigger.effect";
-import * as Effect from "effect/Effect";
-import { truncateEffect } from "../lib/string.effect";
-import { collectComposerInlineTokensEffect } from "../lib/composerInlineTokens.effect";
+import { detectComposerTrigger } from "../lib/composerTrigger";
+import { truncate } from "../lib/string";
 import CommandMenu from "./CommandMenu";
 import BotMentionMenu from "./BotMentionMenu";
+import PermissionModePicker from "./PermissionModePicker";
+import ModelPicker from "./ComposerModelPicker";
+import ThinkingPicker from "./ComposerThinkingPicker";
+import StatsPopover from "./StatsPopover";
 import { PaperclipIcon, SendIcon, StopIcon, XIcon } from "./icons";
+
+/** Live run indicator. Idle-dimmed so the row reads quiet until a run starts. */
+function ThroughputBars({ active }: { active: boolean }) {
+	return (
+		<span className={`throughput-bars inline-flex items-end gap-[2px] leading-none ${active ? "text-dim" : "text-dim/35"}`} title={active ? "Agent is running" : "Idle"} aria-hidden="true">
+			{[0, 1, 2, 3, 4].map((i) => (
+				<span
+					key={i}
+					className={`throughput-bar ${active ? "is-active" : "is-idle"}`}
+					style={{ animationDelay: `${i * 90}ms` } as any}
+					aria-hidden
+				/>
+			))}
+		</span>
+	);
+}
 
 export interface Attachment {
 	name: string;
@@ -55,7 +72,7 @@ interface Props {
 
 function trunc(s: string, n = 42): string {
 	const one = s.replace(/\s+/g, " ").trim();
-	return Effect.runSync(truncateEffect(one, n));
+	return truncate(one, n);
 }
 
 function readAsBase64(file: Blob): Promise<string> {
@@ -149,7 +166,7 @@ const Composer = memo(function Composer({
 	mentionBots = [],
 }: Props) {
 	const [text, setText] = useState("");
-	const [mode, setMode] = useState<"steer" | "followUp">("steer");
+	const [mode, setMode] = useState<"steer" | "followUp">("followUp");
 	const [attachments, setAttachments] = useState<Attachment[]>([]);
 	const [dragOver, setDragOver] = useState(false);
 	const [sending, setSending] = useState(false);
@@ -160,11 +177,14 @@ const Composer = memo(function Composer({
 		try { return JSON.parse(localStorage.getItem("babylon:composer-history") ?? "[]"); } catch { return []; }
 	});
 	const [historyCursor, setHistoryCursor] = useState<number | null>(null);
+	// Custom answer for a select dialog: any text typed here wins over the
+	// option buttons, so a free-form description (e.g. picking "something
+	// else") always reaches the agent instead of being dropped.
+	const [dialogText, setDialogText] = useState("");
 	const fileRef = useRef<HTMLInputElement>(null);
 	const composerRef = useRef<HTMLTextAreaElement>(null);
 	const attachmentsRef = useRef<Attachment[]>([]);
-	const trigger = useMemo(() => Effect.runSync(detectComposerTriggerEffect(text, text.length)), [text]);
-	const _inlineTokens = useMemo(() => Effect.runSync(collectComposerInlineTokensEffect(text)), [text]);
+	const trigger = useMemo(() => detectComposerTrigger(text, text.length), [text]);
 	const commandToken = useMemo(() => {
 		if (!trigger) return null;
 		if (trigger.kind === "slash-command") return trigger.query;
@@ -174,7 +194,7 @@ const Composer = memo(function Composer({
 	const commandMatches = useMemo(
 		() =>
 			commandToken !== null && commandToken !== dismissedToken
-				? Effect.runSync(rankCommandsEffect(commands, commandToken, 16))
+				? rankCommands(commands, commandToken, 16)
 				: [],
 		[commandToken, commands, dismissedToken]
 	);
@@ -213,7 +233,7 @@ const Composer = memo(function Composer({
 	const skillMatches = useMemo(
 		() =>
 			skillToken && skillToken.query !== dismissedSkill
-				? Effect.runSync(rankCommandsEffect(skillCommands, skillToken.query, 8))
+				? rankCommands(skillCommands, skillToken.query, 8)
 				: [],
 		[skillToken, skillCommands, dismissedSkill]
 	);
@@ -341,6 +361,9 @@ const Composer = memo(function Composer({
 			}
 		} finally {
 			if (!isStreamingSubmit) setSending(false);
+			// Keep the keyboard flow: the composer owns focus after every
+			// submit so abort → send-another-prompt never drops keystrokes.
+			requestAnimationFrame(() => composerRef.current?.focus());
 		}
 		for (const attachment of attachments) URL.revokeObjectURL(attachment.url);
 		setAttachments([]);
@@ -413,6 +436,9 @@ const Composer = memo(function Composer({
 
 	const hasBlockingDialog = !!dialogs?.[0] && (dialogs[0].method === "select" || dialogs[0].method === "input" || dialogs[0].method === "editor");
 
+	// A fresh dialog starts with an empty custom-answer box.
+	useEffect(() => setDialogText(""), [dialogs?.[0]?.id]);
+
 	useEffect(() => {
 		if (!hasBlockingDialog || !dialogs?.[0]?.options?.length) return;
 		const onNumber = async (e: KeyboardEvent) => {
@@ -425,7 +451,8 @@ const Composer = memo(function Composer({
 			if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
 			e.preventDefault();
 			const id = dialogs[0].id;
-			const value = opts[idx];
+			// Typed text wins over the numeric shortcut (matches the buttons).
+			const value = dialogText.trim() || opts[idx];
 			onDialogDismiss?.(id);
 			try {
 				const { bridge: b } = await import("../bridge");
@@ -436,7 +463,7 @@ const Composer = memo(function Composer({
 		};
 		window.addEventListener("keydown", onNumber);
 		return () => window.removeEventListener("keydown", onNumber);
-	}, [hasBlockingDialog, dialogs, onDialogDismiss, toast]);
+	}, [hasBlockingDialog, dialogs, onDialogDismiss, toast, dialogText]);
 
 	const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
 		if (hasBlockingDialog) {
@@ -551,6 +578,14 @@ const Composer = memo(function Composer({
 		el.style.height = Math.min(el.scrollHeight, 140) + "px";
 	};
 
+	// Autogrow is a layout effect of the text, not part of render: resizing
+	// here keeps typing decoupled from unrelated parent renders (streaming
+	// deltas re-render the composer via context props, but the textarea only
+	// touches the DOM when its own text changes).
+	useEffect(() => {
+		autoGrow(composerRef.current);
+	}, [text]);
+
 	return (
 		<div
 			className={`composer-dock w-full shrink-0 overflow-visible ${dragOver ? "is-dragging" : ""}`}
@@ -571,7 +606,7 @@ const Composer = memo(function Composer({
 			<div ref={menuAnchorRef} className="relative w-full min-w-0">
 				{menuPortal}
 				{streaming && (steering.length > 0 || followUp.length > 0) && (
-					<div className="mb-2 flex flex-wrap gap-1.5 text-[12px]">
+					<div className="mb-2 flex flex-wrap gap-1.5 text-[11px]">
 						{steering.map((s, i) => (
 							<span key={`s${i}`} className="rounded-full bg-accent-soft px-2.5 py-1 font-medium text-accent">
 								steer · {trunc(s)}
@@ -585,7 +620,7 @@ const Composer = memo(function Composer({
 					</div>
 				)}
 
-				{attachmentError ? <p className="mb-2 text-[12px] text-err">{attachmentError}</p> : null}
+				{attachmentError ? <p className="mb-2 text-[11px] text-err">{attachmentError}</p> : null}
 				{attachments.length > 0 && (
 					<div className="mb-2 flex flex-wrap gap-2">
 						{attachments.map((a, i) => {
@@ -597,9 +632,9 @@ const Composer = memo(function Composer({
 										<img src={a.url} alt={a.name} title={a.name} className="h-14 w-14 rounded-xl border border-line object-cover" />
 									) : (
 										<div className="flex h-14 min-w-[120px] items-center gap-2 rounded-xl border border-line bg-inset px-3" title={a.name}>
-											<span className="grid h-7 w-7 place-items-center rounded-lg bg-accent-soft text-[10px] font-bold text-accent">{isText ? "TXT" : "FILE"}</span>
-											<span className="min-w-0 flex-1 truncate text-[12px] font-medium">{a.name}</span>
-											<span className="text-[11px] text-dim">{Math.round((a.data.length * 3) / 4 / 1024)}KB</span>
+											<span className="grid h-7 w-7 place-items-center rounded-lg bg-accent-soft text-[length:var(--chat-r-10)] font-bold text-accent">{isText ? "TXT" : "FILE"}</span>
+											<span className="min-w-0 flex-1 truncate text-[11px] font-medium">{a.name}</span>
+											<span className="text-[length:var(--chat-r-11)] text-dim">{Math.round((a.data.length * 3) / 4 / 1024)}KB</span>
 										</div>
 									)}
 									<button
@@ -620,15 +655,14 @@ const Composer = memo(function Composer({
 					</div>
 				)}
 				<div
-					className={`composer-surface !border-0 !shadow-none group relative flex flex-col border-0 bg-transparent font-mono text-[15px] !outline-none focus-within:!border-0 focus-within:!shadow-none focus-within:!outline-none ${dragOver ? "bg-accent/[0.04]" : ""}`}
-					style={{ border: "none", boxShadow: "none", outline: "none" }}
+					className="composer-surface group relative flex flex-col"
 				>
 					{dialogs?.[0] ? (
 						<div role="dialog" aria-modal="true" aria-labelledby="composer-dialog-title" className="border-b border-line px-4 py-3">
 							<div className="flex items-start justify-between gap-2">
 								<div className="min-w-0 flex-1">
-									<p id="composer-dialog-title" className="text-[13.5px] font-semibold leading-snug tracking-tight break-words">{dialogs[0].title ?? "Question"}</p>
-									{dialogs[0].message && <div className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md border border-line/60 bg-inset/40 px-3 py-2 text-[12.5px] leading-[1.6] text-dim">{dialogs[0].message}</div>}
+									<p id="composer-dialog-title" className="text-[length:var(--chat-r-14)] font-semibold leading-snug tracking-tight break-words">{dialogs[0].title ?? "Question"}</p>
+									{dialogs[0].message && <div className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md border border-line/60 bg-inset/40 px-3 py-2 text-[length:var(--chat-r-13)] leading-[1.6] text-dim">{dialogs[0].message}</div>}
 								</div>
 								<button
 									onClick={async () => {
@@ -655,39 +689,116 @@ const Composer = memo(function Composer({
 												onDialogDismiss?.(id);
 												try {
 													const { bridge: b } = await import("../bridge");
-													await b.uiRespond({ id, value: o });
+													await b.uiRespond({ id, value: dialogText.trim() || o });
 												} catch (e: any) {
 													toast?.("error", e?.message ?? "failed");
 												}
 											}}
-											className="flex w-full items-center justify-between rounded-xl border border-line bg-bg px-3 py-2 text-left text-[13px] transition-colors hover:border-accent/30 hover:bg-accent/5 hover:text-accent"
+											className="flex w-full items-center justify-between rounded-xl border border-line bg-bg px-3 py-2 text-left text-[12px] transition-colors hover:border-accent/30 hover:bg-accent/5 hover:text-accent"
 										>
 											<span className="flex items-center gap-2">
-												<span className="grid h-5 w-5 place-items-center rounded-md bg-inset text-[11px] font-medium text-dim">{idx + 1}</span>
+												<span className="grid h-5 w-5 place-items-center rounded-md bg-inset text-[length:var(--chat-r-11)] font-medium text-dim">{idx + 1}</span>
 												{o}
 											</span>
-											<span className="text-[11px] text-dim">{idx + 1} ↩</span>
+											<span className="text-[length:var(--chat-r-11)] text-dim">{idx + 1} ↩</span>
 										</button>
 									))}
+									<div className="mt-1 flex items-center gap-2 border-t border-line/60 pt-2">
+										<input
+											value={dialogText}
+											onChange={(e) => setDialogText(e.target.value)}
+											onKeyDown={async (e) => {
+												if (e.key !== "Enter") return;
+												e.preventDefault();
+												const custom = dialogText.trim();
+												if (!custom) return;
+												const id = dialogs[0].id;
+												onDialogDismiss?.(id);
+												try {
+													const { bridge: b } = await import("../bridge");
+													await b.uiRespond({ id, value: custom });
+												} catch (err: any) {
+													toast?.("error", err?.message ?? "failed");
+												}
+											}}
+											placeholder="Or type a custom answer…"
+											aria-label="Custom answer"
+											className="min-w-0 flex-1 rounded-lg border border-line bg-bg px-3 py-2 text-[12px] outline-none focus:border-accent"
+										/>
+										<button
+											onClick={async () => {
+												const custom = dialogText.trim();
+												if (!custom) return;
+												const id = dialogs[0].id;
+												onDialogDismiss?.(id);
+												try {
+													const { bridge: b } = await import("../bridge");
+													await b.uiRespond({ id, value: custom });
+												} catch (err: any) {
+													toast?.("error", err?.message ?? "failed");
+												}
+											}}
+											disabled={!dialogText.trim()}
+											className="shrink-0 rounded-lg bg-fg px-3 py-2 text-[12px] font-semibold text-bg disabled:opacity-30"
+										>
+											Send
+										</button>
+									</div>
 								</div>
 							) : dialogs[0].method === "input" || dialogs[0].method === "editor" ? (
 								<ComposerDialogInput dialog={dialogs[0]} onDismiss={onDialogDismiss!} toast={toast} />
 							) : null}
-							<p className="mt-2 text-[11px] text-dim">Press 1,{Math.min(9, dialogs[0].options?.length ?? 0)} to choose, or Esc to dismiss.</p>
+							<p className="mt-2 text-[length:var(--chat-r-11)] text-dim">Press 1,{Math.min(9, dialogs[0].options?.length ?? 0)} to choose, type a custom answer, or Esc to dismiss.</p>
 						</div>
 					) : null}
 
 					{!hasBlockingDialog && (
-						<div className="flex items-center gap-3 px-3 py-3">
+						<div className="flex items-center gap-3 px-4 py-3">
 							<input ref={fileRef} type="file" multiple className="hidden" onChange={(e) => { void addFiles(e.target.files ?? []); e.target.value = ""; }} />
 							<button onClick={() => fileRef.current?.click()} title="Attach (paste / drag & drop)" aria-label="Attach file" disabled={hasBlockingDialog} className="grid h-8 w-8 shrink-0 place-items-center text-dim hover:text-fg disabled:opacity-40"><PaperclipIcon size={16} /></button>
-							<span className="shrink-0 select-none font-mono text-[15px] leading-none text-dim" aria-hidden>&gt;</span>
-							<textarea ref={(el) => { (composerRef as any).current = el; if (el) autoGrow(el); }} value={text} onChange={(e) => { setText(e.target.value); if (historyCursor !== null) setHistoryCursor(null); autoGrow(e.target as HTMLTextAreaElement); }} onKeyDown={onKeyDown} onPaste={onPaste} rows={1} disabled={hasBlockingDialog} placeholder={streaming ? (mode === "steer" ? "Steer…" : "Queue…") : "Ask anything…"} role="combobox" aria-label="Message Pi" aria-autocomplete="list" aria-expanded={commandMatches.length > 0 || mentionMatches.length > 0 || skillMatches.length > 0} aria-controls={commandMatches.length > 0 ? "composer-commands" : mentionMatches.length > 0 ? "composer-bot-mentions" : skillMatches.length > 0 ? "composer-skills" : undefined} aria-activedescendant={commandMatches.length > 0 ? `cmd-opt-${selectedCommand}` : mentionMatches.length > 0 ? `mention-opt-${selectedMention}` : skillMatches.length > 0 ? `skill-opt-${selectedSkill}` : undefined} className="composer-input max-h-[140px] min-h-[20px] w-full flex-1 resize-none border-0 bg-transparent py-1 font-mono text-[15px] leading-6 !outline-none placeholder:text-dim/40 focus:!outline-none focus-visible:!outline-none focus:!ring-0 focus-visible:!ring-0" style={{ outline: "none", boxShadow: "none", border: "none" } as any} />
+							<span className="shrink-0 select-none text-[length:var(--prompt-font)] leading-none text-dim" aria-hidden>&gt;</span>
+							<textarea ref={composerRef} value={text} onChange={(e) => { setText(e.target.value); if (historyCursor !== null) setHistoryCursor(null); }} onKeyDown={onKeyDown} onPaste={onPaste} rows={1} disabled={hasBlockingDialog} placeholder={streaming ? (mode === "steer" ? "Steer…" : "Queue…") : "Message Pi…"} role="textbox" aria-label="Message Pi" aria-autocomplete="list" aria-controls={commandMatches.length > 0 ? "composer-commands" : mentionMatches.length > 0 ? "composer-bot-mentions" : skillMatches.length > 0 ? "composer-skills" : undefined} aria-activedescendant={commandMatches.length > 0 ? `cmd-opt-${selectedCommand}` : mentionMatches.length > 0 ? `mention-opt-${selectedMention}` : skillMatches.length > 0 ? `skill-opt-${selectedSkill}` : undefined} className="composer-input max-h-[140px] min-h-[20px] w-full flex-1 resize-none border-0 bg-transparent py-1 text-[length:var(--prompt-font)] leading-[1.5] outline-none placeholder:text-dim focus:outline-none focus-visible:outline-none" />
 							{streaming ? (
-								<div className="flex shrink-0 items-center gap-1.5" role="group" aria-label="Delivery mode"><button onClick={() => setMode("steer")} aria-pressed={mode === "steer"} title="Interrupt and redirect" className={`h-8 px-3 font-mono text-[13px] ${mode === "steer" ? "bg-accent text-white" : "bg-inset text-dim hover:text-fg"}`}>steer</button><button onClick={() => setMode("followUp")} aria-pressed={mode === "followUp"} title="Queue after current run" className={`h-8 px-3 font-mono text-[13px] ${mode === "followUp" ? "bg-accent text-white" : "bg-inset text-dim hover:text-fg"}`}>queue</button><button onClick={onAbort} title="Stop run" aria-label="Stop run" className="grid h-8 w-8 place-items-center bg-err text-white hover:bg-err/90"><StopIcon size={14} /></button></div>
+								<div className="flex shrink-0 items-center gap-1.5" role="group" aria-label="Delivery mode"><button onClick={() => setMode("steer")} aria-pressed={mode === "steer"} title="Interrupt and redirect" className={`h-8 rounded-md px-3 text-[12px] ${mode === "steer" ? "bg-accent text-white" : "bg-inset text-dim hover:text-fg"}`}>steer</button><button onClick={() => setMode("followUp")} aria-pressed={mode === "followUp"} title="Queue after current run" className={`h-8 rounded-md px-3 text-[12px] ${mode === "followUp" ? "bg-accent text-white" : "bg-inset text-dim hover:text-fg"}`}>queue</button><button onClick={onAbort} title="Stop run" aria-label="Stop run" className="grid h-8 w-8 place-items-center rounded-md bg-err text-white hover:bg-err/90"><StopIcon size={14} /></button></div>
 							) : (
-								<button onClick={submit} disabled={sending || (!text.trim() && attachments.length === 0)} title={sending ? "Sending…" : "Send"} aria-label="Send message" className="grid h-8 w-8 shrink-0 place-items-center bg-fg text-bg hover:bg-fg/90 disabled:cursor-not-allowed disabled:opacity-30"><SendIcon size={14} /></button>
+								<button onClick={submit} disabled={sending || (!text.trim() && attachments.length === 0)} title={sending ? "Sending…" : "Send"} aria-label="Send message" className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-fg text-bg hover:bg-fg/90 disabled:cursor-not-allowed disabled:opacity-30"><SendIcon size={14} /></button>
 							)}
+						</div>
+					)}
+					{/* Session control row, part of the composer surface (T3Code's
+					    in-composer controls): permission, model, thinking, run
+					    state, and usage stay one control surface with the input
+					    instead of a separate full-width telemetry strip. */}
+					{!hasBlockingDialog && (
+						<div className="composer-controls-row flex items-center gap-0.5 border-t border-line/60 px-3 py-1">
+							<span className="flex shrink-0 items-center">
+								<PermissionModePicker />
+							</span>
+							<span className="model-shrink flex min-w-0 max-w-[38%] shrink items-center">
+								<ModelPicker
+									models={models}
+									current={agentState?.model ?? null}
+									disabled={!models.length}
+									onSelect={onSetModel}
+								/>
+							</span>
+							<span className="flex shrink-0 items-center">
+								<ThinkingPicker
+									current={agentState?.thinkingLevel ?? "off"}
+									available={thinkingLevels.length ? thinkingLevels : undefined}
+									disabled={!agentState}
+									onSelect={onSetThinking}
+								/>
+							</span>
+							<div className="flex-1" />
+							{streaming && (
+								<span className="flex shrink-0 items-center px-1">
+									<ThroughputBars active />
+								</span>
+							)}
+							<span className="flex shrink-0 items-center">
+								<StatsPopover stats={stats} hasSession={!!agentState} onCompact={onCompact} />
+							</span>
 						</div>
 					)}
 				</div>
@@ -711,13 +822,13 @@ function ComposerDialogInput({ dialog, onDismiss, toast }: { dialog: ComposerDia
 	return (
 		<div className="mt-2 flex flex-col gap-2">
 			{dialog.method === "input" ? (
-				<input autoFocus value={value} onChange={(e) => setValue(e.target.value)} placeholder={dialog.placeholder} onKeyDown={(e) => e.key === "Enter" && void respond({ value })} className="rounded-xl border border-line bg-bg px-3 py-2 text-[13px] outline-none focus:border-[var(--focus)]" />
+				<input autoFocus value={value} onChange={(e) => setValue(e.target.value)} placeholder={dialog.placeholder} onKeyDown={(e) => e.key === "Enter" && void respond({ value })} className="rounded-xl border border-line bg-bg px-3 py-2 text-[length:var(--chat-r-13)] outline-none focus:border-[var(--focus)]" />
 			) : (
-				<textarea autoFocus value={value} onChange={(e) => setValue(e.target.value)} rows={4} className="resize-y rounded-xl border border-line bg-bg px-3 py-2 font-mono text-[12px] outline-none focus:border-[var(--focus)]" />
+				<textarea autoFocus value={value} onChange={(e) => setValue(e.target.value)} rows={4} className="resize-y rounded-xl border border-line bg-bg px-3 py-2 font-mono text-[length:var(--code-font)] outline-none focus:border-[var(--focus)]" />
 			)}
 			<div className="flex justify-end gap-2">
-				<button onClick={() => void respond({ cancelled: true })} className="rounded-full border border-line px-3 py-1.5 text-[12.5px]">Cancel</button>
-				<button onClick={() => void respond({ value })} className="rounded-full bg-accent px-4 py-1.5 text-[12.5px] font-semibold text-white">Submit</button>
+				<button onClick={() => void respond({ cancelled: true })} className="rounded-full border border-line px-3 py-1.5 text-[12px]">Cancel</button>
+				<button onClick={() => void respond({ value })} className="rounded-full bg-accent px-4 py-1.5 text-[12px] font-semibold text-white">Submit</button>
 			</div>
 		</div>
 	);

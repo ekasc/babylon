@@ -27,11 +27,14 @@ export interface RuntimeFacade {
   // Pi
   openSession(opts: { path?: string; cwd: string; requestId?: number }): Promise<unknown>;
   prompt(message: string, images?: unknown[], streamingBehavior?: string): Promise<unknown>;
-  abort(): Promise<unknown>;
+  abort(sessionFile?: string): Promise<unknown>;
+  releaseSession?(path: string): Promise<{ released: boolean }>;
   getState(): Promise<unknown>;
   getMessages(): Promise<unknown[]>;
   getToolOutput(toolCallId: string): Promise<unknown>;
   getModels(): Promise<unknown[]>;
+  /** Idempotent pre-warm of a project (rollback shadow + model runtime). */
+  warmProject(cwd: string): Promise<unknown>;
   setModel(provider: string, modelId: string): Promise<unknown>;
   getThinkingLevels(): Promise<string[]>;
   setThinking(level: string): Promise<unknown>;

@@ -14,7 +14,7 @@ export type HookAction =
   | "attach_metadata"
   | "notify";
 
-export interface HookDefinition {
+export type HookDefinition = {
   id: string;
   event: HookEvent;
   enabled: boolean;

@@ -29,7 +29,7 @@ export interface WatchEvent {
   branch?: string;
 }
 
-export interface ScheduledTask {
+export type ScheduledTask = {
   id: string;
   name: string;
   enabled: boolean;

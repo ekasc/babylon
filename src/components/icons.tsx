@@ -21,19 +21,6 @@ function base(props: IconProps) {
   };
 }
 
-export const PiMark = (props: IconProps) => (
-  <svg {...base(props)}>
-    <circle cx="12" cy="12" r="10" fill="currentColor" stroke="none" />
-    <path
-      d="M7 9.5h10M9 9.5c0 3.5.8 6 3 8M12 9.5c-1 3.2-1.2 5.6-.6 8M15 9.5c.4 2.4.3 4.8-.4 8"
-      stroke="var(--bg)"
-      strokeWidth="1.4"
-      strokeLinecap="round"
-      fill="none"
-    />
-  </svg>
-);
-
 export const CpuIcon = (props: IconProps) => (
   <svg {...base(props)}>
     <rect x="5" y="5" width="14" height="14" rx="2" />
@@ -191,6 +178,13 @@ export const MoreIcon = (props: IconProps) => (
   </svg>
 );
 
+export const GlobeIcon = (props: IconProps) => (
+  <svg {...base(props)}>
+    <circle cx="12" cy="12" r="8.5" />
+    <path d="M3.5 12h17M12 3.5c2.4 2.3 3.7 5.2 3.7 8.5s-1.3 6.2-3.7 8.5c-2.4-2.3-3.7-5.2-3.7-8.5S9.6 5.8 12 3.5z" />
+  </svg>
+);
+
 /** Small leading icon for tool cards (bash/edit/read/grep/find/ls). */
 export const ToolGlyph = ({ name, ...props }: IconProps & { name: string }) => {
   switch (name) {
@@ -227,6 +221,20 @@ export const FilePlusIcon = (props: IconProps) => (
 export const PlusIcon = (props: IconProps) => (
   <svg {...base(props)}>
     <path d="M12 5v14M5 12h14" />
+  </svg>
+);
+
+export const ArrowRightIcon = (props: IconProps) => (
+  <svg {...base(props)}>
+    <path d="M5 12h14" />
+    <path d="m13 6 6 6-6 6" />
+  </svg>
+);
+
+export const RotateIcon = (props: IconProps) => (
+  <svg {...base(props)}>
+    <path d="M4 12a8 8 0 0 1 14.9-4M20 12a8 8 0 0 1-14.9 4" />
+    <path d="M19 3v4h-4M5 21v-4h4" />
   </svg>
 );
 
@@ -273,6 +281,12 @@ export const ArrowUpIcon = (props: IconProps) => (
 export const ArrowDownIcon = (props: IconProps) => (
   <svg {...base(props)}>
     <path d="M12 5v14M6 13l6 6 6-6" />
+  </svg>
+);
+
+export const ArrowLeftIcon = (props: IconProps) => (
+  <svg {...base(props)}>
+    <path d="M19 12H5M13 6l-6 6 6 6" />
   </svg>
 );
 

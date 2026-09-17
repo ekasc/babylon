@@ -2,6 +2,32 @@ import type { Task } from "./tasks";
 import type { Bot, BotGroup, BotPatch, DefaultBot, DefaultBotPatch, NewBotInput, NewGroupInput } from "./bots";
 import type { Handoff } from "./handoff";
 import type { PiSettings } from "./lib/settings-shared";
+import type { SimEmulation, SimViewport } from "./lib/simulator";
+
+export interface SimBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface SimTabState {
+  id: string;
+  url: string;
+  title: string | null;
+  loading: boolean;
+  zoomFactor: number;
+}
+
+export type SimEvent =
+  | { type: "title"; tabId: string; title: string }
+  | { type: "url"; tabId: string; url: string; canBack: boolean; canForward: boolean }
+  | { type: "loading"; tabId: string; loading: boolean; canBack?: boolean; canForward?: boolean }
+  | { type: "fail"; tabId: string; error: string; url: string }
+  | { type: "crashed"; tabId: string; reason: string }
+  | { type: "tabs"; tabs: SimTabState[]; activeId: string | null }
+  | { type: "visibility"; open: boolean }
+  | { type: "emulation"; tabId: string; emulation: SimEmulation };
 
 export interface ProjectSettings {
   projectPath: string;
@@ -486,7 +512,11 @@ export interface Bridge {
   handoffConsume(handoffId: string, liveFile: string): Promise<{ consumedInto: string }>;
 
   prompt(message: string, images?: any[], streamingBehavior?: "steer" | "followUp"): Promise<any>;
-  abort(): Promise<any>;
+  /** Abort one session's run (defaults to the foreground session). Other
+   *  sessions keep running untouched. */
+  abort(sessionFile?: string): Promise<any>;
+  /** Release an idle session runtime (tab closed). Live runtimes refuse. */
+  releaseSession(path: string): Promise<{ released: boolean }>;
   refreshSession(path: string): Promise<boolean>;
 
   getMessages(): Promise<any[]>;
@@ -513,6 +543,8 @@ export interface Bridge {
   gitStageHunk(cwd: string, file: string, patch: string): Promise<void>;
   gitDiscardHunk(cwd: string, file: string, patch: string): Promise<void>;
   getModels(): Promise<any[]>;
+  /** Best-effort pre-warm of a project before its first session. */
+  warmProject(cwd: string): Promise<any>;
   getCommands(): Promise<CommandInfo[]>;
   setModel(provider: string, modelId: string): Promise<any>;
   setThinking(level: string): Promise<any>;
@@ -591,6 +623,29 @@ export interface Bridge {
   onAgentEvents(cb: (events: any[]) => void): () => void;
   onAgentEvent(cb: (event: any) => void): () => void;
   onStatus(cb: (status: SessionStatus) => void): () => void;
+  simOpenTab(url?: string): Promise<SimTabState>;
+  simActivate(tabId: string): Promise<SimTabState>;
+  simCloseTab(tabId?: string | null): Promise<{ closed: boolean }>;
+  simTabs(): Promise<{ tabs: SimTabState[]; activeId: string | null }>;
+  simAttach(): Promise<{ tabs: SimTabState[]; activeId: string | null; emulation: SimEmulation | null }>;
+  simDetach(): Promise<void>;
+  simClose(): Promise<void>;
+  simBounds(tabId: string | undefined, rect: SimBounds): Promise<void>;
+  simEmulate(tabId: string | undefined, emulation: SimEmulation): Promise<{ ok: boolean }>;
+  simViewport(tabId: string | undefined, viewport: SimViewport): Promise<{ ok: boolean }>;
+  simZoom(tabId: string | undefined, factor: number): Promise<{ zoomFactor: number }>;
+  simFitZoom(tabId: string | undefined, scale: number): Promise<void>;
+  simHardReload(tabId?: string | null): Promise<void>;
+  simDevTools(tabId?: string | null): Promise<void>;
+  simClearCookies(tabId?: string | null): Promise<void>;
+  simClearCache(tabId?: string | null): Promise<void>;
+  simMenu(opts: { tabId?: string | null; showDeviceToolbar: boolean }): Promise<{ deviceToolbar?: boolean; dismissed?: boolean }>;
+  simNavigate(tabId: string | undefined, url: string): Promise<{ ok: boolean }>;
+  simReload(tabId?: string | null): Promise<void>;
+  simBack(tabId?: string | null): Promise<void>;
+  simForward(tabId?: string | null): Promise<void>;
+  simProbe(port: number): Promise<{ open: boolean }>;
+  onSimEvent(cb: (ev: SimEvent) => void): () => void;
 
   permissionsGet(): Promise<PermissionState>;
   getSettings(): Promise<PiSettings>;
@@ -602,12 +657,17 @@ export interface Bridge {
   permissionsRemoveRule(id: string): Promise<{ removed: boolean }>;
   permissionsResolveApproval(id: string, choice: ApprovalChoice): Promise<{ ok: boolean }>;
   onApprovalRequested(cb: (req: ApprovalRequest) => void): () => void;
+  /** Pending permission approvals still awaited by the runtime (recovery
+   *  after renderer reload: the original request events are gone). */
+  approvalsPending(): Promise<ApprovalRequest[]>;
+  /** Daemon socket liveness (only fires in daemon-owned mode). */
+  onDaemonStatus(cb: (payload: { connected: boolean }) => void): () => void;
   /** Fires when a pending approval is released without a user decision
    *  (e.g. Full Access mode was enabled while the agent waited). */
   onApprovalCleared(cb: (payload: { id: string }) => void): () => void;
   /** Fires when an interactive approval is resolved (allowed/denied), so the
    *  UI can drop the matching attention item. */
-   onApprovalResolved(cb: (payload: { id: string; choice: ApprovalChoice }) => void): () => void;
+   onApprovalResolved(cb: (payload: { id: string; choice: ApprovalChoice; sessionId?: string | null }) => void): () => void;
   onPermissionsChanged(cb: (state: PermissionState) => void): () => void;
 
   lspGetSnapshot(cwd: string): Promise<LspProjectSnapshot | null>;
@@ -702,6 +762,7 @@ export const bridge: Bridge = window.pideck ?? {
 
   prompt: () => Promise.resolve(),
   abort: () => Promise.resolve(),
+  releaseSession: () => Promise.resolve({ released: false }),
   refreshSession: () => Promise.resolve(false),
 
   getMessages: () => Promise.resolve([]),
@@ -727,6 +788,7 @@ export const bridge: Bridge = window.pideck ?? {
   gitStageHunk: () => Promise.reject(new Error("bridge unavailable")),
   gitDiscardHunk: () => Promise.reject(new Error("bridge unavailable")),
   getModels: () => Promise.resolve([]),
+  warmProject: () => Promise.resolve(),
   getCommands: () => Promise.resolve([]),
   setModel: () => Promise.resolve(),
   setThinking: () => Promise.resolve(),
@@ -788,6 +850,29 @@ export const bridge: Bridge = window.pideck ?? {
   onAgentEvents: () => () => {},
   onAgentEvent: () => () => {},
   onStatus: () => () => {},
+  simOpenTab: () => Promise.reject(new Error("bridge unavailable")),
+  simActivate: () => Promise.reject(new Error("bridge unavailable")),
+  simCloseTab: () => Promise.resolve({ closed: false }),
+  simTabs: () => Promise.resolve({ tabs: [], activeId: null }),
+  simAttach: () => Promise.resolve({ tabs: [], activeId: null, emulation: null }),
+  simDetach: () => Promise.resolve(),
+  simClose: () => Promise.resolve(),
+  simBounds: () => Promise.resolve(),
+  simEmulate: () => Promise.reject(new Error("bridge unavailable")),
+  simViewport: () => Promise.reject(new Error("bridge unavailable")),
+  simZoom: () => Promise.reject(new Error("bridge unavailable")),
+  simFitZoom: () => Promise.resolve(),
+  simHardReload: () => Promise.resolve(),
+  simDevTools: () => Promise.resolve(),
+  simClearCookies: () => Promise.resolve(),
+  simClearCache: () => Promise.resolve(),
+  simMenu: () => Promise.resolve({ dismissed: true }),
+  simNavigate: () => Promise.reject(new Error("bridge unavailable")),
+  simReload: () => Promise.resolve(),
+  simBack: () => Promise.resolve(),
+  simForward: () => Promise.resolve(),
+  simProbe: () => Promise.resolve({ open: false }),
+  onSimEvent: () => () => {},
 
   permissionsGet: () => Promise.resolve({ mode: "auto", rules: [] }),
   getSettings: () => Promise.resolve({}),
@@ -799,6 +884,8 @@ export const bridge: Bridge = window.pideck ?? {
   onApprovalRequested: () => () => {},
   onApprovalCleared: () => () => {},
   onApprovalResolved: () => () => {},
+  approvalsPending: () => Promise.resolve([]),
+  onDaemonStatus: () => () => {},
   onPermissionsChanged: () => () => {},
 
   lspGetSnapshot: () => Promise.resolve(null),

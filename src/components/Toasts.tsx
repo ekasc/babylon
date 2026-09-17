@@ -32,7 +32,7 @@ function ToastCard({ toast, onDismiss }: { toast: Toast; onDismiss(id: number): 
         : "border-line text-fg";
 
   return (
-    <div role={toast.type === "error" ? "alert" : "status"} className={`toast pointer-events-auto flex items-start gap-2 rounded-xl border bg-raised px-3 py-2 text-[12.5px] shadow-lg ${color}`}>
+    <div role={toast.type === "error" ? "alert" : "status"} className={`toast pointer-events-auto flex items-start gap-2 rounded-xl border bg-raised px-3 py-2 text-[13px] shadow-lg ${color}`}>
       <span className="min-w-0 flex-1 break-words">{toast.text}</span>
       <button onClick={() => onDismiss(toast.id)} aria-label="Dismiss notification" className="shrink-0 text-dim hover:text-fg">
         <XIcon size={11} />

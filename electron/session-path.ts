@@ -1,5 +1,5 @@
 import { promises as fsp } from "node:fs";
-import { isAbsolute, relative, resolve } from "node:path";
+import { relative, resolve } from "node:path";
 
 function contained(root: string, target: string): boolean {
   const rel = relative(root, target);

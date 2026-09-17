@@ -13,6 +13,7 @@
 import {
   createEnvelope,
   parseEnvelope,
+  DAEMON_PROTOCOL_VERSION,
   type ProtocolEnvelope,
 } from "./daemon-protocol";
 import { createRuntime, type RuntimeState } from "./runtime";
@@ -59,7 +60,9 @@ export function dispatchRequest(runtime: RuntimeState, request: ProtocolEnvelope
 
   switch (request.type) {
     case "ping":
-      response = createEnvelope("response", "pong", { ok: true }, request.id);
+      // The daemon advertises the protocol it speaks so a client built from
+      // other source can detect skew and retire it before using it.
+      response = createEnvelope("response", "pong", { ok: true, protocol: DAEMON_PROTOCOL_VERSION }, request.id);
       break;
 
     case "task.created": {

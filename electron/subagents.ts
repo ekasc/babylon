@@ -107,15 +107,23 @@ export class ManagedSubagents {
     private readonly options: {
       agentDir: string;
       modelRuntime: ModelRuntime;
+      /** Resolve the model runtime owning a cwd (per-project sharing).
+       *  Falls back to modelRuntime when absent (single-project legacy). */
+      getModelRuntime?: (cwd: string) => Promise<ModelRuntime>;
       onUpdate?: () => void;
       onParentMessage?: (record: ManagedSubagentRecord, action: SubagentParentEvent, message?: string) => void | Promise<void>;
       /** Babylon permission controller, if enabled. Gates the subagent's tools. */
       permission?: BabylonPermissionController;
       hookManager?: import("./hook-manager").HookManager;
-      onLaunch?: (ev: { type: "babylon_launch_started" | "babylon_launch_terminated"; runId: string; runKind: "subagent" | "thread" | "workflow"; label?: string; status?: string }) => void;
+      onLaunch?: (ev: { type: "babylon_launch_started" | "babylon_launch_terminated"; runId: string; runKind: "subagent" | "thread" | "workflow"; label?: string; status?: string; parentSessionId?: string | null; parentSessionFile?: string | null }) => void;
     }
   ) {
     void this.recoverPersistent();
+  }
+
+  private async modelRuntimeFor(cwd: string): Promise<ModelRuntime> {
+    if (this.options.getModelRuntime) return this.options.getModelRuntime(cwd);
+    return this.options.modelRuntime;
   }
 
   tool(): ToolDefinition<any, any> {
@@ -310,7 +318,7 @@ export class ManagedSubagents {
     const requestedModel = params.model?.trim() || (ctx.model ? exactModel(ctx.model) : "");
     if (!requestedModel) throw new Error("No subagent model selected");
     const [provider, modelId] = splitModel(requestedModel);
-    const model = this.options.modelRuntime.getModel(provider, modelId);
+    const model = (await this.modelRuntimeFor(ctx.cwd)).getModel(provider, modelId);
     if (!model) throw new Error(`Subagent model not found: ${requestedModel}`);
     const profile = params.profile ?? "read-only";
     const thinking = params.thinking ?? "high";
@@ -347,7 +355,7 @@ export class ManagedSubagents {
     this.addMessage(record, "user", task);
     const runtime = await this.createRuntime(record);
     this.runtimes.set(runId, runtime);
-    this.options.onLaunch?.({ type: "babylon_launch_started", runId, runKind: "subagent", label: record.name ?? task.slice(0, 80), status: "running" });
+    this.options.onLaunch?.({ type: "babylon_launch_started", runId, runKind: "subagent", label: record.name ?? task.slice(0, 80), status: "running", parentSessionId: record.parentSessionId, parentSessionFile: record.parentSessionFile });
     void this.runTurn(runtime, task, params.timeoutMs);
     return runtime;
   }
@@ -435,7 +443,7 @@ export class ManagedSubagents {
 
   private async createRuntime(record: ManagedSubagentRecord): Promise<ManagedRuntime> {
     const [provider, modelId] = splitModel(record.sessionModel);
-    const model = this.options.modelRuntime.getModel(provider, modelId);
+    const model = (await this.modelRuntimeFor(record.cwd)).getModel(provider, modelId);
     if (!model) throw new Error(`Subagent model is no longer available: ${record.sessionModel}`);
     await fs.mkdir(runDir(record.cwd, record.runId), { recursive: true });
     let manager: SessionManager;
@@ -487,14 +495,16 @@ export class ManagedSubagents {
       excludeTools: ["subagent", "workflow", "spawn_thread", "send_input"] as any,
     });
     // Gate the subagent's tool calls through the same Babylon permission policy
-    // as the parent session, so isolated agents can't bypass it.
+    // as the parent session, so isolated agents can't bypass it. Scoped to
+    // the PARENT session id: approvals and session rules belong to the
+    // conversation the user supervises, not the child's internal session.
     if (this.options.permission) {
       if (this.options.permission) {
         installAgentGuards(created.session.agent as any, {
           controller: this.options.permission,
           cwd: record.cwd,
           hookManager: this.options.hookManager,
-          sessionId: created.session.sessionId,
+          sessionId: record.parentSessionId ?? created.session.sessionId,
           taskId: undefined,
         });
       }
@@ -559,7 +569,7 @@ export class ManagedSubagents {
       runtime.running = null;
       await this.save(record);
       const terminal = (record.status as string) === "failed" ? "failed" : (record.status as string) === "stopped" ? "stopped" : "completed";
-      this.options.onLaunch?.({ type: "babylon_launch_terminated", runId: record.runId, runKind: "subagent", status: terminal });
+      this.options.onLaunch?.({ type: "babylon_launch_terminated", runId: record.runId, runKind: "subagent", status: terminal, parentSessionId: record.parentSessionId, parentSessionFile: record.parentSessionFile });
     }
   }
 
@@ -579,7 +589,7 @@ export class ManagedSubagents {
     runtime.unsubscribe = null;
     runtime.session.dispose();
     this.runtimes.delete(runtime.record.runId);
-    this.options.onLaunch?.({ type: "babylon_launch_terminated", runId: runtime.record.runId, runKind: "subagent", status: "stopped" });
+    this.options.onLaunch?.({ type: "babylon_launch_terminated", runId: runtime.record.runId, runKind: "subagent", status: "stopped", parentSessionId: runtime.record.parentSessionId, parentSessionFile: runtime.record.parentSessionFile });
   }
 
   private addMessage(record: ManagedSubagentRecord, role: ManagedSubagentRecord["recentMessages"][number]["role"], text: string): void {

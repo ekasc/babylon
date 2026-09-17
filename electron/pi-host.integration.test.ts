@@ -30,6 +30,9 @@ describe("PiHost resource and command integration", () => {
     const events: any[] = [];
     const host = new PiHost({ cwd, agentDir, onEvent: (event) => events.push(event), onStatus: () => undefined });
     await host.start();
+    // Independent runtimes: commands/prompt need an explicitly opened session
+    // (no implicit warm singleton anymore).
+    await host.open({ cwd });
     const commands = await host.getCommands();
     expect(commands).toEqual(
       expect.arrayContaining([

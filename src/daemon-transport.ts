@@ -8,7 +8,13 @@
 
 import { StringDecoder } from "node:string_decoder";
 
-export const DEFAULT_MAX_FRAME_BYTES = 1024 * 1024;
+// 1 MiB was too small for real payloads: `pi.getMessages` carries a session's
+// live transcript, and a long session exceeds it easily. An oversized frame is
+// rejected by the peer's decoder, which drops the socket, and because the
+// renderer rehydrates on reconnect that turned into a disconnect loop. The
+// socket is owner-only (0600), so the budget is sized for real transcripts
+// rather than for an untrusted peer.
+export const DEFAULT_MAX_FRAME_BYTES = 64 * 1024 * 1024;
 
 export interface FrameDecoder {
   /** Feed one chunk; returns every complete frame it completed. */

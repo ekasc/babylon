@@ -48,6 +48,24 @@ describe("CLI-invisible activity records", () => {
   });
 });
 
+describe("notice action", () => {
+  it("appends a system line without touching anything else", () => {
+    const state = reducer(initialState, {
+      type: "local-user",
+      text: "hello",
+    });
+    const next = reducer(state, {
+      type: "notice",
+      text: "Switched to opencode-go/Muse Spark",
+    });
+    expect(next.items).toHaveLength(2);
+    expect(next.items[1]).toMatchObject({
+      kind: "system",
+      text: "Switched to opencode-go/Muse Spark",
+    });
+  });
+});
+
 describe("optimistic image messages", () => {
   it("renders images immediately while the prompt is being accepted", () => {
     const state = reducer(initialState, {
@@ -223,5 +241,34 @@ describe("group room speaker attribution", () => {
     ]);
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({ kind: "assistant", speaker: "brain" });
+  });
+});
+
+describe("non-streaming completion", () => {
+  it("message_end renders the completed reply when deltas were suppressed", () => {
+    let state = reducer(initialState, {
+      type: "event",
+      event: { type: "message_start", message: { role: "assistant", model: "m" } },
+    } as any);
+    // No message_update dispatched (streaming disabled).
+    state = reducer(state, {
+      type: "event",
+      event: {
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "weighing options" },
+            { type: "text", text: "Hello there" },
+          ],
+        },
+      },
+    } as any);
+    const assistant = state.items.find((i) => i.kind === "assistant") as any;
+    expect(assistant.streaming).toBe(false);
+    expect(assistant.blocks).toEqual([
+      { type: "thinking", text: "weighing options" },
+      { type: "text", text: "Hello there" },
+    ]);
   });
 });

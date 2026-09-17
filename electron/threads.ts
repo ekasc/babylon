@@ -63,7 +63,7 @@ export function detectThreadEvents(
 
 export interface ThreadManagerOptions {
   /** Executes an extension tool in the center session (provided by pi-host). */
-  runTool: (toolName: string, args: Record<string, unknown>) => Promise<unknown>;
+  runTool: (toolName: string, args: Record<string, unknown>, sessionId?: string | null) => Promise<unknown>;
   /** Called after a control action so the owning parent conversation learns. */
   onParentMessage?: (
     thread: { threadId: string; name: string | null; parentSessionId: string | null },
@@ -129,7 +129,8 @@ export class ThreadManager {
       toolName,
       action === "stop"
         ? { threadId, reason: "stopped from Babylon" }
-        : { threadId, message: message!.trim(), delivery: action === "steer" ? "steer" : "follow_up" }
+        : { threadId, message: message!.trim(), delivery: action === "steer" ? "steer" : "follow_up" },
+      state.parentSessionId ?? null
     );
     if ((result as any)?.isError) throw new Error((result as any)?.content?.[0]?.text ?? "Thread control failed");
     await this.opts.onParentMessage?.(

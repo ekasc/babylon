@@ -16,7 +16,7 @@ export type AttentionType =
   | "environment_failure"
   | "review_requested";
 
-export interface AttentionItem {
+export type AttentionItem = {
   id: string;
   type: AttentionType;
   title: string;

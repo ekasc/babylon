@@ -48,7 +48,7 @@ import { promises as fsp } from "node:fs";
 import { join } from "node:path";
 import { serializeTranscript } from "./serializer";
 import { extractHighValueTokens } from "./symbol-dictionary";
-import { renderFrames, applySubstitution } from "./renderer";
+import { renderFrames } from "./renderer";
 import { profileForModel, type SnapcompactModelProfile } from "./model-profiles";
 import { EVAL_FIXTURES, type EvalFixture, type EvalQuestion } from "./eval-fixtures";
 

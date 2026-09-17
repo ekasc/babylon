@@ -1,23 +1,4 @@
 import Composer, { type Attachment } from "./Composer";
-import PermissionModePicker from "./PermissionModePicker";
-import ModelPicker from "./ComposerModelPicker";
-import ThinkingPicker from "./ComposerThinkingPicker";
-import StatsPopover from "./StatsPopover";
-
-function ThroughputBars({ active }: { active: boolean }) {
-  return (
-    <span className={`throughput-bars inline-flex items-end gap-[2px] font-mono leading-none ${active ? "text-dim" : "text-dim/35"}`} aria-label={active ? "Agent is running" : "Agent idle"} aria-live="polite" title={active ? "Agent is running" : "Idle"} aria-hidden={active ? "false" : "true"}>
-      {[0, 1, 2, 3, 4].map((i) => (
-        <span
-          key={i}
-          className={`throughput-bar ${active ? "is-active" : "is-idle"}`}
-          style={{ animationDelay: `${i * 90}ms` } as any}
-          aria-hidden
-        />
-      ))}
-    </span>
-  );
-}
 
 interface Props {
 	agentState: any;
@@ -65,17 +46,20 @@ export default function SessionFooter({
 	onAbort = () => {},
 	dialogs,
 	onDialogDismiss,
-	runningWorkflows = 0,
-	subagentCount = 0,
 	mentionBots = [],
 }: Props) {
-	const model = agentState?.model ?? null;
-	const thinking = agentState?.thinkingLevel ?? "off";
+	// The session controls (permission, model, thinking, run state, usage)
+	// live in the composer surface itself. The footer is just the composer,
+	// not a permanent telemetry dashboard.
 
 	return (
-		<footer className="flex flex-col w-full font-mono border-t session-footer shrink-0 border-line bg-bg relative overflow-visible">
+		<footer className="flex flex-col w-full session-footer shrink-0 bg-bg relative overflow-visible">
 			<div className="py-3 px-4 w-full bg-bg">
-				<div className="w-full">
+				{/* Centered column matching the transcript width (768px, T3Code's
+				    max-w-3xl for both timeline and composer): the composer reads
+				    as one deliberate control surface aligned to the
+				    conversation, session controls included. */}
+				<div className="mx-auto w-full max-w-3xl">
 					<Composer
 						streaming={streaming}
 						steering={steering}
@@ -97,70 +81,9 @@ export default function SessionFooter({
 						mentionBots={mentionBots}
 					/>
 				</div>
-			</div>
+		</div>
 
-			{/* Status row: session controls · spacer · context · mcp/subagents/workflows */}
-			<div className="relative z-10 flex gap-4 items-center py-2 px-5 w-full font-mono leading-none border-t border-line bg-inset/35 text-[15px] text-dim overflow-visible">
-				<div className="flex gap-4 items-center shrink-0">
-					<span className="flex items-center tui-footer-control">
-						<PermissionModePicker />
-					</span>
-					<span className="shrink-0 text-dim/30">·</span>
-					<span className="flex items-center tui-footer-control">
-						<ModelPicker
-							models={models ?? []}
-							current={model}
-							disabled={!models?.length}
-							onSelect={onSetModel ?? (() => {})}
-						/>
-					</span>
-					<span className="shrink-0 text-dim/30">·</span>
-					<span className="flex items-center tui-footer-control">
-						<ThinkingPicker
-							current={thinking}
-							available={
-								thinkingLevels?.length
-									? thinkingLevels
-									: undefined
-							}
-							disabled={!agentState}
-							onSelect={onSetThinking ?? (() => {})}
-						/>
-					</span>
-					<span className="shrink-0 text-dim/30">·</span>
-					<span className="flex items-center shrink-0 h-[14px]">
-						<ThroughputBars active={streaming} />
-					</span>
-				</div>
-
-				<div className="flex-1" />
-
-				<div className="flex gap-3 items-center shrink-0 text-[12px] leading-none tabular-nums">
-					<span className="flex gap-1 items-center shrink-0">
-						<span className="tui-footer-control">
-							<StatsPopover stats={stats} hasSession={!!agentState} onCompact={onCompact ?? (() => {})} />
-						</span>
-					</span>
-					{subagentCount > 0 && (
-						<>
-							<span className="shrink-0 text-dim/30">·</span>
-							<span className="tabular-nums shrink-0">
-								subagents: {subagentCount}
-							</span>
-						</>
-					)}
-					{runningWorkflows > 0 && (
-						<>
-							<span className="shrink-0 text-dim/30">·</span>
-							<span className="tabular-nums shrink-0">
-								workflows: {runningWorkflows}
-							</span>
-						</>
-					)}
-				</div>
-			</div>
-
-			<style>{`
+		<style>{`
 				.session-footer{position:relative;z-index:20;isolation:isolate}
 				.throughput-bars{height:14px;align-items:flex-end}
 				.throughput-bar{display:inline-block;width:2px;border-radius:1px;background:currentColor;opacity:0.9;transform-origin:bottom center}
@@ -170,35 +93,48 @@ export default function SessionFooter({
 				@media (prefers-reduced-motion: reduce){.throughput-bar.is-active{animation:none;height:5px;opacity:0.7}}
 				.session-footer .operator-popover{z-index:70}
 				.session-footer .composer-dock { padding: 0; }
-				.session-footer .composer-surface { border-radius: 0; box-shadow: none; }
-				.session-footer .tui-footer-control .operator-meta-control {
-					height: 28px !important;
-					min-height: 28px !important;
+				/* In-composer control row: ghost controls one step smaller than
+				   the old status strip, so the row reads as composer chrome. */
+				.session-footer .composer-controls-row .operator-meta-control {
+					height: 26px !important;
+					min-height: 26px !important;
 					padding: 0 8px !important;
-					font-family: var(--mono) !important;
-					font-size: 15px !important;
+					font-family: var(--font-sans) !important;
+					font-size: 12.5px !important;
 					line-height: 1 !important;
 					gap: 6px !important;
 					color: inherit !important;
 					background: transparent !important;
 					border: 0 !important;
-					border-radius: 0 !important;
+					border-radius: 7px !important;
 					box-shadow: none !important;
 				}
-				.session-footer .tui-footer-control .operator-meta-control * {
-					font-size: 15px !important;
+				.session-footer .composer-controls-row .operator-meta-control * {
+					font-size: 12.5px !important;
 					line-height: 1 !important;
 				}
-				.session-footer .tui-footer-control .operator-meta-control svg {
-					width: 15px !important;
-					height: 15px !important;
+				.session-footer .composer-controls-row .operator-meta-control svg {
+					width: 12px !important;
+					height: 12px !important;
 					flex-shrink: 0;
 				}
-				.session-footer .tui-footer-control .operator-meta-control:hover {
+				.session-footer .composer-controls-row .operator-meta-control:hover {
 					color: var(--fg) !important;
 					background: transparent !important;
 					text-decoration: underline;
 					text-underline-offset: 2px;
+				}
+				/* The model control is the flexible truncating region: every
+				   flex level needs min-width:0 or the long name pushes thinking
+				   and context out of position. All other controls are shrink-0
+				   and never move. */
+				.session-footer .composer-controls-row .model-shrink,
+				.session-footer .composer-controls-row .model-shrink > div,
+				.session-footer .composer-controls-row .model-shrink .operator-meta-control {
+					min-width: 0 !important;
+				}
+				.session-footer .composer-controls-row .model-shrink .operator-meta-control {
+					max-width: 100%;
 				}
 			`}</style>
 		</footer>

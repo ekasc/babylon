@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
+import { ModalDialog } from "./ui/Dialog";
+import { Checkbox } from "./ui/Checkbox";
 import type { DefaultBotPatch } from "../bots";
 import { botHandle } from "../bots";
 import type { ProjectSettings } from "../bridge";
 import type { Bot, NewBotInput } from "../bots";
-import { BotAvatar } from "./BotsPanel";
+import { BotAvatar } from "./BotAvatar";
 
 const inputCls = "w-full rounded border border-line bg-raised px-2 py-1.5 text-[13px]";
 const labelCls = "mb-1 block text-[12px] font-semibold text-dim";
@@ -72,12 +74,16 @@ export default function ProjectPanel({
     }
   };
   return (
-    <div className="fixed inset-0 z-[60] grid place-items-center p-4" role="dialog" aria-modal="true" aria-label="Project settings">
-      <div className="absolute inset-0 bg-black/50" onClick={onClose} aria-hidden="true" />
-      <div className="relative flex max-h-[88vh] w-[600px] max-w-full flex-col overflow-hidden rounded-lg border border-line bg-bg shadow-xl">
+    <ModalDialog
+      onClose={onClose}
+      backdropClassName="fixed inset-0 z-[60] bg-black/50"
+      viewportClassName="fixed inset-0 z-[60] grid place-items-center p-4"
+      popupClassName="relative flex max-h-[88vh] w-[600px] max-w-full flex-col overflow-hidden rounded-lg border border-line bg-bg shadow-xl"
+      ariaLabel="Project settings"
+    >
         <div className="flex shrink-0 items-center gap-2 border-b border-line px-4 py-3">
           <h2 className="text-[15px] font-semibold">Project</h2>
-          <span className="truncate font-mono text-[12px] text-dim" title={projectPath}>{projectPath}</span>
+          <span className="truncate text-[12px] text-dim" title={projectPath}>{projectPath}</span>
           <button type="button" onClick={onClose} aria-label="Close project settings" className="thread-action ml-auto">✕</button>
         </div>
         <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-3">
@@ -91,7 +97,7 @@ export default function ProjectPanel({
                 <input value={title} onChange={(e) => setTitle(e.target.value)} maxLength={80} className={inputCls} /></label>
             </div>
             <label className="mt-2 block"><span className={labelCls}>Persona</span>
-              <textarea value={persona} onChange={(e) => setPersona(e.target.value)} rows={4} placeholder="Empty persona chats like today's default." className={`${inputCls} font-mono text-[12px]`} /></label>
+              <textarea value={persona} onChange={(e) => setPersona(e.target.value)} rows={4} placeholder="Empty persona chats like today's default." className={`${inputCls} text-[12px]`} /></label>
             <div className="mt-2 grid grid-cols-2 gap-2">
               <label className="block"><span className={labelCls}>Model provider</span>
                 <input value={provider} onChange={(e) => setProvider(e.target.value)} placeholder="inherits global" className={inputCls} /></label>
@@ -128,19 +134,15 @@ export default function ProjectPanel({
             <p className="mt-0.5 text-[12px] leading-5 text-dim">Staffed teammates stay silent unless @-mentioned, unless free discussion is on.</p>
             <div className="mt-2">
               {employees.filter((b) => !b.hidden).length === 0 ? (
-                <p className="text-[12.5px] text-dim">No employees yet, create the first below.</p>
+                <p className="text-[13px] text-dim">No employees yet, create the first below.</p>
               ) : (
                 employees.filter((b) => !b.hidden).map((b) => (
-                  <label key={b.id} className="flex cursor-pointer items-center gap-2 rounded px-1 py-1 hover:bg-raised">
-                    <input
-                      type="checkbox"
+                  <label key={b.id} onClick={(e) => { if ((e.target as HTMLElement).closest("button")) return; void run(() => onSetMembers(staffed.has(b.id) ? settings.memberIds.filter((id) => id !== b.id) : [...settings.memberIds, b.id])); }} className="flex cursor-pointer items-center gap-2 rounded px-1 py-1 hover:bg-raised">
+                    <Checkbox
                       disabled={busy}
                       checked={staffed.has(b.id)}
-                      onChange={() =>
-                        void run(() =>
-                          onSetMembers(staffed.has(b.id) ? settings.memberIds.filter((id) => id !== b.id) : [...settings.memberIds, b.id])
-                        )
-                      }
+                      onChange={() => void run(() => onSetMembers(staffed.has(b.id) ? settings.memberIds.filter((id) => id !== b.id) : [...settings.memberIds, b.id]))}
+                      ariaLabel={b.name}
                     />
                     <BotAvatar name={b.name} size={18} />
                     <span className="text-[13px] font-semibold">@{botHandle(b)}</span>
@@ -166,12 +168,12 @@ export default function ProjectPanel({
                 Hire
               </button>
             </div>
-            <label className="mt-3 flex cursor-pointer items-start gap-2 rounded-md border border-line bg-raised px-2.5 py-2">
-              <input
-                type="checkbox"
+            <label onClick={(e) => { if ((e.target as HTMLElement).closest("button")) return; void run(() => onSetFreeSpeak(!settings.freeSpeak)); }} className="mt-3 flex cursor-pointer items-start gap-2 rounded-md border border-line bg-raised px-2.5 py-2">
+              <Checkbox
                 disabled={busy}
                 checked={settings.freeSpeak}
                 onChange={() => void run(() => onSetFreeSpeak(!settings.freeSpeak))}
+                ariaLabel="Free discussion"
                 className="mt-0.5"
               />
               <span>
@@ -180,9 +182,8 @@ export default function ProjectPanel({
               </span>
             </label>
           </section>
-          {error ? <p role="alert" className="text-[12.5px] text-err">{error}</p> : null}
+          {error ? <p role="alert" className="text-[13px] text-err">{error}</p> : null}
         </div>
-      </div>
-    </div>
+    </ModalDialog>
   );
 }

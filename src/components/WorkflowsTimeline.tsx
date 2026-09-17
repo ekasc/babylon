@@ -149,7 +149,7 @@ export function WorkflowsTimeline({
         )}
 
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 pb-2 text-[14px] tracking-[0.02em] text-dim">
-          {run.script && <span className="rounded-sm border border-line bg-inset px-1.5 py-px font-mono text-[12px] text-dim">{run.script}</span>}
+          {run.script && <span className="rounded-sm border border-line bg-inset px-1.5 py-px text-[12px] text-dim">{run.script}</span>}
           {run.startedAt ? <span>started {timeAgo(run.startedAt)}</span> : null}
           {run.completedAt ? <span>finished {timeAgo(run.completedAt)}</span> : null}
           {run.durationMs != null ? <span>took {fmtDuration(run.durationMs)}</span> : null}
@@ -167,7 +167,7 @@ export function WorkflowsTimeline({
         {run.error && (
           <p className="border-t border-line px-3 py-1.5 text-[14px] leading-snug text-err">
             {run.error}
-            {run.errorCode ? <span className="ml-1 font-mono text-[14px] opacity-80">[{run.errorCode}]</span> : null}
+            {run.errorCode ? <span className="ml-1 text-[14px] opacity-80">[{run.errorCode}]</span> : null}
           </p>
         )}
 
@@ -221,7 +221,7 @@ export function WorkflowsTimeline({
               )}
             </>
           )}
-          <span className="ml-auto font-mono text-[14px] text-dim">{run.runId.slice(0, 8)}…</span>
+          <span className="ml-auto text-[14px] text-dim">{run.runId.slice(0, 8)}…</span>
         </div>
       </div>
 
@@ -269,7 +269,7 @@ export function WorkflowsTimeline({
                           className={`h-2 w-2 shrink-0 rounded-full ${st === "running" ? "animate-pulse" : ""}`}
                           style={{ background: c }}
                         />
-                        <span className="font-mono text-[11px] text-dim">{String(i + 1).padStart(2, "0")}</span>
+                        <span className="text-[11px] text-dim">{String(i + 1).padStart(2, "0")}</span>
                         <span className="min-w-0 flex-1 truncate text-[13px] font-semibold tracking-tight text-fg" title={p}>
                           {p}
                         </span>
@@ -365,7 +365,7 @@ function AgentRow({ agent, onOpen }: { agent: WorkflowAgentDetail; onOpen(): voi
       <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${agent.status === "running" ? "animate-pulse" : ""}`} style={{ background: color }} />
       <span className="min-w-0 flex-1">
         <span className="flex items-baseline gap-1.5">
-          <span className="shrink-0 font-mono text-[13px] text-dim">#{agent.id}</span>
+          <span className="shrink-0 text-[13px] text-dim">#{agent.id}</span>
           <span className="truncate text-[14px] font-medium tracking-tight text-fg">{agent.label}</span>
         </span>
         {(agent.error || agent.waitReason) && (

@@ -1,0 +1,130 @@
+import type { IpcMainInvokeEvent } from "electron";
+import * as gitOps from "./git";
+import { gitStatus } from "./git-status";
+import type { RuntimeFacade } from "../src/runtime-facade";
+
+type Handle = (
+  channel: string,
+  listener: (event: IpcMainInvokeEvent, ...args: any[]) => unknown,
+) => void;
+
+export function registerGitIpc(handle: Handle, deps: { getRuntime: () => RuntimeFacade }): void {
+  const { getRuntime } = deps;
+  handle("pideck:git-status", async (_e, cwd: unknown) => {
+    if (typeof cwd !== "string" || cwd.length > 4096) throw new Error("invalid cwd");
+    try {
+      return await gitStatus(cwd);
+    } catch {
+      return { isRepo: false, dirty: [], ahead: 0, behind: 0 };
+    }
+  });
+  // Git integration (status, commit/push/pull, branches, pull requests)
+  const requireCwd = (cwd: unknown): string => {
+    if (typeof cwd !== "string" || cwd.length === 0 || cwd.length > 4096) throw new Error("invalid cwd");
+    return cwd;
+  };
+  handle("pideck:git-status-details", async (_e, cwd: unknown) => {
+    try {
+      return await gitOps.statusDetails(requireCwd(cwd));
+    } catch {
+      return { isRepo: false };
+    }
+  });
+  handle("pideck:git-branches", (_e, cwd: unknown) => gitOps.listBranches(requireCwd(cwd)));
+  handle("pideck:git-diff-file", async (_e, cwd: unknown, file: unknown) => {
+    const root = requireCwd(cwd);
+    if (typeof file !== "string" || file.length === 0 || file.length > 1024 || file.includes("\u0000")) {
+      throw new Error("invalid file path");
+    }
+    return gitOps.diffForFile(root, file);
+  });
+  handle("pideck:git-branch-create", (_e, cwd: unknown, name: unknown, switchTo: unknown) => {
+    if (typeof name !== "string" || name.length > 200) throw new Error("invalid branch name");
+    return gitOps.createBranch(requireCwd(cwd), name, switchTo === true);
+  });
+  handle("pideck:git-branch-switch", (_e, cwd: unknown, name: unknown, options: unknown) => {
+    if (typeof name !== "string" || name.length > 200) throw new Error("invalid branch name");
+    if (options !== undefined && (typeof options !== "object" || options === null || typeof (options as any).stash !== "boolean")) {
+      throw new Error("invalid switch options");
+    }
+    return gitOps.switchBranch(requireCwd(cwd), name, options as { stash?: boolean } | undefined);
+  });
+  handle("pideck:git-commit-push", async (event, cwd: unknown, requestId: unknown) => {
+    const root = requireCwd(cwd);
+    if (typeof requestId !== "string" || requestId.length === 0 || requestId.length > 100) throw new Error("invalid request id");
+    if (!/^[a-zA-Z0-9_-]+$/.test(requestId)) throw new Error("invalid request id format");
+    const emit = (phase: string, message: string) => {
+      if (!event.sender.isDestroyed()) event.sender.send("pideck:git-commit-push-progress", { requestId, phase, message });
+    };
+    let committed = false;
+    let stagedForRecovery = false;
+    let prepared: import("./git").PreparedCommitContext | null = null;
+    try {
+      emit("preparing", "Staging changes and preparing diff context");
+      prepared = await gitOps.prepareCommitContext(root);
+      const context = prepared;
+      stagedForRecovery = true;
+      if (context.truncatedPatch) emit("generating", "Generating commit message (patch truncated, using file summary for remaining changes)");
+      else emit("generating", "Generating commit message");
+      const generated = await getRuntime().generateCommitMessage(context) as any;
+      emit("committing", `Committing ${generated.subject}`);
+      const commit = await gitOps.commitStaged(root, generated.message);
+      committed = true;
+      stagedForRecovery = false;
+      emit("pushing", "Pushing current branch");
+      const push = await gitOps.pushCurrentBranch(root);
+      const pushLabel = push.status === "skipped_up_to_date" ? `Already up to date on ${push.branch}` : `Committed and pushed ${push.branch}`;
+      emit("done", pushLabel);
+      return { generated, commit, push };
+    } catch (cause) {
+      // If we staged via prepareCommitContext but failed before commit, restore
+      // the user's pre-existing staged selection instead of leaving a
+      // half-staged state.
+      if (stagedForRecovery && !committed) {
+        await gitOps.resetStaged(root, prepared ?? undefined);
+        emit("error", `${cause instanceof Error ? cause.message : String(cause)}, staged changes were unstaged`);
+      }
+      const detail = cause instanceof Error ? cause.message : String(cause);
+      const message = committed ? `Commit succeeded, but push failed: ${detail}` : detail;
+      if (!stagedForRecovery || committed) emit("error", message);
+      throw new Error(message);
+    }
+  });
+  handle("pideck:git-commit", (_e, cwd: unknown, message: unknown) => {
+    if (typeof message !== "string" || message.length > 20_000) throw new Error("invalid commit message");
+    return gitOps.commitAll(requireCwd(cwd), message);
+  });
+  handle("pideck:git-push", (_e, cwd: unknown) => gitOps.pushCurrentBranch(requireCwd(cwd)));
+  handle("pideck:git-pull", (_e, cwd: unknown) => gitOps.pullCurrentBranch(requireCwd(cwd)));
+  handle("pideck:git-pr-context", (_e, cwd: unknown) => gitOps.prContext(requireCwd(cwd)));
+  handle("pideck:git-pr-suggest", (_e, cwd: unknown) => gitOps.suggestPrContent(requireCwd(cwd)));
+  handle("pideck:git-pr-create", (_e, cwd: unknown, input: unknown) => {
+    const title = (input as any)?.title;
+    const body = (input as any)?.body;
+    if (typeof title !== "string" || title.length > 500) throw new Error("invalid PR title");
+    if (body !== undefined && (typeof body !== "string" || body.length > 100_000)) throw new Error("invalid PR body");
+    return gitOps.createPr(requireCwd(cwd), { title, body: typeof body === "string" ? body : "" });
+  });
+  handle("pideck:git-stage-file", (_e, cwd: unknown, file: unknown) => {
+    if (typeof file !== "string" || !file.trim() || file.length > 4096) throw new Error("invalid file");
+    return gitOps.stageFile(requireCwd(cwd), file);
+  });
+  handle("pideck:git-unstage-file", (_e, cwd: unknown, file: unknown) => {
+    if (typeof file !== "string" || !file.trim() || file.length > 4096) throw new Error("invalid file");
+    return gitOps.unstageFile(requireCwd(cwd), file);
+  });
+  handle("pideck:git-discard-file", (_e, cwd: unknown, file: unknown) => {
+    if (typeof file !== "string" || !file.trim() || file.length > 4096) throw new Error("invalid file");
+    return gitOps.discardFile(requireCwd(cwd), file);
+  });
+  handle("pideck:git-stage-hunk", (_e, cwd: unknown, file: unknown, patch: unknown) => {
+    if (typeof file !== "string" || !file.trim() || file.length > 4096) throw new Error("invalid file");
+    if (typeof patch !== "string" || !patch.trim() || patch.length > 200_000) throw new Error("invalid patch");
+    return gitOps.stageHunk(requireCwd(cwd), file, patch);
+  });
+  handle("pideck:git-discard-hunk", (_e, cwd: unknown, file: unknown, patch: unknown) => {
+    if (typeof file !== "string" || !file.trim() || file.length > 4096) throw new Error("invalid file");
+    if (typeof patch !== "string" || !patch.trim() || patch.length > 200_000) throw new Error("invalid patch");
+    return gitOps.discardHunk(requireCwd(cwd), file, patch);
+  });
+}

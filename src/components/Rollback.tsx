@@ -1,38 +1,21 @@
-import { useEffect, useRef } from "react";
 import type { HistoryProjection, RollbackPlan } from "../bridge";
 import { BranchIcon, XIcon } from "./icons";
 import { useFluidAppear } from "../lib/useSpring";
+import { ModalDialog } from "./ui/Dialog";
 
 export function RollbackConfirm({ plan, busy, onCancel, onConfirm }: { plan: RollbackPlan; busy: boolean; onCancel(): void; onConfirm(): void }) {
   const surface = useFluidAppear<HTMLDivElement>();
-  const ref = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    requestAnimationFrame(() => ref.current?.querySelector<HTMLElement>("button")?.focus());
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !busy) onCancel();
-      if (event.key !== "Tab" || !ref.current) return;
-      const controls = [...ref.current.querySelectorAll<HTMLElement>("button:not(:disabled)")];
-      if (!controls.length) return;
-      const first = controls[0];
-      const last = controls[controls.length - 1];
-      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
-      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => { window.removeEventListener("keydown", onKey); previous?.focus(); };
-  }, [busy, onCancel]);
 
   return (
-    <div className="fade-in fixed inset-0 z-50 grid place-items-center bg-[var(--scrim)] p-6" onMouseDown={() => !busy && onCancel()}>
-      <div
-        ref={(node) => { ref.current = node; surface(node); }}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="rollback-title"
-        className="modal-surface w-full max-w-[560px] p-5"
-        onMouseDown={(event) => event.stopPropagation()}
-      >
+    <ModalDialog
+      onClose={onCancel}
+      dismissible={!busy}
+      backdropClassName="fade-in fixed inset-0 z-50 bg-[var(--scrim)]"
+      viewportClassName="fixed inset-0 z-50 grid place-items-center p-6"
+      popupClassName="modal-surface w-full max-w-[560px] p-5"
+      ariaLabelledBy="rollback-title"
+      popupRef={surface}
+    >
         <div className="flex items-start gap-3">
           <span className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-full bg-warn/12 text-warn"><BranchIcon size={15} /></span>
           <div className="min-w-0 flex-1">
@@ -52,7 +35,7 @@ export function RollbackConfirm({ plan, busy, onCancel, onConfirm }: { plan: Rol
             {plan.changes.map((change) => (
               <div key={change.path} className="flex min-w-0 items-center gap-2 py-1 text-[13px]">
                 <span className={`rollback-file-status is-${change.status}`}>{change.status[0].toUpperCase()}</span>
-                <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{change.path}</span>
+                <span className="min-w-0 flex-1 truncate text-[12px]">{change.path}</span>
               </div>
             ))}
           </div>
@@ -67,8 +50,7 @@ export function RollbackConfirm({ plan, busy, onCancel, onConfirm }: { plan: Rol
             {busy ? "Rolling back…" : "Rollback conversation and files"}
           </button>
         </div>
-      </div>
-    </div>
+    </ModalDialog>
   );
 }
 

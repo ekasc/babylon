@@ -5,20 +5,26 @@ import {
   processFrame,
   type DispatchResult,
 } from "./daemon-host";
-import { createEnvelope, parseEnvelope, serializeEnvelope } from "./daemon-protocol";
+import {
+  createEnvelope,
+  parseEnvelope,
+  serializeEnvelope,
+  type ProtocolMessageType,
+  type ProtocolPayload,
+} from "./daemon-protocol";
 import { createTask } from "./tasks";
 import { createContract } from "./completion-contracts";
 import type { AttentionItem } from "./attention";
 import type { RuntimeState } from "./runtime";
 
-function request(type: string, payload: unknown) {
-  return createEnvelope("request", type as never, payload);
+function request(type: ProtocolMessageType, payload: ProtocolPayload) {
+  return createEnvelope("request", type, payload);
 }
 
 describe("babylon daemon host", () => {
   it("responds to ping without changing runtime", () => {
     const rt = createDaemonRuntime();
-    const req = request("ping", null);
+    const req = request("ping", {});
     const res: DispatchResult = dispatchRequest(rt, req);
     expect(res.response.type).toBe("pong");
     expect(res.response.inReplyTo).toBe(req.id);
@@ -153,7 +159,7 @@ describe("babylon daemon host", () => {
       request("task.created", createTask({ id: "t1", title: "y" })),
     );
     expect(dup.response.type).toBe("error");
-    const ping = dispatchRequest(rt, request("ping", null));
+    const ping = dispatchRequest(rt, request("ping", {}));
     expect(ping.response.type).toBe("pong");
   });
 

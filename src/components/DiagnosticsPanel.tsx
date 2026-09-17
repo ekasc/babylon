@@ -1,13 +1,13 @@
 import type { DiagnosticsSnapshot } from "../diagnostics";
 
 import { exportDiagnostics } from "../diagnostics";
-import { useModalDialog } from "./useModalDialog";
+import { ModalDialog } from "./ui/Dialog";
 
 function Row({ label, value }: { label: string; value: string | number }) {
   return (
-    <div className="flex items-center justify-between gap-3 text-[12.5px]">
+    <div className="flex items-center justify-between gap-3 text-[13px]">
       <span className="text-dim">{label}</span>
-      <span className="font-mono">{value}</span>
+      <span>{value}</span>
     </div>
   );
 }
@@ -24,17 +24,21 @@ export function DiagnosticsPanel({
   snapshot: DiagnosticsSnapshot;
   onClose: () => void;
 }) {
-  const dialogRef = useModalDialog(onClose);
   return (
-    <div className="fade-in fixed inset-0 z-50 grid place-items-center bg-[var(--scrim)] p-6" onMouseDown={onClose}>
-      <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="diagnostics-title" className="modal-surface w-full max-w-lg p-5" onMouseDown={(e) => e.stopPropagation()}>
+    <ModalDialog
+      onClose={onClose}
+      backdropClassName="fade-in fixed inset-0 z-50 bg-[var(--scrim)]"
+      viewportClassName="fixed inset-0 z-50 grid place-items-center p-6"
+      popupClassName="modal-surface w-full max-w-lg p-5"
+      ariaLabelledBy="diagnostics-title"
+    >
         <div className="flex items-center justify-between">
           <h2 id="diagnostics-title" className="text-[15px] font-semibold tracking-tight">Runtime diagnostics</h2>
-          <button onClick={onClose} className="rounded-lg border border-line px-2 py-1 text-[12.5px] hover:border-accent">
+          <button onClick={onClose} className="rounded-lg border border-line px-2 py-1 text-[13px] hover:border-accent">
             Close
           </button>
         </div>
-        <p className="mt-1 text-[11.5px] text-dim">
+        <p className="mt-1 text-[12px] text-dim">
           Aggregates only. Exports contain no prompts, tool output, secrets, or source.
         </p>
 
@@ -67,7 +71,7 @@ export function DiagnosticsPanel({
               {snapshot.events.firstTs !== undefined ? (
                 <Row label="Window" value={`${new Date(snapshot.events.firstTs).toLocaleTimeString()}, ${new Date(snapshot.events.lastTs ?? 0).toLocaleTimeString()}`} />
               ) : null}
-              <div className="mt-1.5 text-[11.5px] text-dim">Observed event types</div>
+              <div className="mt-1.5 text-[12px] text-dim">Observed event types</div>
               <div className="mt-1 flex flex-wrap gap-1">
                 {snapshot.events.observedTypes.map((type) => (
                   <span key={type} className="pill bg-raised text-fg">
@@ -78,7 +82,7 @@ export function DiagnosticsPanel({
                   <span className="text-[12px] text-dim">No events recorded.</span>
                 ) : null}
               </div>
-              <div className="mt-1.5 text-[11.5px] text-dim">
+              <div className="mt-1.5 text-[12px] text-dim">
                 Unobserved event types <span className="text-dim/70">(not seen this session, not necessarily broken)</span>
               </div>
               <div className="mt-1 flex flex-wrap gap-1">
@@ -88,7 +92,7 @@ export function DiagnosticsPanel({
                   </span>
                 ))}
               </div>
-              <div className="mt-1.5 text-[11.5px] text-dim">Ownership coverage</div>
+              <div className="mt-1.5 text-[12px] text-dim">Ownership coverage</div>
               <div className="mt-1 flex flex-wrap gap-1">
                 {Object.entries(snapshot.events.ownershipCoverage)
                   .filter(([, count]) => count > 0)
@@ -110,11 +114,10 @@ export function DiagnosticsPanel({
             // Optional chaining: clipboard is undefined outside secure contexts.
             navigator.clipboard?.writeText(exportDiagnostics(snapshot))?.catch(() => undefined);
           }}
-          className="mt-4 w-full rounded-lg bg-accent px-3 py-1.5 text-[12.5px] font-semibold text-bg hover:opacity-90"
+          className="mt-4 w-full rounded-lg bg-accent px-3 py-1.5 text-[13px] font-semibold text-bg hover:opacity-90"
         >
           Copy diagnostic export
         </button>
-      </div>
-    </div>
+    </ModalDialog>
   );
 }

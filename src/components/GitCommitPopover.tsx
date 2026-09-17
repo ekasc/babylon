@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { bridge } from "../bridge";
+import { ModalDialog } from "./ui/Dialog";
 
 interface Props {
   cwd?: string;
@@ -43,8 +44,13 @@ export default function GitCommitPopover({ cwd, onClose, toast, onChanged }: Pro
   };
 
   return (
-    <div role="dialog" aria-label="Commit and push" className="fixed inset-0 z-50 grid place-items-center bg-scrim p-4" onClick={onClose}>
-      <div className="w-full max-w-[520px] rounded-xl border border-line bg-raised p-5 shadow-xl" onClick={(e) => e.stopPropagation()}>
+    <ModalDialog
+      onClose={onClose}
+      backdropClassName="fade-in fixed inset-0 z-50 bg-scrim"
+      viewportClassName="fixed inset-0 z-50 grid place-items-center p-4"
+      popupClassName="w-full max-w-[520px] rounded-xl border border-line bg-raised p-5 shadow-xl"
+      ariaLabel="Commit and push"
+    >
         <div className="flex items-center justify-between">
           <h3 className="text-[15px] font-semibold tracking-tight">Commit & push</h3>
           <button onClick={onClose} className="rounded-md px-2 py-1 text-dim hover:text-fg" aria-label="Close">
@@ -56,7 +62,7 @@ export default function GitCommitPopover({ cwd, onClose, toast, onChanged }: Pro
         {preview && (
           <div className="mt-3 rounded-lg border border-line bg-inset px-3 py-2.5 text-[13px]">
             <p className="font-medium">{preview.subject}</p>
-            {preview.body && <p className="mt-1.5 whitespace-pre-wrap text-[12.5px] leading-relaxed text-dim">{preview.body}</p>}
+            {preview.body && <p className="mt-1.5 whitespace-pre-wrap text-[13px] leading-relaxed text-dim">{preview.body}</p>}
           </div>
         )}
         <div className="relative mt-4 flex items-center gap-2">
@@ -84,7 +90,6 @@ export default function GitCommitPopover({ cwd, onClose, toast, onChanged }: Pro
             </div>
           )}
         </div>
-      </div>
-    </div>
+    </ModalDialog>
   );
 }

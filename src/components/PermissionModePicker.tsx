@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { PopoverPanel, PopoverRoot, PopoverTrigger } from "./ui/Popover";
 import { bridge, type PermissionMode } from "../bridge";
 import { ShieldIcon } from "./icons";
 
@@ -36,22 +37,6 @@ export default function PermissionModePicker() {
     return bridge.onPermissionsChanged((next) => setMode(next.mode));
   }, []);
 
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-
   const meta = MODE_META[mode];
   const danger = mode === "full_access";
 
@@ -63,19 +48,25 @@ export default function PermissionModePicker() {
 
   return (
     <div ref={rootRef} className="relative">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        title={`Execution mode: ${meta.label}`}
-        aria-expanded={open}
-        className={`operator-meta-control flex h-8 items-center gap-1.5 px-2.5 text-[13px] ${danger ? "text-warn" : ""}`}
-      >
-        <ShieldIcon size={12} className="shrink-0" />
-        <span>{meta.short}</span>
-      </button>
+      <PopoverRoot open={open} onOpenChange={setOpen}>
+        <PopoverTrigger
+          title={`Execution mode: ${meta.label}`}
+          className={`operator-meta-control flex h-8 items-center gap-1.5 px-2.5 text-[13px] ${danger ? "text-warn" : ""}`}
+        >
+          <ShieldIcon size={12} className="shrink-0" />
+          <span>{meta.short}</span>
+        </PopoverTrigger>
 
-      {open && (
-        <div className="operator-popover absolute bottom-full left-0 z-50 mb-2 w-[320px] overflow-hidden">
-          <div className="px-3 pt-3 pb-1 text-[11.5px] font-semibold uppercase tracking-wide text-dim">
+        <PopoverPanel
+          container={rootRef.current}
+          side="top"
+          align="start"
+          sideOffset={8}
+          matchTriggerWidth={false}
+          positionerClassName="z-50"
+          className="operator-popover w-[320px] overflow-hidden"
+        >
+          <div className="px-3 pt-3 pb-1 text-[12px] font-semibold uppercase tracking-wide text-dim">
             Execution mode
           </div>
           <div className="p-1.5">
@@ -87,7 +78,7 @@ export default function PermissionModePicker() {
                   key={m}
                   onClick={() => choose(m)}
                   aria-pressed={active}
-                  className={`w-full rounded-md px-2.5 py-2 text-left transition-colors duration-100 hover:bg-inset ${active ? "bg-inset" : ""}`}
+                  className={`w-full rounded-lg px-3 py-2 text-left transition-colors duration-100 hover:bg-inset ${active ? "bg-inset" : ""}`}
                 >
                   <span className="flex items-center gap-2 text-[13px]">
                     <span className={item.danger ? "font-medium text-warn" : active ? "font-medium text-fg" : "text-fg"}>
@@ -95,18 +86,18 @@ export default function PermissionModePicker() {
                     </span>
                     {active && <span className="text-accent">✓</span>}
                   </span>
-                  <span className="mt-0.5 block text-[11.5px] leading-snug text-dim">{item.hint}</span>
+                  <span className="mt-0.5 block text-[12px] leading-snug text-dim">{item.hint}</span>
                 </button>
               );
             })}
           </div>
           {danger && (
-            <div className="border-t border-line/60 px-3 py-2 text-[11.5px] leading-snug text-warn">
+            <div className="border-t border-line/60 px-3 py-2 text-[12px] leading-snug text-warn">
               Full Access is active — consequential actions run without asking.
             </div>
           )}
-        </div>
-      )}
+        </PopoverPanel>
+      </PopoverRoot>
     </div>
   );
 }

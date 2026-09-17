@@ -30,8 +30,9 @@ export default memo(function BashCard({ item }: BashCardProps) {
   const isError = item.status === "error" || b.status === "failed" || b.status === "signaled" || (b.exitCode !== undefined && b.exitCode !== 0);
 
   useEffect(() => {
-    if (isRunning || isError) setOpen(true);
-  }, [isRunning, isError]);
+    // Expanded only for failures; a run in progress never force-opens a card.
+    if (isError) setOpen(true);
+  }, [isError]);
 
   const formatDuration = (ms?: number) => {
     if (ms == null) return null;
@@ -53,8 +54,8 @@ export default memo(function BashCard({ item }: BashCardProps) {
   return (
     <div className="bash-card-t3 group my-2 overflow-hidden rounded-lg border border-line bg-[var(--raised)]">
       {b.unsafe ? (
-        <div className="flex items-center gap-2 bg-[color-mix(in_srgb,var(--err)_8%,transparent)] px-3 py-1.5 text-[12px] text-[var(--err)]" role="alert">
-          <span className="font-semibold uppercase tracking-wide text-[11px]">Potentially unsafe</span>
+        <div className="flex items-center gap-2 bg-[color-mix(in_srgb,var(--err)_8%,transparent)] px-3 py-1.5 text-[11px] text-[var(--err)]" role="alert">
+          <span className="font-semibold uppercase tracking-wide text-[length:var(--chat-r-11)]">Potentially unsafe</span>
           <span className="truncate">{b.unsafe}</span>
         </div>
       ) : null}
@@ -65,8 +66,8 @@ export default memo(function BashCard({ item }: BashCardProps) {
         title={command}
       >
         <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${isRunning ? "animate-pulse bg-[var(--accent)]" : isError ? "bg-[var(--err)]" : "bg-[var(--dim)]"}`} aria-hidden />
-        <span className="font-mono text-[12.5px] text-dim">$</span>
-        <span className="min-w-0 flex-1 truncate font-mono text-[12.5px] text-fg">{truncatedCmd}</span>
+        <span className="font-mono text-[length:var(--code-font)] text-dim">$</span>
+        <span className="min-w-0 flex-1 truncate font-mono text-[length:var(--code-font)] text-fg">{truncatedCmd}</span>
         {b.cwd ? (
           <span className="bash-chip bash-chip-cwd" title={b.cwd}>
             {cwdLabel}
@@ -86,13 +87,13 @@ export default memo(function BashCard({ item }: BashCardProps) {
       </button>
       {open && (
         <div className="border-t border-line bg-[var(--inset)]">
-          <pre className="max-h-[320px] overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-[12.5px] leading-5 text-fg">
+          <pre className="max-h-[320px] overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-[length:var(--code-font)] leading-[1.58] text-fg">
             <span className="text-dim">$ {command}</span>
             {hasOutput ? "\n" + output : hasPatch ? "" : "\n(no output)"}
           </pre>
           {hasPatch ? <div className="max-h-[320px] overflow-auto"><DiffView patch={patch} /></div> : null}
           {item.truncated && fullOutput == null ? (
-            <button onClick={fetchFull} className="m-2 rounded-md border border-line bg-bg px-2 py-1 text-[12px] text-dim hover:text-fg">
+            <button onClick={fetchFull} className="m-2 rounded-md border border-line bg-bg px-2 py-1 text-[11px] text-dim hover:text-fg">
               Show full output
             </button>
           ) : null}

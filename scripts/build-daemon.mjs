@@ -11,6 +11,7 @@ await esbuild.build({
   bundle: true,
   platform: "node",
   format: "esm",
+  minify: true,
   banner: {
     js: `import { createRequire as topLevelCreateRequire } from "module"; const require = topLevelCreateRequire(import.meta.url);`,
   },

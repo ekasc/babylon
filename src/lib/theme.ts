@@ -1,4 +1,4 @@
-import { getWithFallback } from "./storage";
+import { getWithFallback, setWithFallback } from "./storage";
 import { RESERVED_THEME_IDS } from "./themePalettes";
 
 export type ThemePref = "light" | "dark" | "system";
@@ -6,7 +6,7 @@ export type ThemeId = "terminal" | "excalidraw";
 
 /** Apply mode (light/dark/system), controls .dark class */
 export function applyTheme(theme: ThemePref): void {
-  localStorage.setItem("babylon:theme", theme);
+  setWithFallback("theme", theme);
   const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
   const isDark = theme === "dark" || (theme === "system" && prefersDark);
   document.documentElement.classList.toggle("dark", isDark);
@@ -20,7 +20,7 @@ export function loadThemePref(): ThemePref {
 
 /** Apply theme id (terminal/excalidraw), controls .theme-* class, each theme defines its own light+dark */
 export function applyThemeId(id: ThemeId): void {
-  localStorage.setItem("babylon:themeId", id);
+  setWithFallback("themeId", id);
   document.documentElement.classList.toggle("theme-excalidraw", id === "excalidraw");
   document.documentElement.classList.toggle("theme-terminal", id === "terminal");
 }
@@ -68,13 +68,13 @@ export function applyMonoFont(family: string): void {
   const stack = monoStack(family);
   document.documentElement.style.setProperty("--mono", stack);
   document.documentElement.style.setProperty("--font-mono", stack);
-  localStorage.setItem("babylon:monoFont", family);
+  setWithFallback("monoFont", family);
 }
 
 export function applySansFont(family: string): void {
   const stack = family === "system" ? "-apple-system, BlinkMacSystemFont, \"SF Pro Text\", \"Helvetica Neue\", \"Segoe UI\", sans-serif" : `"${family.replace(/"/g, '\\"')}", -apple-system, BlinkMacSystemFont, sans-serif`;
   document.documentElement.style.setProperty("--font-sans", stack);
-  localStorage.setItem("babylon:sansFont", family);
+  setWithFallback("sansFont", family);
 }
 
 export function loadSansFontPref(): string {
@@ -85,7 +85,7 @@ export function applyRadius(radius: string): void {
   document.documentElement.style.setProperty("--radius", radius);
   document.documentElement.style.setProperty("--radius-sm", radius);
   document.documentElement.style.setProperty("--radius-lg", radius);
-  localStorage.setItem("babylon:radius", radius);
+  setWithFallback("radius", radius);
 }
 
 export function loadMonoFontPref(): string {

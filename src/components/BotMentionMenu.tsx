@@ -1,7 +1,7 @@
 import { memo } from "react";
 import type { Bot } from "../bots";
 import { botHandle } from "../bots";
-import { BotAvatar } from "./BotsPanel";
+import { BotAvatar } from "./BotAvatar";
 
 interface Props {
   bots: Bot[];

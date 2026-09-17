@@ -6,8 +6,8 @@ import {
 	useRef,
 	useState,
 } from "react";
-import { createPortal } from "react-dom";
 import { CheckIcon, ChevronIcon, CpuIcon, SparkleIcon } from "./icons";
+import { PopoverPanel, PopoverRoot, PopoverTrigger } from "./ui/Popover";
 
 interface Model {
 	id: string;
@@ -62,12 +62,6 @@ export default function ModelPicker({
 	const rootRef = useRef<HTMLDivElement>(null);
 	const searchRef = useRef<HTMLInputElement>(null);
 	const listRef = useRef<HTMLDivElement>(null);
-	const popoverRef = useRef<HTMLDivElement>(null);
-	// Viewport-fixed popover position, measured from the trigger on open.
-	// The footer lives in an isolated stacking context, so an absolutely
-	// positioned popover can paint under (or be clipped by) the panes above
-	// it, fixed + portal escapes every ancestor trap. Clamped on all sides.
-	const [pos, setPos] = useState<{ left: number; bottom: number } | null>(null);
 
 	const currentKey = current ? `${current.provider}/${current.id}` : "";
 	const searching = query.trim().length > 0;
@@ -137,31 +131,10 @@ export default function ModelPicker({
 
 	const flat = useMemo(() => visible.flatMap((g) => g.models), [visible]);
 
-	// Viewport-fixed placement, measured from the trigger on open (see pos).
-	useEffect(() => {
-		if (!open) {
-			setPos(null);
-			return;
-		}
-		const place = () => {
-			const r = rootRef.current?.getBoundingClientRect();
-			if (!r) return;
-			const w = Math.min(460, window.innerWidth - 24);
-			setPos({
-				left: Math.max(12, Math.min(r.left, window.innerWidth - w - 12)),
-				bottom: Math.max(12, window.innerHeight - r.top + 8),
-			});
-		};
-		place();
-		// Measured coords go stale on viewport changes, close instead of
-		// floating detached from the trigger.
-		const onResize = () => setOpen(false);
-		window.addEventListener("resize", onResize);
-		return () => {
-			window.removeEventListener("resize", onResize);
-		};
-	}, [open]);
-
+	// Placement is owned by the popover primitive (body portal, fixed,
+	// opens upward): it escapes the footer's isolated stacking context the
+	// same way the old measured portal did, and tracks the anchor instead
+	// of closing on resize.
 	// Opening lands on the current model's provider tab.
 	useLayoutEffect(() => {
 		if (!open) return;
@@ -220,27 +193,12 @@ export default function ModelPicker({
 		[open],
 	);
 
-	useEffect(() => {
-		if (!open) return;
-		const onDown = (e: MouseEvent) => {
-			const t = e.target as Node;
-			if (!rootRef.current?.contains(t) && !popoverRef.current?.contains(t)) setOpen(false);
-		};
-		window.addEventListener("mousedown", onDown);
-		return () => {
-			window.removeEventListener("mousedown", onDown);
-		};
-	}, [open]);
-
-	// Keyboard: ↑↓ move within the pane, ←→ switch provider tabs, Enter picks,
-	// Escape closes.
+	// Keyboard: ↑↓ move within the pane, ←→ switch provider tabs, Enter picks.
+	// Escape/outside-press dismissal is owned by the popover primitive.
 	useEffect(() => {
 		if (!open) return;
 		const onKey = (e: KeyboardEvent) => {
-			if (e.key === "Escape") {
-				e.preventDefault();
-				setOpen(false);
-			} else if (e.key === "ArrowDown") {
+			if (e.key === "ArrowDown") {
 				e.preventDefault();
 				setHi((i) => Math.min(i + 1, flat.length - 1));
 			} else if (e.key === "ArrowUp") {
@@ -289,14 +247,12 @@ export default function ModelPicker({
 
 	return (
 		<div ref={rootRef} className="relative">
-			<button
-				onClick={() => setOpen((v) => !v)}
+			<PopoverRoot open={open} onOpenChange={setOpen}>
+			<PopoverTrigger
 				disabled={disabled || !models.length}
 				title={
 					currentKey ? `Switch model, ${currentKey}` : "Switch model"
 				}
-				aria-haspopup="dialog"
-				aria-expanded={open}
 				className="operator-meta-control flex h-8 items-center gap-1.5 px-2.5 disabled:opacity-50"
 			>
 				<CpuIcon size={15} className="shrink-0 text-dim" />
@@ -314,18 +270,23 @@ export default function ModelPicker({
 					size={10}
 					className={`shrink-0 text-dim transition-transform ${open ? "rotate-90" : ""}`}
 				/>
-			</button>
+			</PopoverTrigger>
 
-			{open && pos && createPortal(
-				<div ref={popoverRef} style={{ left: pos.left, bottom: pos.bottom }} className="flex overflow-hidden fixed z-[70] flex-col p-1.5 operator-popover w-[460px] max-w-[min(460px,calc(100vw-24px))] max-h-[min(420px,calc(100vh-80px))]">
-					<div className="p-2 border-b border-line/60">
+			<PopoverPanel
+				side="top"
+				align="start"
+				sideOffset={8}
+				positionerClassName="z-[70]"
+				className="flex overflow-hidden flex-col p-1.5 operator-popover w-[460px] max-w-[min(460px,calc(100vw-24px))] max-h-[min(420px,calc(100vh-80px))]"
+			>
+					<div className="px-2 py-1.5 border-b border-line/60">
 						<input
 							ref={searchRef}
 							value={query}
 							onChange={(e) => setQuery(e.target.value)}
 							placeholder="Search…"
 							aria-label="Search models"
-							className="py-1.5 px-2.5 w-full rounded-md border outline-none border-line bg-inset text-[12px] placeholder:text-dim focus:border-accent"
+							className="w-full rounded-[var(--radius-sm)] border border-line bg-transparent px-2 py-1 text-[12px] placeholder:text-dim outline-none focus:border-line-strong"
 						/>
 					</div>
 					{!searching && tabs.length > 0 ? (
@@ -352,10 +313,10 @@ export default function ModelPicker({
 													: "text-dim hover:text-fg"
 											}`}
 										>
-											<span className="min-w-0 truncate text-[12.5px]">
+											<span className="min-w-0 truncate text-[13px]">
 												{t.label}
 											</span>
-											<span className="font-mono shrink-0 text-[10px] text-dim/70">
+											<span className="shrink-0 text-[10px] text-dim/70">
 												{t.models.length}
 											</span>
 										</button>
@@ -389,7 +350,7 @@ export default function ModelPicker({
 											onClick={() =>
 												pick(m.provider, m.id)
 											}
-											className={`flex w-full items-center gap-2.5 rounded-md px-3 py-1.5 text-left transition-colors duration-100 ${
+											className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-colors duration-100 ${
 												active ? "bg-fg/[0.1]" : ""
 											} ${isCurrent ? "text-accent" : ""}`}
 										>
@@ -407,7 +368,7 @@ export default function ModelPicker({
 														/>
 													)}
 												</span>
-												<span className="block mt-px font-mono leading-4 truncate text-[11px] text-dim/80">
+												<span className="block mt-px leading-4 truncate text-[11px] text-dim/80">
 													{fmtWin(m.contextWindow)}{" "}
 													ctx · in{" "}
 													{fmtCost(m.cost?.input)} /
@@ -422,7 +383,7 @@ export default function ModelPicker({
 												/>
 											)}
 											{!isCurrent && active && (
-												<kbd className="py-px px-1.5 font-mono leading-4 rounded border shrink-0 border-line bg-bg text-[10px] text-dim">
+												<kbd className="py-px px-1.5 leading-4 rounded border shrink-0 border-line bg-bg text-[10px] text-dim">
 													↵
 												</kbd>
 											)}
@@ -462,7 +423,7 @@ export default function ModelPicker({
 										data-idx={idx}
 										onMouseEnter={() => setHi(idx)}
 										onClick={() => pick(m.provider, m.id)}
-										className={`flex w-full items-center gap-2.5 rounded-md px-3 py-1.5 text-left transition-colors duration-100 ${
+										className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-colors duration-100 ${
 											active ? "bg-fg/[0.1]" : ""
 										} ${isCurrent ? "text-accent" : ""}`}
 									>
@@ -480,7 +441,7 @@ export default function ModelPicker({
 													/>
 												)}
 											</span>
-											<span className="block mt-px font-mono leading-4 truncate text-[11px] text-dim/80">
+											<span className="block mt-px leading-4 truncate text-[11px] text-dim/80">
 												{m.provider}/{m.id} ·{" "}
 												{fmtWin(m.contextWindow)} ctx ·
 												in {fmtCost(m.cost?.input)} /
@@ -494,7 +455,7 @@ export default function ModelPicker({
 											/>
 										)}
 										{!isCurrent && active && (
-											<kbd className="py-px px-1.5 font-mono leading-4 rounded border shrink-0 border-line bg-bg text-[10px] text-dim">
+											<kbd className="py-px px-1.5 leading-4 rounded border shrink-0 border-line bg-bg text-[10px] text-dim">
 												↵
 											</kbd>
 										)}
@@ -503,8 +464,8 @@ export default function ModelPicker({
 							})}
 						</div>
 					)}
-				</div>
-			, document.body)}
+				</PopoverPanel>
+			</PopoverRoot>
 		</div>
 	);
 }

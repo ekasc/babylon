@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { bridge, type PermissionRule, type PolicyCategory } from "../bridge";
+import { Select, SelectOption } from "./ui/Select";
 
 const CATEGORIES: { id: PolicyCategory; label: string }[] = [
   { id: "file_read", label: "File read" },
@@ -44,44 +45,46 @@ export default function PermissionRulesSection() {
 
   return (
     <div>
-      <p className="text-[12.5px] leading-5 text-dim max-w-[640px]">Explicit rules override the execution mode shown next to the composer. Deny always wins. Scopes: <span className="text-fg">Always</span> persists, <span className="text-fg">Session</span> clears on restart.</p>
+      <p className="text-[13px] leading-5 text-dim max-w-[640px]">Explicit rules override the execution mode shown next to the composer. Deny always wins. Scopes: <span className="text-fg">Always</span> persists, <span className="text-fg">Session</span> clears on restart.</p>
 
       {rules.length === 0 ? (
-        <p className="mt-4 rounded-md border border-dashed border-line/60 bg-inset/20 px-3 py-3 text-[12.5px] text-dim">No explicit rules. Behaviour follows the execution mode.</p>
+        <p className="mt-4 rounded-[var(--radius-sm)] border border-dashed border-line/60 bg-inset/20 px-3 py-3 text-[13px] text-dim">No explicit rules. Behaviour follows the execution mode.</p>
       ) : (
-        <div className="mt-4 border border-line/30 rounded-md overflow-hidden divide-y divide-line/20">
+        <div className="mt-4 border-t border-line overflow-hidden">
           {rules.map((rule) => (
-            <div key={rule.id} className="flex items-center gap-3 px-3 py-2.5 text-[12.5px]">
-              <span className={`inline-flex items-center rounded px-1.5 py-0.5 text-[11px] font-medium ${rule.decision === "allow" ? "bg-ok/10 text-ok" : "bg-err/10 text-err"}`}>{rule.decision === "allow" ? "Allow" : "Deny"}</span>
+            <div key={rule.id} className="flex items-center gap-3 px-2.5 py-2.5 text-[13px] border-b border-line last:border-0">
+              <span className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[11px] font-medium ${rule.decision === "allow" ? "bg-ok/10 text-ok" : "bg-err/10 text-err"}`}>{rule.decision === "allow" ? "Allow" : "Deny"}</span>
               <span className="text-fg font-[450]">{CATEGORIES.find((c) => c.id === rule.category)?.label ?? rule.category}</span>
-              {rule.match?.commandPattern ? <span className="font-mono text-[11px] text-dim truncate max-w-[200px]">“{rule.match.commandPattern}”</span> : null}
-              {rule.match?.pathGlob ? <span className="font-mono text-[11px] text-dim truncate max-w-[200px]">{rule.match.pathGlob}</span> : null}
-              <span className={`ml-auto text-[11px] px-1.5 py-0.5 rounded border ${rule.scope === "always" ? "border-line bg-bg text-dim" : "border-amber-500/20 bg-amber-500/10 text-amber-700"}`}>{rule.scope}</span>
-              <button onClick={() => void removeRule(rule.id)} className="ml-1 rounded px-2 py-1 text-[11px] text-dim hover:text-err hover:bg-err/10">Remove</button>
+              {rule.match?.commandPattern ? <span className="text-[11px] text-dim truncate max-w-[200px]">“{rule.match.commandPattern}”</span> : null}
+              {rule.match?.pathGlob ? <span className="text-[11px] text-dim truncate max-w-[200px]">{rule.match.pathGlob}</span> : null}
+              <span className={`ml-auto text-[11px] px-1.5 py-0.5 rounded-full border ${rule.scope === "always" ? "border-line bg-bg text-dim" : "border-warn/20 bg-warn/10 text-warn"}`}>{rule.scope}</span>
+              <button onClick={() => void removeRule(rule.id)} className="ml-1 rounded-[var(--radius-sm)] px-2 py-1 text-[11px] text-dim hover:text-err hover:bg-err/10">Remove</button>
             </div>
           ))}
         </div>
       )}
 
       {!showAdd ? (
-        <button onClick={() => setShowAdd(true)} className="mt-3 rounded-md border border-line/60 px-3 py-1.5 text-[12.5px] text-fg hover:bg-inset">+ Add rule</button>
+        <button onClick={() => setShowAdd(true)} className="mt-3 rounded-[var(--radius-sm)] border border-line/60 px-3 py-1.5 text-[13px] text-fg hover:bg-inset">+ Add rule</button>
       ) : (
-        <div className="mt-3 rounded-md border border-line/40 bg-inset/20 p-3">
+        <div className="mt-3 rounded-[var(--radius-sm)] border border-line/40 bg-inset/20 p-3">
           <div className="grid grid-cols-[1.4fr_0.9fr_0.9fr] gap-2">
-            <select value={category} onChange={(e) => setCategory(e.target.value as PolicyCategory)} className="rounded-md border border-line bg-bg px-2.5 py-2 text-[12.5px] outline-none focus:border-accent">
-              {CATEGORIES.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
-            </select>
-            <select value={decision} onChange={(e) => setDecision(e.target.value as "allow" | "deny")} className="rounded-md border border-line bg-bg px-2.5 py-2 text-[12.5px] outline-none focus:border-accent">
-              <option value="allow">Allow</option><option value="deny">Deny</option>
-            </select>
-            <select value={scope} onChange={(e) => setScope(e.target.value as "always" | "session")} className="rounded-md border border-line bg-bg px-2.5 py-2 text-[12.5px] outline-none focus:border-accent">
-              <option value="always">Always</option><option value="session">Session</option>
-            </select>
+            <Select value={category} onChange={(v) => setCategory(v as PolicyCategory)} triggerClassName="rounded-[var(--radius-sm)] border border-line bg-bg px-2.5 py-2 text-[13px] outline-none">
+              {CATEGORIES.map((c) => <SelectOption key={c.id} value={c.id} label={c.label} />)}
+            </Select>
+            <Select value={decision} onChange={(v) => setDecision(v as "allow" | "deny")} triggerClassName="rounded-[var(--radius-sm)] border border-line bg-bg px-2.5 py-2 text-[13px] outline-none">
+              <SelectOption value="allow" label="Allow" />
+              <SelectOption value="deny" label="Deny" />
+            </Select>
+            <Select value={scope} onChange={(v) => setScope(v as "always" | "session")} triggerClassName="rounded-[var(--radius-sm)] border border-line bg-bg px-2.5 py-2 text-[13px] outline-none">
+              <SelectOption value="always" label="Always" />
+              <SelectOption value="session" label="Session" />
+            </Select>
           </div>
-          <input value={match} onChange={(e) => setMatch(e.target.value)} placeholder={category.startsWith("file_") ? "Path glob, e.g. **/secrets/** (optional)" : "Command substring, e.g. npm run (optional)"} className="mt-2 w-full rounded-md border border-line bg-bg px-2.5 py-2 text-[12.5px] outline-none focus:border-accent placeholder:text-dim/60" />
+          <input value={match} onChange={(e) => setMatch(e.target.value)} placeholder={category.startsWith("file_") ? "Path glob, e.g. **/secrets/** (optional)" : "Command substring, e.g. npm run (optional)"} className="mt-2 w-full rounded-[var(--radius-sm)] border border-line bg-bg px-2.5 py-2 text-[13px] outline-none focus:border-accent placeholder:text-dim" />
           <div className="mt-2 flex gap-2">
-            <button onClick={() => void addRule()} className="rounded-md bg-fg text-bg px-3 py-1.5 text-[12.5px] font-medium hover:opacity-90">Add</button>
-            <button onClick={() => setShowAdd(false)} className="rounded-md border border-line px-3 py-1.5 text-[12.5px] hover:bg-bg">Cancel</button>
+            <button onClick={() => void addRule()} className="rounded-[var(--radius-sm)] bg-fg text-bg px-3 py-1.5 text-[13px] font-medium hover:opacity-90">Add</button>
+            <button onClick={() => setShowAdd(false)} className="rounded-[var(--radius-sm)] border border-line px-3 py-1.5 text-[13px] hover:bg-bg">Cancel</button>
           </div>
         </div>
       )}

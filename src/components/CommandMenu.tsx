@@ -42,8 +42,8 @@ const CommandMenu = memo(function CommandMenu({ commands, selected, onSelect, on
           onClick={() => onChoose(command)}
           className={`flex w-full items-start gap-2 rounded-md px-3 py-2.5 text-left ${index === selected ? "bg-accent-soft" : "hover:bg-inset"}`}
         >
-          <span className="shrink-0 font-mono text-[14px] font-semibold text-accent">{sigil}{command.name}</span>
-          {command.argumentHint ? <span className="shrink-0 font-mono text-[13px] text-warn">{command.argumentHint}</span> : null}
+          <span className="shrink-0 text-[14px] font-semibold text-accent">{sigil}{command.name}</span>
+          {command.argumentHint ? <span className="shrink-0 text-[13px] text-warn">{command.argumentHint}</span> : null}
           <span className="min-w-0 flex-1 truncate text-[13px] text-dim">{command.description}</span>
           <span className="shrink-0 text-[12px] text-dim">{SOURCE_LABEL[command.source]}</span>
         </button>

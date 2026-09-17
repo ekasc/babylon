@@ -11,6 +11,12 @@ import { makeId } from "./runtime";
 
 export type ProtocolKind = "request" | "response" | "event";
 
+// Bumped whenever the request/response contract changes shape. The desktop app
+// and the daemon are separate processes that survive updates independently, so
+// a client that connects to a daemon built from different source must retire it
+// rather than speak a mismatched protocol. See `daemon.shutdown`.
+export const DAEMON_PROTOCOL_VERSION = 2;
+
 // The single source of truth for message types. The string union is derived
 // from this list so adding a member cannot silently drift from the validator.
 export const KNOWN_MESSAGE_TYPES = [
@@ -24,6 +30,7 @@ export const KNOWN_MESSAGE_TYPES = [
   "approval.requested",
   "approval.resolved",
   "approval.cleared",
+  "approval.list",
   "permissions.get",
   "permissions.set-mode",
   "permissions.add-rule",
@@ -42,6 +49,8 @@ export const KNOWN_MESSAGE_TYPES = [
   "policy.updated",
   "state.get",
   "state.snapshot",
+  "daemon.auth",
+  "daemon.shutdown",
   "remote.auth",
   "remote.tasks.list",
   "remote.state.view",
@@ -61,6 +70,7 @@ export const KNOWN_MESSAGE_TYPES = [
   "pi.ui.respond",
   "pi.getToolOutput",
   "pi.getModels",
+  "pi.warmProject",
   "pi.setModel",
   "pi.getThinkingLevels",
   "pi.setThinking",
@@ -106,12 +116,20 @@ export type ProtocolMessageType = (typeof KNOWN_MESSAGE_TYPES)[number];
 // untrusted scalar at this boundary.
 const NO_PAYLOAD_TYPES: readonly ProtocolMessageType[] = ["ping", "pong"];
 
+/**
+ * An envelope payload: a JSON object. Arrays and scalars are rejected here and
+ * by `validatePayload`, so a handler's raw result cannot be sent as-is without
+ * being wrapped in a named object. This is the type-level half of the same rule
+ * that `validatePayload` enforces at runtime.
+ */
+export type ProtocolPayload = Record<string, unknown>;
+
 export interface ProtocolEnvelope {
   /** Stable message id (minted once, carried end to end). */
   id: string;
   kind: ProtocolKind;
   type: ProtocolMessageType;
-  payload: unknown;
+  payload: ProtocolPayload;
   /** Links a request/response pair. */
   inReplyTo?: string;
   /** Epoch milliseconds. */
@@ -125,6 +143,22 @@ function validatePayload(type: ProtocolMessageType, payload: unknown): void {
   }
 }
 
+/** Narrow an arbitrary value to a payload, rejecting arrays and scalars. The
+ *  single place a payload cast is allowed, and it is checked first. */
+export function toPayload(value: unknown): ProtocolPayload {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Invalid protocol payload: must be an object");
+  }
+  return value as ProtocolPayload;
+}
+
+/** Payload for a type whose payload is optional (ping/pong): absent becomes an
+ *  empty object, present is still required to be an object. pong carries
+ *  `{ ok, protocol }`, so it must not be flattened away. */
+function optionalPayload(value: unknown): ProtocolPayload {
+  return value === undefined || value === null ? {} : toPayload(value);
+}
+
 function validateInReplyTo(inReplyTo: unknown): string | undefined {
   if (inReplyTo === undefined) return undefined;
   if (typeof inReplyTo !== "string" || inReplyTo.trim().length === 0) {
@@ -136,7 +170,7 @@ function validateInReplyTo(inReplyTo: unknown): string | undefined {
 export function createEnvelope(
   kind: ProtocolKind,
   type: ProtocolMessageType,
-  payload: unknown,
+  payload: ProtocolPayload,
   inReplyTo?: string
 ): ProtocolEnvelope {
   const normalizedReply = validateInReplyTo(inReplyTo);
@@ -194,7 +228,10 @@ export function parseEnvelope(json: string): ProtocolEnvelope {
     id: v.id,
     kind: v.kind,
     type,
-    payload: v.payload,
+    // ping/pong may omit a payload; normalize absence to an empty object so
+    // the envelope payload type stays object-only for every consumer. A present
+    // payload is preserved (pong carries { ok, protocol }).
+    payload: NO_PAYLOAD_TYPES.includes(type) ? optionalPayload(v.payload) : toPayload(v.payload),
     inReplyTo,
     ts: v.ts,
   };

@@ -11,7 +11,7 @@ import { serializeTranscript } from "./serializer";
 import { extractHighValueTokens, type RawSymbol } from "./symbol-dictionary";
 import { renderFrames } from "./renderer";
 import { profileToFrameProfile, type SnapcompactModelProfile } from "./model-profiles";
-import type { SnapcompactArchive, SnapcompactSymbol } from "./types";
+import type { SnapcompactArchive } from "./types";
 
 export class ArchiveBudgetError extends Error {
   readonly budget: string;

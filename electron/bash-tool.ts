@@ -42,11 +42,6 @@ function buildHints(command: string): ShellHint[] {
   return hints.slice(0, 2);
 }
 
-interface BashArgs {
-  command: string;
-  timeout?: number;
-}
-
 const UNSAFE_PATTERNS: Array<{ re: RegExp; label: string }> = [
   { re: /\brm\s+-rf?\s+\/(?!\w)/, label: "rm -rf /" },
   { re: /:\(\)\s*\{.*:&.*\}\s*;:/, label: "fork bomb" },

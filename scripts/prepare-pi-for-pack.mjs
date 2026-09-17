@@ -2,23 +2,29 @@
 // command): electron-builder imports this file and calls the default export
 // with { appOutDir, outDir, arch, targets, packager, electronPlatformName }.
 //
-// Babylon links @earendil-works/pi-coding-agent from an existing Pi
-// installation (scripts/link-pi.mjs) instead of declaring it as a dependency.
-// electron-builder would follow that symlink and embed the installer's
-// absolute home path in the package, so before packing we dereference the link
-// into a real copy inside node_modules. Packaging then reads from a relative
-// path that is valid on any machine.
+// Babylon pins @earendil-works/pi-coding-agent as a dependency, but a developer
+// can override it with an ambient Pi via PI_PACKAGE_DIR (scripts/link-pi.mjs).
+// electron-builder would follow that symlink and embed the installer's absolute
+// home path in the package, so the package is staged as a real, fully
+// dereferenced copy that electron-builder reads instead of the link.
+//
+// The staging copy is throwaway. An earlier version dereferenced the link *in
+// place*, which replaced node_modules/@earendil-works/pi-coding-agent with a
+// copy whose dependency links no longer resolved: the next build failed with
+// resolution errors and 13 test files could not import Pi until it was
+// re-linked. Nothing here may mutate node_modules outside the staging dir.
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, rmSync, cpSync, realpathSync } from "node:fs";
+import { existsSync, rmSync, cpSync, realpathSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const link = join(root, "node_modules", "@earendil-works", "pi-coding-agent");
+const stage = join(root, "node_modules", ".pi-pack", "pi-coding-agent");
 const linkPi = join(root, "scripts", "link-pi.mjs");
 
 export default async function preparePiForPack(_context) {
-  // Missing entirely (never linked): try to establish the link the same way
+  // Missing entirely (never linked): establish the link the same way
   // scripts/link-pi.mjs does. If Pi is genuinely absent, fail with an
   // actionable message instead of letting electron-builder fail cryptically on
   // the from path or ship a broken package.
@@ -34,18 +40,18 @@ export default async function preparePiForPack(_context) {
     }
   }
 
-  try {
-    const stat = lstatSync(link);
-    if (!stat.isSymbolicLink()) {
-      console.log("[prepare-pi] pi-coding-agent is a real directory; nothing to dereference");
-      return;
+  // Resolve through the link and copy the package whole, dereferencing pnpm's
+  // nested symlinks (chalk, @earendil-works/pi-tui, …) so the bundle is
+  // self-contained. The link itself is left exactly as it was.
+  const source = realpathSync(link);
+  console.log(`[prepare-pi] staging ${source} -> ${stage}`);
+  rmSync(stage, { recursive: true, force: true });
+  cpSync(source, stage, { recursive: true, dereference: true });
+
+  for (const required of ["package.json", "dist", "node_modules"]) {
+    if (!existsSync(join(stage, required))) {
+      throw new Error(`[prepare-pi] staged package is missing ${required}; refusing to pack a broken bundle`);
     }
-    const target = realpathSync(link);
-    console.log(`[prepare-pi] dereferencing symlink ${link} -> ${target}`);
-    rmSync(link, { recursive: true, force: true });
-    cpSync(target, link, { recursive: true, dereference: true });
-    console.log("[prepare-pi] done");
-  } catch (e) {
-    console.warn("[prepare-pi] failed", e);
   }
+  console.log("[prepare-pi] done");
 }

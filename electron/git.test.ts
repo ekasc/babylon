@@ -139,6 +139,32 @@ describe("statusDetails", () => {
     expect(details.files.map((f) => f.path)).toContain("file.txt");
     expect(details.insertions).toBe(1);
   });
+
+  it("preserves filenames with spaces, tabs, and edge whitespace (A05)", async () => {
+    const root = await makeRepoWithCommit();
+    const spaced = join(root, "src", "my file.ts");
+    const { mkdirSync } = await import("node:fs");
+    mkdirSync(join(root, "src"), { recursive: true });
+    await writeFile(spaced, "one\ntwo\n");
+    await writeFile(join(root, "tab\tname.ts"), "x\n");
+    await writeFile(join(root, "file.txt"), "one\ntwo\nthree\n");
+
+    const details = await statusDetails(root);
+    const paths = details.files.map((f) => f.path);
+    expect(paths).toContain("src/my file.ts");
+    expect(paths).toContain("tab\tname.ts");
+    expect(paths).not.toContain("file.ts");
+    expect(details.files.find((f) => f.path === "src/my file.ts")).toMatchObject({ insertions: 2 });
+  });
+
+  it("tracks renames by their new name (A05)", async () => {
+    const root = await makeRepoWithCommit();
+    await git(root, ["mv", "file.txt", "old name.txt"]);
+    const details = await statusDetails(root);
+    const paths = details.files.map((f) => f.path);
+    expect(paths).toContain("old name.txt");
+    expect(paths).not.toContain("file.txt");
+  });
 });
 
 describe("resetStaged", () => {
