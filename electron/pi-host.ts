@@ -248,7 +248,17 @@ export class PiHost {
     const key = resolve(cwd);
     let pending = this.projectRuntimes.get(key);
     if (!pending) {
-      pending = ModelRuntime.create();
+      // Catalog and credentials come from the host's agentDir, not the
+      // process-wide one. Without this the agentDir option is half-honoured:
+      // settings and resources follow it while the model catalog does not, so
+      // an isolated host (a test, or the daemon started with
+      // BABYLON_DAEMON_AGENT_DIR) still reads ~/.pi/agent/models.json from
+      // whatever machine it runs on.
+      const agentDir = this.opts.agentDir ?? getAgentDir();
+      pending = ModelRuntime.create({
+        authPath: join(agentDir, "auth.json"),
+        modelsPath: join(agentDir, "models.json"),
+      });
       this.projectRuntimes.set(key, pending);
     }
     return pending;

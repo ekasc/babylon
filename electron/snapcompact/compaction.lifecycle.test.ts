@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtemp, rm, mkdir, readFile } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PiHost } from "../pi-host";
@@ -44,6 +44,37 @@ describe("snapcompact lifecycle regression (real PiHost.compact)", () => {
     stateDir = join(root, "state");
     await mkdir(cwd, { recursive: true });
     await mkdir(agentDir, { recursive: true });
+    // Pin the model catalog to a fixture. The host now resolves models through
+    // its own agentDir, so without this the test picks up nothing on a machine
+    // with no ~/.pi/agent/models.json and compaction fails with "Unknown
+    // provider". Keeps the test independent of the developer's Pi config.
+    await writeFile(
+      join(agentDir, "models.json"),
+      JSON.stringify({
+        providers: {
+          fixture: {
+            name: "Fixture",
+            baseUrl: "http://127.0.0.1:9/v1",
+            api: "openai-completions",
+            apiKey: "sk-fixture",
+            models: [
+              {
+                id: "fixture-1",
+                name: "Fixture 1",
+                reasoning: false,
+                input: ["text", "image"],
+                contextWindow: 200_000,
+                maxTokens: 8_192,
+              },
+            ],
+          },
+        },
+      })
+    );
+    await writeFile(
+      join(agentDir, "settings.json"),
+      JSON.stringify({ defaultProvider: "fixture", defaultModel: "fixture-1" })
+    );
     await exec("git", ["init"], { cwd });
 
     host = new PiHost({ cwd, agentDir, stateDir, onEvent: () => {}, onStatus: () => {} });
