@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   createEnvelope,
+  DAEMON_PROTOCOL_VERSION,
   KNOWN_MESSAGE_TYPES,
   parseEnvelope,
   serializeEnvelope,
+  shouldRetireDaemon,
   type ProtocolEnvelope,
 } from "./daemon-protocol";
 
@@ -98,5 +100,35 @@ describe("babylon daemon protocol", () => {
 
   it("keeps the type union in sync with the known types list", () => {
     expect(KNOWN_MESSAGE_TYPES.length).toBe(87);
+  });
+});
+
+describe("shouldRetireDaemon", () => {
+  const ours = { protocol: DAEMON_PROTOCOL_VERSION, build: "abc123" };
+
+  it("keeps an unreachable socket for the spawn path", () => {
+    expect(shouldRetireDaemon(undefined, ours)).toBe(false);
+  });
+
+  it("retires on protocol mismatch", () => {
+    expect(shouldRetireDaemon({ protocol: ours.protocol + 1, build: ours.build }, ours)).toBe(true);
+  });
+
+  it("keeps identical builds", () => {
+    expect(shouldRetireDaemon({ protocol: ours.protocol, build: ours.build }, ours)).toBe(false);
+  });
+
+  it("retires same-version skew from separate bundle builds", () => {
+    expect(shouldRetireDaemon({ protocol: ours.protocol, build: "stale00" }, ours)).toBe(true);
+  });
+
+  it("retires a daemon that predates build ids, and keeps when it cannot compare", () => {
+    expect(shouldRetireDaemon({ protocol: ours.protocol }, ours)).toBe(true);
+    expect(shouldRetireDaemon({ protocol: ours.protocol, build: "stale00" }, { ...ours, build: "unknown" })).toBe(false);
+  });
+
+  it("retires a draining holder to wait it out instead of adopting it", () => {
+    expect(shouldRetireDaemon({ protocol: ours.protocol, build: ours.build, draining: true }, ours)).toBe(true);
+    expect(shouldRetireDaemon({ protocol: ours.protocol, build: ours.build, draining: false }, ours)).toBe(false);
   });
 });

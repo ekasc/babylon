@@ -375,8 +375,6 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast, cwd = nu
             <ChevronIcon size={14} className="rotate-180" />
           </button>
         )}
-        <LayersIcon size={14} className="shrink-0 text-accent" />
-        <span className="text-[14px] font-semibold tracking-tight">Activity</span>
         {live ? <span className="h-2 w-2 rounded-full bg-accent" title="Work is active" /> : null}
         <span className="truncate text-[14px] tracking-[0.02em] text-dim">
           {tab === "agents" ? selectedAgent ? "agent transcript" : "subagents · threads" : agent ? "agent transcript" : detail ? "run detail" : "workflows · agents"}
@@ -394,13 +392,6 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast, cwd = nu
               <RefreshIcon size={12} />
             </button>
           )}
-          <button
-            onClick={onClose}
-            title="Close"
-            className="rounded-md px-1.5 py-0.5 text-dim hover:bg-inset hover:text-fg"
-          >
-            <XIcon size={12} />
-          </button>
         </div>
       </div>
 

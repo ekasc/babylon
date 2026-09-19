@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { WebContentsView, shell, type BrowserWindow } from "electron";
+import { WebContentsView, nativeImage, shell, type BrowserWindow } from "electron";
 import {
   effectiveZoom,
   normalizeZoomFactor,
@@ -10,6 +10,7 @@ import {
   sanitizeViewport,
   type SimEmulation,
 } from "../src/lib/simulator";
+import { condenseAxTree, parseAxRefSelector, type AxNodeJson } from "./sim-a11y";
 
 export interface SimControllerDeps {
   getWindow: () => BrowserWindow | null;
@@ -41,6 +42,10 @@ interface TabState {
   lastUrl: string;
   title: string | null;
   loading: boolean;
+  /** Renderer crash flag: set on render-process-gone, cleared by the next
+   *  successful navigation. Tools fail fast with a recovery hint while set. */
+  crashed: boolean;
+  crashReason: string | null;
 }
 
 const APPLY_TIMEOUT_MS = 5000;
@@ -65,6 +70,8 @@ export class SimController {
   private order: string[] = [];
   private activeId: string | null = null;
   private chains = new Map<string, Promise<void>>();
+  /** Outstanding withDebugger sessions per tab (see withDebugger). */
+  private debuggerUsers = new Map<string, number>();
 
   constructor(private readonly deps: SimControllerDeps) {}
 
@@ -97,6 +104,7 @@ export class SimController {
     const tabId = id ?? this.activeId;
     const tab = tabId ? this.tabs.get(tabId) : undefined;
     if (!tab || tab.view.webContents.isDestroyed()) throw new Error("sim tab is not open");
+    if (tab.crashed) throw new Error(`sim tab crashed (${tab.crashReason ?? "gone"}). browser_navigate or browser_reload to recover.`);
     return tab;
   }
 
@@ -144,6 +152,8 @@ export class SimController {
         lastUrl: url,
         title: null,
         loading: true,
+        crashed: false,
+        crashReason: null,
       };
       this.wireTab(tab);
       this.tabs.set(id, tab);
@@ -223,9 +233,14 @@ export class SimController {
     wc.on("did-fail-load", (_ev, code, desc, validatedURL, isMainFrame) => {
       if (isMainFrame && code !== -3) this.deps.notify({ type: "fail", tabId: id, error: desc, url: validatedURL });
     });
-    wc.on("render-process-gone", (_ev, details) =>
-      this.deps.notify({ type: "crashed", tabId: id, reason: details?.reason ?? "gone" })
-    );
+    wc.on("render-process-gone", (_ev, details) => {
+      const t = this.tabs.get(id);
+      if (t) {
+        t.crashed = true;
+        t.crashReason = details?.reason ?? "gone";
+      }
+      this.deps.notify({ type: "crashed", tabId: id, reason: details?.reason ?? "gone" });
+    });
   }
 
   /** Bind the tab's view to the window; hidden tabs stay alive but detached. */
@@ -286,6 +301,7 @@ export class SimController {
       this.tabs.delete(tabId);
       this.order = this.order.filter((t) => t !== tabId);
       this.chains.delete(tabId);
+      this.debuggerUsers.delete(tabId);
       if (this.activeId === tabId) {
         const next = this.order[this.order.length - 1] ?? null;
         this.activeId = null;
@@ -412,8 +428,20 @@ export class SimController {
     this.applyZoom(tab);
   }
 
+  /** Tab access for reload paths: a crashed renderer can still reload into
+   *  a fresh one, so the crash flag must not block recovery. */
+  private forReload(id?: string | null): TabState {
+    const tabId = id ?? this.activeId;
+    const tab = tabId ? this.tabs.get(tabId) : undefined;
+    if (!tab || tab.view.webContents.isDestroyed()) throw new Error("sim tab is not open");
+    return tab;
+  }
+
   async hardReload(tabId?: string | null): Promise<{ ok: true }> {
-    await this.live(tabId).view.webContents.reloadIgnoringCache();
+    const tab = this.forReload(tabId);
+    await tab.view.webContents.reloadIgnoringCache();
+    tab.crashed = false;
+    tab.crashReason = null;
     return { ok: true as const };
   }
 
@@ -451,16 +479,24 @@ export class SimController {
     const url = sanitizeSimUrl(rawUrl);
     if (!url) throw new Error("sim only loads http(s) URLs");
     if (tabId) {
-      await this.live(tabId).view.webContents.loadURL(url);
+      const tab = this.live(tabId);
+      await tab.view.webContents.loadURL(url);
+      tab.crashed = false;
+      tab.crashReason = null;
       return { ok: true as const };
     }
     const tab = await this.ensureOpen(url);
     await tab.view.webContents.loadURL(url);
+    tab.crashed = false;
+    tab.crashReason = null;
     return { ok: true as const };
   }
 
   reload(tabId?: string | null): void {
-    this.live(tabId).view.webContents.reload();
+    const tab = this.forReload(tabId);
+    tab.view.webContents.reload();
+    tab.crashed = false;
+    tab.crashReason = null;
   }
 
   back(tabId?: string | null): void {
@@ -493,12 +529,33 @@ export class SimController {
 
   private async withDebugger<T>(tab: TabState, fn: (send: (method: string, params?: Record<string, unknown>) => Promise<any>) => Promise<T>): Promise<T> {
     const wc = tab.view.webContents;
+    const key = tab.id;
     try {
-      if (!wc.debugger.isAttached()) wc.debugger.attach();
+      if ((this.debuggerUsers.get(key) ?? 0) === 0) {
+        if (!wc.debugger.isAttached()) wc.debugger.attach();
+      }
     } catch (e) {
       throw new Error(`sim debugger unavailable: ${e instanceof Error ? e.message : String(e)}`);
     }
-    return fn((method, params) => withTimeout(wc.debugger.sendCommand(method, params), APPLY_TIMEOUT_MS));
+    this.debuggerUsers.set(key, (this.debuggerUsers.get(key) ?? 0) + 1);
+    // Detach when the last user leaves: a lingering attach blocks the user's
+    // DevTools. Tab operation chains keep most uses serial, but event-driven
+    // emulation (did-finish-load) can interleave with tool sessions.
+    try {
+      return await fn((method, params) => withTimeout(wc.debugger.sendCommand(method, params), APPLY_TIMEOUT_MS));
+    } finally {
+      const left = (this.debuggerUsers.get(key) ?? 1) - 1;
+      if (left <= 0) {
+        this.debuggerUsers.delete(key);
+        try {
+          if (!wc.isDestroyed() && wc.debugger.isAttached()) wc.debugger.detach();
+        } catch {
+          /* already gone */
+        }
+      } else {
+        this.debuggerUsers.set(key, left);
+      }
+    }
   }
 
   /** Attach CDP and apply the stored emulation (viewport, DPR, UA, touch).
@@ -544,17 +601,36 @@ export class SimController {
   }
 
   /** Viewport screenshot, capped in width to keep token cost sane. */
-  async screenshot(tabId?: string | null): Promise<{ png: Buffer; width: number; height: number }> {
-    const wc = this.live(tabId).view.webContents;
+  async screenshot(tabId?: string | null, opts?: { fullPage?: boolean }): Promise<{ png: Buffer; width: number; height: number }> {
+    const tab = this.live(tabId);
+    if (opts?.fullPage) {
+      // Beyond-viewport capture via CDP; falls back to the viewport shot
+      // when the debugger is busy (user DevTools) or the page refuses.
+      try {
+        const shot = await this.withDebugger(tab, async (send) =>
+          send("Page.captureScreenshot", { format: "png", captureBeyondViewport: true })
+        );
+        const buf = Buffer.from(String((shot as any)?.data ?? ""), "base64");
+        if (buf.length > 0) return this.scaleShot(nativeImage.createFromBuffer(buf));
+      } catch {
+        /* fall through to viewport capture */
+      }
+    }
+    const wc = tab.view.webContents;
     const image = await wc.capturePage();
+    return this.scaleShot(image);
+  }
+
+  private scaleShot(image: Electron.NativeImage): { png: Buffer; width: number; height: number } {
     const size = image.getSize();
     const scaled = size.width > SSHOT_MAX_WIDTH ? image.resize({ width: SSHOT_MAX_WIDTH, height: Math.round((SSHOT_MAX_WIDTH / size.width) * size.height) }) : image;
     const out = scaled.getSize();
     return { png: scaled.toPNG(), width: out.width, height: out.height };
   }
 
-  /** Rendered text snapshot of the page. */
-  async snapshot(tabId?: string | null): Promise<{ url: string; title: string; text: string }> {
+  /** Rendered text snapshot of the page, optionally with the condensed
+   *  accessibility tree (refs for ref:N click/fill targeting). */
+  async snapshot(tabId?: string | null, opts?: { a11y?: boolean }): Promise<{ url: string; title: string; text: string; a11y: string }> {
     const tab = this.live(tabId);
     const wc = tab.view.webContents;
     const run = async (code: string): Promise<any> => {
@@ -567,7 +643,50 @@ export class SimController {
     const url = String((await run("location.href")) ?? "");
     const title = String((await run("document.title")) ?? "");
     const text = String((await run("(document.body ? document.body.innerText : '').slice(0, 12000)")) ?? "").slice(0, TEXT_CAP);
-    return { url, title, text };
+    let a11y = "";
+    if (opts?.a11y) {
+      try {
+        a11y = (await this.axTree(tab)).text;
+      } catch {
+        /* text-only fallback */
+      }
+    }
+    return { url, title, text, a11y };
+  }
+
+  /**
+   * Condensed accessibility tree for the tab, with sequential [ref] markers
+   * on backed nodes. Refs are positional: resolve them through a fresh tree
+   * at use time; a ref that no longer resolves means the page changed and
+   * the caller should take a new snapshot.
+   */
+  async axTree(tab: TabState): Promise<{ text: string; refCount: number }> {
+    const res = await this.withDebugger(tab, async (send) => send("Accessibility.getFullAXTree", {}));
+    const condensed = condenseAxTree(((res as any)?.nodes ?? []) as AxNodeJson[]);
+    return { text: condensed.text, refCount: condensed.refs.length };
+  }
+
+  /** Resolve a ref:N marker to a clickable center via fresh-tree lookup. */
+  private async resolveAxRef(tab: TabState, ref: number): Promise<{ x: number; y: number; objectId: string }> {
+    const res = await this.withDebugger(tab, async (send) => send("Accessibility.getFullAXTree", {}));
+    const condensed = condenseAxTree(((res as any)?.nodes ?? []) as AxNodeJson[]);
+    const hit = condensed.refs.find((r) => r.ref === ref);
+    if (!hit) throw new Error(`ref:${ref} is stale (page changed?) — take a new browser_snapshot first.`);
+    return this.withDebugger(tab, async (send) => {
+      const resolved = (await send("DOM.resolveNode", { backendNodeId: hit.backendDOMNodeId })) as any;
+      const objectId = resolved?.object?.objectId;
+      if (!objectId) throw new Error(`ref:${ref} no longer resolves to a live element.`);
+      const quads = (await send("DOM.getContentQuads", { objectId })) as any;
+      const quad = quads?.quads?.[0];
+      if (!Array.isArray(quad) || quad.length < 8) throw new Error(`ref:${ref} is not visible.`);
+      const xs = [quad[0], quad[2], quad[4], quad[6]];
+      const ys = [quad[1], quad[3], quad[5], quad[7]];
+      return {
+        x: Math.round((Math.min(...xs) + Math.max(...xs)) / 2),
+        y: Math.round((Math.min(...ys) + Math.max(...ys)) / 2),
+        objectId,
+      };
+    });
   }
 
   private checkSelector(raw: unknown): string {
@@ -593,7 +712,12 @@ export class SimController {
   async click(tabId: string | undefined, rawSelector: string): Promise<{ x: number; y: number; text: string }> {
     const selector = this.checkSelector(rawSelector);
     const tab = this.live(tabId);
-    const at = await this.locate(tab, selector);
+    // ref:N markers from the snapshot a11y tree resolve through a fresh
+    // tree (stale refs fail with a take-a-new-snapshot hint).
+    const ref = parseAxRefSelector(selector);
+    const at = ref != null
+      ? await this.resolveAxRef(tab, ref).then((r) => ({ x: r.x, y: r.y, text: `ref:${ref}` }))
+      : await this.locate(tab, selector);
     const touch = tab.emulation?.touch === true;
     await this.withDebugger(tab, async (send) => {
       if (touch) {
@@ -611,6 +735,34 @@ export class SimController {
     const selector = this.checkSelector(rawSelector);
     if (typeof rawText !== "string" || rawText.length > 4000) throw new Error("text must be a string (≤4000 chars)");
     const tab = this.live(tabId);
+    const ref = parseAxRefSelector(selector);
+    if (ref != null) {
+      const r = await this.resolveAxRef(tab, ref);
+      await this.withDebugger(tab, async (send) => {
+        await send("DOM.focus", { objectId: r.objectId });
+        // Select-all first so insert replaces instead of appending (mirrors
+        // the CSS path's focus+select prep). Ctrl on Win/Linux, Cmd on macOS.
+        const modifiers = process.platform === "darwin" ? 4 : 2;
+        const selectAll = { key: "a", code: "KeyA", windowsVirtualKeyCode: 65, modifiers };
+        await send("Input.dispatchKeyEvent", { type: "keyDown", ...selectAll });
+        await send("Input.dispatchKeyEvent", { type: "keyUp", ...selectAll });
+        await send("Input.insertText", { text: rawText });
+      });
+      let value = "";
+      try {
+        value = await this.withDebugger(tab, async (send) => {
+          const res = (await send("Runtime.callFunctionOn", {
+            objectId: r.objectId,
+            functionDeclaration: "function() { return (this.value ?? this.innerText ?? '').slice(0, 500); }",
+            returnByValue: true,
+          })) as any;
+          return String(res?.result?.result?.value ?? "");
+        });
+      } catch {
+        /* best effort readback */
+      }
+      return { value };
+    }
     const wc = tab.view.webContents;
     const prep = `(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return 'missing'; if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) && !(el instanceof HTMLElement && el.isContentEditable)) return 'uneditable'; el.focus(); if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) el.select(); else { const r = document.createRange(); r.selectNodeContents(el); const s = getSelection(); if (s) { s.removeAllRanges(); s.addRange(r); } } return 'ok'; })()`;
     let state: any;

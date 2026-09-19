@@ -19,10 +19,13 @@ export default function Toasts({ toasts, onDismiss }: Props) {
 
 function ToastCard({ toast, onDismiss }: { toast: Toast; onDismiss(id: number): void }) {
   useEffect(() => {
+    // Errors persist until dismissed: they carry actions (retry, unblock)
+    // the user may need after reading the transcript around them.
+    if (toast.type === "error") return;
     const id = setTimeout(() => onDismiss(toast.id), 5000);
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [toast.id]);
+  }, [toast.id, toast.type]);
 
   const color =
     toast.type === "error"

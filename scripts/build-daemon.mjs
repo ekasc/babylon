@@ -4,6 +4,7 @@
 import esbuild from "esbuild";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { computeBuildId } from "./build-id.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -17,5 +18,6 @@ await esbuild.build({
   },
   entryPoints: [path.join(root, "daemon/main.ts")],
   outfile: path.join(root, "dist-daemon/main.mjs"),
+  define: { __BABYLON_BUILD_ID__: JSON.stringify(computeBuildId(root)) },
   sourcemap: true,
 });

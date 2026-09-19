@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { bridge, type HistoryProjection, type HistoryTurn } from "../bridge";
-import { BranchIcon, FlaskIcon, XIcon, ChevronIcon } from "./icons";
+import { FlaskIcon, ChevronIcon } from "./icons";
 
 interface Props {
   onClose(): void;
@@ -50,16 +50,12 @@ export default function BranchPanel({ onClose, refreshToken, onRollback, onUndoR
 
   return (
     <section aria-label="Session history workspace" className="context-pane flex h-full min-w-0 flex-col">
-      <div className="context-header flex h-16 shrink-0 items-center gap-2 px-4">
-        <BranchIcon size={14} className="shrink-0 text-accent" />
-        <span className="text-[15px] font-semibold tracking-tight">History</span>
-        <span className="truncate text-[13px] text-dim">
-          {history.hasBranches ? "conversation branches" : "conversation timeline"}
-        </span>
+      {/* The sidebar's header names this pane, so only its own actions remain. */}
+      <div className="flex shrink-0 items-center gap-2 px-4 py-2">
         {branched ? (
           <button
             onClick={() => setFolded((f) => !f)}
-            className="context-header-button ml-auto"
+            className="context-header-button"
             aria-pressed={folded}
             title={folded ? "Show all paths" : "Focus active path"}
           >
@@ -70,9 +66,6 @@ export default function BranchPanel({ onClose, refreshToken, onRollback, onUndoR
         <button onClick={onForkCurrent} className="context-header-button" title="Fork the session from its current position">
           <FlaskIcon size={12} />
           Fork current
-        </button>
-        <button onClick={onClose} aria-label="Close history" className="context-icon-button">
-          <XIcon size={12} />
         </button>
       </div>
 

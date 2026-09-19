@@ -51,7 +51,8 @@ const CompactionCard = memo(function CompactionCard({ item }: { item: Extract<Ch
   const isCompacting = item.status === "compacting";
   const isFailed = item.status === "failed";
   const isAborted = item.status === "aborted";
-  let leading: string | null = null;
+  // Status dot matches the tool/launch register (no text glyphs).
+  const dotClass = isFailed ? "bg-err" : isAborted ? "bg-warn" : "bg-ok";
   let text: string;
   let subtext: string | null = null;
   if (isCompacting) {
@@ -59,11 +60,9 @@ const CompactionCard = memo(function CompactionCard({ item }: { item: Extract<Ch
     subtext = item.reason ? `${item.reason}` : null;
   } else if (isAborted) {
     text = "Compaction aborted";
-    leading = "○";
   } else if (isFailed) {
     text = "Compaction failed";
     subtext = item.error ?? null;
-    leading = "⚠";
   } else {
     const r = item.result;
     if (r?.tokensBefore != null && r?.estimatedTokensAfter != null) {
@@ -72,7 +71,6 @@ const CompactionCard = memo(function CompactionCard({ item }: { item: Extract<Ch
       text = "Compacted";
     }
     subtext = item.reason && item.reason !== "auto" ? item.reason : null;
-    leading = "◍";
   }
   return (
     <div
@@ -81,8 +79,7 @@ const CompactionCard = memo(function CompactionCard({ item }: { item: Extract<Ch
       role="status"
       aria-live="polite"
     >
-      {isCompacting ? <span className="spinner inline-block h-3 w-3 shrink-0 rounded-full border-[1.5px] border-line border-t-accent animate-spin" aria-hidden /> : null}
-      {leading ? <span aria-hidden>{leading}</span> : null}
+      {isCompacting ? <span className="spinner inline-block h-3 w-3 shrink-0 rounded-full border-[1.5px] border-line border-t-accent animate-spin" aria-hidden /> : <span aria-hidden className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${dotClass}`} />}
       <span className="font-medium tabular-nums tracking-tight" style={{ color: isFailed || isAborted ? undefined : "var(--fg)" }}>{text}</span>
       {subtext ? <span className="text-dim truncate">· {subtext}</span> : null}
     </div>
@@ -118,6 +115,40 @@ function buildEntries(shown: ChatItem[]): Entry[] {
   return entries;
 }
 
+/** Markdown blockquote for quote-in-composer. Blank lines stay bare `>`. */
+export function formatBlockquote(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => (line.trim() ? `> ${line}` : ">"))
+    .join("\n");
+}
+
+/** Max quoted characters (T3 caps citation text the same way). */
+export const QUOTE_MAX_CHARS = 2000;
+
+/** One in-transcript find hit: item key for scroll targeting, index for folds. */
+export interface TranscriptMatch {
+  key: string;
+  index: number;
+}
+
+/** Case-insensitive substring search over message text (tools excluded —
+ *  their rows are command chips, not prose). */
+export function findTranscriptMatches(items: ChatItem[], query: string): TranscriptMatch[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return [];
+  const out: TranscriptMatch[] = [];
+  items.forEach((item, index) => {
+    let hay = "";
+    if (item.kind === "user" || item.kind === "system" || item.kind === "recap") hay = item.text ?? "";
+    else if (item.kind === "assistant") hay = item.blocks.map((b) => b.text).join("\n");
+    else if (item.kind === "launch") hay = `${item.label ?? ""}\n${item.log ?? ""}`;
+    else if (item.kind === "compaction") hay = item.reason ?? "";
+    if (hay.toLowerCase().includes(q)) out.push({ key: item.key, index });
+  });
+  return out;
+}
+
 interface Props {
   items: ChatItem[];
   /** True while an older stored-transcript window still exists. */
@@ -131,6 +162,9 @@ interface Props {
   streamResponses?: boolean;
   historyTurns?: HistoryTurn[];
   onRollback?(entryId: string): void;
+  /** Quote in composer (T3 cite): assistant text selection quoted as a
+   *  markdown blockquote into the composer draft. Receives raw text. */
+  onQuote?(text: string): void;
   onOpenLaunch?(runId: string, runKind: "subagent" | "thread" | "workflow"): void;
   onControlLaunch?(runId: string, runKind: "subagent" | "thread" | "workflow", action: "stop"): void;
   /** Group room: hide reasoning blocks and director machinery (collapsed in
@@ -159,6 +193,7 @@ export default memo(function ChatView({
   streaming,
   historyTurns = [],
   onRollback,
+  onQuote,
   onOpenLaunch,
   onControlLaunch,
   isRoom = false,
@@ -180,6 +215,87 @@ export default memo(function ChatView({
   const lastUserScrollAt = useRef(0);
   const showJumpVisible = useRef(false);
   const [showJump, setShowJump] = useState(false);
+  // In-transcript find: Cmd/Ctrl+F opens a floating bar; Enter jumps between
+  // matches, expanding collapsed folds on the way.
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [findIdx, setFindIdx] = useState(0);
+  const itemEls = useRef(new Map<string, HTMLDivElement>());
+  const trackItemEl = useCallback(
+    (key: string) => (el: HTMLDivElement | null) => {
+      if (el) itemEls.current.set(key, el);
+      else itemEls.current.delete(key);
+    },
+    []
+  );
+  const clearFindFlash = useCallback(() => {
+    for (const n of document.querySelectorAll(".find-target-flash")) n.classList.remove("find-target-flash");
+  }, []);
+  const closeFind = useCallback(() => {
+    setFindOpen(false);
+    clearFindFlash();
+  }, [clearFindFlash]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== "f" || e.shiftKey || e.altKey) return;
+      const ae = document.activeElement;
+      if (ae instanceof HTMLInputElement || ae instanceof HTMLTextAreaElement || (ae instanceof HTMLElement && ae.isContentEditable)) return;
+      e.preventDefault();
+      setFindOpen(true);
+      setFindIdx(0);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+  // Quote in composer: selecting assistant transcript text surfaces a
+  // floating Quote button (T3's cite toolbar, one action). Assistant-only so
+  // user messages and inputs never quote.
+  const [quoteSel, setQuoteSel] = useState<{ x: number; y: number; text: string } | null>(null);
+  useEffect(() => {
+    if (!onQuote) return;
+    const update = () => {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+        setQuoteSel(null);
+        return;
+      }
+      const range = sel.getRangeAt(0);
+      const container = ref.current;
+      if (!container || !container.contains(range.commonAncestorContainer)) {
+        setQuoteSel(null);
+        return;
+      }
+      const node = range.commonAncestorContainer;
+      const el = node instanceof Element ? node : node.parentElement;
+      if (!el || !el.closest(".conversation-assistant")) {
+        setQuoteSel(null);
+        return;
+      }
+      const text = sel.toString().trim();
+      if (!text) {
+        setQuoteSel(null);
+        return;
+      }
+      // Rect reads can throw in non-visual DOMs (jsdom); fall back to a
+      // top-left anchor so quoting still works there.
+      let x = 8;
+      let y = 6;
+      try {
+        const rect = range.getBoundingClientRect();
+        x = Math.max(8, Math.min(rect.left, window.innerWidth - 120));
+        y = Math.min(window.innerHeight - 48, rect.bottom + 6);
+      } catch {
+        /* keep fallback anchor */
+      }
+      setQuoteSel({
+        x,
+        y,
+        text: text.length > QUOTE_MAX_CHARS ? text.slice(0, QUOTE_MAX_CHARS) : text,
+      });
+    };
+    document.addEventListener("selectionchange", update);
+    return () => document.removeEventListener("selectionchange", update);
+  }, [onQuote]);
   const setStick = (next: boolean) => {
     stick.current = next;
     if (showJumpVisible.current === next) {
@@ -222,6 +338,7 @@ export default memo(function ChatView({
   const shown = items;
 
   const onScroll = () => {
+    setQuoteSel(null);
     const el = ref.current;
     if (!el) return;
     const pin = lastPin.current;
@@ -375,6 +492,37 @@ export default memo(function ChatView({
     }
     return last;
   }, [foldMap, streaming, streamResponses]);
+  const findMatches = useMemo(
+    () => (findOpen ? findTranscriptMatches(shown, findQuery) : []),
+    [findOpen, shown, findQuery]
+  );
+  const findActive =
+    findMatches.length > 0
+      ? findMatches[((findIdx % findMatches.length) + findMatches.length) % findMatches.length]
+      : null;
+  // Jump to the active hit: expand its fold first (the row mounts on the
+  // next paint), then scroll it into view with a flash ring.
+  useEffect(() => {
+    if (!findOpen || !findActive) return;
+    for (const fold of foldMap.values()) {
+      if (
+        findActive.index >= fold.start &&
+        findActive.index < fold.end &&
+        !expandedTurns.has(fold.turnId) &&
+        fold.turnId !== liveTurnId
+      ) {
+        setExpandedTurns((prev) => new Set(prev).add(fold.turnId));
+        return;
+      }
+    }
+    const id = requestAnimationFrame(() => {
+      const el = itemEls.current.get(findActive.key);
+      el?.scrollIntoView?.({ block: "center" });
+      clearFindFlash();
+      el?.classList.add("find-target-flash");
+    });
+    return () => cancelAnimationFrame(id);
+  }, [findOpen, findActive, foldMap, expandedTurns, liveTurnId, clearFindFlash]);
   // Terminal replies of collapsed turns: their reasoning block is work too, so
   // it stays hidden until the turn is expanded.
   const collapsedTerminals = useMemo(() => {
@@ -449,7 +597,7 @@ export default memo(function ChatView({
               </Fragment>
             ) : (
               <Fragment key={entry.item.key}>
-                <div className={longChat ? "chat-item chat-item-long" : "chat-item"}>
+                <div ref={trackItemEl(entry.item.key)} className={longChat ? "chat-item chat-item-long" : "chat-item"}>
                   {(() => {
                     const prev = idx > 0 ? visibleEntries[idx - 1] : null;
                     const prevIsTool = !!prev && (prev.type === "group" || (prev.type === "single" && (prev.item.kind === "tool" || prev.item.kind === "launch")));
@@ -511,7 +659,7 @@ export default memo(function ChatView({
                               <ToolGroup tools={he.tools} onDisclosureToggle={suspendFollowForDisclosure} />
                             </div>
                           ) : (
-                            <div key={he.item.key} className={longChat ? "chat-item chat-item-long" : "chat-item"}>
+                            <div ref={trackItemEl(he.item.key)} key={he.item.key} className={longChat ? "chat-item chat-item-long" : "chat-item"}>
                               {he.item.kind === "tool" ? <ToolCard item={he.item as any} onDisclosureToggle={suspendFollowForDisclosure} /> : he.item.kind === "assistant" ? (<>
                                 <SpeakerHead speaker={(he.item as any).speaker} streaming={(he.item as any).streaming} roomHandle={roomHandle} members={roomMembers} isRoom={isRoom} roomName={roomName} showSpeakers={showSpeakers} />
                                 <AssistantMessage item={he.item as any} hideThinking={isRoom} />
@@ -540,6 +688,68 @@ export default memo(function ChatView({
         ) : null}
       </div>
       </div>
+      {findOpen ? (
+        <div
+          role="search"
+          aria-label="Find in transcript"
+          className="absolute left-1/2 top-2 z-20 flex -translate-x-1/2 items-center gap-1 rounded-full border border-line bg-raised py-1 pl-3 pr-1.5 shadow-lg"
+        >
+          <input
+            autoFocus
+            value={findQuery}
+            onChange={(e) => {
+              setFindQuery(e.target.value);
+              setFindIdx(0);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                setFindIdx((i) => (e.shiftKey ? i - 1 : i + 1));
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                closeFind();
+              }
+            }}
+            placeholder="Find in transcript"
+            aria-label="Find in transcript"
+            className="w-44 bg-transparent text-[12px] outline-none placeholder:text-dim"
+          />
+          <span aria-live="polite" className="min-w-8 shrink-0 text-center text-[11px] tabular-nums text-dim">
+            {findMatches.length > 0 && findActive
+              ? `${findMatches.indexOf(findActive) + 1}/${findMatches.length}`
+              : findQuery.trim() ? "0" : "—"}
+          </span>
+          <button
+            type="button"
+            onClick={() => setFindIdx((i) => i - 1)}
+            disabled={findMatches.length === 0}
+            aria-label="Previous match"
+            title="Previous match (Shift+Enter)"
+            className="grid h-6 w-6 place-items-center rounded-full text-dim hover:text-fg disabled:opacity-30"
+          >
+            ↑
+          </button>
+          <button
+            type="button"
+            onClick={() => setFindIdx((i) => i + 1)}
+            disabled={findMatches.length === 0}
+            aria-label="Next match"
+            title="Next match (Enter)"
+            className="grid h-6 w-6 place-items-center rounded-full text-dim hover:text-fg disabled:opacity-30"
+          >
+            ↓
+          </button>
+          <button
+            type="button"
+            onClick={closeFind}
+            aria-label="Close find"
+            title="Close find (Esc)"
+            className="grid h-6 w-6 place-items-center rounded-full text-dim hover:text-fg"
+          >
+            ✕
+          </button>
+        </div>
+      ) : null}
       {showJump && (
         <button
           type="button"
@@ -557,6 +767,26 @@ export default memo(function ChatView({
           <ArrowDownIcon size={14} />
         </button>
       )}
+      {quoteSel && onQuote ? (
+        <button
+          type="button"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => {
+            onQuote(formatBlockquote(quoteSel.text));
+            window.getSelection()?.removeAllRanges();
+            setQuoteSel(null);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") setQuoteSel(null);
+          }}
+          style={{ left: quoteSel.x, top: quoteSel.y }}
+          className="fixed z-[60] rounded-full border border-line bg-raised px-3 py-1.5 text-[12px] font-medium text-fg shadow-lg transition-colors hover:border-accent/40 hover:text-accent"
+          aria-label="Quote selection in composer"
+          title="Quote selection in composer"
+        >
+          Quote
+        </button>
+      ) : null}
     </div>
   );
 });

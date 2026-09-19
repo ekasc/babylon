@@ -5,6 +5,7 @@ import esbuild from "esbuild";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { computeBuildId } from "./build-id.mjs";
 
 const { context: createContext } = esbuild;
 
@@ -19,6 +20,10 @@ const shared = {
   bundle: true,
   platform: "node",
   format: "esm",
+  // Content hash of the sources, so the app can retire a daemon bundled
+  // from different source. Computed once per dev session; the daemon bundle
+  // gets a fresh one on every build:daemon.
+  define: { __BABYLON_BUILD_ID__: JSON.stringify(computeBuildId(root)) },
   // Pi loads provider auth and API implementations with relative dynamic
   // imports. Keep the package intact so those imports resolve inside it.
   external: ["electron", "@earendil-works/pi-coding-agent"],

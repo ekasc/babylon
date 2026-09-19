@@ -63,6 +63,11 @@ Never say "should work" when verification was available.
 Never hide failing checks.
 
 
+## Feature Entry Points (critical)
+
+- Never add an entry point for a new feature to the More panels menu. Put a
+  feature's entry point where the feature is used, not in a menu of miscellany.
+
 ## Git Boundaries (critical)
 
 - Git operations are only performed when the user explicitly issues them:

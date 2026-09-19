@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import Composer from "./Composer";
@@ -71,5 +71,197 @@ describe("Composer select dialog (ask_question with options)", () => {
     await userEvent.click(screen.getByRole("button", { name: /Main chat/ }));
     await waitFor(() => expect(uiRespond).toHaveBeenCalledTimes(1));
     expect(uiRespond).toHaveBeenCalledWith({ id: "d1", value: "Main chat" });
+  });
+});
+describe("Composer prompt stash", () => {
+  it("stashes the draft on Cmd+S and shows the count badge", async () => {
+    const toast = vi.fn();
+    render(<Composer {...baseProps({ toast })} />);
+    const box = screen.getByRole("textbox", { name: "Message Pi" }) as HTMLTextAreaElement;
+    await userEvent.type(box, "park this thought");
+    await userEvent.keyboard("{Meta>}s{/Meta}");
+    expect(box.value).toBe("");
+    expect(screen.getByRole("button", { name: "Stashed drafts (1)" })).toBeTruthy();
+    expect(toast).toHaveBeenCalledWith("info", "Draft stashed");
+  });
+
+  it("restores a stash by appending and removes the entry", async () => {
+    render(<Composer {...baseProps({})} />);
+    const box = screen.getByRole("textbox", { name: "Message Pi" }) as HTMLTextAreaElement;
+    await userEvent.type(box, "parked idea");
+    await userEvent.keyboard("{Control>}s{/Control}");
+    await userEvent.click(screen.getByRole("button", { name: "Stashed drafts (1)" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: /parked idea/ }));
+    expect(box.value).toBe("parked idea");
+    expect(screen.queryByRole("button", { name: /Stashed drafts \(\d+\)/ })).toBeNull();
+  });
+
+  it("appends a restored stash below existing text", async () => {
+    render(<Composer {...baseProps({})} />);
+    const box = screen.getByRole("textbox", { name: "Message Pi" }) as HTMLTextAreaElement;
+    await userEvent.type(box, "first");
+    await userEvent.keyboard("{Meta>}s{/Meta}");
+    await userEvent.type(box, "second");
+    await userEvent.click(screen.getByRole("button", { name: "Stashed drafts (1)" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: /first/ }));
+    expect(box.value).toBe("second\n\nfirst");
+  });
+
+  it("deletes a stash without restoring", async () => {
+    render(<Composer {...baseProps({})} />);
+    const box = screen.getByRole("textbox", { name: "Message Pi" }) as HTMLTextAreaElement;
+    await userEvent.type(box, "drop me");
+    await userEvent.keyboard("{Meta>}s{/Meta}");
+    await userEvent.click(screen.getByRole("button", { name: "Stashed drafts (1)" }));
+    await userEvent.click(screen.getByRole("button", { name: "Delete stashed draft" }));
+    expect(screen.queryByRole("button", { name: /Stashed drafts \(\d+\)/ })).toBeNull();
+    expect(box.value).toBe("");
+  });
+
+  it("ignores stash on an empty draft", async () => {
+    render(<Composer {...baseProps({})} />);
+    await userEvent.click(screen.getByRole("textbox", { name: "Message Pi" }));
+    await userEvent.keyboard("{Meta>}s{/Meta}");
+    expect(screen.queryByRole("button", { name: /Stashed drafts \(\d+\)/ })).toBeNull();
+  });
+});
+
+describe("Composer quote draftRequests", () => {
+  it("appends quote text below the existing draft", async () => {
+    const { rerender } = render(<Composer {...baseProps({})} />);
+    const box = screen.getByRole("textbox", { name: "Message Pi" }) as HTMLTextAreaElement;
+    await userEvent.type(box, "my words");
+    rerender(<Composer {...baseProps({ draftRequest: { id: 1, text: "> quoted", append: true } })} />);
+    expect(box.value).toBe("my words\n\n> quoted");
+  });
+
+  it("replaces the draft without append", async () => {
+    const { rerender } = render(<Composer {...baseProps({})} />);
+    const box = screen.getByRole("textbox", { name: "Message Pi" }) as HTMLTextAreaElement;
+    await userEvent.type(box, "my words");
+    rerender(<Composer {...baseProps({ draftRequest: { id: 2, text: "rollback text" } })} />);
+    expect(box.value).toBe("rollback text");
+  });
+});
+
+describe("composer draft persistence", () => {
+  const KEY_A = "test-draft-a";
+  const KEY_B = "test-draft-b";
+  const stored = (k: string) => localStorage.getItem(`babylon:composer-draft:${k}`);
+
+  it("restores the draft after remount", async () => {
+    localStorage.removeItem(`babylon:composer-draft:${KEY_A}`);
+    const { unmount } = render(<Composer {...baseProps({ sessionKey: KEY_A })} />);
+    await userEvent.type(screen.getByRole("textbox", { name: "Message Pi" }), "half thought");
+    expect(stored(KEY_A)).toBe("half thought");
+    unmount();
+    render(<Composer {...baseProps({ sessionKey: KEY_A })} />);
+    expect((screen.getByRole("textbox", { name: "Message Pi" }) as HTMLTextAreaElement).value).toBe("half thought");
+    localStorage.removeItem(`babylon:composer-draft:${KEY_A}`);
+  });
+
+  it("keeps drafts per session", async () => {
+    localStorage.removeItem(`babylon:composer-draft:${KEY_A}`);
+    localStorage.removeItem(`babylon:composer-draft:${KEY_B}`);
+    const { rerender } = render(<Composer {...baseProps({ sessionKey: KEY_A })} />);
+    const box = screen.getByRole("textbox", { name: "Message Pi" }) as HTMLTextAreaElement;
+    await userEvent.type(box, "for A");
+    rerender(<Composer {...baseProps({ sessionKey: KEY_B })} />);
+    expect(box.value).toBe("");
+    await userEvent.type(box, "for B");
+    rerender(<Composer {...baseProps({ sessionKey: KEY_A })} />);
+    expect(box.value).toBe("for A");
+    localStorage.removeItem(`babylon:composer-draft:${KEY_A}`);
+    localStorage.removeItem(`babylon:composer-draft:${KEY_B}`);
+  });
+
+  it("clears the saved draft on accepted send", async () => {
+    localStorage.removeItem(`babylon:composer-draft:${KEY_A}`);
+    render(<Composer {...baseProps({ sessionKey: KEY_A })} />);
+    const box = screen.getByRole("textbox", { name: "Message Pi" }) as HTMLTextAreaElement;
+    await userEvent.type(box, "send me");
+    await userEvent.keyboard("{Enter}");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(stored(KEY_A)).toBeNull();
+  });
+});
+
+describe("composer attachments policy", () => {
+  beforeEach(() => {
+    window.URL.createObjectURL = vi.fn(() => "blob:mock");
+    window.URL.revokeObjectURL = vi.fn();
+  });
+
+  it("rejects HEIC with guidance", async () => {
+    const { fireEvent } = await import("@testing-library/react");
+    render(<Composer {...baseProps({})} />);
+    const dock = document.querySelector(".composer-dock")!;
+    fireEvent.drop(dock, { dataTransfer: { files: [new File(["x"], "photo.heic", { type: "" })] } });
+    expect(await screen.findByText(/HEIC\/HEIF.*convert to JPEG or PNG/i)).toBeTruthy();
+  });
+
+  it("routes typeless image drags to the image path", async () => {
+    const { fireEvent } = await import("@testing-library/react");
+    render(<Composer {...baseProps({})} />);
+    const dock = document.querySelector(".composer-dock")!;
+    fireEvent.drop(dock, { dataTransfer: { files: [new File(["x"], "photo.jpg", { type: "" })] } });
+    expect(await screen.findByAltText("photo.jpg")).toBeTruthy();
+  });
+
+  it("caps attachments per message", async () => {
+    const { fireEvent } = await import("@testing-library/react");
+    render(<Composer {...baseProps({})} />);
+    const dock = document.querySelector(".composer-dock")!;
+    const files = Array.from({ length: 10 }, (_, i) => new File(["x"], `f${i}.txt`, { type: "text/plain" }));
+    fireEvent.drop(dock, { dataTransfer: { files } });
+    expect(await screen.findByText(/not attached \(max 8 files/i)).toBeTruthy();
+  });
+
+  it("refuses oversized sends at submit", async () => {
+    const onSend = vi.fn(async () => true);
+    const { fireEvent } = await import("@testing-library/react");
+    const toast = vi.fn();
+    render(<Composer {...baseProps({ onSend, toast })} />);
+    const box = screen.getByRole("textbox", { name: "Message Pi" });
+    fireEvent.change(box, { target: { value: "x".repeat(120_001) } });
+    (box as HTMLTextAreaElement).focus();
+    await userEvent.keyboard("{Enter}");
+    expect(onSend).not.toHaveBeenCalled();
+    expect(toast).toHaveBeenCalledWith("error", expect.stringContaining("120,000"));
+  });
+
+  it("folds large pastes to stably-named files, bypassed by mod+Shift+V", async () => {
+    const { fireEvent } = await import("@testing-library/react");
+    const toast = vi.fn();
+    render(<Composer {...baseProps({ toast })} />);
+    const box = screen.getByRole("textbox", { name: "Message Pi" });
+    const big = "x".repeat(33 * 1024);
+    const paste = () =>
+      fireEvent.paste(box, {
+        clipboardData: { items: [], getData: () => big },
+      } as unknown as ClipboardEvent);
+    paste();
+    expect(await screen.findByText("pasted-text.txt")).toBeTruthy();
+    expect(toast).toHaveBeenCalledWith("info", expect.stringContaining("pasted-text.txt"));
+    toast.mockClear();
+    await userEvent.click(box);
+    await userEvent.keyboard("{Meta>}{Shift>}v{/Shift}{/Meta}");
+    paste();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(toast).not.toHaveBeenCalled();
+  });
+});
+
+describe("composer stash menu", () => {
+  it("closes the open stash menu on Escape", async () => {
+    render(<Composer {...baseProps({})} />);
+    const box = screen.getByRole("textbox", { name: "Message Pi" });
+    await userEvent.type(box, "park me");
+    await userEvent.keyboard("{Meta>}s{/Meta}");
+    await userEvent.click(screen.getByRole("button", { name: "Stashed drafts (1)" }));
+    expect(screen.getByRole("menu", { name: "Stashed drafts" })).toBeTruthy();
+    await userEvent.click(box);
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("menu", { name: "Stashed drafts" })).toBeNull();
   });
 });

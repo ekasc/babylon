@@ -75,13 +75,16 @@ export const AssistantMessage = memo(function AssistantMessage({ item, hideThink
   const [elapsed, setElapsed] = useState(0);
   const startedAt = useRef<number | null>(null);
   useEffect(() => {
-    if (!inFlight) return;
+    if (!item.streaming) {
+      startedAt.current = null;
+      return;
+    }
     if (startedAt.current == null) startedAt.current = Date.now();
     const tick = () => setElapsed(Math.floor((Date.now() - (startedAt.current as number)) / 1000));
     tick();
     const id = window.setInterval(tick, 1000);
     return () => window.clearInterval(id);
-  }, [inFlight]);
+  }, [item.streaming]);
   const lastTextIdx = (() => {
     for (let i = blocks.length - 1; i >= 0; i--) if (blocks[i].type === "text" && blocks[i].text.trim()) return i;
     return -1;
@@ -90,6 +93,12 @@ export const AssistantMessage = memo(function AssistantMessage({ item, hideThink
   return (
     <article className="conversation-assistant" aria-busy={inFlight || undefined}>
       <div className="flex flex-col gap-3">
+      {!!item.streaming ? (
+        <div role="status" aria-live="polite" className="flex items-center gap-2 text-[12px] text-dim">
+          <span className="thinking-dot is-pulse" aria-hidden />
+          <span>Working{elapsed > 0 ? ` · ${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, "0")}` : "…"}</span>
+        </div>
+      ) : null}
       {blocks.map((b, i) => {
         const isLastText = i === lastTextIdx;
         const showDivider = isLastText && hasPreceding && !item.streaming;
@@ -102,12 +111,7 @@ export const AssistantMessage = memo(function AssistantMessage({ item, hideThink
           <Thinking key={i} text={b.text} streaming={!!item.streaming} />
         );
       })}
-      {inFlight ? (
-        <div role="status" aria-live="polite" className="flex items-center gap-2 text-[12px] text-dim">
-          <span className="thinking-dot is-pulse" aria-hidden />
-          <span>Working{elapsed > 0 ? ` · ${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, "0")}` : "…"}</span>
-        </div>
-      ) : item.streaming ? (
+      {inFlight ? null : item.streaming ? (
         <span aria-hidden="true" className="h-4 w-[2px] animate-pulse bg-accent" />
       ) : null}
       </div>
@@ -228,14 +232,15 @@ export const RecapLine = memo(function RecapLine({ text }: { text: string }) {
 // Tool calls
 // ---------------------------------------------------------------------------
 
-function argSummary(name: string, args: any): string {
+function argSummary(name: string, args: Record<string, unknown> | null | undefined): string {
   if (!args || typeof args !== "object") return "";
-  if (name === "bash") return args.command ?? "";
-  if (args.path) return args.path;
-  if (args.pattern) return args.pattern;
+  const str = (v: unknown) => (typeof v === "string" ? v : "");
+  if (name === "bash") return str(args.command);
+  if (args.path) return str(args.path);
+  if (args.pattern) return str(args.pattern);
   try {
     return Object.values(args)
-      .filter((v) => typeof v === "string")
+      .filter((v): v is string => typeof v === "string")
       .slice(0, 2)
       .join(" ")
       .slice(0, 140);
@@ -272,6 +277,8 @@ export function miniPatch(patch: string, maxLines = 6): string {
 export const ToolCard = memo(function ToolCard({ item, onDisclosureToggle }: { item: Extract<ChatItem, { kind: "tool" }>; onDisclosureToggle?: () => void }) {
   const [open, setOpen] = useState(false);
   const [fullOutput, setFullOutput] = useState<string | null>(null);
+  const [outputLoading, setOutputLoading] = useState(false);
+  const [outputError, setOutputError] = useState<string | null>(null);
 
   useEffect(() => {
     // Expanded only for failures; a run in progress never force-opens a card.
@@ -316,17 +323,24 @@ export const ToolCard = memo(function ToolCard({ item, onDisclosureToggle }: { i
                 {fullOutput ?? item.output ?? (item.status === "running" ? "running…" : "(no output)")}
               </pre>
               {item.truncated && fullOutput == null ? (
-                <button
-                  onClick={() => {
-                    bridge
-                      .getToolOutput(item.toolCallId)
-                      .then((result) => setFullOutput(result.content))
-                      .catch(() => undefined);
-                  }}
-                  className="context-button mt-1"
-                >
-                  Show full output
-                </button>
+                <>
+                  <button
+                    onClick={() => {
+                      setOutputLoading(true);
+                      setOutputError(null);
+                      bridge
+                        .getToolOutput(item.toolCallId)
+                        .then((result) => setFullOutput(result.content))
+                        .catch((e) => setOutputError(e instanceof Error ? e.message : "couldn't load full output"))
+                        .finally(() => setOutputLoading(false));
+                    }}
+                    disabled={outputLoading}
+                    className="context-button mt-1 disabled:opacity-50"
+                  >
+                    {outputLoading ? "Loading full output…" : "Show full output"}
+                  </button>
+                  {outputError ? <p role="alert" className="mt-1 text-[12px] text-err">{outputError}</p> : null}
+                </>
               ) : null}
             </>
           )}

@@ -9,6 +9,10 @@ export interface GoalState {
   turns: number;
   done: boolean;
   doneAt?: number;
+  /** Set while the clock is held; elapsed excludes everything after it. */
+  pausedAt?: number | null;
+  /** Ms of finished pauses, excluded from the elapsed clock. */
+  pausedMs?: number;
   pos?: GoalPos | null;
 }
 
@@ -45,6 +49,8 @@ export function loadGoals(store: Store | null = defaultStore()): GoalMap {
         turns: typeof g.turns === "number" && g.turns >= 0 ? Math.floor(g.turns) : 0,
         done: g.done === true,
         ...(typeof g.doneAt === "number" ? { doneAt: g.doneAt } : {}),
+        ...(typeof g.pausedAt === "number" ? { pausedAt: g.pausedAt } : {}),
+        ...(typeof g.pausedMs === "number" && g.pausedMs > 0 ? { pausedMs: g.pausedMs } : {}),
         ...(g.pos && typeof g.pos.x === "number" && typeof g.pos.y === "number" ? { pos: { x: g.pos.x, y: g.pos.y } } : {}),
       };
     }
@@ -70,22 +76,40 @@ export function startGoal(map: GoalMap, path: string, objective: string, now: nu
   const prev = map[path];
   return {
     ...map,
-    [path]: { objective: clean, startedAt: now, turns: 0, done: false, pos: prev?.pos ?? null },
+    [path]: { objective: clean, startedAt: now, turns: 0, done: false, pausedAt: null, pausedMs: 0, pos: prev?.pos ?? null },
   };
 }
 
-/** Count one assistant reply toward the session's goal. No-op without an open goal. */
+/** Count one assistant reply toward the session's goal. No-op without an open, running goal. */
 export function bumpGoalTurn(map: GoalMap, path: string): GoalMap {
   const g = map[path];
-  if (!g || g.done) return map;
+  if (!g || g.done || g.pausedAt != null) return map;
   return { ...map, [path]: { ...g, turns: g.turns + 1 } };
+}
+
+/** Hold the clock. No-op without a running goal. */
+export function pauseGoal(map: GoalMap, path: string, now: number = Date.now()): GoalMap {
+  const g = map[path];
+  if (!path || !g || g.done || g.pausedAt != null) return map;
+  return { ...map, [path]: { ...g, pausedAt: now } };
+}
+
+/** Resume a paused goal, or continue a finished one where it left off. */
+export function resumeGoal(map: GoalMap, path: string, now: number = Date.now()): GoalMap {
+  const g = map[path];
+  if (!path || !g || (g.pausedAt == null && !g.done)) return map;
+  const pausedMs = (g.pausedMs ?? 0) + (g.pausedAt != null ? Math.max(0, now - g.pausedAt) : 0);
+  const next: GoalState = { ...g, pausedMs, pausedAt: null, done: false };
+  delete next.doneAt;
+  return { ...map, [path]: next };
 }
 
 /** Mark the goal done, freezing the elapsed clock. */
 export function finishGoal(map: GoalMap, path: string, now: number = Date.now()): GoalMap {
   const g = map[path];
   if (!g || g.done) return map;
-  return { ...map, [path]: { ...g, done: true, doneAt: now } };
+  const pausedMs = (g.pausedMs ?? 0) + (g.pausedAt != null ? Math.max(0, now - g.pausedAt) : 0);
+  return { ...map, [path]: { ...g, pausedMs, pausedAt: null, done: true, doneAt: now } };
 }
 
 export function clearGoal(map: GoalMap, path: string): GoalMap {
@@ -101,9 +125,10 @@ export function moveGoal(map: GoalMap, path: string, pos: GoalPos): GoalMap {
   return { ...map, [path]: { ...g, pos } };
 }
 
-/** Elapsed ms toward the goal; frozen at doneAt once finished. */
+/** Elapsed ms toward the goal; frozen at doneAt once finished, held while paused. */
 export function goalElapsed(g: GoalState, now: number = Date.now()): number {
-  return Math.max(0, (g.done && typeof g.doneAt === "number" ? g.doneAt : now) - g.startedAt);
+  const end = g.done && typeof g.doneAt === "number" ? g.doneAt : (g.pausedAt ?? now);
+  return Math.max(0, end - g.startedAt - (g.pausedMs ?? 0));
 }
 
 /** H:MM:SS past the hour, M:SS before it. */

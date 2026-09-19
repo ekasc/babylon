@@ -1,4 +1,5 @@
-import type { ActiveRollback, TurnCheckpoint } from "./rollback-store";
+import type { ActiveRollback, TurnCheckpoint, TurnReceipt } from "./rollback-store";
+import { missingCheckpointReason } from "./rollback-store";
 import type { SessionTreeRow } from "./session-tree";
 
 export interface HistoryTurn {
@@ -47,6 +48,7 @@ export function projectHistory(input: {
   rows: SessionTreeRow[];
   leafId: string | null;
   checkpoints: TurnCheckpoint[];
+  receipts?: TurnReceipt[];
   gitAvailable: boolean;
   streaming: boolean;
   activeRollback?: ActiveRollback;
@@ -88,7 +90,7 @@ export function projectHistory(input: {
     else if (input.streaming) rollbackReason = "Finish or stop the active response before rolling back";
     else if (!onActivePath) rollbackReason = "This turn is not on the active path";
     else if (!input.gitAvailable) rollbackReason = "Rollback requires a Git project";
-    else if (!checkpoint) rollbackReason = "No filesystem checkpoint was recorded for this turn";
+    else if (!checkpoint) rollbackReason = missingCheckpointReason(input.receipts, row.id);
     else if (!checkpoint.complete) rollbackReason = "This filesystem checkpoint is incomplete";
     return {
       entryId: row.id,

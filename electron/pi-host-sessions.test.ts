@@ -25,13 +25,14 @@ async function makeSessionFile(cwd: string) {
   return file;
 }
 
-function makeHost(cwd: string, agentDir: string) {
+function makeHost(cwd: string, agentDir: string, sessionsRoot?: string) {
   const events: any[] = [];
   const statuses: any[] = [];
   const host = new PiHost({
     cwd,
     agentDir,
     stateDir: join(agentDir, "pideck-state"),
+    ...(sessionsRoot ? { sessionsRoot } : {}),
     onEvent: (ev: any) => events.push(ev),
     onStatus: (s: any) => statuses.push(s),
   } as any);
@@ -164,4 +165,99 @@ describe("PiHost independent session execution", () => {
       await host.dispose();
     }
   }, 60_000);
+});
+
+describe("drain for restart", () => {
+  function liveSession(streaming: boolean) {
+    return { runtime: { session: { isStreaming: streaming, sessionId: "s1" } } };
+  }
+
+  it("refuses new turns once draining, before touching sessions", async () => {
+    const { cwd, agentDir } = await makeProject("drain-fence");
+    const { host } = makeHost(cwd, agentDir);
+    expect(host.isDraining()).toBe(false);
+    host.beginDrain();
+    expect(host.isDraining()).toBe(true);
+    await expect(host.prompt("hi")).rejects.toThrow(/draining/);
+    await host.dispose();
+  });
+
+  it("is quiet with no sessions and times out on a live turn", async () => {
+    const { cwd, agentDir } = await makeProject("drain-quiet");
+    const { host } = makeHost(cwd, agentDir);
+    expect(host.activeTurnCount()).toBe(0);
+    expect(await host.drainTurns(50)).toBe(true);
+    (host as any).sessions.set("f", liveSession(true));
+    expect(host.activeTurnCount()).toBe(1);
+    expect(await host.drainTurns(60)).toBe(false);
+    await host.dispose();
+  });
+
+  it("returns true when the turn ends mid-wait", async () => {
+    const { cwd, agentDir } = await makeProject("drain-finish");
+    const { host } = makeHost(cwd, agentDir);
+    const fake = liveSession(true);
+    (host as any).sessions.set("f", fake);
+    setTimeout(() => {
+      fake.runtime.session.isStreaming = false;
+    }, 20);
+    expect(await host.drainTurns(1000)).toBe(true);
+    expect(host.activeTurnCount()).toBe(0);
+    await host.dispose();
+  });
+
+  it("counts approval-blocked sessions as live", async () => {
+    const { cwd, agentDir } = await makeProject("drain-ui");
+    const { host } = makeHost(cwd, agentDir);
+    (host as any).sessions.set("f", liveSession(false));
+    expect(host.activeTurnCount()).toBe(0);
+    (host as any).uiRequests.set("u1", { sessionFile: "f", resolve: () => undefined, reject: () => undefined });
+    expect(host.activeTurnCount()).toBe(1);
+    await host.dispose();
+  });
+});
+
+describe("instance session fork", () => {
+  async function scopedRoot(tag: string): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), `pideck-sessions-${tag}-`));
+    roots.push(dir);
+    return dir;
+  }
+
+  async function mintSession(cwd: string, root: string): Promise<string> {
+    const sm = SessionManager.create(cwd, root);
+    const file = sm.getSessionFile();
+    if (!file) throw new Error("no session file");
+    // SessionManager mints the path lazily; materialize it so reads behave.
+    const { appendFile } = await import("node:fs/promises");
+    await appendFile(file, "");
+    return file;
+  }
+
+  it("opens sessions inside its root and refuses outside files", async () => {
+    const { cwd, agentDir } = await makeProject("fork");
+    const root = await scopedRoot("fork");
+    const inside = await mintSession(cwd, root);
+    expect(inside.startsWith(root)).toBe(true);
+    const outside = await mintSession(cwd, await scopedRoot("other"));
+    const { host } = makeHost(cwd, agentDir, root);
+    await host.start();
+    try {
+      await host.open({ path: inside, cwd });
+      expect((host as any).foregroundSessionFile).toBe(inside);
+      await expect(host.open({ path: outside, cwd })).rejects.toThrow(/outside/i);
+    } finally {
+      await host.dispose();
+    }
+  });
+
+  it("resolves parents only inside the given root", async () => {
+    const { cwd } = await makeProject("parents");
+    const root = await scopedRoot("parents");
+    const file = await mintSession(cwd, root);
+    const id = file.split("_").pop()!.replace(/\.jsonl$/, "");
+    const { resolveParentSessionFile } = await import("./threads");
+    expect(await resolveParentSessionFile(id, root)).toBe(file);
+    expect(await resolveParentSessionFile(id)).toBeNull();
+  });
 });

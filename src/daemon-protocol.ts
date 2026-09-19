@@ -17,6 +17,30 @@ export type ProtocolKind = "request" | "response" | "event";
 // rather than speak a mismatched protocol. See `daemon.shutdown`.
 export const DAEMON_PROTOCOL_VERSION = 2;
 
+/** What a live daemon advertises about itself on ping. */
+export type DaemonAdvertised = { protocol?: unknown; build?: unknown; draining?: unknown };
+
+/**
+ * Whether the socket holder must go before use. Protocol mismatch is
+ * definitive. Builds are content-hashed at bundle time, so equal versions
+ * with different builds are still skew: the dev watcher rebuilds the
+ * Electron side on every save while the daemon bundle only rebuilds on
+ * demand. A daemon that predates build ids counts as mismatched (fail
+ * closed); an unknown own id means this side cannot compare, so it keeps.
+ */
+export function shouldRetireDaemon(
+  running: DaemonAdvertised | undefined,
+  ours: { protocol: number; build: string }
+): boolean {
+  if (!running) return false;
+  // A draining holder exits on its own within seconds; retire waits it out
+  // through the normal shutdown path instead of adopting a dying daemon.
+  if (running.draining === true) return true;
+  if (running.protocol !== ours.protocol) return true;
+  if (ours.build === "unknown") return false;
+  return running.build !== ours.build;
+}
+
 // The single source of truth for message types. The string union is derived
 // from this list so adding a member cannot silently drift from the validator.
 export const KNOWN_MESSAGE_TYPES = [

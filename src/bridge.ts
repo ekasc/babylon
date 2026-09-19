@@ -157,6 +157,12 @@ export interface GitPrCreateResult {
   headBranch: string;
 }
 
+import type { RegionReading } from "./lib/sketch-compile";
+
+export type CanvasSceneSummary = { name: string; path: string; mtime: number; size: number };
+export type CanvasScenePayload = { path: string; name: string; text: string | null };
+export type CanvasChangedEvent = { path: string; name: string; text: string | null };
+
 export interface SessionStatus {
   status: "idle" | "starting" | "ready" | "exited" | "error";
   cwd?: string;
@@ -519,6 +525,14 @@ export interface Bridge {
   releaseSession(path: string): Promise<{ released: boolean }>;
   refreshSession(path: string): Promise<boolean>;
 
+  canvasList(cwd: string): Promise<CanvasSceneSummary[]>;
+  canvasWrite(cwd: string, name: string, text: string): Promise<{ path: string }>;
+  canvasWatch(cwd: string | null, name: string | null): Promise<{ path?: string; name?: string; text: string | null }>;
+  canvasClassify(cwd: string, name: string, crops: { regionId: string; dataUrl: string }[]): Promise<Record<string, RegionReading>>;
+  canvasUnwatch(): Promise<{ ok: boolean }>;
+  onCanvasChanged(cb: (event: CanvasChangedEvent) => void): () => void;
+  onCanvasScenes(cb: (scenes: CanvasSceneSummary[]) => void): () => void;
+
   getMessages(): Promise<any[]>;
   getState(): Promise<any>;
   getStats(): Promise<any>;
@@ -731,6 +745,13 @@ export const bridge: Bridge = window.pideck ?? {
   getSessionMessages: () => Promise.resolve({ messages: [], startOffset: 0 }),
   getSessionWindow: () => Promise.resolve({ messages: [], startOffset: 0 }),
   getToolOutput: () => Promise.reject(new Error("bridge unavailable")),
+  canvasList: () => Promise.resolve([]),
+  canvasWrite: () => Promise.reject(new Error("bridge unavailable")),
+  canvasWatch: () => Promise.resolve({ text: null }),
+  canvasClassify: () => Promise.reject(new Error("bridge unavailable")),
+  canvasUnwatch: () => Promise.resolve({ ok: true }),
+  onCanvasChanged: () => () => {},
+  onCanvasScenes: () => () => {},
   deleteSession: () => Promise.reject(new Error("bridge unavailable")),
   pickFolder: () => Promise.resolve(null),
   openSession: () => Promise.resolve(),

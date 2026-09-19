@@ -7,6 +7,8 @@ import {
   goalElapsed,
   loadGoals,
   moveGoal,
+  pauseGoal,
+  resumeGoal,
   saveGoals,
   startGoal,
   type GoalMap,
@@ -57,6 +59,43 @@ describe("finishGoal / clearGoal", () => {
     m = clearGoal(m, "/s/a");
     expect(m).toEqual({});
     expect(clearGoal(m, "/s/a")).toBe(m);
+  });
+});
+
+describe("pauseGoal / resumeGoal", () => {
+  it("holds the clock while paused and accrues again on resume", () => {
+    let m: GoalMap = startGoal({}, "/s/a", "Ship it", 1000);
+    m = pauseGoal(m, "/s/a", 11000);
+    expect(m["/s/a"].pausedAt).toBe(11000);
+    expect(goalElapsed(m["/s/a"], 999999)).toBe(10000);
+    expect(bumpGoalTurn(m, "/s/a")).toBe(m);
+    expect(pauseGoal(m, "/s/a", 12000)).toBe(m);
+    m = resumeGoal(m, "/s/a", 31000);
+    expect(m["/s/a"].pausedAt).toBeNull();
+    expect(goalElapsed(m["/s/a"], 41000)).toBe(20000);
+    m = bumpGoalTurn(m, "/s/a");
+    expect(m["/s/a"].turns).toBe(1);
+    expect(resumeGoal(m, "/s/a", 42000)).toBe(m);
+    expect(pauseGoal({}, "/s/a")).toEqual({});
+  });
+  it("settles the pause when stopping, and continues a finished goal", () => {
+    let m: GoalMap = startGoal({}, "/s/a", "Ship it", 1000);
+    m = pauseGoal(m, "/s/a", 6000);
+    m = finishGoal(m, "/s/a", 11000);
+    expect(m["/s/a"].pausedAt).toBeNull();
+    expect(goalElapsed(m["/s/a"], 999999)).toBe(5000);
+    m = resumeGoal(m, "/s/a", 21000);
+    expect(m["/s/a"].done).toBe(false);
+    expect(goalElapsed(m["/s/a"], 26000)).toBe(20000);
+  });
+  it("round-trips a held clock through storage", () => {
+    const store = memStore();
+    let m: GoalMap = startGoal({}, "/s/a", "Ship it", 1000);
+    m = pauseGoal(m, "/s/a", 11000);
+    saveGoals(m, store);
+    const back = loadGoals(store)["/s/a"];
+    expect(back.pausedAt).toBe(11000);
+    expect(goalElapsed(back, 999999)).toBe(10000);
   });
 });
 

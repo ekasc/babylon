@@ -7,6 +7,7 @@ import {
 } from "./daemon-host";
 import {
   createEnvelope,
+  DAEMON_PROTOCOL_VERSION,
   parseEnvelope,
   serializeEnvelope,
   type ProtocolMessageType,
@@ -28,7 +29,16 @@ describe("babylon daemon host", () => {
     const res: DispatchResult = dispatchRequest(rt, req);
     expect(res.response.type).toBe("pong");
     expect(res.response.inReplyTo).toBe(req.id);
+    expect(res.response.payload).toMatchObject({ ok: true, protocol: DAEMON_PROTOCOL_VERSION, build: expect.any(String) });
     expect(res.runtime).toBe(rt); // unchanged reference
+  });
+
+  it("advertises draining on pong when asked", () => {
+    const rt = createDaemonRuntime();
+    const draining = dispatchRequest(rt, request("ping", {}), { draining: true });
+    expect((draining.response.payload as { draining?: unknown }).draining).toBe(true);
+    const idle = dispatchRequest(rt, request("ping", {}));
+    expect((idle.response.payload as { draining?: unknown }).draining).toBe(false);
   });
 
   it("adds a task on task.created", () => {

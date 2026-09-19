@@ -97,6 +97,9 @@ export interface DaemonServerOptions {
    * Unix-socket mode leaves it unset and keeps filesystem-permission trust.
    */
   authTokenHash?: string;
+  /** True while the host is draining for restart. Advertised on pong so a
+   *  newcomer waits the holder out instead of adopting a dying daemon. */
+  isDraining?: () => boolean;
   /** HookManager used by the daemon-owned PiHost. Mutating this is what
    *  makes `pre_tool_use` / `post_tool_use` actually fire on the PiHost side
    *  in daemon mode. */
@@ -816,7 +819,7 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
     // attention.*, contract.registered). Unsupported types come back as
     // explicit errors.
     const before = state.runtime;
-    const result = dispatchRequest(before, request);
+    const result = dispatchRequest(before, request, { draining: options.isDraining?.() ?? false });
     state = { ...state, runtime: result.runtime };
     send(socket, result.response);
     if (result.runtime !== before && result.response.type !== "error") {

@@ -9,7 +9,7 @@ afterEach(() => cleanup());
 
 /**
  * Babylon's contract with the Base UI dialog primitive (used by
- * DiagnosticsPanel, RollbackConfirm, PromptHost, GitCommitPopover,
+ * RollbackConfirm, PromptHost, GitCommitPopover,
  * CommandPalette, NewSessionModal, ProjectPanel).
  *
  * These tests do not test Base UI itself — they pin the dismissal and

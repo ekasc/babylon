@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { bridge, bridgeAvailable, type ActivityUpdate, type CommandInfo, type HistoryProjection, type ProjectGroup, type ProjectSettings, type SessionMeta, type SessionStatus, type SessionWindow, type WorkflowRunSummary } from "./bridge";
+import { bridge, bridgeAvailable, type ActivityUpdate, type CommandInfo, type HistoryProjection, type ProjectGroup, type ProjectSettings, type SessionMeta, type SessionStatus, type SessionWindow, type SimTabState, type WorkflowRunSummary } from "./bridge";
 import type { Bot, BotGroup, BotPatch, DefaultBot, NewBotInput, NewGroupInput } from "./bots";
 import { isBotMainSession, isGroupRoom } from "./bots";
 import { initialState, mergeLiveMessages, reducer } from "./store";
@@ -30,7 +30,6 @@ import { countRunningWork } from "./lib/activity";
 import Sidebar from "./components/Sidebar";
 import { useTheme } from "./components/hooks/useTheme";
 import { useRollback } from "./components/hooks/useRollback";
-import { useEventLog } from "./components/hooks/useEventLog";
 import { useGitStatus } from "./components/hooks/useGitStatus";
 import { useSidebarState } from "./components/hooks/useSidebarState";
 import { usePanels } from "./components/hooks/usePanels";
@@ -41,7 +40,6 @@ import { type Attachment } from "./components/Composer";
 import DialogHost from "./components/DialogHost";
 import Toasts from "./components/Toasts";
 import Hero from "./components/Hero";
-import WorkspacePane from "./components/WorkspacePane";
 import { RollbackConfirm } from "./components/Rollback";
 import NewSessionModal from "./components/NewSessionModal";
 import SessionFooter from "./components/SessionFooter";
@@ -50,20 +48,16 @@ import GitCommitPopover from "./components/GitCommitPopover";
 // Overlay panels are rarely needed at boot; lazy-load them so they stay out
 // of the startup bundle.
 const SimSidebar = lazy(() => import("./components/SimSidebar").then((m) => ({ default: m.SimSidebar })));
-const DiagnosticsPanel = lazy(() => import("./components/DiagnosticsPanel").then((m) => ({ default: m.DiagnosticsPanel })));
-import { collectDiagnostics } from "./diagnostics";
+const CanvasPanel = lazy(() => import("./components/CanvasPanel"));
 import { PromptHost, confirmAction, promptText } from "./lib/prompts";
 import { createAttentionRegistry } from "./attention";
-import { defaultPolicy } from "./background-policy";
-import { createBabylonEvent, type BabylonEvent } from "./events";
-import { babylonEventFromAgentEvent } from "./agent-events";
 import { stampOwnership } from "./ownership";
 import { addAttention, listAttention, removeAttention, type AttentionRegistry } from "./attention";
-import { ChevronIcon, GlobeIcon, LayersIcon, GaugeIcon } from "./components/icons";
+import { ChevronIcon, GlobeIcon, LayersIcon, GaugeIcon, BranchIcon, ClockIcon, FolderIcon, TemplateIcon, ArrowUpIcon } from "./components/icons";
 import { SessionTabs } from "./components/SessionTabs";
 import { SessionHistoryMenu } from "./components/SessionHistoryMenu";
-import PanelsMenu from "./components/PanelsMenu";
-import { GoalOverlay } from "./components/GoalOverlay";
+import { CanvasProvider } from "./components/canvas-context";
+import SessionSidebar, { type SessionMenuItem } from "./components/SessionSidebar";
 import StatsCard, { defaultStatsCardPos, type StatsCardPos } from "./components/StatsCard";
 import { countCompactions, pushTurnSample, type TurnSample } from "./lib/session-stats";
 import {
@@ -71,7 +65,8 @@ import {
   clearGoal,
   finishGoal,
   loadGoals,
-  moveGoal,
+  pauseGoal,
+  resumeGoal,
   saveGoals,
   startGoal,
   type GoalMap,
@@ -101,7 +96,6 @@ export default function App() {
   const [showProject, setShowProject] = useState(false);
   // Goal mode: per-session objective with elapsed time + turn count.
   const [goals, setGoals] = useState<GoalMap>(() => loadGoals());
-  const [goalOpen, setGoalOpen] = useState(false);
   const updateGoals = useCallback((fn: (m: GoalMap) => GoalMap) => {
     setGoals((prev) => {
       const next = fn(prev);
@@ -190,26 +184,10 @@ export default function App() {
   const { gitStatuses, refreshGitStatuses, refreshGitStatusForCwd } = useGitStatus(groups);
   const [stats, setStats] = useState<any>(null);
   const [thinkingLevels, setThinkingLevels] = useState<string[]>([]);
-  const {
-    showBranchPanel,
-    setShowBranchPanel,
-    showCommitPopover,
-    setShowCommitPopover,
-    showWorkflowsPanel,
-    setShowWorkflowsPanel,
-    showSimPanel,
-    setShowSimPanel,
-    showCommandPalette,
-    setShowCommandPalette,
-    panelsMenuOpen,
-    setPanelsMenuOpen,
-    showDiagnostics,
-    setShowDiagnostics,
-  } = usePanels();
+  const { showCommitPopover, setShowCommitPopover, showCommandPalette, setShowCommandPalette } = usePanels();
   const [attention, setAttention] = useState<AttentionRegistry>(() =>
     createAttentionRegistry(),
   );
-  const { eventLog, appendEvents } = useEventLog(showDiagnostics);
   // Non-streaming is the default: hold incremental text until the reply is
   // complete. (Reasoning always renders as one collapsed line.)
   const streamResponses = useBoolPref("streamResponses", false);
@@ -250,7 +228,10 @@ export default function App() {
   });
 
   const [sidebarMinimized, setSidebarMinimized] = useState(() => getWithFallback("sidebar-minimized") === "1");
-  const [draftRequest, setDraftRequest] = useState<{ id: number; text: string } | null>(null);
+  // The session sidebar is closed by default and opened on demand, like the app's
+  // other right-hand panel. Its X puts it away; the thread header opens it again.
+  const [sideOpen, setSideOpen] = useState(() => getWithFallback("session-sidebar") === "1");
+  const [draftRequest, setDraftRequest] = useState<{ id: number; text: string; append?: boolean } | null>(null);
   const [promotedParent, setPromotedParent] = useState<{ path: string; cwd: string } | null>(null);
   // Optimistic active session: set synchronously on click so the sidebar row
   // highlights instantly; the host's status confirm later keeps it exact.
@@ -471,27 +452,6 @@ export default function App() {
     }
     apply();
   }, []);
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      const command = event.metaKey || event.ctrlKey;
-      if (command && event.key.toLowerCase() === "k") {
-        event.preventDefault();
-        togglePalette((open: boolean) => !open);
-      } else if (command && !event.altKey && event.key.toLowerCase() === "b") {
-        event.preventDefault();
-        setSidebarMinimized((minimized) => {
-          setWithFallback("sidebar-minimized", minimized ? "0" : "1");
-          return !minimized;
-        });
-      } else if (command && event.altKey && event.key.toLowerCase() === "b") {
-        event.preventDefault();
-        setShowWorkflowsPanel((open) => !open);
-        setShowBranchPanel(false);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
 
   const beginContextResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
@@ -534,10 +494,10 @@ export default function App() {
     const offWorkflows = bridge.onWorkflowsUpdate((update) => setWorkflowRuns(update.runs));
     // The agent opening the in-app browser takes over the context pane.
     const offSim = bridge.onSimEvent((ev) => {
-      if (ev.type === "visibility" && ev.open) {
-        setShowSimPanel(true);
-        setShowBranchPanel(false);
-        setShowWorkflowsPanel(false);
+      if (ev.type === "tabs") {
+        syncBrowserTabs(ev.tabs);
+      } else if (ev.type === "visibility" && ev.open) {
+        takeOverBrowser();
       }
     });
     return () => {
@@ -584,7 +544,6 @@ export default function App() {
   // still-pending runtime approvals take the same path (inbox item + event).
   const registerApproval = useCallback(
     (req: { id: string; action: { description?: string; category?: string }; risk?: unknown }, source?: string | null) => {
-      appendEvents([createBabylonEvent("approval.requested", { payload: { id: req.id } })]);
       setAttention((prev) =>
         addAttention(prev, {
           id: `perm-${req.id}`,
@@ -597,7 +556,7 @@ export default function App() {
         })
       );
     },
-    [activeSessionPath, status.sessionPath, appendEvents]
+    [activeSessionPath, status.sessionPath]
   );
   useEffect(() => {
     return bridge.onApprovalRequested((req) => {
@@ -708,11 +667,6 @@ export default function App() {
   // never blindly the foreground session.
   useEffect(() => {
     return bridge.onApprovalResolved((payload) => {
-      appendEvents([
-        createBabylonEvent("approval.resolved", {
-          payload: { id: payload.id, decision: payload.choice },
-        }),
-      ]);
       setAttention((prev) => removeAttention(prev, `perm-${payload.id}`));
       const sid = (payload as { sessionId?: string | null }).sessionId ?? null;
       const ap = (sid && sessionIdToPathRef.current.get(sid)) || activePathRef.current;
@@ -722,26 +676,7 @@ export default function App() {
         setExecutions((prev) => resolveApprovalExecution(prev, ap, seq, at));
       }
     });
-  }, [appendEvents]);
-
-  // Attention lifecycle events: diff committed registry state so every real
-  // transition (permission raises, automation failures, dismissals, clears)
-  // is observed exactly once, regardless of which surface caused it. The
-  // attention item id is the subject; no owner ids are fabricated.
-  const prevAttentionRef = useRef(attention);
-  useEffect(() => {
-    const prev = prevAttentionRef.current;
-    prevAttentionRef.current = attention;
-    if (prev === attention) return;
-    const events: BabylonEvent[] = [];
-    for (const id of Object.keys(attention.items)) {
-      if (!prev.items[id]) events.push(createBabylonEvent("attention.created", { payload: { id } }));
-    }
-    for (const id of Object.keys(prev.items)) {
-      if (!attention.items[id]) events.push(createBabylonEvent("attention.resolved", { payload: { id } }));
-    }
-    appendEvents(events);
-  }, [attention, appendEvents]);
+  }, []);
 
   useEffect(() => {
     if (status.status !== "ready") return;
@@ -878,7 +813,6 @@ export default function App() {
           switching: switchingRef.current,
         };
         let stateChanged = false;
-        const mapped: BabylonEvent[] = [];
         let needsResync = false;
         for (const event of events) {
           // Non-streaming (default): suppress incremental text/thinking deltas;
@@ -946,8 +880,6 @@ export default function App() {
               }
             }
           }
-          const babylonEvent = babylonEventFromAgentEvent(event);
-          if (babylonEvent) mapped.push(babylonEvent);
           if (
             event?.type === "agent_settled" ||
             event?.type === "agent_end" ||
@@ -963,14 +895,13 @@ export default function App() {
             needsResync = true;
           }
         }
-        appendEvents(mapped);
         // Reflect engine-side state changes (model/thinking toggles, /fast,
         // session renames) in the status bar without waiting for the next
         // model/thinking/compact round-trip.
         if (stateChanged) bridge.getState().then(setAgentState).catch(() => {});
         if (needsResync) void resyncFromSource({ skipRefresh: true });
       }),
-    [appendEvents, resyncFromSource, resolveRuntimePath, markUnread, updateGoals]
+    [resyncFromSource, resolveRuntimePath, markUnread, updateGoals]
   );
 
   const hydrate = useCallback(async (expectedEpoch = epochRef.current) => {
@@ -1666,13 +1597,6 @@ export default function App() {
             return false;
           }
           const room = await bridge.groupSend(activeGroup.id, text);
-          appendEvents([
-            createBabylonEvent("message.sent", {
-              owner: stampOwnership(
-                activeSessionIdRef.current ? { sessionId: activeSessionIdRef.current } : {}
-              ),
-            }),
-          ]);
           if (room.stopped) toast("info", "Room rounds stopped");
           if (history.activeRollback) await hydrate();
           return true;
@@ -1684,13 +1608,6 @@ export default function App() {
         );
         // Real transition: the host accepted the prompt. Ownership is the live
         // session's runtime id; no message id is fabricated when absent.
-        appendEvents([
-          createBabylonEvent("message.sent", {
-            owner: stampOwnership(
-              activeSessionIdRef.current ? { sessionId: activeSessionIdRef.current } : {}
-            ),
-          }),
-        ]);
         if (history.activeRollback) await hydrate();
         return true;
       } catch (e: any) {
@@ -1700,7 +1617,7 @@ export default function App() {
         return false;
       }
     },
-    [history.activeRollback, hydrate, toast, appendEvents, activeGroup]
+    [history.activeRollback, hydrate, toast, activeGroup]
   );
 
   const abort = useCallback(async () => {
@@ -1824,9 +1741,6 @@ export default function App() {
   runtimeByPathRef.current = runtimeByPath;
   groupsRef.current = groups;
   // Per-session liveness is dead: runtimeByPath (above) owns it now.
-  const contextOpen = showWorkflowsPanel || showBranchPanel || showSimPanel;
-  const headerGit = status.cwd ? gitStatuses[status.cwd] ?? null : null;
-  const activeDirtyCount = (headerGit as any)?.isRepo ? ((headerGit as any).dirty?.length ?? 0) : 0;
 
   // ---- Spaces / Agents / Tabs nav model ----
   const sessionByPath = useMemo(() => buildSessionByPath(groups), [groups]);
@@ -1885,21 +1799,6 @@ export default function App() {
   );
   const allSpaceCwds = useMemo(() => buildAllSpaceCwds(spaces, activeSpace), [spaces, activeSpace]);
 
-  // Diagnostics snapshot, recomputed only when an input to it actually
-  // changes, not on every unrelated render while the panel is open. The
-  // background policy input is a constant in this build, so it varies never.
-  const diagnosticsSnapshot = useMemo(
-    () =>
-      collectDiagnostics({
-        now: Date.now(),
-        attention,
-        policy: defaultPolicy(),
-        events: eventLog,
-      }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [showDiagnostics, attention, eventLog]
-  );
-
   // Stable handlers for the memoized Sidebar/ChatView. Their identity must not
   // change per render (streaming ticks, keystrokes), or the memo boundary is
   // defeated and the whole subtree re-renders.
@@ -1929,11 +1828,6 @@ export default function App() {
     },
     [toast]
   );
-  const onOpenTree = useCallback(() => {
-    if (!ready || !hasSession) return;
-    setShowBranchPanel((open) => !open);
-    setShowWorkflowsPanel(false);
-  }, [ready, hasSession]);
   const onSearch = useCallback(() => togglePalette(true), [togglePalette]);
   const onAddSpace = useCallback(() => void addSpace(), [addSpace]);
   const onOpenLiveAgent = useCallback(
@@ -1948,7 +1842,11 @@ export default function App() {
   // renders must not re-render the transcript subtree).
   const chatOnNeedEarlier = useCallback(() => void loadEarlier(), [loadEarlier]);
   const chatOnRollback = useCallback((entryId: string) => void prepareRollback(entryId), [prepareRollback]);
-  const chatOnOpenLaunch = useCallback(() => setShowWorkflowsPanel(true), []);
+  // Quote in composer: assistant selection arrives pre-formatted as a
+  // blockquote and appends to the draft (never replaces typed text).
+  const chatOnQuote = useCallback((text: string) => {
+    setDraftRequest({ id: Date.now(), text, append: true });
+  }, []);
   const chatOnControlLaunch = useCallback(
     (runId: string, runKind: "subagent" | "thread" | "workflow", action: "stop") =>
       void controlLaunch(runId, runKind, action),
@@ -1970,7 +1868,280 @@ export default function App() {
 
   const goalPath = activeSessionPath ?? status.sessionPath ?? null;
   const goalForPath = goalPath ? goals[goalPath] ?? null : null;
-  const goalActive = !!goalForPath && !goalForPath.done;
+
+  // The sidebar's index. Only features that render as panes appear here, because
+  // a grid item has to open in the sidebar rather than somewhere else. The rest
+  // of the session features are dialogs or cards and keep their own surfaces.
+  const sideItems = useMemo<SessionMenuItem[]>(
+    () => [
+      {
+        id: "browser",
+        label: "Browser",
+        icon: <GlobeIcon size={16} />,
+        hint: "Preview pages and dev servers in an embedded tabbed browser",
+      },
+      {
+        id: "branches",
+        label: "Branches",
+        icon: <BranchIcon size={16} />,
+        hint: ready
+          ? "Conversation branches and the timeline of this session"
+          : "Conversation branches, needs the background daemon",
+        disabled: !ready,
+      },
+      {
+        id: "activity",
+        label: "Activity",
+        icon: <LayersIcon size={16} />,
+        hint: ready
+          ? "Workflows, threads and subagents for this session"
+          : "Workflows, threads and subagents, needs the background daemon",
+        badge: activityBadge,
+        disabled: !ready,
+      },
+      {
+        id: "canvas",
+        label: "Canvas",
+        icon: <TemplateIcon size={16} />,
+        hint: "Diagram scenes the agent and the human share, in .pi/canvas",
+      },
+    ],
+    [activityBadge, ready]
+  );
+
+  // Tabs for the one right sidebar. Browser tabs mirror the backend tab list:
+  // the backend stays the tab manager, the strip is only its UI. The other
+  // features open a fresh pane per tab. A grid tile always opens a new tab.
+  type SideFeature = "browser" | "branches" | "activity" | "canvas";
+  type SideTab = { key: string; feature: SideFeature; backendTabId?: string; mermaid?: string | null };
+
+  const [sideTabs, setSideTabs] = useState<SideTab[]>([]);
+  const [activeSideTab, setActiveSideTab] = useState<string | null>(null);
+  const [browserTabs, setBrowserTabs] = useState<SimTabState[]>([]);
+  const sideTabCounter = useRef(0);
+  const browserIdsRef = useRef<Set<string>>(new Set());
+  const browserTabsRef = useRef<SimTabState[]>([]);
+  const sideOpenRef = useRef(sideOpen);
+  const takeOverRef = useRef(false);
+  const sideTabsRef = useRef<SideTab[]>([]);
+  useEffect(() => {
+    sideOpenRef.current = sideOpen;
+    sideTabsRef.current = sideTabs;
+  });
+
+  const setSidebarOpen = useCallback((open: boolean) => {
+    setSideOpen(open);
+    setWithFallback("session-sidebar", open ? "1" : "0");
+  }, []);
+
+  const browserTabKey = (id: string) => `browser:${id}`;
+
+  const browserTabLabel = (tab: SimTabState): string => {
+    if (tab.title) return tab.title;
+    if (tab.url) {
+      try {
+        const url = new URL(tab.url);
+        return url.host + (url.pathname !== "/" ? url.pathname : "");
+      } catch {
+        return tab.url;
+      }
+    }
+    return "New tab";
+  };
+
+  const openFeatureTab = useCallback(
+    (feature: SideFeature, opts?: { mermaid?: string }) => {
+      if (feature === "browser") {
+        bridge
+          .simOpenTab()
+          .then((tab) => {
+            const key = browserTabKey(tab.id);
+            browserIdsRef.current = new Set([...browserIdsRef.current, tab.id]);
+            browserTabsRef.current = [...browserTabsRef.current.filter((t) => t.id !== tab.id), tab];
+            setBrowserTabs(browserTabsRef.current);
+            setSideTabs((prev) => (prev.some((t) => t.key === key) ? prev : [...prev, { key, feature, backendTabId: tab.id }]));
+            setActiveSideTab(key);
+          })
+          .catch((error: any) => toast("error", error?.message ?? "could not open browser tab"));
+        return;
+      }
+      sideTabCounter.current += 1;
+      const key = `tab-${sideTabCounter.current}`;
+      setSideTabs((prev) => [...prev, { key, feature, mermaid: opts?.mermaid ?? null }]);
+      setActiveSideTab(key);
+    },
+    [toast]
+  );
+
+  const focusSideTab = useCallback(
+    (key: string) => {
+      setActiveSideTab(key);
+      const tab = sideTabs.find((t) => t.key === key);
+      if (tab?.feature === "browser" && tab.backendTabId) {
+        bridge.simActivate(tab.backendTabId).catch((error: any) => toast("error", error?.message ?? "could not switch browser tab"));
+      }
+    },
+    [sideTabs, toast]
+  );
+
+  const closeSideTab = useCallback(
+    (key: string) => {
+      const tab = sideTabs.find((t) => t.key === key);
+      if (!tab) return;
+      if (tab.feature === "browser" && tab.backendTabId) {
+        // Removal arrives through the backend tabs event, which owns the truth
+        // about what still exists.
+        bridge.simCloseTab(tab.backendTabId).catch((error: any) => toast("error", error?.message ?? "could not close browser tab"));
+        return;
+      }
+      const rest = sideTabs.filter((t) => t.key !== key);
+      setSideTabs(rest);
+      if (activeSideTab === key) {
+        setActiveSideTab(rest.length > 0 ? rest[rest.length - 1].key : null);
+      }
+    },
+    [sideTabs, activeSideTab, toast]
+  );
+
+  const showSideGrid = useCallback(() => {
+    setActiveSideTab(null);
+  }, []);
+
+  const toggleFeatureTab = useCallback(
+    (feature: SideFeature) => {
+      const existing = [...sideTabs].reverse().find((t) => t.feature === feature)?.key;
+      if (existing && existing === activeSideTab) showSideGrid();
+      else if (existing) focusSideTab(existing);
+      else openFeatureTab(feature);
+    },
+    [sideTabs, activeSideTab, focusSideTab, openFeatureTab, showSideGrid]
+  );
+
+  const clearTabMermaid = useCallback((key: string) => {
+    setSideTabs((prev) => prev.map((t) => (t.key === key ? { ...t, mermaid: null } : t)));
+  }, []);
+
+  // Reconcile sidebar browser tabs with the backend tab list. Fresh backend
+  // ids take focus while the sidebar is open (a tile click, or the agent
+  // opening a tab); the take-over flag covers its tab arriving while closed.
+  const syncBrowserTabs = useCallback((tabs: SimTabState[]) => {
+    const ids = new Set(tabs.map((t) => t.id));
+    const fresh = tabs.filter((t) => !browserIdsRef.current.has(t.id));
+    const removed = [...browserIdsRef.current].filter((id) => !ids.has(id));
+    browserIdsRef.current = ids;
+    browserTabsRef.current = tabs;
+    setBrowserTabs((prev) => {
+      if (
+        prev.length === tabs.length &&
+        prev.every((t, i) => t.id === tabs[i].id && t.title === tabs[i].title && t.url === tabs[i].url && t.loading === tabs[i].loading)
+      ) {
+        return prev;
+      }
+      return tabs;
+    });
+    if (fresh.length === 0 && removed.length === 0) return;
+    setSideTabs((prev) => {
+      const kept = prev.filter((t) => t.feature !== "browser" || (t.backendTabId != null && ids.has(t.backendTabId)));
+      if (fresh.length === 0 && kept.length === prev.length) return prev;
+      return [...kept, ...fresh.map((t) => ({ key: browserTabKey(t.id), feature: "browser" as SideFeature, backendTabId: t.id }))];
+    });
+    if (fresh.length > 0 && (sideOpenRef.current || takeOverRef.current)) {
+      setActiveSideTab(browserTabKey(fresh[fresh.length - 1].id));
+      takeOverRef.current = false;
+    } else if (removed.length > 0) {
+      // A removed tab takes focus with it; fall back to the last survivor.
+      const removedKeys = new Set(removed.map(browserTabKey));
+      setActiveSideTab((prev) => {
+        if (!prev || !removedKeys.has(prev)) return prev;
+        const rest = sideTabsRef.current.filter((t) => !removedKeys.has(t.key));
+        return rest.length > 0 ? rest[rest.length - 1].key : null;
+      });
+    }
+  }, []);
+
+  // The agent opening the in-app browser takes over the sidebar browser tab,
+  // even if its tab event has not arrived yet; the sync above converges it.
+  const takeOverBrowser = useCallback(() => {
+    takeOverRef.current = true;
+    const tabs = browserTabsRef.current;
+    if (tabs.length > 0) setActiveSideTab(browserTabKey(tabs[tabs.length - 1].id));
+  }, []);
+
+  const activeTab: SideTab | null = sideTabs.find((t) => t.key === activeSideTab) ?? null;
+
+  const stripTabs = sideTabs.map((tab) => {
+    const item = sideItems.find((i) => i.id === tab.feature);
+    const live = tab.feature === "browser" ? browserTabs.find((t) => t.id === tab.backendTabId) : undefined;
+    return {
+      key: tab.key,
+      label: live ? browserTabLabel(live) : (item?.label ?? tab.feature),
+      icon: item?.icon ?? null,
+      loading: live?.loading ?? false,
+    };
+  });
+
+  // The panes are split into lazy chunks. Warm them while the grid is showing,
+  // so opening one never waits on a load. Startup stays lean because nothing
+  // loads until the sidebar is actually opened.
+  useEffect(() => {
+    if (!sideOpen || activeSideTab !== null) return;
+    void import("./components/SimSidebar");
+    void import("./components/BranchPanel");
+    void import("./components/WorkflowsPanel");
+    void import("./components/CanvasPanel");
+  }, [sideOpen, activeSideTab]);
+
+  /** Put the sidebar itself away. Backend tabs survive (as before); the next
+      backend event re-lists them, which is how reopening used to re-mirror. */
+  const closeSidebar = useCallback(() => {
+    setSidebarOpen(false);
+    setSideTabs([]);
+    setActiveSideTab(null);
+    setBrowserTabs([]);
+    browserIdsRef.current = new Set();
+    browserTabsRef.current = [];
+    takeOverRef.current = false;
+  }, [setSidebarOpen]);
+
+  const canvasOpener = useMemo(
+    () => ({
+      openInCanvas: (code: string) => {
+        openFeatureTab("canvas", { mermaid: code });
+      },
+    }),
+    [openFeatureTab]
+  );
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const command = event.metaKey || event.ctrlKey;
+      if (command && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        togglePalette((open: boolean) => !open);
+      } else if (command && !event.altKey && event.key.toLowerCase() === "b") {
+        event.preventDefault();
+        setSidebarMinimized((minimized) => {
+          setWithFallback("sidebar-minimized", minimized ? "0" : "1");
+          return !minimized;
+        });
+      } else if (command && event.altKey && event.key.toLowerCase() === "b") {
+        event.preventDefault();
+        toggleFeatureTab("activity");
+        setSidebarOpen(true);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [toggleFeatureTab]);
+
+  const onOpenTree = useCallback(() => {
+    if (!ready || !hasSession) return;
+    toggleFeatureTab("branches");
+  }, [ready, hasSession, toggleFeatureTab]);
+
+  const chatOnOpenLaunch = useCallback(() => {
+    openFeatureTab("activity");
+  }, [openFeatureTab]);
   const compactionCount = useMemo(() => countCompactions(state.items), [state.items]);
 
   // Preload/bridge missing (e.g. renderer opened outside Electron, or the
@@ -1999,6 +2170,7 @@ export default function App() {
   }
 
   return (
+    <CanvasProvider value={canvasOpener}>
     <div className="app-shell flex h-full">
     {settingsOpen ? (
       <Suspense fallback={null}>
@@ -2033,17 +2205,6 @@ export default function App() {
       />
       </Suspense>
     ) : null}
-      {goalOpen && hasSession && goalPath ? (
-        <GoalOverlay
-          key={goalPath}
-          goal={goalForPath}
-          onStart={(objective) => updateGoals((m) => startGoal(m, goalPath, objective))}
-          onFinish={() => updateGoals((m) => finishGoal(m, goalPath))}
-          onClear={() => updateGoals((m) => clearGoal(m, goalPath))}
-          onClose={() => setGoalOpen(false)}
-          onMove={(pos) => updateGoals((m) => moveGoal(m, goalPath, pos))}
-        />
-      ) : null}
       {statsCardOpen && hasSession ? (
         <StatsCard
           tokens={stats?.tokens ?? null}
@@ -2077,7 +2238,7 @@ export default function App() {
         groups={groups}
         activePath={activeSessionPath ?? status.sessionPath}
         activeCwd={activeSpace ?? status.cwd}
-        treeOpen={showBranchPanel}
+        treeOpen={activeTab?.feature === "branches"}
         canOpenTree={ready && hasSession}
         minimized={sidebarMinimized}
         onOpenSettings={onOpenSettings}
@@ -2162,45 +2323,6 @@ export default function App() {
             <div className="ml-auto flex shrink-0 items-center gap-1.5">
               {hasSession ? (
                 <button
-                  onClick={() => {
-                    setShowWorkflowsPanel((open) => !open);
-                    setShowBranchPanel(false);
-                  }}
-                  title="Activity, workflows, threads, subagents"
-                  aria-pressed={showWorkflowsPanel}
-                  className={`thread-action relative ${showWorkflowsPanel ? "is-active" : ""}`}
-                >
-                  <LayersIcon size={14} />
-                  {activityBadge > 0 ? <span className="absolute -right-1 -top-1 min-w-[16px] h-[16px] px-1 grid place-items-center rounded-full bg-accent text-white text-[10px] font-bold leading-none">{activityBadge}</span> : null}
-                </button>
-              ) : null}
-              <button
-                onClick={() => { const next = !showSimPanel; setShowSimPanel(next); if (next) { setShowBranchPanel(false); setShowWorkflowsPanel(false); } }}
-                title="Browser: preview pages and dev servers in an embedded tabbed browser"
-                aria-pressed={showSimPanel}
-                className={`thread-action ${showSimPanel ? "is-active" : ""}`}
-              >
-                <GlobeIcon size={14} />
-              </button>
-              <button
-                onClick={() => setShowCommitPopover(true)}
-                title="Commit and push, stages all changes, generates a message, and pushes"
-                className="thread-action thread-action-text text-[12px]"
-              >
-                Commit{activeDirtyCount > 0 ? ` ${activeDirtyCount}` : ""}
-              </button>
-              {hasSession ? (
-                <button
-                  onClick={() => setGoalOpen(true)}
-                  title="Goal mode: track elapsed time and turns toward an objective"
-                  aria-pressed={goalOpen}
-                  className={`thread-action thread-action-text text-[12px] ${goalActive ? "text-accent" : ""}`}
-                >
-                  Goal{goalActive ? " ●" : ""}
-                </button>
-              ) : null}
-              {hasSession ? (
-                <button
                   onClick={() => writeBoolPref("statsCard", !statsCardOpen)}
                   title="Session stats: tokens, compactions, TPS, cache hit rate, messages"
                   aria-pressed={statsCardOpen}
@@ -2209,13 +2331,23 @@ export default function App() {
                   <GaugeIcon size={14} />
                 </button>
               ) : null}
-              <PanelsMenu
-                open={panelsMenuOpen}
-                onOpenChange={setPanelsMenuOpen}
-                items={[
-                  { label: "Runtime diagnostics", open: showDiagnostics, onToggle: () => setShowDiagnostics((v) => !v) },
-                ]}
-              />
+              {/* Way back into the session sidebar. It renders only while the
+                  sidebar is closed, so open and close never share the row. */}
+              {!sideOpen ? (
+                <button
+                  onClick={() => setSidebarOpen(true)}
+                  title="Session sidebar (⌘⌥B)"
+                  aria-label="Show session sidebar"
+                  className="thread-action thread-action-text relative text-[12px]"
+                >
+                  Sidebar
+                  {activityBadge > 0 ? (
+                    <span className="absolute -right-0.5 -top-0.5 grid h-[16px] min-w-[16px] place-items-center rounded-full bg-accent px-1 text-[10px] font-bold leading-none text-white">
+                      {activityBadge}
+                    </span>
+                  ) : null}
+                </button>
+              ) : null}
             </div>
             {preparingVisible ? <span className="shrink-0 text-[13px] text-dim">Preparing…</span> : null}
           </header>
@@ -2243,6 +2375,7 @@ export default function App() {
                   streamResponses={streamResponses}
                   historyTurns={history.turns}
                   onRollback={chatOnRollback}
+                  onQuote={chatOnQuote}
                   onOpenLaunch={chatOnOpenLaunch}
                   onControlLaunch={chatOnControlLaunch}
                 />
@@ -2273,6 +2406,7 @@ export default function App() {
                 followUp={state.followUp}
                 commands={commands}
                 draftRequest={draftRequest}
+                sessionKey={activeSessionPath ?? status.sessionPath ?? null}
                 toast={toast}
                 onSend={send}
                 onAbort={abort}
@@ -2285,28 +2419,61 @@ export default function App() {
                     ? bots.filter((b) => activeGroup.memberIds.includes(b.id))
                     : (sharedStaff ?? bots.filter((b) => !b.hidden))
                 }
+                goal={goalForPath}
+                onStartGoal={(objective) => {
+                  if (goalPath) updateGoals((m) => startGoal(m, goalPath, objective));
+                }}
+                onPauseGoal={() => {
+                  if (goalPath) updateGoals((m) => pauseGoal(m, goalPath));
+                }}
+                onResumeGoal={() => {
+                  if (goalPath) updateGoals((m) => resumeGoal(m, goalPath));
+                }}
+                onFinishGoal={() => {
+                  if (goalPath) updateGoals((m) => finishGoal(m, goalPath));
+                }}
+                onClearGoal={() => {
+                  if (goalPath) updateGoals((m) => clearGoal(m, goalPath));
+                }}
               />
             ) : null}
           </div>
         </main>
 
-        <Suspense fallback={null}>
-          {/* The browser backend lives in the main process, not the daemon socket,
-              so it renders on toggle alone. Branch/Activity still need the daemon. */}
-          {(showSimPanel || (ready && contextOpen)) ? (
-            <WorkspacePane width={contextWidth} onResizeStart={beginContextResize}>
-              {showSimPanel ? (
-                <SimSidebar onClose={() => setShowSimPanel(false)} />
-              ) : showBranchPanel ? (
+        {/* The browser backend lives in the main process, not the daemon socket,
+            so it renders on toggle alone. Branch/Activity still need the daemon. */}
+        {sideOpen && (activeSpace ?? status.cwd) ? (
+          <SessionSidebar
+            width={contextWidth}
+            onResizeStart={beginContextResize}
+            items={sideItems}
+            tabs={stripTabs}
+            activeKey={activeSideTab}
+            onOpen={(id) => {
+              if (id === "browser" || id === "branches" || id === "activity" || id === "canvas") openFeatureTab(id);
+            }}
+            onFocus={focusSideTab}
+            onCloseTab={closeSideTab}
+            onShowGrid={showSideGrid}
+            onClose={closeSidebar}
+          >
+            {/* The panes load lazily. The boundary sits inside the sidebar so a
+                first open blanks only the body, never the whole sidebar. */}
+            <Suspense fallback={null}>
+              {activeTab?.feature === "browser" ? (
+                <SimSidebar />
+              ) : activeTab?.feature === "branches" ? (
                 <BranchPanel
-                  onClose={() => setShowBranchPanel(false)}
+                  onClose={() => {
+                    if (activeSideTab) closeSideTab(activeSideTab);
+                  }}
                   refreshToken={historyRevision}
                   onRollback={(entryId) => void prepareRollback(entryId)}
                   onUndoRollback={() => void undoRollback()}
                   onForkCurrent={() => void forkCurrent()}
                   toast={toast}
                 />
-              ) : (
+              ) : activeTab?.feature === "activity" ? (
                 <WorkflowsPanel
                   cwd={activeSpace ?? status.cwd ?? null}
                   resolveCwd={resolveSessionCwd}
@@ -2317,15 +2484,21 @@ export default function App() {
                       if (parentPath && status.cwd) setPromotedParent({ path: parentPath, cwd: status.cwd });
                       void openSession(path, cwd);
                     }
-                    setShowWorkflowsPanel(false);
+                    if (activeSideTab) closeSideTab(activeSideTab);
                   }}
-                  onClose={() => setShowWorkflowsPanel(false)}
+                  onClose={() => {
+                    if (activeSideTab) closeSideTab(activeSideTab);
+                  }}
                   toast={toast}
                 />
-              )}
-            </WorkspacePane>
-          ) : null}
-        </Suspense>
+              ) : activeTab?.feature === "canvas" ? (
+                <CanvasPanel cwd={(activeSpace ?? status.cwd) ?? ""} mermaid={activeTab?.mermaid ?? null} onImported={() => {
+                  if (activeSideTab) clearTabMermaid(activeSideTab);
+                }} />
+              ) : null}
+            </Suspense>
+          </SessionSidebar>
+        ) : null}
       </div>
 
       <Suspense fallback={null}>
@@ -2360,14 +2533,6 @@ export default function App() {
           onClose={() => setShowNewSession(false)}
         />
       )}
-      <Suspense fallback={null}>
-        {showDiagnostics ? (
-          <DiagnosticsPanel
-            snapshot={diagnosticsSnapshot}
-            onClose={() => setShowDiagnostics(false)}
-          />
-        ) : null}
-      </Suspense>
       <ApprovalGate />
       {rollbackPlan ? (
         <RollbackConfirm
@@ -2388,7 +2553,9 @@ export default function App() {
       />
       <PromptHost />
       <Toasts toasts={state.toasts} onDismiss={(id) => dispatch({ type: "toast-dismiss", id })} />
+
     </div>
+    </CanvasProvider>
   );
 }
 

@@ -88,6 +88,8 @@ export interface RoomPresence {
 export interface State {
   items: ChatItem[];
   streaming: boolean;
+  /** Wall-clock ms when the current run started (agent_start). Cleared on settle. */
+  streamStartAt: number | null;
   steering: string[];
   followUp: string[];
   dialogs: Dialog[];
@@ -126,6 +128,7 @@ let toastSeq = 0;
 export const initialState: State = {
   items: [],
   streaming: false,
+  streamStartAt: null,
   steering: [],
   followUp: [],
   dialogs: [],
@@ -364,11 +367,17 @@ export function reducer(state: State, action: Action): State {
   }
 }
 
+/** m:ss elapsed label for run timers and stop records ("0:07", "1:05"). */
+export function formatRunDuration(elapsedMs: number): string {
+  const totalSec = Math.max(0, Math.floor(elapsedMs / 1000));
+  return `${Math.floor(totalSec / 60)}:${String(totalSec % 60).padStart(2, "0")}`;
+}
+
 function applyEvent(state: State, ev: any): State {
   if (!ev || typeof ev !== "object") return state;
   switch (ev.type) {
     case "agent_start":
-      return { ...state, streaming: true };
+      return { ...state, streaming: true, streamStartAt: Date.now() };
 
     case "agent_settled": {
       const items = state.items.slice();
@@ -382,10 +391,15 @@ function applyEvent(state: State, ev: any): State {
         }
         if (it.kind === "assistant" || it.kind === "user") break;
       }
-      let next: State = { ...state, items, streaming: false, settledNonce: state.settledNonce + 1, roomTurn: null };
+      let next: State = { ...state, items, streaming: false, streamStartAt: null, settledNonce: state.settledNonce + 1, roomTurn: null };
       if (needsAbortedNotice && (ev as any)?.aborted) {
         next = withToast(next, "warning", "Chat aborted");
-        next.items = [...next.items, { kind: "system", key: nextKey("s"), text: "Chat aborted, no response completed." }];
+        const startedAt = state.streamStartAt;
+        const text =
+          typeof startedAt === "number" && startedAt > 0
+            ? `Chat aborted after ${formatRunDuration(Date.now() - startedAt)}, no response completed.`
+            : "Chat aborted, no response completed.";
+        next.items = [...next.items, { kind: "system", key: nextKey("s"), text }];
       }
       return next;
     }

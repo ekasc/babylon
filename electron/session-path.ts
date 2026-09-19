@@ -1,7 +1,7 @@
 import { promises as fsp } from "node:fs";
 import { relative, resolve } from "node:path";
 
-function contained(root: string, target: string): boolean {
+export function contained(root: string, target: string): boolean {
   const rel = relative(root, target);
   return rel !== "" && !rel.startsWith("..");
 }

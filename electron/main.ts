@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, screen, type IpcMainInvokeEvent } from "electron";
+import { app, BrowserWindow, Menu, Tray, ipcMain, nativeImage, screen, type IpcMainInvokeEvent } from "electron";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import * as net from "node:net";
@@ -8,6 +8,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { AgentEventBuffer } from "./event-buffer";
 import { registerGitIpc } from "./git-ipc";
+import { registerCanvasIpc } from "./canvas-ipc";
 import { registerRuntimeIpc } from "./runtime-ipc";
 import { registerLspProcessIpc } from "./lsp-process-ipc";
 import { registerSimIpc } from "./sim-ipc";
@@ -37,11 +38,14 @@ import { buildBotSystemPrompt, buildDefaultBotSystemPrompt, buildGroupSystemProm
 import { driveRoomTurns } from "./room-driver";
 import type { CompletionContract } from "../src/completion-contracts";
 import { connectDaemonClient, type DaemonClient } from "../src/daemon-client";
-import { DAEMON_PROTOCOL_VERSION } from "../src/daemon-protocol";
+import { createCoalescingWorker } from "../src/lib/coalescing-worker";
+import { DAEMON_PROTOCOL_VERSION, shouldRetireDaemon, type DaemonAdvertised } from "../src/daemon-protocol";
 import { readDaemonPid, retireDaemon, type RetirePort } from "./daemon-supervisor";
+import { acquireLifecycleLock, releaseLifecycleLock, LifecycleLockedError, type LifecycleLock } from "./daemon-lock";
+import { buildId } from "../src/build-info";
+import { syncDaemonTray, TRAY_ICON_DATA_URL, type DaemonTrayHandle } from "./tray";
 import { importLoginShellEnv } from "./shell-env";
-import { createLocalRuntime } from "../src/local-runtime";
-import { createDaemonRuntime } from "../src/daemon-runtime";
+import { resolveRuntime } from "./runtime-select";
 import type { RuntimeFacade } from "../src/runtime-facade";
 
 const DEV_SERVER = !!process.env.VITE_DEV_SERVER_URL;
@@ -57,8 +61,12 @@ const DEV_SERVER = !!process.env.VITE_DEV_SERVER_URL;
 // Must run before app.whenReady() and before any app.getPath("userData").
 if (!app.isPackaged) app.setPath("userData", join(app.getPath("appData"), "Babylon Dev"));
 
-// Pi engine session store (mirrors electron/threads.ts).
-const PI_SESSIONS_ROOT = join(homedir(), ".pi", "agent", "sessions");
+// Pi engine session store, forked per instance under userData so two owners
+// (dev and packaged, or two checkouts) never interleave turns into each
+// other's transcripts. Auth, models, and billing stay shared under ~/.pi.
+function sessionsRoot(): string {
+  return join(app.getPath("userData"), "sessions");
+}
 
 // Babylon-owned runtime state (rollback snapshots/ledgers, recaps, compaction
 // archives). The in-process host and the daemon must both point here: a split
@@ -168,6 +176,18 @@ function requestApproval(action: AgentAction, risk: Risk, sessionId?: string): P
   });
 }
 
+/**
+ * Network egress raised by the canvas. It is put through the same policy as any
+ * other egress: an explicit deny holds, an explicit allow passes, and anything
+ * else asks. With no engine loaded it asks rather than assuming.
+ */
+async function gateCanvasEgress(action: AgentAction): Promise<boolean> {
+  const evaluation = permissionEngine?.evaluate(action);
+  if (evaluation?.decision === "deny") return false;
+  if (evaluation?.decision === "allow") return true;
+  return requestApproval(action, evaluation?.risk ?? "high");
+}
+
 function resolveApproval(id: string, choice: "allow_once" | "allow_session" | "allow_always" | "deny"): void {
   const pending = pendingApprovals.get(id);
   if (!pending) return;
@@ -213,7 +233,7 @@ let workflowsBridge: any = null;
  *  aggregated to the renderer. Navigation only foregrounds; it never
  *  destroys tracking (see ActivityRegistry). */
 let activityRegistry: ActivityRegistry | null = null;
-const sessionIndex = new SessionIndex(PI_SESSIONS_ROOT);
+const sessionIndex = new SessionIndex(sessionsRoot());
 const processManager = new ProcessManager();
 const taskManager = new TaskManager(processManager);
 const lspManager = new LspManager();
@@ -318,7 +338,7 @@ async function resolveCanonicalSessionFile(stored: string | null | undefined): P
   } catch {}
   if (owned && owned === stored) return owned;
   try {
-    const validated = await validateSessionPath(PI_SESSIONS_ROOT, stored);
+    const validated = await validateSessionPath(sessionsRoot(), stored);
     if (!existsSync(validated)) return undefined;
     return validated;
   } catch {
@@ -351,6 +371,57 @@ let runtimeOwner: "local" | "daemon" = "local";
  *  reconnect. Never changes `runtimeOwner`. */
 let daemonConnected = false;
 
+/** Menu-bar presence. Exists if and only if the daemon socket is connected. */
+let daemonTray: DaemonTrayHandle | null = null;
+
+function showMainWindow(): void {
+  const target =
+    win && !win.isDestroyed() ? win : BrowserWindow.getAllWindows().find((w) => !w.isDestroyed());
+  if (!target) {
+    createWindow();
+    return;
+  }
+  if (target.isMinimized()) target.restore();
+  target.show();
+  target.focus();
+}
+
+function syncTray(): void {
+  // Headless verification has no display; a Tray would throw.
+  if (process.env.PIDECK_HEADLESS === "1") {
+    daemonTray?.destroy();
+    daemonTray = null;
+    return;
+  }
+  try {
+    daemonTray = syncDaemonTray(daemonTray, {
+      connected: daemonConnected,
+      tooltip: "Babylon — daemon connected",
+      create: () => {
+        const image = nativeImage.createFromDataURL(TRAY_ICON_DATA_URL);
+        image.setTemplateImage(true);
+        const tray = new Tray(image);
+        return {
+          destroy: () => tray.destroy(),
+          setToolTip: (tip: string) => tray.setToolTip(tip),
+          setContextMenu: (menu: unknown) => tray.setContextMenu(menu as Electron.Menu),
+          popUpContextMenu: () => tray.popUpContextMenu(),
+          onClick: (fn: () => void) => tray.on("click", fn),
+        };
+      },
+      menu: () =>
+        Menu.buildFromTemplate([
+          { label: "Babylon · daemon connected", enabled: false },
+          { type: "separator" },
+          { label: "Show Babylon", click: () => showMainWindow() },
+          { label: "Quit Babylon", click: () => app.quit() },
+        ]),
+    });
+  } catch {
+    daemonTray = null;
+  }
+}
+
 function daemonPaths() {
   return {
     socketPath: join(app.getPath("userData"), "daemon.sock"),
@@ -369,10 +440,7 @@ function isDaemonEnabled(): boolean {
 }
 
 function getRuntime(): RuntimeFacade {
-  if (runtimeOwner === "daemon" && daemonClient) return createDaemonRuntime(daemonClient);
-  // Fallback to local runtime, host may be null during early startup, so guard
-  const hostForLocal = host ?? ({ open: async () => ({}), prompt: async () => ({}), abort: async () => ({}), getState: async () => ({}), getMessages: async () => [] } as unknown as PiHost);
-  return createLocalRuntime({ taskManager, attentionManager, hookManager, piHost: hostForLocal, contracts });
+  return resolveRuntime({ runtimeOwner, daemonClient, host, taskManager, attentionManager, hookManager, contracts });
 }
 
 function daemonOnly(): DaemonClient | null {
@@ -483,6 +551,24 @@ const agentEvents = new AgentEventBuffer((events) => {
   win?.webContents.send("pideck:agent-events", events);
 });
 
+// Task and attention broadcasts arrive in flurries, and each one used to cost
+// a full state.get round-trip plus a full-list send. Latest wins per view:
+// a burst collapses to the fewest refreshes possible.
+const daemonViewRefresh = createCoalescingWorker<string, void>({
+  merge: () => undefined,
+  process: async (key) => {
+    const res = await daemonClient?.request("state.get", {}).catch(() => null);
+    if (!res) return;
+    const runtime = (res.payload as { runtime?: { tasks?: { tasks: Record<string, unknown> }; attention?: unknown } })?.runtime;
+    if (key === "tasks") {
+      const tasks = runtime?.tasks ? Object.values(runtime.tasks.tasks) : [];
+      win?.webContents.send("pideck:task-update", tasks);
+    } else {
+      win?.webContents.send("pideck:attention-update", runtime?.attention ?? { items: {} });
+    }
+  },
+});
+
 // ---------------------------------------------------------------------------
 // Workflows bridge (pi-dynamic-workflows run state)
 // ---------------------------------------------------------------------------
@@ -514,7 +600,7 @@ function updateActivityBridge(cwd: string): void {
             /* best effort */
           }
         },
-        resolveParentSessionFile: (sessionId) => resolveParentSessionFile(sessionId),
+        resolveParentSessionFile: (sessionId) => resolveParentSessionFile(sessionId, sessionsRoot()),
       });
     }
     activityRegistry.ensure(cwd);
@@ -653,6 +739,7 @@ async function startHost(): Promise<void> {
     host = new PiHost({
       cwd,
       stateDir: PI_STATE_ROOT,
+      sessionsRoot: sessionsRoot(),
       permission: permissionEngine
         ? {
             evaluate: (action, sessionId) => permissionEngine!.evaluate(action, sessionId),
@@ -727,7 +814,7 @@ function registerIpc(): void {
   };
 
   registerSessionsIpc(handle, {
-    sessionsRoot: PI_SESSIONS_ROOT,
+    sessionsRoot: sessionsRoot(),
     sessionIndex,
     getRuntime,
     getHost,
@@ -742,7 +829,7 @@ function registerIpc(): void {
   });
 
   registerBotsIpc(handle, {
-    sessionsRoot: PI_SESSIONS_ROOT,
+    sessionsRoot: sessionsRoot(),
     botStore,
     projectSettings,
     sessionIndex,
@@ -762,7 +849,7 @@ function registerIpc(): void {
   });
 
   registerSessionRuntimeIpc(handle, {
-    sessionsRoot: PI_SESSIONS_ROOT,
+    sessionsRoot: sessionsRoot(),
     getRuntime,
     getHost,
     isDaemonOwned,
@@ -770,6 +857,12 @@ function registerIpc(): void {
     driveSharedChatExtras,
   });
   registerGitIpc(handle, { getRuntime });
+
+  registerCanvasIpc(handle, {
+    getWindow: () => win,
+    classifyRegions: (cwd, crops) => getHost().classifyRegions(cwd, crops),
+    requestEgressApproval: gateCanvasEgress,
+  });
 
   registerRuntimeIpc(handle, { getRuntime, daemonOnly, getWindow: () => win });
 
@@ -850,14 +943,15 @@ function probeSocket(socketPath: string, timeoutMs = 1_000): Promise<boolean> {
   });
 }
 
-/** Protocol version a live daemon advertises, or undefined when it is
+/** What the socket holder advertises, or undefined when it is
  *  unreachable or predates versioned handshakes. */
-async function daemonProtocolVersion(socketPath: string): Promise<number | undefined> {
+async function daemonAdvertised(socketPath: string): Promise<DaemonAdvertised | undefined> {
   const probe = connectDaemonClient({ listen: { socketPath }, reconnect: false });
   try {
     const res = await probe.request("ping", { protocol: DAEMON_PROTOCOL_VERSION }, 2_000);
-    const version = (res.payload as { protocol?: unknown }).protocol;
-    return typeof version === "number" ? version : undefined;
+    const payload = res.payload as DaemonAdvertised;
+    if (typeof payload?.protocol !== "number") return undefined;
+    return { protocol: payload.protocol, build: typeof payload.build === "string" ? payload.build : undefined };
   } catch {
     return undefined;
   } finally {
@@ -893,6 +987,7 @@ function spawnDaemon(entry: string, socketPath: string, snapshotPath: string, pi
       BABYLON_DAEMON_SNAPSHOT: snapshotPath,
       BABYLON_DAEMON_PID_FILE: pidPath,
       BABYLON_DAEMON_STATE_DIR: PI_STATE_ROOT,
+      BABYLON_SESSIONS_ROOT: sessionsRoot(),
       BABYLON_DAEMON_PERMISSIONS_DIR: permissionDir(),
       BABYLON_SETTINGS_PATH: app.getPath("userData") + "/pideck-settings.json",
     },
@@ -908,27 +1003,48 @@ async function ensureDaemon(): Promise<boolean> {
   const entry = join(__dirname, "..", "dist-daemon", "main.mjs");
   const entryExists = existsSync(entry);
 
-  if (await probeSocket(socketPath)) {
-    const running = await daemonProtocolVersion(socketPath);
-    if (running !== DAEMON_PROTOCOL_VERSION) {
-      console.warn(
-        `[pideck] daemon speaks protocol ${running ?? "unknown"}, this build speaks ${DAEMON_PROTOCOL_VERSION}; retiring it`
-      );
-      if (!(await retireDaemon(socketPath, pidPath, retirePort))) {
-        // Fail closed: speaking a mismatched protocol risks corrupting the
-        // daemon's authoritative state, so use the in-process host instead.
-        console.error("[pideck] could not retire the incompatible daemon; falling back to the in-process host");
-        return false;
-      }
+  // Elect the holder under lock: two GUIs starting at once must not both see
+  // an empty socket and both spawn. A loser waits briefly, then adopts.
+  const lockPath = join(app.getPath("userData"), "daemon.lifecycle-lock");
+  let lock: LifecycleLock | null = null;
+  for (let i = 0; i < 3 && !lock; i++) {
+    try {
+      lock = await acquireLifecycleLock(lockPath);
+    } catch (error) {
+      if (!(error instanceof LifecycleLockedError)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 500));
     }
   }
-
-  if (!(await probeSocket(socketPath))) {
-    if (!entryExists) {
-      console.warn("daemon.enabled is set but dist-daemon/main.mjs is missing; run pnpm build:daemon, falling back to in-process host");
-      return false;
+  if (!lock) {
+    console.error("[pideck] daemon election stayed locked; falling back to the in-process host");
+    return false;
+  }
+  try {
+    if (await probeSocket(socketPath)) {
+      const running = await daemonAdvertised(socketPath);
+      const ours = { protocol: DAEMON_PROTOCOL_VERSION, build: buildId() };
+      if (shouldRetireDaemon(running, ours)) {
+        console.warn(
+          `[pideck] daemon is stale (protocol ${String(running?.protocol ?? "unknown")}, build ${String(running?.build ?? "unknown")}) vs this build (protocol ${ours.protocol}, build ${ours.build}); retiring it`
+        );
+        if (!(await retireDaemon(socketPath, pidPath, retirePort))) {
+          // Fail closed: speaking a mismatched protocol risks corrupting the
+          // daemon's authoritative state, so use the in-process host instead.
+          console.error("[pideck] could not retire the incompatible daemon; falling back to the in-process host");
+          return false;
+        }
+      }
     }
-    spawnDaemon(entry, socketPath, snapshotPath, pidPath);
+
+    if (!(await probeSocket(socketPath))) {
+      if (!entryExists) {
+        console.warn("daemon.enabled is set but dist-daemon/main.mjs is missing; run pnpm build:daemon, falling back to in-process host");
+        return false;
+      }
+      spawnDaemon(entry, socketPath, snapshotPath, pidPath);
+    }
+  } finally {
+    await releaseLifecycleLock(lock).catch(() => undefined);
   }
   if (!daemonClient) {
     daemonClient = connectDaemonClient({
@@ -959,6 +1075,7 @@ async function ensureDaemon(): Promise<boolean> {
       } catch {
         /* best effort */
       }
+      syncTray();
       // If the daemon owns the runtime and the socket just came back, install
       // the daemon LSP notifier (it was deferred at startup if the socket
       // happened to be down at that exact moment).
@@ -972,26 +1089,13 @@ async function ensureDaemon(): Promise<boolean> {
       // inject daemon state into the locally-owned UI (P1 #6).
       if (!isDaemonOwned()) return;
       if (envelope.type === "task.created" || envelope.type === "task.updated" || envelope.type === "task.removed") {
-        daemonClient
-          ?.request("state.get", {})
-          .then((res) => {
-            const runtime = (res.payload as { runtime?: { tasks?: { tasks: Record<string, unknown> } } })?.runtime;
-            const tasks = runtime?.tasks ? Object.values(runtime.tasks.tasks) : [];
-            win?.webContents.send("pideck:task-update", tasks);
-          })
-          .catch(() => {});
+        daemonViewRefresh.enqueue("tasks", undefined);
       }
       if (envelope.type === "attention.raised" || envelope.type === "attention.resolved") {
-        daemonClient
-          ?.request("state.get", {})
-          .then((res) => {
-            const runtime = (res.payload as { runtime?: { attention?: unknown } })?.runtime;
-            win?.webContents.send("pideck:attention-update", runtime?.attention ?? { items: {} });
-          })
-          .catch(() => {});
+        daemonViewRefresh.enqueue("attention", undefined);
       }
       if (envelope.type === "pi.event") {
-        win?.webContents.send("pideck:agent-events", [envelope.payload]);
+        agentEvents.push(envelope.payload);
       }
       if (envelope.type === "pi.session.status") {
         // In daemon mode there is no local PiHost whose onStatus would call
@@ -1026,9 +1130,12 @@ async function handshakeDaemon(): Promise<boolean> {
   try {
     const pong = await daemonClient.request("ping", { protocol: DAEMON_PROTOCOL_VERSION }, 5_000);
     // ensureDaemon() should have retired a mismatched daemon already; this is
-    // the last line of defense against speaking the wrong protocol.
-    if ((pong.payload as { protocol?: unknown }).protocol !== DAEMON_PROTOCOL_VERSION) {
-      console.error("[pideck] daemon protocol mismatch during handshake; falling back to the in-process host");
+    // the last line of defense, including against a stale bundle respawned
+    // from disk after the retire.
+    const advertised = pong.payload as DaemonAdvertised;
+    const ours = buildId();
+    if (advertised?.protocol !== DAEMON_PROTOCOL_VERSION || (ours !== "unknown" && advertised?.build !== ours)) {
+      console.error("[pideck] daemon skew during handshake (stale bundle on disk? run pnpm build:daemon); falling back to the in-process host");
       return false;
     }
   } catch {
@@ -1036,6 +1143,7 @@ async function handshakeDaemon(): Promise<boolean> {
   }
   runtimeOwner = "daemon";
   daemonConnected = true;
+  syncTray();
   // Warm the task cache so the UI has something to render immediately.
   daemonClient
     .request("state.get", {})
@@ -1127,6 +1235,8 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  daemonTray?.destroy();
+  daemonTray = null;
   // Flush window bounds synchronously; the debounced writer may not have run.
   try {
     if (win && !win.isDestroyed()) writeFileSync(windowBoundsFile(), JSON.stringify(win.getNormalBounds()));

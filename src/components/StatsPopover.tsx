@@ -3,7 +3,7 @@ import { PopoverPanel, PopoverRoot, PopoverTrigger } from "./ui/Popover";
 import { fmtTokens } from "../store";
 import { CompressIcon, GaugeIcon } from "./icons";
 
-interface Stats {
+export interface Stats {
   userMessages?: number;
   assistantMessages?: number;
   toolCalls?: number;

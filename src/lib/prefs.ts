@@ -5,7 +5,7 @@ import { getWithFallback, setWithFallback } from "./storage";
 const EVENT = "babylon:pref-changed";
 
 export type BoolPrefKey = "streamResponses" | "statsCard";
-export type StringPrefKey = "chatFont" | "promptFont" | "codeFont" | "statsCardPos";
+export type StringPrefKey = "chatFont" | "promptFont" | "codeFont" | "statsCardPos" | "canvasWidth";
 
 export function readBoolPref(key: BoolPrefKey, fallback: boolean): boolean {
   const v = getWithFallback(key);

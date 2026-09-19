@@ -11,18 +11,30 @@ interface Model {
   reasoning?: boolean;
 }
 
+export type { Model as PickerModel };
+
 interface Props {
   models: Model[];
   current?: Model | null;
   disabled?: boolean;
   align?: "left" | "right";
   wide?: boolean;
+  /** Popover direction; the composer variant opens upward above the input. */
+  side?: "top" | "bottom";
+  /** Denser trigger + upward panel for the composer controls row. */
+  compactTrigger?: boolean;
   onSelect(provider: string, modelId: string): void;
 }
 
 const RECENTS_KEY = "babylon:recent-models";
 const MAX_RECENT = 5;
 const RECENT_LABEL = "Recent";
+
+/** Rows under this index get a mod+digit quick-select hint (T3 ⌘N rows). */
+export const MODEL_PICKER_SHORTCUT_LIMIT = 9;
+
+const isMac = typeof navigator !== "undefined" && /mac/i.test(navigator.platform ?? "");
+const modGlyph = isMac ? "⌘" : "Ctrl";
 
 const fmtWin = (n?: number) => (n ? `${Math.round(n / 1000)}k` : "—");
 const fmtCost = (n?: number) => (n ? `$${n.toFixed(2)}/M` : "—");
@@ -41,7 +53,7 @@ interface Group {
   models: Model[];
 }
 
-export default function ModelPicker({ models, current, disabled, align = "left", wide, onSelect }: Props) {
+export default function ModelPicker({ models, current, disabled, align = "left", wide, side, compactTrigger, onSelect }: Props) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [hi, setHi] = useState(0);
@@ -165,11 +177,20 @@ export default function ModelPicker({ models, current, disabled, align = "left",
     [open]
   );
 
-  // Keyboard: ↑↓ move within the pane, ←→ switch provider tabs, Enter picks.
-  // Escape/outside-press dismissal is owned by the popover primitive.
+  // Keyboard: ↑↓ move within the pane, ←→ switch provider tabs, Enter picks,
+  // mod+digit quick-picks a visible row (T3 ⌘N). Escape/outside-press
+  // dismissal is owned by the popover primitive.
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && /^[1-9]$/.test(e.key)) {
+        const m = flat[Number(e.key) - 1];
+        if (m) {
+          e.preventDefault();
+          pick(m.provider, m.id);
+        }
+        return;
+      }
       if (e.key === "ArrowDown") {
         e.preventDefault();
         setHi((i) => Math.min(i + 1, flat.length - 1));
@@ -212,10 +233,20 @@ export default function ModelPicker({ models, current, disabled, align = "left",
       <PopoverRoot open={open} onOpenChange={setOpen}>
       <PopoverTrigger
         disabled={disabled || !models.length}
-        title={currentKey ? `Switch model — ${currentKey}` : "Switch model"}
-        className="operator-meta-control flex h-8 max-w-[220px] items-center gap-1.5 px-2.5 text-[13px] disabled:opacity-50"
+        title={
+          models.length === 0
+            ? "No models available — check provider auth, then reopen"
+            : currentKey
+              ? `Switch model — ${currentKey}`
+              : "Switch model"
+        }
+        className={
+          compactTrigger
+            ? "operator-meta-control flex h-8 items-center gap-1.5 px-2.5 disabled:opacity-50"
+            : "operator-meta-control flex h-8 max-w-[220px] items-center gap-1.5 px-2.5 text-[13px] disabled:opacity-50"
+        }
       >
-        <CpuIcon size={12} className="shrink-0 text-dim" />
+        <CpuIcon size={compactTrigger ? 15 : 12} className="shrink-0 text-dim" />
         {current ? (
           <span className="min-w-0 truncate">
             <span className="text-dim">{current.provider}/</span>
@@ -230,11 +261,11 @@ export default function ModelPicker({ models, current, disabled, align = "left",
       {open && wide && <div className="fixed inset-0 z-40 bg-black/20" aria-hidden />}
       <PopoverPanel
         container={rootRef.current}
-        side="bottom"
+        side={side ?? "bottom"}
         align={align === "right" ? "end" : "start"}
         sideOffset={8}
-        positionerClassName="z-50"
-        className={`operator-popover overflow-hidden p-1.5 ${wide ? "w-[560px] max-w-[min(560px,calc(100vw-24px))] rounded-xl border border-line bg-bg flex flex-col max-h-[min(560px,calc(100vh-80px))]" : "w-[460px] max-w-[calc(100vw-32px)]"}`}
+        positionerClassName={side === "top" ? "z-[70]" : "z-50"}
+        className={`operator-popover overflow-hidden p-1.5 ${wide ? "w-[560px] max-w-[min(560px,calc(100vw-24px))] rounded-xl border border-line bg-bg flex flex-col max-h-[min(560px,calc(100vh-80px))]" : side === "top" ? "flex flex-col w-[460px] max-w-[min(460px,calc(100vw-24px))] max-h-[min(420px,calc(100vh-80px))]" : "w-[460px] max-w-[calc(100vw-32px)]"}`}
       >
           {wide && <div className="pointer-events-none absolute -top-1.5 right-[140px] h-3 w-3 rotate-45 border-l border-t border-line bg-bg" aria-hidden />}
           <div className="border-b border-line/60 p-2">
@@ -287,7 +318,7 @@ export default function ModelPicker({ models, current, disabled, align = "left",
                       data-idx={idx}
                       onMouseEnter={() => setHi(idx)}
                       onClick={() => pick(m.provider, m.id)}
-                      className={`flex w-full items-center gap-2.5 rounded-md px-3 py-1.5 text-left transition-colors duration-100 ${
+                      className={`flex w-full items-center gap-2.5 px-3 text-left transition-colors duration-100 ${compactTrigger ? "rounded-lg py-2" : "rounded-md py-1.5"} ${
                         active ? "bg-fg/[0.1]" : ""
                       } ${isCurrent ? "text-accent" : ""}`}
                     >
@@ -305,6 +336,9 @@ export default function ModelPicker({ models, current, disabled, align = "left",
                       {isCurrent && <CheckIcon size={11} className="shrink-0 text-accent" />}
                       {!isCurrent && active && (
                         <kbd className="shrink-0 rounded border border-line bg-bg px-1.5 py-px text-[10px] leading-4 text-dim">↵</kbd>
+                      )}
+                      {!isCurrent && !active && idx < MODEL_PICKER_SHORTCUT_LIMIT && (
+                        <kbd title={`${modGlyph}+${idx + 1} to select`} className="shrink-0 rounded border border-line/60 bg-transparent px-1.5 py-px text-[10px] leading-4 text-dim/60">{modGlyph}{idx + 1}</kbd>
                       )}
                     </button>
                   );
@@ -331,7 +365,7 @@ export default function ModelPicker({ models, current, disabled, align = "left",
                     data-idx={idx}
                     onMouseEnter={() => setHi(idx)}
                     onClick={() => pick(m.provider, m.id)}
-                    className={`flex w-full items-center gap-2.5 rounded-md px-3 py-1.5 text-left transition-colors duration-100 ${
+                    className={`flex w-full items-center gap-2.5 px-3 text-left transition-colors duration-100 ${compactTrigger ? "rounded-lg py-2" : "rounded-md py-1.5"} ${
                       active ? "bg-fg/[0.1]" : ""
                     } ${isCurrent ? "text-accent" : ""}`}
                   >
@@ -349,6 +383,9 @@ export default function ModelPicker({ models, current, disabled, align = "left",
                     {isCurrent && <CheckIcon size={11} className="shrink-0 text-accent" />}
                     {!isCurrent && active && (
                       <kbd className="shrink-0 rounded border border-line bg-bg px-1.5 py-px text-[10px] leading-4 text-dim">↵</kbd>
+                    )}
+                    {!isCurrent && !active && idx < MODEL_PICKER_SHORTCUT_LIMIT && (
+                      <kbd title={`${modGlyph}+${idx + 1} to select`} className="shrink-0 rounded border border-line/60 bg-transparent px-1.5 py-px text-[10px] leading-4 text-dim/60">{modGlyph}{idx + 1}</kbd>
                     )}
                   </button>
                 );

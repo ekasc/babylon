@@ -41,7 +41,7 @@ export function createBrowserTools(getController: () => SimController | null): T
       name: "browser_open",
       label: "Open Browser",
       description:
-        "Open a URL in Babylon's in-app browser (tabbed Chromium guests with device emulation). Reuses the active tab unless newTab is true. The sidebar mirrors the same tabs for the user. Prefer browser_navigate when a page is already open.",
+        "Open a URL in Babylon's in-app browser (tabbed Chromium guests with device emulation). Reuses the active tab unless newTab is true. The sidebar mirrors the same tabs for the user. Tabs share one cookie jar that survives restarts, so logins stick. Prefer browser_navigate when a page is already open.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -238,18 +238,21 @@ export function createBrowserTools(getController: () => SimController | null): T
     {
       name: "browser_screenshot",
       label: "Screenshot Browser",
-      description: "Capture an in-app browser tab's viewport as a PNG image (capped at 1440px wide, defaults to the active tab). The image is returned to you; use it to verify layout, styling, and visual state.",
+      description: "Capture an in-app browser tab as a PNG image (capped at 1440px wide, defaults to the active tab). Pass fullPage for the whole page height instead of just the viewport. The image is returned to you; use it to verify layout, styling, and visual state.",
       parameters: {
         type: "object",
         additionalProperties: false,
-        properties: { tab: tabParam() },
+        properties: {
+          tab: tabParam(),
+          fullPage: { type: "boolean", description: "Capture beyond the viewport (full page height)" },
+        },
       } as any,
       execute: async (_id, raw, _signal, onUpdate) => {
         const ctl = needCtl(getController);
         onUpdate?.({ content: [{ type: "text", text: "Capturing screenshot…" }], details: {} });
         const tab = typeof (raw as any)?.tab === "string" && (raw as any).tab ? (raw as any).tab : null;
         await ctl.ensureOpen();
-        const shot = await ctl.screenshot(tab);
+        const shot = await ctl.screenshot(tab, { fullPage: (raw as any)?.fullPage === true });
         const snap = await ctl.snapshot(tab).catch(() => null);
         return {
           content: [
@@ -264,7 +267,7 @@ export function createBrowserTools(getController: () => SimController | null): T
     {
       name: "browser_snapshot",
       label: "Read Browser Page",
-      description: "Read an in-app browser tab (defaults to the active tab): URL, title, and rendered text. Use this to check content and state without a screenshot.",
+      description: "Read an in-app browser tab (defaults to the active tab): URL, title, rendered text, and the interactive-element tree with [ref:N] markers. Use this to check content and state without a screenshot; target refs with browser_click/browser_fill (e.g. selector ref:3). Refs are valid until the next navigation.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -274,10 +277,12 @@ export function createBrowserTools(getController: () => SimController | null): T
         const ctl = needCtl(getController);
         const tab = typeof (raw as any)?.tab === "string" && (raw as any).tab ? (raw as any).tab : null;
         await ctl.ensureOpen();
-        const snap = await ctl.snapshot(tab);
+        const snap = await ctl.snapshot(tab, { a11y: true });
+        const body = [`URL: ${snap.url}\nTitle: ${snap.title || "(none)"}\n\n${snap.text || "(no text)"}`];
+        if (snap.a11y) body.push(`Interactive elements (click/fill with selector "ref:N"):\n${snap.a11y}`);
         return {
-          content: [{ type: "text", text: `URL: ${snap.url}\nTitle: ${snap.title || "(none)"}\n\n${snap.text || "(no text)"}` }],
-          details: { url: snap.url, title: snap.title, chars: snap.text.length },
+          content: [{ type: "text", text: body.join("\n\n") }],
+          details: { url: snap.url, title: snap.title, chars: snap.text.length, axChars: snap.a11y.length },
         };
       },
     } as ToolDefinition<any, any>,
@@ -285,13 +290,13 @@ export function createBrowserTools(getController: () => SimController | null): T
     {
       name: "browser_click",
       label: "Click Browser Element",
-      description: "Click an element in an in-app browser tab by CSS selector (e.g. \"button.submit\", \"a[href='/login']\", \"#menu-toggle\"). Defaults to the active tab. Uses touch taps under mobile emulation, mouse clicks otherwise. The element must exist and be visible.",
+      description: "Click an element in an in-app browser tab by CSS selector (e.g. \"button.submit\", \"a[href='/login']\", \"#menu-toggle\") or by snapshot ref (e.g. \"ref:3\"). Defaults to the active tab. Uses touch taps under mobile emulation, mouse clicks otherwise. The element must exist and be visible.",
       parameters: {
         type: "object",
         additionalProperties: false,
         required: ["selector"],
         properties: {
-          selector: { type: "string", description: "CSS selector of the element to click" },
+          selector: { type: "string", description: "CSS selector of the element to click, or a ref:N marker from the latest browser_snapshot" },
           tab: tabParam(),
         },
       } as any,
@@ -308,13 +313,13 @@ export function createBrowserTools(getController: () => SimController | null): T
     {
       name: "browser_fill",
       label: "Fill Browser Field",
-      description: "Type text into a text field in an in-app browser tab by CSS selector (input, textarea, or contenteditable). Defaults to the active tab. Existing content is selected first, then replaced. The element must exist and be visible.",
+      description: "Type text into a text field in an in-app browser tab by CSS selector (input, textarea, or contenteditable) or by snapshot ref (e.g. \"ref:3\"). Defaults to the active tab. Existing content is selected first, then replaced. The element must exist and be visible.",
       parameters: {
         type: "object",
         additionalProperties: false,
         required: ["selector", "text"],
         properties: {
-          selector: { type: "string", description: "CSS selector of the field" },
+          selector: { type: "string", description: "CSS selector of the field, or a ref:N marker from the latest browser_snapshot" },
           text: { type: "string", description: "Text to type" },
           tab: tabParam(),
         },

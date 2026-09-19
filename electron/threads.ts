@@ -78,30 +78,43 @@ const THREAD_ID = /^[a-zA-Z0-9-]{1,64}$/;
 const LIVE_STATUS = new Set(["queued", "starting", "running", "interrupting", "idle", "blocked"]);
 
 /** Shared, cached parent-session-file resolver for pi session ids. Session files
- *  are named `<timestamp>_<sessionId>.jsonl` under ~/.pi/agent/sessions. */
+ *  are named `<timestamp>_<sessionId>.jsonl` under the instance sessions root. */
 const parentFileCache = new Map<string, string | null>();
 
-export async function resolveParentSessionFile(sessionId: string | null | undefined): Promise<string | null> {
+export async function resolveParentSessionFile(
+  sessionId: string | null | undefined,
+  root: string = join(homedir(), ".pi", "agent", "sessions")
+): Promise<string | null> {
   if (!sessionId) return null;
-  const cached = parentFileCache.get(sessionId);
+  // Keyed by root: one process can resolve for several instances (tests do).
+  const cacheKey = `${root}\0${sessionId}`;
+  const cached = parentFileCache.get(cacheKey);
   if (cached !== undefined) return cached;
   try {
-    const root = join(homedir(), ".pi", "agent", "sessions");
-    const projects = await fs.readdir(root);
-    for (const project of projects) {
-      const dir = join(root, project);
-      const files = await fs.readdir(dir).catch(() => []);
-      const hit = files.find((file) => file.includes(sessionId) && file.endsWith(".jsonl"));
-      if (hit) {
-        const path = join(dir, hit);
-        parentFileCache.set(sessionId, path);
-        return path;
+    // Both layouts occur: the default store groups files per encoded cwd,
+    // while an explicit session dir holds them flat.
+    const top = await fs.readdir(root).catch(() => [] as string[]);
+    const candidates: string[] = [];
+    for (const entry of top) {
+      const full = join(root, entry);
+      const stat = await fs.lstat(full).catch(() => null);
+      if (!stat) continue;
+      if (stat.isFile()) {
+        if (entry.endsWith(".jsonl")) candidates.push(full);
+      } else if (stat.isDirectory()) {
+        const files = await fs.readdir(full).catch(() => [] as string[]);
+        for (const file of files) if (file.endsWith(".jsonl")) candidates.push(join(full, file));
       }
+    }
+    const hit = candidates.find((path) => path.includes(sessionId));
+    if (hit) {
+      parentFileCache.set(cacheKey, hit);
+      return hit;
     }
   } catch {
     /* sessions store unavailable */
   }
-  parentFileCache.set(sessionId, null);
+  parentFileCache.set(cacheKey, null);
   return null;
 }
 

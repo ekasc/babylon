@@ -13,12 +13,15 @@
 //   BABYLON_DAEMON_TICK_MS  background policy tick interval (0 disables)
 
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { unlinkSync, writeFileSync } from "node:fs";
 import { startDaemonServer } from "../src/daemon-server";
 import { hashToken } from "../src/remote-auth";
 import { loadOrCreateDaemonToken } from "../src/daemon-auth";
 import { PiHost, defaultStateDir } from "../electron/pi-host";
+import { DAEMON_PROTOCOL_VERSION } from "../src/daemon-protocol";
+import { buildId } from "../src/build-info";
+import { removeRuntimeFile, writeRuntimeFile } from "../electron/daemon-runtime-file";
 import { HookManager } from "../electron/hook-manager";
 import { PermissionEngine, type AgentAction, type Risk } from "../electron/permissions";
 import { listSessions } from "../electron/sessions";
@@ -46,6 +49,10 @@ const snapshotPath = process.env.BABYLON_DAEMON_SNAPSHOT ?? join(babylonDir, "da
 // Records this process so a client built from other source can retire it even
 // when it is too old or too stuck to answer a shutdown request.
 const pidFile = process.env.BABYLON_DAEMON_PID_FILE ?? join(babylonDir, "daemon.pid");
+// Advertisement for clients and diagnostics, next to the pid file so a GUI
+// started against another userData still finds its own. Written only once
+// listening, like the pid file, and may be overridden for tests.
+const runtimeFile = process.env.BABYLON_DAEMON_RUNTIME_FILE ?? join(dirname(pidFile), "daemon-runtime.json");
 
 const defaultProject = process.env.BABYLON_DAEMON_DEFAULT_PROJECT ?? "";
 const sessionGroups = await listSessions(defaultProject || undefined).catch(() => []);
@@ -65,6 +72,7 @@ const requestApproval = (action: AgentAction, risk: Risk, sessionId?: string): P
 const piHost = new PiHost({
   cwd: initialCwd,
   agentDir: process.env.BABYLON_DAEMON_AGENT_DIR,
+  sessionsRoot: process.env.BABYLON_SESSIONS_ROOT,
   stateDir: process.env.BABYLON_DAEMON_STATE_DIR ?? defaultStateDir(process.env.BABYLON_DAEMON_AGENT_DIR),
   hookManager,
   permission: {
@@ -90,6 +98,7 @@ const server = await startDaemonServer({
     ? { authTokenHash: hashToken(loadOrCreateDaemonToken(babylonDir)) }
     : {}),
   piHost,
+  isDraining: () => piHost.isDraining(),
   permissionEngine,
   hookManager,
   // A client built from other source retires this daemon instead of speaking a
@@ -106,10 +115,21 @@ writeFileSync(pidFile, `${process.pid}\n`, { mode: 0o600 });
 const address = server.address();
 const addressLabel =
   "socketPath" in address ? address.socketPath : `${address.host ?? "127.0.0.1"}:${address.port}`;
+writeRuntimeFile(runtimeFile, {
+  version: 1,
+  pid: process.pid,
+  protocol: DAEMON_PROTOCOL_VERSION,
+  build: buildId(),
+  socketPath: addressLabel,
+  startedAt: new Date().toISOString(),
+});
 console.log(`babylon-daemon: listening on ${addressLabel}`);
 console.log(`babylon-daemon: state persisted to ${snapshotPath}`);
 
 let stopping = false;
+// retireDaemon waits SHUTDOWN_WAIT_MS (5s) for exit after requesting it; the
+// drain deadline fits inside with slack left for close and dispose.
+const DRAIN_TIMEOUT_MS = 4000;
 async function stop(): Promise<void> {
   if (stopping) return;
   stopping = true;
@@ -118,6 +138,10 @@ async function stop(): Promise<void> {
   } catch {
     // Already gone.
   }
+  removeRuntimeFile(runtimeFile);
+  // Fail new turns fast, then let live ones finish before tearing down.
+  piHost.beginDrain();
+  await piHost.drainTurns(DRAIN_TIMEOUT_MS);
   await server.close();
   await piHost.dispose();
   process.exit(0);

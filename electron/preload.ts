@@ -227,6 +227,17 @@ const api = {
   lspRefresh: (cwd: string): Promise<any> => ipcRenderer.invoke("pideck:lsp-refresh", cwd),
   onLspUpdate: (cb: any) => on("pideck:lsp-update", cb),
 
+  canvasList: (cwd: string): Promise<any[]> => ipcRenderer.invoke("pideck:canvas-list", cwd),
+  canvasWrite: (cwd: string, name: string, text: string): Promise<any> =>
+    ipcRenderer.invoke("pideck:canvas-write", cwd, name, text),
+  canvasWatch: (cwd: string | null, name: string | null): Promise<any> =>
+    ipcRenderer.invoke("pideck:canvas-watch", cwd, name),
+  canvasClassify: (cwd: string, name: string, crops: any[]): Promise<any> =>
+    ipcRenderer.invoke("pideck:canvas-classify", cwd, name, crops),
+  canvasUnwatch: (): Promise<any> => ipcRenderer.invoke("pideck:canvas-unwatch"),
+  onCanvasChanged: (cb: any) => on("pideck:canvas-changed", cb),
+  onCanvasScenes: (cb: any) => on("pideck:canvas-scenes", cb),
+
   onStatus: (cb: any) => on("pideck:session-status", cb),
 };
 

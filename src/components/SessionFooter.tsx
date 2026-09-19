@@ -1,9 +1,13 @@
+import { useState } from "react";
 import Composer, { type Attachment } from "./Composer";
+import { GoalStrip } from "./GoalStrip";
+import type { PickerModel } from "./ModelPicker";
+import type { Stats } from "./StatsPopover";
 
 interface Props {
-	agentState: any;
-	stats: any;
-	models?: any[];
+	agentState?: { model?: PickerModel | null; thinkingLevel?: string } | null;
+	stats?: Stats | null;
+	models?: PickerModel[];
 	thinkingLevels?: string[];
 	onSetModel?: (provider: string, modelId: string) => void;
 	onSetThinking?: (level: string) => void;
@@ -12,7 +16,9 @@ interface Props {
 	steering?: string[];
 	followUp?: string[];
 	commands?: any[];
-	draftRequest?: { id: number; text: string } | null;
+	draftRequest?: { id: number; text: string; append?: boolean } | null;
+	/** Session identity for per-session composer draft persistence. */
+	sessionKey?: string | null;
 	toast?: (kind: "info" | "warning" | "error", text: string) => void;
 	onSend?: (
 		text: string,
@@ -26,6 +32,13 @@ interface Props {
 	subagentCount?: number;
 	/** Bots offered for @-mention completion in the composer. */
 	mentionBots?: import("../bots").Bot[];
+	/** The session's goal, as a mini strip joined to the top of the composer. */
+	goal?: import("../lib/goal-mode").GoalState | null;
+	onStartGoal?: (objective: string) => void;
+	onPauseGoal?: () => void;
+	onResumeGoal?: () => void;
+	onFinishGoal?: () => void;
+	onClearGoal?: () => void;
 }
 
 export default function SessionFooter({
@@ -41,13 +54,21 @@ export default function SessionFooter({
 	followUp = [],
 	commands = [],
 	draftRequest = null,
+	sessionKey = null,
 	toast = (() => {}) as any,
 	onSend = async () => false,
 	onAbort = () => {},
 	dialogs,
 	onDialogDismiss,
 	mentionBots = [],
+	goal = null,
+	onStartGoal = () => {},
+	onPauseGoal = () => {},
+	onResumeGoal = () => {},
+	onFinishGoal = () => {},
+	onClearGoal = () => {},
 }: Props) {
+	const [goalEditing, setGoalEditing] = useState(false);
 	// The session controls (permission, model, thinking, run state, usage)
 	// live in the composer surface itself. The footer is just the composer,
 	// not a permanent telemetry dashboard.
@@ -60,6 +81,21 @@ export default function SessionFooter({
 				    as one deliberate control surface aligned to the
 				    conversation, session controls included. */}
 				<div className="mx-auto w-full max-w-3xl">
+					{goal || goalEditing ? (
+						<GoalStrip
+							goal={goal}
+							editing={goalEditing}
+							onEditingChange={setGoalEditing}
+							onStart={(objective) => {
+								onStartGoal(objective);
+								setGoalEditing(false);
+							}}
+							onPause={onPauseGoal}
+							onResume={onResumeGoal}
+							onFinish={onFinishGoal}
+							onClear={onClearGoal}
+						/>
+					) : null}
 					<Composer
 						streaming={streaming}
 						steering={steering}
@@ -70,6 +106,7 @@ export default function SessionFooter({
 						models={models ?? []}
 						thinkingLevels={thinkingLevels ?? []}
 						draftRequest={draftRequest}
+						sessionKey={sessionKey}
 						toast={toast}
 						onSend={onSend}
 						onAbort={onAbort}
@@ -79,6 +116,8 @@ export default function SessionFooter({
 						dialogs={dialogs}
 						onDialogDismiss={onDialogDismiss}
 						mentionBots={mentionBots}
+						goalSet={goal !== null}
+						onStartGoal={() => setGoalEditing(true)}
 					/>
 				</div>
 		</div>

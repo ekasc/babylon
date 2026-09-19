@@ -16,12 +16,16 @@ import { promises as fsp } from "node:fs";
 import { join, resolve } from "node:path";
 import { flattenSessionTree } from "./session-tree";
 import { projectHistory } from "./session-history";
-import { ActiveRollback, RollbackStore, entryDigest, type TurnCheckpoint } from "./rollback-store";
+import { ActiveRollback, RollbackStore, entryDigest, missingCheckpointReason, type Ledger, type TurnCheckpoint } from "./rollback-store";
+import { validateSessionPath, contained } from "./session-path";
 import { SnapshotStore, type RestoreChange, type SnapshotCapture } from "./snapshot-store";
 import { shouldRelayImagesThrough, toPiImages } from "./prompt-images";
 import { clampToolOutput, readSessionTail, readToolOutput } from "./sessions";
 import { RecapStore } from "./recap-store";
 import { mergeSkillEntries, readUserSkillEntries } from "./user-skills";
+import { CANVAS_PROMPT } from "../src/lib/canvas-prompt";
+import { readCrops } from "../src/lib/sketch-classify";
+import type { RegionReading } from "../src/lib/sketch-compile";
 import { DEFAULT_GIT_COMMIT_MODEL, type PiSettings } from "./app-settings";
 import { getSettings as defaultGetSettings, saveSettings as defaultSaveSettings } from "./app-settings";
 import { buildGitCommitPrompt, extractModelText, parseGeneratedCommitMessage, type GeneratedCommitMessage } from "./git-commit-message";
@@ -33,6 +37,7 @@ import { ManagedSubagents, type ManagedSubagentRecord, type SubagentControlActio
 import { createAskQuestionTool } from "./ask-question";
 import { createBabylonBashTool } from "./bash-tool";
 import { createBrowserTools } from "./sim-tools";
+import { createCanvasTools } from "./canvas-tools";
 import type { SimController } from "./sim-controller";
 import { installAgentGuards } from "./permission-hook";
 import { mapToolToAction } from "./permission-agent";
@@ -126,6 +131,8 @@ export interface HostOptions {
   agentDir?: string;
   /** Babylon-owned state outside project worktrees. */
   stateDir?: string;
+  /** Instance sessions root. Unset keeps the SDK default (shared legacy store). */
+  sessionsRoot?: string;
   /** Called for every agent event (mirrors RPC stdout events). */
   onEvent: (event: any) => void;
   /** Called with status changes. */
@@ -174,6 +181,8 @@ export class PiHost {
    *  Execution belongs to these entries; foreground selection never owns
    *  their lifetime. Entries leave only via releaseSession/delete/quit. */
   private readonly sessions = new Map<string, SessionEntry>();
+  /** Set while the host is draining for restart: new turns fail fast. */
+  private draining = false;
   /** Foreground pointer: renderer convenience for active-scoped commands,
    *  never an execution primitive. */
   private foregroundSessionFile: string | null = null;
@@ -479,7 +488,7 @@ export class PiHost {
         settingsManager,
         modelRuntime,
         resourceLoaderOptions: {
-          ...(this.botSystemPrompt ? { appendSystemPrompt: [this.botSystemPrompt] } : {}),
+          appendSystemPrompt: [...(this.botSystemPrompt ? [this.botSystemPrompt] : []), CANVAS_PROMPT],
           extensionsOverride: (base) => ({
             ...base,
             extensions: [
@@ -507,7 +516,7 @@ export class PiHost {
         services,
         sessionManager: input.sessionManager,
         sessionStartEvent: input.sessionStartEvent,
-        customTools: [this.managedSubagents.tool(), createAskQuestionTool(), createBabylonBashTool(runtimeCwd), ...createBrowserTools(() => self.opts.getSimController?.() ?? null)],
+        customTools: [this.managedSubagents.tool(), createAskQuestionTool(), createBabylonBashTool(runtimeCwd), ...createBrowserTools(() => self.opts.getSimController?.() ?? null), ...createCanvasTools()],
       });
       try {
         const hasAsk = !!(result.session as any).getToolDefinition?.("ask_question");
@@ -1128,6 +1137,22 @@ export class PiHost {
     // Serialize per target file; unrelated sessions open concurrently.
     const key = opts.path ?? `new:${opts.cwd}`;
     return this.enqueueTransition(key, async () => {
+    if (opts.path && this.opts.sessionsRoot) {
+      // Sessions are forked per instance: refuse anything outside this
+      // instance's root instead of interleaving turns into another owner's file.
+      // Existing files get the full symlink-safe check; not-yet-flushed new
+      // sessions fall back to containment, since the live session is the
+      // source of truth until its first flush.
+      try {
+        await validateSessionPath(this.opts.sessionsRoot, opts.path);
+      } catch (error: any) {
+        if (error?.message === "session path does not exist") {
+          if (!contained(this.opts.sessionsRoot, resolve(opts.path))) {
+            throw new Error("session path is outside this instance's sessions root");
+          }
+        } else throw error;
+      }
+    }
     if (opts.path) {
       const existing = this.sessions.get(opts.path);
       if (existing) {
@@ -1170,7 +1195,7 @@ export class PiHost {
     } else {
       // New session in `cwd`: a fresh runtime + file, never a reset of some
       // other session's runtime. Foreground follows the user's new tab.
-      const sm = SessionManager.create(opts.cwd);
+      const sm = SessionManager.create(opts.cwd, this.opts.sessionsRoot);
       const file = sm.getSessionFile()!;
       await this.createSessionRuntimeWithManager(file, opts.cwd, sm);
       this.foregroundSessionFile = file;
@@ -1205,7 +1230,7 @@ export class PiHost {
   /** Create a fresh session runtime in cwd without foregrounding it (agent-
    *  requested new sessions must not hijack the user's view). */
   private async createSessionIn(cwd: string, _options?: any): Promise<any> {
-    const sm = SessionManager.create(cwd);
+    const sm = SessionManager.create(cwd, this.opts.sessionsRoot);
     const file = sm.getSessionFile()!;
     await this.createSessionRuntimeWithManager(file, cwd, sm);
     const entry = this.sessions.get(file)!;
@@ -1258,7 +1283,7 @@ export class PiHost {
       const cwd = this.foregroundSessionFile
         ? (this.sessions.get(this.foregroundSessionFile)?.cwd ?? this._cwd)
         : this._cwd;
-      const sm = SessionManager.create(cwd, undefined, opts?.parentSession ? { parentSession: opts.parentSession } : undefined);
+      const sm = SessionManager.create(cwd, this.opts.sessionsRoot, opts?.parentSession ? { parentSession: opts.parentSession } : undefined);
       const file = sm.getSessionFile()!;
       await this.createSessionRuntimeWithManager(file, cwd, sm);
       this.foregroundSessionFile = file;
@@ -1279,7 +1304,45 @@ export class PiHost {
   // Agent commands
   // -------------------------------------------------------------------------
 
+  /** Refuse new turns while draining for restart. Idempotent. */
+  beginDrain(): void {
+    this.draining = true;
+  }
+
+  isDraining(): boolean {
+    return this.draining;
+  }
+
+  /** Sessions with live work a restart must not kill: streaming turns,
+   *  turns awaiting approval, and sessions with active subagents. */
+  activeTurnCount(): number {
+    let count = 0;
+    for (const [sessionFile, entry] of this.sessions) {
+      const session = entry?.runtime?.session as any;
+      if (!session) continue;
+      if (session.isStreaming) {
+        count++;
+      } else if ([...this.uiRequests.values()].some((p) => p.sessionFile === sessionFile)) {
+        count++;
+      } else if (this.managedSubagents?.hasActiveForSession(session.sessionId)) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /** Wait for live turns to finish, up to timeoutMs. True when quiet. */
+  async drainTurns(timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    for (;;) {
+      if (this.activeTurnCount() === 0) return true;
+      if (Date.now() >= deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+
   async prompt(message: string, images?: any[], streamingBehavior?: "steer" | "followUp"): Promise<any> {
+    if (this.draining) throw new Error("daemon is draining for restart; please resend in a moment");
     const entry = this.activeEntry();
     const sessionAtStart = entry.runtime.session;
     const rollbackAtStart = (await this.rollbacks.load(sessionAtStart.sessionId).catch(() => null))?.active;
@@ -1316,7 +1379,10 @@ export class PiHost {
           sessionAtStart.sessionManager.getLeafId() !== rollbackAtStart.rollbackLeafId;
         if (continued) await this.rollbacks.clearActive(rollbackAtStart.sessionId).catch(() => undefined);
       }
-      if (checkpoint) await this.captureTurnEnd(checkpoint).catch(() => undefined);
+      if (checkpoint) {
+        if ("skipped" in checkpoint) await this.recordTurnSkipped(checkpoint.skipped).catch(() => undefined);
+        else await this.captureTurnEnd(checkpoint).catch(() => undefined);
+      }
     }
   }
   // A configured image model reads attached images (screenshots, diagrams)
@@ -1357,6 +1423,39 @@ export class PiHost {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Reads a sketch: one crop per region, one closed question each, parsed strictly.
+   * Reading a drawing is the job the configured image model already exists for,
+   * so it is the model used here, and a crop that cannot be read becomes a
+   * question rather than a failed compile.
+   */
+  async classifyRegions(
+    cwd: string | null,
+    crops: { regionId: string; dataUrl: string }[]
+  ): Promise<Record<string, RegionReading>> {
+    const imageRef = this._getSettings().imageModel;
+    if (!imageRef) throw new Error("Set an image model in Settings to have a sketch read.");
+    const modelRuntime = await this.modelRuntimeForCwd(cwd);
+    const model = modelRuntime.getModel(imageRef.provider, imageRef.modelId);
+    if (!model) throw new Error(`${imageRef.provider}/${imageRef.modelId} is not available in this project.`);
+
+    if (!crops.length) console.warn("[canvas] classify called with no crops");
+    const { readings, problems } = await readCrops(crops, async ({ prompt, image }) =>
+      modelRuntime.completeSimple(
+        model,
+        {
+          messages: [{ role: "user", content: [{ type: "text", text: prompt }, { type: "image", ...image }] }],
+        } as any,
+        { reasoning: "low", maxTokens: 512 }
+      )
+    );
+    // Unreadable is a question for the human, not a broken compile. The reason
+    // still has to be visible, or a classifier that fails every time looks
+    // exactly like a drawing nothing could be made of.
+    for (const problem of problems) console.warn(`[canvas] ${problem.regionId}: ${problem.reason}`);
+    return readings;
   }
 
   async steer(message: string): Promise<any> {
@@ -1440,15 +1539,16 @@ export class PiHost {
     beforeLeafId: string | null;
     beforeEntryIds: Set<string>;
     before: SnapshotCapture;
-  } | null> {
+  } | { skipped: string } | null> {
     const session = this.session;
     const sessionFile = session.sessionFile ?? session.sessionManager.getSessionFile();
-    if (!sessionFile || session.isStreaming) return null;
+    if (!sessionFile) return { skipped: "the session had no file yet" };
+    if (session.isStreaming) return { skipped: "a response was already streaming" };
     // The pre-turn checkpoint is the rollback boundary: it MUST reflect the
     // worktree at this instant, so it is an authoritative capture that reads
     // Git/FS directly and never trusts the eventually-consistent watcher.
     const before = await this.snapshots.capture(this.cwd, { authoritative: true }).catch(() => null);
-    if (!before) return null;
+    if (!before) return { skipped: "the pre-turn snapshot failed" };
     const entries = session.sessionManager.getEntries();
     return {
       sessionId: session.sessionId,
@@ -1459,7 +1559,62 @@ export class PiHost {
     };
   }
 
+  /** A turn that never opened a checkpoint still leaves a receipt, so readers
+   *  can tell "by design" from "broken". Attaches to the latest user message,
+   *  which is the turn's own message in the common case. */
+  private async recordTurnSkipped(reason: string): Promise<void> {
+    const session = this.session;
+    const sessionFile = session.sessionFile ?? session.sessionManager.getSessionFile();
+    if (!sessionFile) return;
+    const entries = session.sessionManager.getEntries() as any[];
+    const users = entries.filter((entry) => entry?.type === "message" && entry.message?.role === "user");
+    const user = users[users.length - 1];
+    if (!user?.id) return;
+    await this.rollbacks.recordTurnOutcome({
+      receipt: {
+        sessionId: session.sessionId,
+        sessionFile,
+        userEntryId: user.id,
+        outcome: "skipped",
+        reason,
+        createdAt: new Date().toISOString(),
+      },
+    });
+  }
+
+  private async recordTurnFailed(
+    start: { sessionId: string; sessionFile: string },
+    userId: string | undefined,
+    reason: string
+  ): Promise<void> {
+    if (!userId) return;
+    await this.rollbacks.recordTurnOutcome({
+      receipt: {
+        sessionId: start.sessionId,
+        sessionFile: start.sessionFile,
+        userEntryId: userId,
+        outcome: "failed",
+        reason,
+        createdAt: new Date().toISOString(),
+      },
+    });
+  }
+
   private async captureTurnEnd(start: {
+    sessionId: string;
+    sessionFile: string;
+    beforeLeafId: string | null;
+    beforeEntryIds: Set<string>;
+    before: SnapshotCapture;
+  }): Promise<void> {
+    try {
+      await this.captureTurnEndInner(start);
+    } catch (error) {
+      console.warn("[pideck] turn checkpoint failed:", error instanceof Error ? error.message : error);
+    }
+  }
+
+  private async captureTurnEndInner(start: {
     sessionId: string;
     sessionFile: string;
     beforeLeafId: string | null;
@@ -1468,20 +1623,33 @@ export class PiHost {
   }): Promise<void> {
     const session = this.session;
     const sessionFile = session.sessionFile ?? session.sessionManager.getSessionFile();
-    if (session.sessionId !== start.sessionId || sessionFile !== start.sessionFile) return;
     const entries = session.sessionManager.getEntries() as any[];
     const user = entries.find(
       (entry) => !start.beforeEntryIds.has(entry.id) && entry.type === "message" && entry.message?.role === "user"
     );
+    if (session.sessionId !== start.sessionId || sessionFile !== start.sessionFile) {
+      await this.recordTurnFailed(start, user?.id, "the session moved to another conversation mid-turn");
+      return;
+    }
     const finalLeafId = session.sessionManager.getLeafId();
-    if (!user || !finalLeafId) return;
+    if (!user || !finalLeafId) {
+      await this.recordTurnFailed(start, user?.id, "the turn recorded no new user message or position");
+      return;
+    }
     // The post-turn snapshot must also be authoritative. `prepareRollback`
     // restores files only for the paths in `changedPaths`, which is derived
     // from this snapshot; a watcher-backed capture that missed the agent's
     // edit would yield an incomplete diff and leave the change in place after
     // a rollback. Reading Git/FS directly guarantees a complete diff.
     const after = await this.snapshots.capture(this.cwd, { authoritative: true }).catch(() => null);
-    if (!after || after.root !== start.before.root) return;
+    if (!after || after.root !== start.before.root) {
+      await this.recordTurnFailed(
+        start,
+        user.id,
+        !after ? "the post-turn snapshot failed" : "the project root moved mid-turn"
+      );
+      return;
+    }
     const changedPaths = await this.snapshots.changedFiles(this.cwd, start.before.tree, after.tree);
     const exclusions = changedExclusions(start.before.excluded, after.excluded);
     if (changedPaths.length > 5000) exclusions.push("More than 5,000 files changed in one turn");
@@ -1498,7 +1666,17 @@ export class PiHost {
       exclusions,
       createdAt: new Date().toISOString(),
     };
-    await this.rollbacks.addCheckpoint(checkpoint);
+    await this.rollbacks.recordTurnOutcome({
+      checkpoint,
+      receipt: {
+        sessionId: start.sessionId,
+        sessionFile: start.sessionFile,
+        userEntryId: user.id,
+        outcome: "checkpointed",
+        reason: "checkpoint recorded",
+        createdAt: checkpoint.createdAt,
+      },
+    });
     // Real checkpoint lifecycle → Babylon event stream (renderer maps this to
     // checkpoint.created). Ids only; never checkpoint contents.
     this.opts.onEvent({
@@ -1663,7 +1841,7 @@ export class PiHost {
     const session = this.session;
     const manager = session.sessionManager;
     const rows = flattenSessionTree(manager.getTree());
-    const ledger = await this.rollbacks.load(session.sessionId).catch(() => ({ version: 1 as const, checkpoints: [], active: undefined }));
+    const ledger: Ledger = await this.rollbacks.load(session.sessionId).catch(() => ({ version: 1 as const, checkpoints: [], active: undefined }));
     let active = ledger.active;
     let undoAvailable = false;
     let undoReason: string | undefined;
@@ -1682,6 +1860,7 @@ export class PiHost {
       rows,
       leafId: manager.getLeafId(),
       checkpoints: ledger.checkpoints,
+      receipts: ledger.receipts,
       gitAvailable: await this.snapshots.available(this.cwd),
       streaming: session.isStreaming,
       activeRollback: active,
@@ -1693,9 +1872,9 @@ export class PiHost {
   async getTurnChanges(entryId: string): Promise<any> {
     await this.ensureSession();
     const session = this.session;
-    const ledger = await this.rollbacks.load(session.sessionId).catch(() => ({ version: 1 as const, checkpoints: [], active: undefined }));
+    const ledger: Ledger = await this.rollbacks.load(session.sessionId).catch(() => ({ version: 1 as const, checkpoints: [], active: undefined }));
     const checkpoint = ledger.checkpoints.find((item) => item.userEntryId === entryId);
-    if (!checkpoint) throw new Error("No filesystem checkpoint was recorded for this turn");
+    if (!checkpoint) throw new Error(missingCheckpointReason(ledger.receipts, entryId));
     if (!checkpoint.complete) throw new Error("This filesystem checkpoint is incomplete");
     const files = await this.snapshots.turnChanges(this.cwd, checkpoint.beforeTree, checkpoint.afterTree);
     const totals = files.reduce(
@@ -1713,9 +1892,9 @@ export class PiHost {
   async getTurnFileDiff(entryId: string, path: string): Promise<any> {
     await this.ensureSession();
     const session = this.session;
-    const ledger = await this.rollbacks.load(session.sessionId).catch(() => ({ version: 1 as const, checkpoints: [], active: undefined }));
+    const ledger: Ledger = await this.rollbacks.load(session.sessionId).catch(() => ({ version: 1 as const, checkpoints: [], active: undefined }));
     const checkpoint = ledger.checkpoints.find((item) => item.userEntryId === entryId);
-    if (!checkpoint) throw new Error("No filesystem checkpoint was recorded for this turn");
+    if (!checkpoint) throw new Error(missingCheckpointReason(ledger.receipts, entryId));
     if (!checkpoint.complete) throw new Error("This filesystem checkpoint is incomplete");
     return this.snapshots.fileDiff(this.cwd, checkpoint.beforeTree, checkpoint.afterTree, path);
   }
@@ -1734,7 +1913,8 @@ export class PiHost {
     const checkpointByUser = new Map(ledger.checkpoints.map((checkpoint) => [checkpoint.userEntryId, checkpoint]));
     const selected = users.slice(targetIndex);
     const checkpoints = selected.map((entry) => checkpointByUser.get(entry.id));
-    if (checkpoints.some((checkpoint) => !checkpoint)) throw new Error("No filesystem checkpoint was recorded for this turn");
+    const missingEntry = selected.find((entry) => !checkpointByUser.get(entry.id));
+    if (missingEntry) throw new Error(missingCheckpointReason(ledger.receipts, missingEntry.id));
     if (checkpoints.some((checkpoint) => !checkpoint!.complete)) throw new Error("This filesystem checkpoint is incomplete");
     const previousLeafId = session.sessionManager.getLeafId();
     if (!previousLeafId) throw new Error("No active session position");
@@ -2239,6 +2419,11 @@ export class PiHost {
     // Stop the recursive fs.watch watchers before anything else; leaving them
     // running leaks file descriptors for every tracked worktree.
     this.snapshots.dispose();
+    try {
+      this.rollbacks.close();
+    } catch {
+      /* ignore */
+    }
     await this.managedSubagents?.dispose().catch(() => undefined);
     for (const entry of this.sessions.values()) {
       entry.unsubscribe?.();

@@ -263,6 +263,13 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 /* Shell, brutalist, no blur */
 .app-shell{background:var(--bg)}
 .app-sidebar{position:relative;background:var(--nav);border-right:1px solid var(--line)}
+.session-tile{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;height:62px;width:112px;border:0;border-radius:var(--radius);background:transparent;color:var(--dim);font-size:12px;font-weight:500}
+.session-tile:hover{background:var(--inset);color:var(--fg)}
+.session-tile:active{background:var(--pressed)}
+.session-tile.is-active{background:var(--inset);color:var(--fg);font-weight:600;box-shadow:inset 0 0 0 1px var(--line)}
+html.dark .session-tile.is-active{background:var(--active-deep)}
+.session-tile:disabled{opacity:.4}
+.session-tile-count{position:absolute;top:6px;right:6px;min-width:21px;border-radius:10px;background:var(--raised);padding:1px 6px;color:var(--dim);font-size:12px;text-align:center}
 .sidebar-resize-handle{position:absolute;top:0;right:0;bottom:0;width:5px;cursor:col-resize;z-index:6}
 .sidebar-resize-handle:hover,.sidebar-resize-handle:active{background:color-mix(in srgb,var(--accent) 35%,transparent)}
 .sidebar-resize-handle:focus-visible{outline:2px solid var(--focus);outline-offset:-2px}
@@ -360,6 +367,10 @@ html.dark .sidebar-footer::before{background:var(--line-deep)}
 .conversation-user{width:fit-content;max-width:min(78%,620px);margin:14px 0 18px auto;border:1px solid var(--line);border-radius:var(--radius);background:var(--inset);padding:8px 12px;box-shadow:none;overflow-wrap:anywhere;word-break:break-word}
 .conversation-assistant{margin:0 0 14px;padding:3px 4px 12px;max-width:72ch}
 .assistant-divider{border:0;border-top:1px solid var(--line);margin:14px 0;opacity:.9}
+/* In-transcript find target: one accent ring pulse on jump, then quiet. */
+.find-target-flash{animation:find-flash 1.2s ease-out;border-radius:var(--radius)}
+@keyframes find-flash{0%{box-shadow:0 0 0 2px var(--accent)}100%{box-shadow:0 0 0 0 transparent}}
+@media (prefers-reduced-motion: reduce){.find-target-flash{animation:none;box-shadow:0 0 0 2px var(--accent)}}
 .conversation-thinking{margin:3px 0 8px}
 .conversation-thinking summary{width:fit-content;color:var(--dim)}
 .thinking-card{margin:8px 0 12px;overflow:hidden;border:1px solid var(--line);border-radius:var(--radius);background:var(--inset);box-shadow:none;transition:border-color 100ms ease,background-color 100ms ease}
@@ -469,6 +480,12 @@ html.dark .sidebar-footer::before{background:var(--line-deep)}
 /* Session footer is a normal flex sibling (header -> chat -> footer), never floating */
 .session-footer{position:relative;display:flex;flex-direction:column;flex-shrink:0;z-index:auto}
 .session-footer .composer-dock{background:transparent}
+/* Mini goal strip joined to the top of the composer: same box language, no
+ * bottom border, square bottom corners, so the composer's own top border is
+ * the shared seam. */
+.goal-strip{display:flex;align-items:center;gap:8px;min-height:36px;padding:2px 12px;border:1px solid var(--line);border-bottom:0;border-radius:12px 12px 0 0;background:var(--bg);font-size:12px;color:var(--dim)}
+.goal-strip .goal-objective{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--fg);font-weight:500}
+.goal-strip-input{flex:1;min-width:0;height:26px;padding:4px 9px;font-size:12px}
 .session-footer .composer-surface{box-shadow:0 1px 2px rgba(0,0,0,.06),0 12px 32px -16px rgba(0,0,0,.22);backdrop-filter:none;-webkit-backdrop-filter:none}
 .composer-surface:focus-within{border-color:color-mix(in srgb,var(--focus) 55%,var(--line));box-shadow:0 0 0 3px color-mix(in srgb,var(--focus) 13%,transparent),0 16px 40px -16px rgba(0,0,0,.28)}
 /* Floating session-stats card: the composer's surface language, lifted off

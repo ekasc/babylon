@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { initialState, mergeLiveMessages, messagesToItems, reconcileItems, reducer } from "./store";
+import { describe, expect, it, vi } from "vitest";
+import { formatRunDuration, initialState, mergeLiveMessages, messagesToItems, reconcileItems, reducer } from "./store";
 
 describe("subagent activity messages", () => {
   it("renders messages injected into the parent conversation", () => {
@@ -270,5 +270,45 @@ describe("non-streaming completion", () => {
       { type: "thinking", text: "weighing options" },
       { type: "text", text: "Hello there" },
     ]);
+  });
+});
+
+describe("abort stop records", () => {
+  it("formats run durations as m:ss", () => {
+    expect(formatRunDuration(0)).toBe("0:00");
+    expect(formatRunDuration(7_200)).toBe("0:07");
+    expect(formatRunDuration(65_000)).toBe("1:05");
+  });
+
+  it("records the run duration on an aborted settle", () => {
+    const start = 1_700_000_000_000;
+    const now = vi.spyOn(Date, "now").mockReturnValue(start);
+    try {
+      let state = reducer(initialState, { type: "event", event: { type: "agent_start" } });
+      expect(state.streaming).toBe(true);
+      expect(state.streamStartAt).toBe(start);
+      state = reducer(state, {
+        type: "event",
+        event: { type: "message_start", message: { role: "assistant", model: "m" } },
+      } as any);
+      now.mockReturnValue(start + 65_000);
+      state = reducer(state, { type: "event", event: { type: "agent_settled", aborted: true } } as any);
+      const last = state.items[state.items.length - 1];
+      expect(last).toMatchObject({ kind: "system", text: "Chat aborted after 1:05, no response completed." });
+      expect(state.streaming).toBe(false);
+      expect(state.streamStartAt).toBeNull();
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("falls back to the timeless notice when the start was never recorded", () => {
+    let state = reducer(initialState, {
+      type: "event",
+      event: { type: "message_start", message: { role: "assistant", model: "m" } },
+    } as any);
+    state = reducer(state, { type: "event", event: { type: "agent_settled", aborted: true } } as any);
+    const last = state.items[state.items.length - 1];
+    expect(last).toMatchObject({ kind: "system", text: "Chat aborted, no response completed." });
   });
 });

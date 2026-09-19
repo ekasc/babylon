@@ -16,7 +16,6 @@ import {
   ArrowLeftIcon,
   ArrowRightIcon,
   MoreIcon,
-  PlusIcon,
   RefreshIcon,
   RotateIcon,
   XIcon,
@@ -36,19 +35,6 @@ interface ServerRow {
 const PROBE_TTL_MS = 5000;
 const RESPONSIVE_VALUE = "responsive";
 
-function hostOf(url: string): string {
-  try {
-    const u = new URL(url);
-    return u.host + (u.pathname !== "/" ? u.pathname : "");
-  } catch {
-    return url;
-  }
-}
-
-function tabLabel(t: SimTabState): string {
-  return t.title || (t.url ? hostOf(t.url) : "New tab");
-}
-
 /** Effective pixel size of a viewport for the device toolbar inputs. */
 function viewportDims(v: SimViewport): { width: number; height: number } {
   const e = resolveViewport(v);
@@ -56,7 +42,7 @@ function viewportDims(v: SimViewport): { width: number; height: number } {
   return { width: e.viewportW, height: e.viewportH };
 }
 
-export function SimSidebar({ onClose }: { onClose(): void }) {
+export function SimSidebar() {
   const [tabs, setTabs] = useState<SimTabState[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [showList, setShowList] = useState(true);
@@ -73,14 +59,6 @@ export function SimSidebar({ onClose }: { onClose(): void }) {
   const activeRef = useRef<string | null>(null);
   const focusedRef = useRef(false);
   const omniboxRef = useRef<HTMLInputElement>(null);
-
-  const goNewTab = useCallback(() => {
-    setSubmitError(null);
-    bridge
-      .simOpenTab()
-      .then(() => requestAnimationFrame(() => omniboxRef.current?.focus()))
-      .catch((e: any) => setSubmitError(e?.message ?? "Could not open tab"));
-  }, []);
 
   const viewportFor = useCallback(
     (tabId: string | null): SimViewport => (tabId ? viewports[tabId] ?? { mode: "fill" } : { mode: "fill" }),
@@ -292,51 +270,6 @@ export function SimSidebar({ onClose }: { onClose(): void }) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-line/60 px-2 pt-2" role="tablist" aria-label="Browser tabs">
-          {tabs.map((t) => {
-            const isActive = t.id === activeId && !showList;
-            return (
-              <div
-                key={t.id}
-                role="tab"
-                aria-selected={isActive}
-                onClick={() => {
-                  setShowList(false);
-                  if (t.id !== activeRef.current) bridge.simActivate(t.id).catch(() => undefined);
-                }}
-                title={tabLabel(t)}
-                className={`flex min-w-0 max-w-[160px] shrink-0 cursor-pointer items-center gap-1.5 rounded-t-md px-2 py-1.5 text-[12px] ${
-                  isActive ? "bg-inset text-fg" : "text-dim hover:bg-inset/60 hover:text-fg"
-                }`}
-              >
-                {t.loading ? <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-accent" /> : null}
-                <span className="min-w-0 flex-1 truncate">{tabLabel(t)}</span>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    bridge.simCloseTab(t.id).catch(() => undefined);
-                  }}
-                  title={`Close ${tabLabel(t)}`}
-                  aria-label={`Close tab ${tabLabel(t)}`}
-                  className="grid shrink-0 place-items-center rounded p-0.5 text-dim hover:text-fg"
-                >
-                  <XIcon size={12} />
-                </button>
-              </div>
-            );
-          })}
-          <button
-            type="button"
-            onClick={goNewTab}
-            title="New tab"
-            aria-label="New tab"
-            className="grid shrink-0 place-items-center rounded-md p-2 text-dim hover:bg-inset/60 hover:text-fg"
-          >
-            <PlusIcon size={14} />
-          </button>
-      </div>
-
       <div className="flex shrink-0 items-center gap-1 px-2 py-1.5">
         <button type="button" onClick={() => activeRef.current && bridge.simBack(activeRef.current).catch(() => undefined)} disabled={!canBack || showingList} title="Back" aria-label="Back" className="thread-action thread-action-text grid shrink-0 place-items-center p-2 disabled:opacity-40"><ArrowLeftIcon size={16} /></button>
         <button type="button" onClick={() => activeRef.current && bridge.simForward(activeRef.current).catch(() => undefined)} disabled={!canForward || showingList} title="Forward" aria-label="Forward" className="thread-action thread-action-text grid shrink-0 place-items-center p-2 disabled:opacity-40"><ArrowRightIcon size={16} /></button>
@@ -383,7 +316,6 @@ export function SimSidebar({ onClose }: { onClose(): void }) {
           <MoreIcon size={16} />
         </button>
         <button type="button" onClick={() => activeTab && bridge.openExternal(activeTab.url).catch(() => undefined)} disabled={!activeTab} title="Open in your browser" className="thread-action thread-action-text px-1.5 text-[12px] disabled:opacity-40">Open</button>
-        <button type="button" onClick={onClose} title="Close browser panel" className="thread-action thread-action-text px-1.5 text-[12px]">Close</button>
       </div>
       {submitError ? (
         <div className="shrink-0 truncate px-3 pb-1 text-[11px] text-err" role="alert">

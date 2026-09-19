@@ -259,6 +259,12 @@ export const ArchiveIcon = (props: IconProps) => (
   </svg>
 );
 
+export const BookmarkIcon = (props: IconProps) => (
+  <svg {...base(props)}>
+    <path d="M7 3h10a1 1 0 0 1 1 1v17l-6-4-6 4V4a1 1 0 0 1 1-1z" />
+  </svg>
+);
+
 export const ChatIcon = (props: IconProps) => (
   <svg {...base(props)}>
     <path d="M21 12a8 8 0 0 1-11.5 7.2L4 20l1-4.3A8 8 0 1 1 21 12z" />

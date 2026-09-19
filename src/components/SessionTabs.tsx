@@ -2,6 +2,8 @@ import { useEffect, useRef } from "react";
 import type { AttentionState } from "../sessionRuntime";
 import { ProjectIcon } from "./ProjectIcon";
 
+const isMacTabHint = typeof navigator !== "undefined" && /mac/i.test(navigator.platform ?? "");
+
 export interface TabItem {
   path: string;
   cwd: string;
@@ -38,6 +40,22 @@ export function SessionTabs({
     activeRef.current?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
   }, [activePath, tabs.length]);
 
+  // Quick-switch: mod+digit activates a visible tab (T3 ⌘1-9 thread jumps).
+  // Skipped while typing in a field so composer/history shortcuts keep working.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || !/^[1-9]$/.test(e.key)) return;
+      const ae = document.activeElement;
+      if (ae instanceof HTMLInputElement || ae instanceof HTMLTextAreaElement || (ae instanceof HTMLElement && ae.isContentEditable)) return;
+      const tab = tabs[Number(e.key) - 1];
+      if (!tab) return;
+      e.preventDefault();
+      if (tab.path !== activePath) onActivate(tab);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [tabs, activePath, onActivate]);
+
   return (
     <div
       role="tablist"
@@ -45,7 +63,7 @@ export function SessionTabs({
       className="flex h-full min-w-0 flex-1 items-stretch gap-px [-webkit-app-region:no-drag]"
     >
       <div className="flex min-w-0 flex-1 items-stretch gap-px overflow-x-auto">
-        {tabs.map((tab) => {
+        {tabs.map((tab, tabIdx) => {
           const active = tab.path === activePath;
           const attention = attentionByPath.get(tab.path) ?? "none";
           return (
@@ -71,7 +89,7 @@ export function SessionTabs({
                   if (!active) onActivate(tab);
                 }
               }}
-              title={tab.title}
+              title={tabIdx < 9 ? `${tab.title} (${isMacTabHint ? "⌘" : "Ctrl"}+${tabIdx + 1})` : tab.title}
               className={`group/tab flex min-w-0 max-w-[200px] shrink-0 cursor-default items-center gap-1.5 border-r border-line/60 px-2.5 text-[13px] outline-none ${
                 active
                   ? "bg-inset text-fg shadow-[inset_0_2px_0_var(--accent)]"

@@ -1,19 +1,28 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 import type { CommandInfo } from "../bridge";
 import type { Bot } from "../bots";
-import { botHandle, rankBots } from "../bots";
-import { insertCommand, rankCommands } from "../commands";
-import { expandSkillMentions, stripSkillPrefix } from "../lib/skillRef";
-import { detectComposerTrigger } from "../lib/composerTrigger";
+import { expandSkillMentions } from "../lib/skillRef";
+import {
+  MAX_ATTACHMENT_BYTES,
+  MAX_SEND_ATTACHMENTS,
+  MAX_SEND_INPUT_CHARS,
+  PASTE_AS_TEXT_ARM_MS,
+  effectiveFileMimeType,
+  isHeicFile,
+  isPasteAsTextShortcutKey,
+  nextPastedTextName,
+  shouldAttachPastedText,
+} from "../lib/attachments";
 import { truncate } from "../lib/string";
-import CommandMenu from "./CommandMenu";
-import BotMentionMenu from "./BotMentionMenu";
+import type { PickerModel } from "./ModelPicker";
+import type { Stats } from "./StatsPopover";
+import type { Dialog } from "../store";
+import { useComposerAutocomplete } from "./useComposerAutocomplete";
 import PermissionModePicker from "./PermissionModePicker";
 import ModelPicker from "./ComposerModelPicker";
 import ThinkingPicker from "./ComposerThinkingPicker";
 import StatsPopover from "./StatsPopover";
-import { PaperclipIcon, SendIcon, StopIcon, XIcon } from "./icons";
+import { BookmarkIcon, PaperclipIcon, SendIcon, StopIcon, XIcon } from "./icons";
 
 /** Live run indicator. Idle-dimmed so the row reads quiet until a run starts. */
 function ThroughputBars({ active }: { active: boolean }) {
@@ -38,36 +47,32 @@ export interface Attachment {
 	url: string;
 }
 
-interface ComposerDialog {
-	id: string;
-	method: "select" | "confirm" | "input" | "editor";
-	title?: string;
-	message?: string;
-	options?: string[];
-	placeholder?: string;
-	prefill?: string;
-}
-
 interface Props {
 	streaming: boolean;
 	steering: string[];
 	followUp: string[];
 	commands: CommandInfo[];
-	agentState: any;
-	stats: any;
-	models: any[];
+	agentState?: { model?: PickerModel | null; thinkingLevel?: string } | null;
+	stats?: Stats | null;
+	models?: PickerModel[];
 	thinkingLevels: string[];
-	draftRequest?: { id: number; text: string } | null;
+	draftRequest?: { id: number; text: string; append?: boolean } | null;
+	/** Session identity for per-session draft persistence. Null skips it. */
+	sessionKey?: string | null;
 	toast(kind: "info" | "warning" | "error", text: string): void;
 	onSend(text: string, images: Attachment[] | undefined, streamingBehavior?: "steer" | "followUp"): Promise<boolean>;
 	onAbort(): void;
 	onSetModel(provider: string, modelId: string): void;
 	onSetThinking(level: string): void;
 	onCompact(): void;
-	dialogs?: ComposerDialog[];
+	dialogs?: Dialog[];
 	onDialogDismiss?: (id: string) => void;
 	/** Bots offered for @-mention completion (room members in rooms). */
 	mentionBots?: Bot[];
+	/** True once a goal is set; hides the ghost Goal control in the row. */
+	goalSet?: boolean;
+	/** Open the goal strip's naming input. */
+	onStartGoal?: () => void;
 }
 
 function trunc(s: string, n = 42): string {
@@ -87,9 +92,9 @@ function readAsBase64(file: Blob): Promise<string> {
 	});
 }
 
-const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const MAX_IMAGE_EDGE = 1280;
-const MAX_PASTE_TEXT_CHARS = 2000;
+const DRAFT_MAX_CHARS = 20000;
+const draftKey = (sessionKey: string) => `babylon:composer-draft:${sessionKey}`;
 
 let imageWorker: Worker | null = null;
 function getImageWorker(): Worker | null {
@@ -152,9 +157,10 @@ const Composer = memo(function Composer({
 	commands,
 	agentState,
 	stats,
-	models,
-	thinkingLevels,
+	models = [],
+	thinkingLevels = [],
 	draftRequest,
+	sessionKey = null,
 	toast,
 	onSend,
 	onAbort,
@@ -164,6 +170,8 @@ const Composer = memo(function Composer({
 	dialogs,
 	onDialogDismiss,
 	mentionBots = [],
+	goalSet = false,
+	onStartGoal,
 }: Props) {
 	const [text, setText] = useState("");
 	const [mode, setMode] = useState<"steer" | "followUp">("followUp");
@@ -171,12 +179,40 @@ const Composer = memo(function Composer({
 	const [dragOver, setDragOver] = useState(false);
 	const [sending, setSending] = useState(false);
 	const [attachmentError, setAttachmentError] = useState<string | null>(null);
-	const [selectedCommand, setSelectedCommand] = useState(0);
-	const [dismissedToken, setDismissedToken] = useState<string | null>(null);
 	const [history, setHistory] = useState<string[]>(() => {
 		try { return JSON.parse(localStorage.getItem("babylon:composer-history") ?? "[]"); } catch { return []; }
 	});
 	const [historyCursor, setHistoryCursor] = useState<number | null>(null);
+	// Draft persistence (per session): typed text survives reloads and session
+	// switches. Saves run against a key ref so a session switch never files
+	// the outgoing text under the incoming key; loads run on key change (ahead
+	// of draftRequest below, so explicit requests still win). Accepted sends
+	// clear the text, which deletes the saved draft through the save below.
+	const sessionKeyRef = useRef(sessionKey);
+	useEffect(() => {
+		sessionKeyRef.current = sessionKey;
+	});
+	useEffect(() => {
+		if (!sessionKey) return;
+		try {
+			const saved = localStorage.getItem(draftKey(sessionKey));
+			setText(saved ? saved.slice(0, DRAFT_MAX_CHARS) : "");
+		} catch {}
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [sessionKey]);
+	useEffect(() => {
+		const key = sessionKeyRef.current;
+		if (!key) return;
+		try {
+			if (text) localStorage.setItem(draftKey(key), text.slice(0, DRAFT_MAX_CHARS));
+			else localStorage.removeItem(draftKey(key));
+		} catch {}
+	}, [text]);
+	// Prompt stash (T3): park the current draft with Cmd/Ctrl+S and pull it
+	// back later. Text-only by design — attachments stay in the composer so a
+	// stash never orphans a file pick. Restoring removes the entry.
+	const [stash, setStash] = useState<Array<{ id: number; text: string; at: number }>>([]);
+	const [stashOpen, setStashOpen] = useState(false);
 	// Custom answer for a select dialog: any text typed here wins over the
 	// option buttons, so a free-form description (e.g. picking "something
 	// else") always reaches the agent instead of being dropped.
@@ -184,74 +220,30 @@ const Composer = memo(function Composer({
 	const fileRef = useRef<HTMLInputElement>(null);
 	const composerRef = useRef<HTMLTextAreaElement>(null);
 	const attachmentsRef = useRef<Attachment[]>([]);
-	const trigger = useMemo(() => detectComposerTrigger(text, text.length), [text]);
-	const commandToken = useMemo(() => {
-		if (!trigger) return null;
-		if (trigger.kind === "slash-command") return trigger.query;
-		if (trigger.kind === "slash-model") return trigger.query || "model";
-		return null;
-	}, [trigger]);
-	const commandMatches = useMemo(
-		() =>
-			commandToken !== null && commandToken !== dismissedToken
-				? rankCommands(commands, commandToken, 16)
-				: [],
-		[commandToken, commands, dismissedToken]
-	);
-
-	// Bot @-mentions: the path trigger doubles as the mention token. Queries
-	// containing "/" are file paths, never bot handles, bots stay out of the way.
-	const [selectedMention, setSelectedMention] = useState(0);
-	const [dismissedMention, setDismissedMention] = useState<string | null>(null);
-	const mentionToken = useMemo(() => {
-		if (!trigger || trigger.kind !== "path") return null;
-		if (trigger.query.includes("/")) return null;
-		return trigger;
-	}, [trigger]);
-	const mentionMatches = useMemo(
-		() =>
-			mentionToken && mentionToken.query !== dismissedMention && mentionBots.length
-				? rankBots(mentionBots, mentionToken.query, 8)
-				: [],
-		[mentionToken, mentionBots, dismissedMention]
-	);
-
-	// Skill $-mentions: autocomplete over skill commands only (display names
-	// stripped of the `skill:` prefix). Choosing, or typing, `$name` inserts
-	// the sigil form; submit expands known names to canonical `/skill:name` so
-	// the transcript carries just the invocation chip, never pasted content.
-	const [selectedSkill, setSelectedSkill] = useState(0);
-	const [dismissedSkill, setDismissedSkill] = useState<string | null>(null);
-	const skillToken = useMemo(() => {
-		if (!trigger || trigger.kind !== "skill") return null;
-		return trigger;
-	}, [trigger]);
-	const skillCommands = useMemo(
-		() => commands.filter((c) => c.source === "skill").map((c) => ({ ...c, name: stripSkillPrefix(c.name) })),
-		[commands]
-	);
-	const skillMatches = useMemo(
-		() =>
-			skillToken && skillToken.query !== dismissedSkill
-				? rankCommands(skillCommands, skillToken.query, 8)
-				: [],
-		[skillToken, skillCommands, dismissedSkill]
-	);
-
-	useEffect(() => setSelectedCommand(0), [commandToken]);
-	useEffect(() => setSelectedMention(0), [mentionToken?.query]);
-	useEffect(() => setSelectedSkill(0), [skillToken?.query]);
+	// Paste-as-text arming (T3): mod+Shift+V on keydown opens a short window
+	// in which paste skips attachment conversion, because clipboard events
+	// carry no modifier state of their own.
+	const pasteAsTextUntilRef = useRef(0);
+	// Autocomplete cluster (slash-commands, @-mentions, $-skills): trigger
+	// detection, ranked menus, dismissal, portal, and menu keys.
+	// Autocomplete cluster (slash-commands, @-mentions, $-skills): trigger
+	// detection, ranked menus, dismissal, portal, and menu keys.
 	// Composer popovers portal to document.body: the session footer (and the
 	// sketch theme's overflow:hidden on it) would otherwise clip anything
 	// opening upward. Fixed z-60 sits above chat content but below modal
 	// surfaces (palette, popovers, toasts at z-70).
 	const menuAnchorRef = useRef<HTMLDivElement>(null);
-	const [, setMenuLayoutTick] = useState(0);
+	const ac = useComposerAutocomplete({ text, setText, commands, mentionBots, composerRef, menuAnchorRef });
 	useEffect(() => {
 		if (!draftRequest) return;
-		setText(draftRequest.text);
-		setDismissedToken(null);
+		if (draftRequest.append) {
+			setText((prev) => (prev.trim() ? `${prev.trimEnd()}\n\n${draftRequest.text}` : draftRequest.text));
+		} else {
+			setText(draftRequest.text);
+		}
+		ac.clearDismissals();
 		requestAnimationFrame(() => composerRef.current?.focus());
+		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [draftRequest]);
 	attachmentsRef.current = attachments;
 	useEffect(
@@ -264,21 +256,38 @@ const Composer = memo(function Composer({
 	const addFiles = async (files: ArrayLike<File>) => {
 		const added: Attachment[] = [];
 		let rejected = 0;
+		const heicNames: string[] = [];
+		// Reserve against the per-message cap so concurrent adds can't
+		// overshoot it (T3 counts in-flight uploads the same way).
+		const slots = Math.max(0, MAX_SEND_ATTACHMENTS - attachments.length);
 		for (const f of Array.from(files)) {
-			if (f.size > MAX_IMAGE_BYTES) {
+			if (added.length >= slots) {
 				rejected++;
 				continue;
 			}
+			if (f.size > MAX_ATTACHMENT_BYTES) {
+				rejected++;
+				continue;
+			}
+			// No HEIC decoder ships yet: reject with guidance instead of
+			// silently sending an unreadable original to the model.
+			if (isHeicFile(f.name, f.type)) {
+				heicNames.push(f.name || "image");
+				continue;
+			}
+			// Typeless drags (other apps, shells) get extension-inferred
+			// MIME so a plain photo.jpg still lands on the image path.
+			const mime = effectiveFileMimeType(f.name, f.type);
 			try {
-				if (f.type.startsWith("image/")) {
+				if (mime.startsWith("image/")) {
 					const viaWorker = await prepareImageViaWorker(f);
 					const prepared = viaWorker ?? (await prepareImage(f));
 					const data = await readAsBase64(prepared.blob);
-					added.push({ name: f.name || "image", mimeType: prepared.mimeType, data, url: URL.createObjectURL(prepared.blob) });
+					added.push({ name: f.name || "image", mimeType: prepared.mimeType || mime, data, url: URL.createObjectURL(prepared.blob) });
 				} else {
 					const data = await readAsBase64(f);
 					const url = URL.createObjectURL(f);
-					added.push({ name: f.name || "file", mimeType: f.type || "application/octet-stream", data, url });
+					added.push({ name: f.name || "file", mimeType: mime, data, url });
 				}
 			} catch {
 				rejected++;
@@ -288,10 +297,15 @@ const Composer = memo(function Composer({
 			setAttachments((a) => [...a, ...added]);
 			setAttachmentError(null);
 		}
-		if (rejected) setAttachmentError(`${rejected} file${rejected === 1 ? " was" : "s were"} not attached (max ${Math.round(MAX_IMAGE_BYTES / 1024 / 1024)}MB).`);
+		const problems: string[] = [];
+		if (heicNames.length) problems.push(`${heicNames.join(", ")} ${heicNames.length === 1 ? "is" : "are"} HEIC/HEIF, which can't be read here yet — convert to JPEG or PNG first.`);
+		if (rejected) problems.push(`${rejected} file${rejected === 1 ? " was" : "s were"} not attached (max ${MAX_SEND_ATTACHMENTS} files, ${Math.round(MAX_ATTACHMENT_BYTES / 1024 / 1024)}MB each).`);
+		setAttachmentError(problems.length ? problems.join(" ") : null);
 	};
 
 	const onPaste = (e: React.ClipboardEvent) => {
+		// Armed by mod+Shift+V on keydown: let the text land inline.
+		if (Date.now() < pasteAsTextUntilRef.current) return;
 		const files = Array.from(e.clipboardData?.items ?? [])
 			.filter((i) => i.type.startsWith("image/"))
 			.map((i) => i.getAsFile())
@@ -302,9 +316,9 @@ const Composer = memo(function Composer({
 			return;
 		}
 		const pastedText = e.clipboardData?.getData("text/plain") ?? "";
-		if (pastedText.length > MAX_PASTE_TEXT_CHARS) {
+		if (shouldAttachPastedText(pastedText)) {
 			e.preventDefault();
-			const fileName = `pasted-text-${Date.now().toString().slice(-6)}.txt`;
+			const fileName = nextPastedTextName(attachments.map((a) => a.name));
 			const blob = new Blob([pastedText], { type: "text/plain" });
 			void (async () => {
 				const data = await readAsBase64(blob);
@@ -322,7 +336,7 @@ const Composer = memo(function Composer({
 		if (sending && !streaming) return;
 		const imageAttachments = attachments.filter((a) => a.mimeType.startsWith("image/"));
 		const fileAttachments = attachments.filter((a) => !a.mimeType.startsWith("image/"));
-		let messageText = expandSkillMentions(t, skillCommands.map((c) => c.name));
+		let messageText = expandSkillMentions(t, ac.skillCommands.map((c) => c.name));
 		if (fileAttachments.length) {
 			const decoded = fileAttachments.map((a) => {
 				try {
@@ -341,6 +355,16 @@ const Composer = memo(function Composer({
 		}
 		const outgoing = imageAttachments;
 		const isStreamingSubmit = streaming;
+		// Send caps (T3's send-turn contract): fail in the composer with a
+		// message instead of downstream as provider errors.
+		if (attachments.length > MAX_SEND_ATTACHMENTS) {
+			setAttachmentError(`You can attach up to ${MAX_SEND_ATTACHMENTS} files per message.`);
+			return;
+		}
+		if (messageText.length > MAX_SEND_INPUT_CHARS) {
+			toast("error", `Message is ${messageText.length.toLocaleString()} characters; the limit is ${MAX_SEND_INPUT_CHARS.toLocaleString()}. Trim text or move some into a file attachment.`);
+			return;
+		}
 		// remember for ArrowUp history (cap 50, dedupe consecutive)
 		if (t) {
 			setHistory((prev) => {
@@ -351,6 +375,7 @@ const Composer = memo(function Composer({
 			});
 		}
 		setHistoryCursor(null);
+		setStashOpen(false);
 		if (!isStreamingSubmit) setSending(true);
 		setText("");
 		try {
@@ -368,71 +393,6 @@ const Composer = memo(function Composer({
 		for (const attachment of attachments) URL.revokeObjectURL(attachment.url);
 		setAttachments([]);
 	};
-
-	const chooseCommand = (command: CommandInfo) => {
-		setText(insertCommand(command));
-		setDismissedToken(null);
-		requestAnimationFrame(() => {
-			const textarea = composerRef.current;
-			textarea?.focus();
-			textarea?.setSelectionRange(textarea.value.length, textarea.value.length);
-		});
-	};
-
-	const chooseSkill = (command: CommandInfo) => {
-		if (!skillToken) return;
-		const next = `${text.slice(0, skillToken.rangeStart)}$${command.name} ${text.slice(skillToken.rangeEnd)}`;
-		setText(next);
-		setDismissedSkill(null);
-		requestAnimationFrame(() => {
-			const textarea = composerRef.current;
-			textarea?.focus();
-			textarea?.setSelectionRange(next.length, next.length);
-		});
-	};
-
-	const chooseMention = (bot: Bot) => {
-		if (!mentionToken) return;
-		const next = `${text.slice(0, mentionToken.rangeStart)}@${botHandle(bot)} ${text.slice(mentionToken.rangeEnd)}`;
-		setText(next);
-		setDismissedMention(null);
-		requestAnimationFrame(() => {
-			const textarea = composerRef.current;
-			textarea?.focus();
-			textarea?.setSelectionRange(next.length, next.length);
-		});
-	};
-
-	const menusOpen = commandMatches.length > 0 || mentionMatches.length > 0 || skillMatches.length > 0;
-	useEffect(() => {
-		if (!menusOpen) return;
-		const onResize = () => setMenuLayoutTick((n) => n + 1);
-		window.addEventListener("resize", onResize);
-		return () => window.removeEventListener("resize", onResize);
-	}, [menusOpen]);
-	// Anchored above the composer; measured every render while open so textarea
-	// autogrow keeps it glued. Portaled out of the session footer (see note above).
-	const menuPortal = (() => {
-		if (!menusOpen) return null;
-		const rect = menuAnchorRef.current?.getBoundingClientRect();
-		if (!rect) return null;
-		return createPortal(
-			<div
-				style={{
-					position: "fixed",
-					left: rect.left,
-					width: rect.width,
-					bottom: Math.max(8, window.innerHeight - rect.top + 8),
-					zIndex: 60,
-				}}
-			>
-				<CommandMenu commands={commandMatches} selected={selectedCommand} onSelect={setSelectedCommand} onChoose={chooseCommand} />
-				<BotMentionMenu bots={mentionMatches} selected={selectedMention} onSelect={setSelectedMention} onChoose={chooseMention} />
-				<CommandMenu commands={skillMatches} selected={selectedSkill} onSelect={setSelectedSkill} onChoose={chooseSkill} sigil="$" listId="composer-skills" optionIdPrefix="skill-opt" label="Skills" />
-			</div>,
-			document.body
-		);
-	})();
 
 	const hasBlockingDialog = !!dialogs?.[0] && (dialogs[0].method === "select" || dialogs[0].method === "input" || dialogs[0].method === "editor");
 
@@ -470,22 +430,30 @@ const Composer = memo(function Composer({
 			e.preventDefault();
 			return;
 		}
-		const menuOpen = commandMatches.length > 0 || mentionMatches.length > 0 || skillMatches.length > 0;
-		if (mentionMatches.length && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
-			e.preventDefault();
-			setSelectedMention((index) => (e.key === "ArrowDown" ? (index + 1) % mentionMatches.length : (index - 1 + mentionMatches.length) % mentionMatches.length));
+		if (isPasteAsTextShortcutKey(e)) {
+			pasteAsTextUntilRef.current = Date.now() + PASTE_AS_TEXT_ARM_MS;
 			return;
 		}
-		if (commandMatches.length && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+		if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
 			e.preventDefault();
-			setSelectedCommand((index) => (e.key === "ArrowDown" ? (index + 1) % commandMatches.length : (index - 1 + commandMatches.length) % commandMatches.length));
+			const trimmed = text.trim();
+			if (!trimmed) return;
+			setStash((list) => [{ id: Date.now(), text: trimmed, at: Date.now() }, ...list].slice(0, 20));
+			setText("");
+			setHistoryCursor(null);
+			setStashOpen(false);
+			toast?.("info", "Draft stashed");
 			return;
 		}
-		if (skillMatches.length && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+		// Autocomplete menus own their keys (arrows/Tab/Escape/accept). Enter
+		// on an already-accepted row falls through to submit below.
+		if (ac.handleMenuKey(e)) return;
+		if (e.key === "Escape" && stashOpen) {
 			e.preventDefault();
-			setSelectedSkill((index) => (e.key === "ArrowDown" ? (index + 1) % skillMatches.length : (index - 1 + skillMatches.length) % skillMatches.length));
+			setStashOpen(false);
 			return;
 		}
+		const menuOpen = ac.menusOpen;
 		if (!menuOpen && e.key === "ArrowUp") {
 			const el = e.currentTarget;
 			const atStart = el.selectionStart === 0 && el.selectionEnd === 0;
@@ -522,53 +490,9 @@ const Composer = memo(function Composer({
 			}
 			return;
 		}
-		if (mentionMatches.length && e.key === "Escape") {
-			e.preventDefault();
-			setDismissedMention(mentionToken?.query ?? "");
-			return;
-		}
-		if (commandMatches.length && e.key === "Escape") {
-			e.preventDefault();
-			setDismissedToken(commandToken);
-			return;
-		}
-		if (skillMatches.length && e.key === "Escape") {
-			e.preventDefault();
-			setDismissedSkill(skillToken?.query ?? "");
-			return;
-		}
-		if (mentionMatches.length && e.key === "Tab") {
-			e.preventDefault();
-			chooseMention(mentionMatches[selectedMention] ?? mentionMatches[0]);
-			return;
-		}
-		if (commandMatches.length && e.key === "Tab") {
-			e.preventDefault();
-			chooseCommand(commandMatches[selectedCommand] ?? commandMatches[0]);
-			return;
-		}
-		if (skillMatches.length && e.key === "Tab") {
-			e.preventDefault();
-			chooseSkill(skillMatches[selectedSkill] ?? skillMatches[0]);
-			return;
-		}
 		if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
 			e.preventDefault();
-			if (mentionMatches.length) {
-				const selected = mentionMatches[selectedMention] ?? mentionMatches[0];
-				if (selected && mentionToken && `@${botHandle(selected)}` !== `@${mentionToken.query}`) chooseMention(selected);
-				else void submit();
-				return;
-			}
-			if (skillMatches.length) {
-				const selected = skillMatches[selectedSkill] ?? skillMatches[0];
-				if (selected && skillToken && `$${selected.name}` !== `$${skillToken.query}`) chooseSkill(selected);
-				else void submit();
-				return;
-			}
-			const selected = commandMatches[selectedCommand] ?? commandMatches[0];
-			if (selected && commandToken !== selected.name) chooseCommand(selected);
-			else void submit();
+			void submit();
 		}
 	};
 
@@ -604,7 +528,7 @@ const Composer = memo(function Composer({
 			}}
 		>
 			<div ref={menuAnchorRef} className="relative w-full min-w-0">
-				{menuPortal}
+				{ac.menuPortal}
 				{streaming && (steering.length > 0 || followUp.length > 0) && (
 					<div className="mb-2 flex flex-wrap gap-1.5 text-[11px]">
 						{steering.map((s, i) => (
@@ -756,8 +680,51 @@ const Composer = memo(function Composer({
 						<div className="flex items-center gap-3 px-4 py-3">
 							<input ref={fileRef} type="file" multiple className="hidden" onChange={(e) => { void addFiles(e.target.files ?? []); e.target.value = ""; }} />
 							<button onClick={() => fileRef.current?.click()} title="Attach (paste / drag & drop)" aria-label="Attach file" disabled={hasBlockingDialog} className="grid h-8 w-8 shrink-0 place-items-center text-dim hover:text-fg disabled:opacity-40"><PaperclipIcon size={16} /></button>
+						<span className="relative shrink-0">
+							<button
+								onClick={() => setStashOpen((o) => !o)}
+								title="Stashed drafts (⌘S to stash)"
+								aria-label={stash.length ? `Stashed drafts (${stash.length})` : "Stash draft"}
+								aria-expanded={stashOpen}
+								disabled={hasBlockingDialog}
+								className="grid h-8 w-8 place-items-center rounded-md text-dim hover:text-fg disabled:opacity-40"
+							>
+								<BookmarkIcon size={15} />
+								{stash.length > 0 ? (
+									<span className="absolute -right-0.5 -top-0.5 grid h-4 min-w-4 place-items-center rounded-full bg-accent px-1 text-[10px] font-semibold leading-none text-white">{stash.length}</span>
+								) : null}
+							</button>
+							{stashOpen && stash.length > 0 ? (
+								<div role="menu" aria-label="Stashed drafts" className="absolute bottom-full left-0 z-50 mb-2 w-72 overflow-hidden rounded-xl border border-line bg-bg shadow-xl">
+									{stash.map((s) => (
+										<div key={s.id} className="group flex items-center gap-2 border-b border-line/60 px-3 py-2 last:border-0 hover:bg-inset">
+											<button
+												role="menuitem"
+												onClick={() => {
+													setText((prev) => (prev.trim() ? `${prev.trimEnd()}\n\n${s.text}` : s.text));
+													setStash((list) => list.filter((x) => x.id !== s.id));
+													setStashOpen(false);
+													requestAnimationFrame(() => composerRef.current?.focus());
+												}}
+												title="Restore into composer"
+												className="min-w-0 flex-1 truncate text-left text-[12px] text-fg"
+											>
+												{s.text.length > 80 ? `${s.text.slice(0, 80)}…` : s.text}
+											</button>
+											<button
+												onClick={() => setStash((list) => list.filter((x) => x.id !== s.id))}
+												aria-label="Delete stashed draft"
+												className="shrink-0 rounded p-1 text-dim opacity-0 hover:text-err group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100"
+											>
+												✕
+											</button>
+										</div>
+									))}
+								</div>
+							) : null}
+						</span>
 							<span className="shrink-0 select-none text-[length:var(--prompt-font)] leading-none text-dim" aria-hidden>&gt;</span>
-							<textarea ref={composerRef} value={text} onChange={(e) => { setText(e.target.value); if (historyCursor !== null) setHistoryCursor(null); }} onKeyDown={onKeyDown} onPaste={onPaste} rows={1} disabled={hasBlockingDialog} placeholder={streaming ? (mode === "steer" ? "Steer…" : "Queue…") : "Message Pi…"} role="textbox" aria-label="Message Pi" aria-autocomplete="list" aria-controls={commandMatches.length > 0 ? "composer-commands" : mentionMatches.length > 0 ? "composer-bot-mentions" : skillMatches.length > 0 ? "composer-skills" : undefined} aria-activedescendant={commandMatches.length > 0 ? `cmd-opt-${selectedCommand}` : mentionMatches.length > 0 ? `mention-opt-${selectedMention}` : skillMatches.length > 0 ? `skill-opt-${selectedSkill}` : undefined} className="composer-input max-h-[140px] min-h-[20px] w-full flex-1 resize-none border-0 bg-transparent py-1 text-[length:var(--prompt-font)] leading-[1.5] outline-none placeholder:text-dim focus:outline-none focus-visible:outline-none" />
+							<textarea ref={composerRef} value={text} onChange={(e) => { setText(e.target.value); if (historyCursor !== null) setHistoryCursor(null); }} onKeyDown={onKeyDown} onPaste={onPaste} rows={1} disabled={hasBlockingDialog} placeholder={streaming ? (mode === "steer" ? "Steer…" : "Queue…") : "Message Pi…"} role="textbox" aria-label="Message Pi" aria-autocomplete="list" aria-controls={ac.openMenu?.id} aria-activedescendant={ac.openMenu ? `${ac.openMenu.optionIdPrefix}-${ac.openMenu.selected}` : undefined} className="composer-input max-h-[140px] min-h-[20px] w-full flex-1 resize-none border-0 bg-transparent py-1 text-[length:var(--prompt-font)] leading-[1.5] outline-none placeholder:text-dim focus:outline-none focus-visible:outline-none" />
 							{streaming ? (
 								<div className="flex shrink-0 items-center gap-1.5" role="group" aria-label="Delivery mode"><button onClick={() => setMode("steer")} aria-pressed={mode === "steer"} title="Interrupt and redirect" className={`h-8 rounded-md px-3 text-[12px] ${mode === "steer" ? "bg-accent text-white" : "bg-inset text-dim hover:text-fg"}`}>steer</button><button onClick={() => setMode("followUp")} aria-pressed={mode === "followUp"} title="Queue after current run" className={`h-8 rounded-md px-3 text-[12px] ${mode === "followUp" ? "bg-accent text-white" : "bg-inset text-dim hover:text-fg"}`}>queue</button><button onClick={onAbort} title="Stop run" aria-label="Stop run" className="grid h-8 w-8 place-items-center rounded-md bg-err text-white hover:bg-err/90"><StopIcon size={14} /></button></div>
 							) : (
@@ -790,6 +757,11 @@ const Composer = memo(function Composer({
 									onSelect={onSetThinking}
 								/>
 							</span>
+							{!goalSet && onStartGoal ? (
+								<span className="flex shrink-0 items-center">
+									<button type="button" onClick={onStartGoal} title="Set a goal: track elapsed time and turns toward an objective" className="operator-meta-control">Goal</button>
+								</span>
+							) : null}
 							<div className="flex-1" />
 							{streaming && (
 								<span className="flex shrink-0 items-center px-1">
@@ -797,7 +769,7 @@ const Composer = memo(function Composer({
 								</span>
 							)}
 							<span className="flex shrink-0 items-center">
-								<StatsPopover stats={stats} hasSession={!!agentState} onCompact={onCompact} />
+								<StatsPopover stats={stats ?? null} hasSession={!!agentState} onCompact={onCompact} />
 							</span>
 						</div>
 					)}
@@ -808,7 +780,7 @@ const Composer = memo(function Composer({
 	);
 });
 
-function ComposerDialogInput({ dialog, onDismiss, toast }: { dialog: ComposerDialog; onDismiss: (id: string) => void; toast: Props["toast"] }) {
+function ComposerDialogInput({ dialog, onDismiss, toast }: { dialog: Dialog; onDismiss: (id: string) => void; toast: Props["toast"] }) {
 	const [value, setValue] = useState(dialog.prefill ?? "");
 	const respond = async (payload: Record<string, unknown>) => {
 		onDismiss(dialog.id);

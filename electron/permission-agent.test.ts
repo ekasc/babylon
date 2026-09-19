@@ -55,6 +55,15 @@ describe("mapToolToAction", () => {
     expect(mapToolToAction("edit", { path: "/etc/hosts" }, CWD)?.category).toBe("file_write_outside");
   });
 
+  it("maps canvas writes like file writes, and checks like reads", () => {
+    const write = mapToolToAction("canvas_write", { cwd: CWD, name: "plan" }, CWD);
+    expect(write?.category).toBe("file_write_workspace");
+    expect(write?.paths?.[0]).toBe("/project/.pi/canvas/plan.canvas");
+    expect(mapToolToAction("canvas_write", { cwd: CWD, name: "../escape" }, CWD)?.category).toBe("file_write_outside");
+    expect(mapToolToAction("canvas_check", { text: "canvas 1" }, CWD)).toBeNull();
+    expect(mapToolToAction("canvas_check", { cwd: CWD, name: "plan" }, CWD)?.category).toBe("file_read");
+  });
+
   it("returns null for unpoliced tools", () => {
     expect(mapToolToAction("todo_write", {}, CWD)).toBeNull();
     expect(mapToolToAction("unknown_tool", {}, CWD)).toBeNull();
