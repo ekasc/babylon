@@ -7,6 +7,7 @@
  */
 
 import { parseRoomTurn } from "../src/bots";
+import { wireNum, wireOf, wireStr } from "../src/store";
 
 export interface Recap {
   id: string;
@@ -42,33 +43,34 @@ export function recapDue(
  *  otherwise the most recent stretch of the conversation (so a first recap
  *  summarizes recent changes rather than the whole chat). */
 export function pickRecapDelta(
-  messages: any[],
+  messages: unknown[],
   coveredEntryId: string | null,
   maxMessages = RECAP_MAX_DELTA_MESSAGES
-): { messages: any[]; coveredEntryId: string | null } {
+): { messages: unknown[]; coveredEntryId: string | null } {
   let start = 0;
   if (coveredEntryId) {
-    const anchor = messages.findIndex((m) => m.entryId === coveredEntryId);
+    const anchor = messages.findIndex((m) => wireStr(wireOf(m), "entryId") === coveredEntryId);
     if (anchor >= 0) start = anchor + 1;
     else start = Math.max(0, messages.length - maxMessages);
   } else {
     start = Math.max(0, messages.length - maxMessages);
   }
   const window = messages.slice(start);
-  return { messages: window, coveredEntryId: window.length ? window[window.length - 1].entryId : null };
+  return { messages: window, coveredEntryId: window.length ? wireStr(wireOf(window[window.length - 1]), "entryId") ?? null : null };
 }
 
 /** A recap is only worth a model call if there is something to say: at least a
  *  couple of turns and a real chunk of text. */
-export function recapWorthy(messages: any[], minMessages = RECAP_MIN_MESSAGES, minChars = RECAP_MIN_CHARS): boolean {
+export function recapWorthy(messages: unknown[], minMessages = RECAP_MIN_MESSAGES, minChars = RECAP_MIN_CHARS): boolean {
   let chars = 0;
   let count = 0;
   for (const m of messages ?? []) {
-    if (typeof m?.content === "string") chars += m.content.length;
-    else if (Array.isArray(m?.content)) {
-      for (const block of m.content) {
+    const content = wireOf(m)?.content;
+    if (typeof content === "string") chars += content.length;
+    else if (Array.isArray(content)) {
+      for (const block of content) {
         if (typeof block === "string") chars += block.length;
-        else chars += String(block?.text ?? "").length;
+        else chars += String(wireOf(block)?.text ?? "").length;
       }
     }
     count++;
@@ -89,16 +91,17 @@ export function buildRecapPrompt(deltaText: string): string {
 /** Plain-text projection of a message window for summarization prompts.
  *  User + assistant text only, oldest first, capped. Room director prompts
  *  (user-role machinery) are machinery, not content, dropped. */
-export function transcriptText(messages: any[], cap = 24_000): string {
+export function transcriptText(messages: unknown[], cap = 24_000): string {
   const parts: string[] = [];
   let chars = 0;
   for (const m of messages ?? []) {
-    if (m?.role !== "user" && m?.role !== "assistant") continue;
-    const blocks = typeof m.content === "string" ? [m.content] : Array.isArray(m.content) ? m.content : [];
+    const msg = wireOf(m);
+    if (msg?.role !== "user" && msg?.role !== "assistant") continue;
+    const blocks = typeof msg.content === "string" ? [msg.content] : Array.isArray(msg.content) ? msg.content : [];
     for (const b of blocks) {
-      const text = typeof b === "string" ? b : String(b?.text ?? "");
+      const text = typeof b === "string" ? b : String(wireOf(b)?.text ?? "");
       if (!text.trim()) continue;
-      if (m.role === "user" && parseRoomTurn(text)) continue;
+      if (msg.role === "user" && parseRoomTurn(text)) continue;
       parts.push(text);
       chars += text.length;
       if (chars >= cap) return parts.join("\n\n").slice(0, cap);
@@ -135,7 +138,7 @@ export function normalizeRecapText(raw: string): string | null {
 
 /** A recap renders like a custom system message so the transcript can show it
  *  interleaved by timestamp without touching the append-only session file. */
-export function recapToMessage(recap: Recap): any {
+export function recapToMessage(recap: Recap): unknown {
   return {
     role: "custom",
     customType: "babylon_recap",
@@ -148,13 +151,13 @@ export function recapToMessage(recap: Recap): any {
 
 /** Merges recap annotations into a projected message window (tail or range),
  *  interleaved by timestamp. */
-export function mergeRecaps(messages: any[], recaps: Recap[]): any[] {
+export function mergeRecaps(messages: unknown[], recaps: Recap[]): unknown[] {
   if (!recaps?.length) return messages;
-  const extras = recaps.map(recapToMessage).filter((m) => Number.isFinite(m.timestamp));
+  const extras = recaps.map(recapToMessage).filter((m) => Number.isFinite(wireNum(wireOf(m), "timestamp")));
   if (!extras.length) return messages;
   return [...messages, ...extras].sort((a, b) => {
-    const at = typeof a?.timestamp === "number" ? a.timestamp : 0;
-    const bt = typeof b?.timestamp === "number" ? b.timestamp : 0;
+    const at = wireNum(wireOf(a), "timestamp") ?? 0;
+    const bt = wireNum(wireOf(b), "timestamp") ?? 0;
     return at - bt;
   });
 }
@@ -163,14 +166,15 @@ export function mergeRecaps(messages: any[], recaps: Recap[]): any[] {
  *  the window's time span, so each recap lands in exactly one window and
  *  scroll-up history loads cannot duplicate recaps already shown nearer the
  *  tail. */
-export function mergeRecapsIntoWindow(messages: any[], recaps: Recap[]): any[] {
+export function mergeRecapsIntoWindow(messages: unknown[], recaps: Recap[]): unknown[] {
   if (!messages.length || !recaps?.length) return messages;
   let first = Infinity;
   let last = -Infinity;
   for (const m of messages) {
-    if (typeof m?.timestamp !== "number" || !Number.isFinite(m.timestamp)) continue;
-    first = Math.min(first, m.timestamp);
-    last = Math.max(last, m.timestamp);
+    const ts = wireNum(wireOf(m), "timestamp");
+    if (typeof ts !== "number" || !Number.isFinite(ts)) continue;
+    first = Math.min(first, ts);
+    last = Math.max(last, ts);
   }
   if (!Number.isFinite(first) || !Number.isFinite(last)) return messages;
   const inside = recaps.filter((r) => {

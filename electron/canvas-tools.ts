@@ -3,7 +3,7 @@ import { checkCanvasText, formatCheckReport } from "../src/lib/canvas-check";
 import { canvasPath, readScene, writeScene } from "./canvas-store";
 
 function textResult(t: string) {
-  return { content: [{ type: "text", text: t }], details: { text: t } };
+  return { content: [{ type: "text" as const, text: t }], details: { text: t } };
 }
 
 /**
@@ -13,8 +13,8 @@ function textResult(t: string) {
  * reported, re-check, then write. canvas_write enforces the same gate at write
  * time and refuses invalid scenes instead of saving them.
  */
-export function createCanvasTools(): ToolDefinition<any, any>[] {
-  const tools: ToolDefinition<any, any>[] = [
+export function createCanvasTools(): ToolDefinition[] {
+  const tools: ToolDefinition[] = [
     {
       name: "canvas_check",
       label: "Check Canvas",
@@ -28,7 +28,7 @@ export function createCanvasTools(): ToolDefinition<any, any>[] {
           cwd: { type: "string", description: "Project dir, with text omitted to check a saved scene" },
           name: { type: "string", description: "Scene name, with text omitted to check a saved scene" },
         },
-      } as any,
+      },
       execute: async (_id, raw) => {
         const a = (raw ?? {}) as Record<string, unknown>;
         let text = typeof a.text === "string" ? a.text : null;
@@ -42,7 +42,7 @@ export function createCanvasTools(): ToolDefinition<any, any>[] {
         }
         return textResult(formatCheckReport(checkCanvasText(text)));
       },
-    } as ToolDefinition<any, any>,
+    },
 
     {
       name: "canvas_write",
@@ -58,7 +58,7 @@ export function createCanvasTools(): ToolDefinition<any, any>[] {
           name: { type: "string", description: "Scene name" },
           text: { type: "string", description: "Full scene text" },
         },
-      } as any,
+      },
       execute: async (_id, raw) => {
         const a = (raw ?? {}) as Record<string, unknown>;
         const cwd = String(a.cwd ?? "").trim();
@@ -77,7 +77,7 @@ export function createCanvasTools(): ToolDefinition<any, any>[] {
             : ", clean";
         return textResult(`wrote ${name} (${report.nodes} nodes, ${report.edges} edges)${warnings}`);
       },
-    } as ToolDefinition<any, any>,
+    },
   ];
   return tools;
 }

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { parseEnvelope, serializeEnvelope, createEnvelope, DAEMON_PROTOCOL_VERSION, type ProtocolMessageType, type ProtocolPayload } from "./daemon-protocol";
 import { encodeFrame } from "./daemon-transport";
 import { hashToken } from "./remote-auth";
-import { startDaemonServer, type DaemonServer } from "./daemon-server";
+import { startDaemonServer, type DaemonPiHost, type DaemonServer } from "./daemon-server";
 import type { ScheduledTask } from "./automation";
 import { createTask } from "./tasks";
 import { PermissionEngine } from "../electron/permissions";
@@ -26,6 +26,56 @@ async function start(opts: Partial<Parameters<typeof startDaemonServer>[0]> = {}
   });
   servers.push(server);
   return server;
+}
+
+/** Partial PiHost fake: unmentioned methods throw if the server calls them. */
+function fakePiHost(overrides: Partial<DaemonPiHost>): DaemonPiHost {
+  const fail = (name: string) => () => {
+    throw new Error(`not stubbed: ${name}`);
+  };
+  return {
+    open: fail("open"),
+    prompt: fail("prompt"),
+    abort: fail("abort"),
+    respondUi: fail("respondUi"),
+    notifyDiagnostics: fail("notifyDiagnostics"),
+    getToolOutput: fail("getToolOutput"),
+    getModels: fail("getModels"),
+    warmProject: fail("warmProject"),
+    setModel: fail("setModel"),
+    getThinkingLevels: fail("getThinkingLevels"),
+    setThinking: fail("setThinking"),
+    getSettings: fail("getSettings"),
+    setSettings: fail("setSettings"),
+    setSessionName: fail("setSessionName"),
+    compact: fail("compact"),
+    getTree: fail("getTree"),
+    getHistory: fail("getHistory"),
+    getTurnChanges: fail("getTurnChanges"),
+    getTurnFileDiff: fail("getTurnFileDiff"),
+    prepareRollback: fail("prepareRollback"),
+    commitRollback: fail("commitRollback"),
+    undoRollback: fail("undoRollback"),
+    getForkMessages: fail("getForkMessages"),
+    fork: fail("fork"),
+    clone: fail("clone"),
+    generateGitCommitMessage: fail("generateGitCommitMessage"),
+    getRecaps: fail("getRecaps"),
+    refreshFromDisk: fail("refreshFromDisk"),
+    switchTo: fail("switchTo"),
+    activeSessionFile: null,
+    controlThread: fail("controlThread"),
+    promoteThread: fail("promoteThread"),
+    controlSubagent: fail("controlSubagent"),
+    promoteSubagent: fail("promoteSubagent"),
+    execGoalCommand: fail("execGoalCommand"),
+    getState: fail("getState"),
+    getMessages: fail("getMessages"),
+    getStats: fail("getStats"),
+    getCommands: fail("getCommands"),
+    attachSinks: () => undefined,
+    ...overrides,
+  };
 }
 
 function connect(port: number): Promise<net.Socket> {
@@ -68,14 +118,15 @@ function reader(socket: net.Socket) {
       if (!line.trim()) continue;
       const envelope = parseEnvelope(line);
       const w = waiters.findIndex((x) => x.type === envelope.type);
-      if (w !== -1) waiters.splice(w, 1)[0].resolve(envelope);
-      else queue.push(envelope);
+      if (w === -1) queue.push(envelope);
+      else waiters.splice(w, 1)[0]?.resolve(envelope);
     }
   });
   return {
     next(type: string, timeoutMs = 2000): Promise<ReturnType<typeof parseEnvelope>> {
       const queued = queue.findIndex((e) => e.type === type);
-      if (queued !== -1) return Promise.resolve(queue.splice(queued, 1)[0]);
+      const found = queued !== -1 ? queue.splice(queued, 1)[0] : undefined;
+      if (found) return Promise.resolve(found);
       return new Promise((resolve, reject) => {
         const t = setTimeout(() => reject(new Error(`timed out waiting for ${type}`)), timeoutMs);
         waiters.push({
@@ -138,29 +189,62 @@ describe("babylon daemon server", () => {
     expect(stopped).toBe(true);
   });
 
+  it("serves pi.goalControl by running the invocation and wrapping the fresh goal", async () => {
+    const goal = {
+      active: true,
+      paused: false,
+      objective: "Ship it",
+      slug: "ship-it",
+      status: "executing" as const,
+      currentStep: "step",
+      startedAt: new Date(0).toISOString(),
+      acceptanceCriteria: [],
+      nonGoals: [],
+      completedSteps: [],
+      evidence: [],
+      log: [],
+    };
+    const seen: string[] = [];
+    const piHost = fakePiHost({
+      execGoalCommand: async (args: string) => {
+        seen.push(args);
+        return goal;
+      },
+    });
+    const server = await start({ piHost });
+    const port = (server.address() as { port: number }).port;
+    const socket = await connect(port);
+    const r = reader(socket);
+    await request(socket, "pi.goalControl", { args: "pause" });
+    const res = await r.next("pi.goalControl");
+    expect(res.payload).toEqual({ goal });
+    expect(seen).toEqual(["pause"]);
+    await request(socket, "pi.goalControl", { args: 42 });
+    const err = await r.next("error");
+    expect(String((err.payload as { error?: string }).error)).toMatch(/requires \{ args \}/);
+  });
+
   it("wraps pi.getCommands in { commands } for the thin client", async () => {
-    const piHost = {
-      opts: { onEvent: () => {}, onStatus: () => {} },
-      getCommands: async () => [{ name: "ls", description: "list", source: "shell" }],
-    } as any;
+    const piHost = fakePiHost({
+      getCommands: async () => [{ name: "ls", description: "list", source: "prompt" as const }],
+    });
     const server = await start({ piHost });
     const port = (server.address() as { port: number }).port;
     const socket = await connect(port);
     const r = reader(socket);
     await request(socket, "pi.getCommands", {});
     const res = await r.next("pi.getCommands");
-    expect(res.payload).toEqual({ commands: [{ name: "ls", description: "list", source: "shell" }] });
+    expect(res.payload).toEqual({ commands: [{ name: "ls", description: "list", source: "prompt" }] });
   });
 
   it("wraps array results so the protocol envelope stays an object", async () => {
-    const piHost = {
-      opts: { onEvent: () => {}, onStatus: () => {} },
+    const piHost = fakePiHost({
       getMessages: async () => [{ role: "user", content: "hi" }],
       getModels: async () => [{ provider: "pi", id: "m1" }],
       getThinkingLevels: async () => ["low", "high"],
       getForkMessages: async () => [{ entryId: "e1" }],
-      getRecaps: async () => [{ id: "r1" }],
-    } as any;
+      getRecaps: async () => [{ id: "r1", at: "2026-01-01T00:00:00.000Z", coveredEntryId: null, text: "Recap: r1" }],
+    });
     const server = await start({ piHost });
     const port = (server.address() as { port: number }).port;
     const socket = await connect(port);
@@ -179,18 +263,17 @@ describe("babylon daemon server", () => {
     expect((await r.next("pi.getForkMessages")).payload).toEqual({ messages: [{ entryId: "e1" }] });
 
     await request(socket, "pi.getRecaps", { sessionFile: "/tmp/s.jsonl" });
-    expect((await r.next("pi.getRecaps")).payload).toEqual({ recaps: [{ id: "r1" }] });
+    expect((await r.next("pi.getRecaps")).payload).toEqual({ recaps: [{ id: "r1", at: "2026-01-01T00:00:00.000Z", coveredEntryId: null, text: "Recap: r1" }] });
   });
 
   it("serves pi.warmProject by delegating to the host", async () => {
     const warmed: string[] = [];
-    const piHost = {
-      opts: { onEvent: () => {}, onStatus: () => {} },
+    const piHost = fakePiHost({
       warmProject: (cwd: string) => {
         warmed.push(cwd);
         return { warmed: true };
       },
-    } as any;
+    });
     const server = await start({ piHost });
     const port = (server.address() as { port: number }).port;
     const socket = await connect(port);
@@ -202,10 +285,9 @@ describe("babylon daemon server", () => {
   });
 
   it("answers an oversized response with a typed error instead of dropping the connection", async () => {
-    const piHost = {
-      opts: { onEvent: () => {}, onStatus: () => {} },
+    const piHost = fakePiHost({
       getMessages: async () => [{ role: "assistant", content: "x".repeat(8192) }],
-    } as any;
+    });
     const server = await start({ piHost, maxFrameBytes: 1024 });
     const port = (server.address() as { port: number }).port;
     const socket = await connect(port);
@@ -234,6 +316,7 @@ describe("babylon daemon server", () => {
 
     // A fresh server on the same snapshot path sees the persisted task.
     const dir = tempDirs[0];
+    if (!dir) throw new Error("missing temp dir");
     await server.close();
     const revived = await startDaemonServer({
       listen: { port: 0 },
@@ -367,6 +450,7 @@ describe("babylon daemon server", () => {
 
     // A fresh daemon on the same snapshot must still know the contract.
     const dir = tempDirs[0];
+    if (!dir) throw new Error("missing temp dir");
     await server.close();
     const revived = await startDaemonServer({
       listen: { port: 0 },
@@ -384,7 +468,7 @@ describe("babylon daemon server", () => {
     const completion = await rr.next("task.complete");
     expect(completion.kind).toBe("response");
     expect(completion.payload).toMatchObject({ blocked: true, reason: "contract failed: tests pass" });
-    expect(revived.state().runtime.tasks.tasks.t1.status).not.toBe("completed");
+    expect(revived.state().runtime.tasks.tasks.t1?.status).not.toBe("completed");
     const item = Object.values(revived.state().runtime.attention.items)[0];
     expect(item).toMatchObject({ type: "failed_task", title: "Completion blocked: Ship it" });
   });
@@ -646,5 +730,28 @@ describe("babylon daemon server", () => {
     await request(socket, "ping", {});
     await expect(r.next("pong")).resolves.toMatchObject({ kind: "response" });
     socket.destroy();
+  });
+});
+
+describe("toSettingsPatch", () => {
+  it("passes valid patches through", async () => {
+    const { toSettingsPatch } = await import("./lib/settings-patch");
+    expect(
+      toSettingsPatch({ chatModel: { provider: "acme", modelId: "m1" }, chatReasoning: "high" })
+    ).toEqual({ chatModel: { provider: "acme", modelId: "m1" }, chatReasoning: "high" });
+  });
+
+  it("drops unknown keys and rejects mistyped values", async () => {
+    const { toSettingsPatch } = await import("./lib/settings-patch");
+    expect(toSettingsPatch({ chatModel: { provider: "a", modelId: "b" }, evil: "x" })).toEqual({
+      chatModel: { provider: "a", modelId: "b" },
+    });
+    expect(() => toSettingsPatch("nope")).toThrow("must be an object");
+    expect(() => toSettingsPatch({ chatModel: { provider: "a" } })).toThrow("modelId");
+    expect(() => toSettingsPatch({ appearance: { theme: "neon" } })).toThrow("theme");
+    expect(toSettingsPatch({ appearance: { theme: "dark" } })).toEqual({ appearance: { theme: "dark" } });
+    expect(() => toSettingsPatch({ contextWindowOverrides: { "a/b": "lots" } })).toThrow(
+      "Record<string, number>"
+    );
   });
 });

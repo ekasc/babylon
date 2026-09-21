@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { bridge } from "../bridge";
 import type { Dialog } from "../store";
+import { errorMessage } from "../lib/errors";
 
 interface Props {
   dialogs: Dialog[];
@@ -20,13 +21,14 @@ export default function DialogHost({ dialogs, onDismiss, toast }: Props) {
   // Composer now handles select/input/editor (ask_question) inline — only
   // render confirm and other non-inline dialogs here to avoid blocking chat.
   const filtered = dialogs.filter((d) => d.method !== "select" && d.method !== "input" && d.method !== "editor");
-  if (!filtered.length) return null;
+  const first = filtered[0];
+  if (first === undefined) return null;
   return (
     <div
       className="pointer-events-none fixed inset-x-0 z-40 flex flex-col items-center px-6"
       style={{ bottom: "var(--dock-bottom, 188px)" }}
     >
-      <DialogCard key={filtered[0].id} dialog={filtered[0]} onDismiss={onDismiss} toast={toast} />
+      <DialogCard key={first.id} dialog={first} onDismiss={onDismiss} toast={toast} />
     </div>
   );
 }
@@ -47,8 +49,8 @@ function DialogCard({
     onDismiss(dialog.id);
     try {
       await bridge.uiRespond({ id: dialog.id, ...payload });
-    } catch (e: any) {
-      toast("error", e?.message ?? "failed to answer extension dialog");
+    } catch (e) {
+      toast("error", errorMessage(e, "failed to answer extension dialog"));
     }
   };
 

@@ -66,12 +66,13 @@ describe("path parsing", () => {
   it("flattens curves into points on the path", () => {
     const cubic = parseStroke("M0 0 C0 50 100 50 100 0")!;
     expect(cubic.length).toBe(9);
-    expect(cubic[cubic.length - 1]).toEqual({ x: 100, y: 0 });
-    expect(cubic[4].y).toBeGreaterThan(30);
+    expect(cubic[cubic.length - 1] ?? {}).toEqual({ x: 100, y: 0 });
+    expect(cubic[4]?.y).toBeGreaterThan(30);
 
-    const quadratic = parseStroke("M0 0 Q50 100 100 0")!;
+    const quadratic = parseStroke("M0 0 Q50 100 100 0");
+    if (!quadratic) throw new Error("missing stroke");
     expect(quadratic.length).toBe(9);
-    expect(quadratic[4].y).toBeCloseTo(50, 5);
+    expect(quadratic[4]?.y).toBeCloseTo(50, 5);
   });
 
   it("returns null for a stroke it cannot be trusted to read", () => {
@@ -106,8 +107,10 @@ describe("reading a sketch", () => {
   it("finds a drawn box", () => {
     const sketch = readSketch([ink("a", box(10, 10, 100, 60))]);
     expect(sketch.regions).toHaveLength(1);
-    expect(sketch.regions[0]).toMatchObject({ id: "r1", shape: "rect", parent: null, contains: [], inkIds: ["a"] });
-    expect(sketch.regions[0].bounds).toEqual({ x: 10, y: 10, width: 100, height: 60 });
+    const region = sketch.regions[0];
+    if (!region) throw new Error("missing region");
+    expect(region).toMatchObject({ id: "r1", shape: "rect", parent: null, contains: [], inkIds: ["a"] });
+    expect(region.bounds).toEqual({ x: 10, y: 10, width: 100, height: 60 });
     expect(sketch.connectors).toEqual([]);
     expect(sketch.loose).toEqual([]);
   });

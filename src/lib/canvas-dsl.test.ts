@@ -76,7 +76,7 @@ describe("canvas dsl", () => {
     };
     const reparsed = mustParse(serializeCanvas(edited));
 
-    expect(reparsed.nodes[2].label).toBe("Paid?");
+    expect(reparsed.nodes[2]?.label).toBe("Paid?");
     expect(reparsed.nodes[0]).toEqual(scene.nodes[0]);
     expect(reparsed.edges).toEqual(scene.edges);
     expect(reparsed.ink).toEqual(scene.ink);
@@ -91,7 +91,7 @@ describe("canvas dsl", () => {
     });
 
     expect(text.split("\n").filter(Boolean)).toHaveLength(2);
-    expect(mustParse(text).nodes[0].label).toBe(label);
+    expect(mustParse(text).nodes[0]?.label).toBe(label);
   });
 
   it("tolerates blank lines and indentation", () => {
@@ -112,7 +112,7 @@ describe("canvas dsl", () => {
 
     it("unknown version", () => {
       expect(errorsOf("canvas 99\n")[0]).toMatchObject({ line: 1 });
-      expect(errorsOf("canvas 99\n")[0].message).toContain("unsupported canvas version 99");
+      expect(errorsOf("canvas 99\n")[0]?.message).toContain("unsupported canvas version 99");
     });
 
     it("empty file", () => {
@@ -121,7 +121,8 @@ describe("canvas dsl", () => {
 
     it("unknown node kind, naming the valid ones", () => {
       const [error] = errorsOf(`canvas 1\nnode a widget "A"\n`);
-      expect(error.line).toBe(2);
+    if (!error) throw new Error("expected error");
+    expect(error.line).toBe(2);
       expect(error.message).toContain("unknown node kind");
       expect(error.message).toContain("decision");
     });
@@ -166,7 +167,7 @@ describe("canvas dsl", () => {
     });
 
     it("self containment", () => {
-      expect(errorsOf(`canvas 1\nnode a group "A" in a\n`)[0].message).toBe('node "a" contains itself');
+      expect(errorsOf(`canvas 1\nnode a group "A" in a\n`)[0]?.message).toBe('node "a" contains itself');
     });
 
     it("containment cycle", () => {
@@ -200,11 +201,11 @@ describe("canvas dsl", () => {
 
     it("at with one number", () => {
       expect(errorsOf(`canvas 1\nnode a process "A" at 10\n`)[0]).toMatchObject({ line: 2 });
-      expect(errorsOf(`canvas 1\nnode a process "A" at 10\n`)[0].message).toContain("at takes two numbers");
+      expect(errorsOf(`canvas 1\nnode a process "A" at 10\n`)[0]?.message).toContain("at takes two numbers");
     });
 
     it("at with a non number", () => {
-      expect(errorsOf(`canvas 1\nnode a process "A" at x,2\n`)[0].message).toContain("at x must be a number");
+      expect(errorsOf(`canvas 1\nnode a process "A" at x,2\n`)[0]?.message).toContain("at x must be a number");
     });
 
     it("unknown keyword", () => {

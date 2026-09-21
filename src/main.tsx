@@ -10,7 +10,7 @@ import "./styles.css";
  * error panel on screen instead.
  */
 class FatalBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
-  state = { error: null as Error | null };
+  state: { error: Error | null } = { error: null };
 
   static getDerivedStateFromError(error: Error) {
     return { error };
@@ -41,7 +41,9 @@ class FatalBoundary extends Component<{ children: ReactNode }, { error: Error | 
   }
 }
 
-createRoot(document.getElementById("root")!).render(
+const rootEl = document.getElementById("root");
+if (!rootEl) throw new Error("missing #root element");
+createRoot(rootEl).render(
   <FatalBoundary>
     <App />
   </FatalBoundary>

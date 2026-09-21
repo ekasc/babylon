@@ -21,6 +21,7 @@
     "eval:snapcompact": "tsx scripts/snapcompact-eval.mjs",
     "prototype:sidebar": "vite",
     "typecheck": "tsc --noEmit",
+    "lint": "node scripts/check-no-any.mjs",
     "test": "vitest run"
   },
   "dependencies": {

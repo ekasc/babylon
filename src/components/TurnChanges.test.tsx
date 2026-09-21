@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { TurnChanges } from "./TurnChanges";
 
 const { getTurnChanges } = vi.hoisted(() => ({
@@ -52,5 +52,34 @@ describe("TurnChanges header totals", () => {
     render(<TurnChanges turn={TURN} isLatest />);
     expect(screen.queryByText("+0")).toBeNull();
     expect(screen.queryByText("−0")).toBeNull();
+  });
+});
+
+describe("TurnChanges load failure", () => {
+  // changedCount <= 5 auto-expands on the latest turn, so the body (and
+  // the failure) renders without an extra click.
+  const SMALL = { ...TURN, entryId: "e2", changedCount: 2 };
+
+  it("shows a retryable error instead of spinning on loading forever", async () => {
+    getTurnChanges.mockRejectedValueOnce(new Error("snapshot unavailable"));
+    render(<TurnChanges turn={SMALL} isLatest />);
+    await waitFor(() => expect(getTurnChanges).toHaveBeenCalledWith("e2"));
+    expect(await screen.findByText("snapshot unavailable")).toBeTruthy();
+    expect(screen.queryByText("loading changes…")).toBeNull();
+  });
+
+  it("retry refetches and renders the file list on success", async () => {
+    getTurnChanges.mockRejectedValueOnce(new Error("snapshot unavailable"));
+    render(<TurnChanges turn={SMALL} isLatest />);
+    const retry = await screen.findByRole("button", { name: /retry/i });
+    getTurnChanges.mockResolvedValueOnce({
+      userEntryId: "e2",
+      files: [{ path: "src/b.ts", kind: "modified", additions: 1, deletions: 1 }],
+      totals: { files: 1, additions: 1, deletions: 1 },
+      exclusions: [],
+    });
+    fireEvent.click(retry);
+    expect(await screen.findByText("src/b.ts")).toBeTruthy();
+    expect(screen.queryByText("snapshot unavailable")).toBeNull();
   });
 });

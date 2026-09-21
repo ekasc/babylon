@@ -33,7 +33,13 @@ describe("TranscriptContent (agent detail transcript)", () => {
   });
 
   it("falls back to the run output when the agent never sent a message", () => {
-    const { queryByText } = render(<TranscriptContent recent={[{ at: "t0", role: "user", text: "prompt" }]} run={{ output: "processed the task" }} live />);
+    const { queryByText } = render(
+      <TranscriptContent
+        recent={[{ at: "t0", role: "user", text: "prompt" }]}
+        run={{ runId: "r1", status: "completed", updatedAt: "t1", output: "processed the task" }}
+        live
+      />
+    );
     expect(queryByText(/processed the task/)).toBeTruthy();
   });
 });

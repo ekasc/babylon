@@ -191,7 +191,7 @@ describe.sequential("LspManager", () => {
 
     const snap1 = mgr.getSnapshot(root)!;
     expect(snap1.diagnostics.length).toBeGreaterThan(0);
-    expect(snap1.servers[0].status).toBe("running");
+    expect(snap1.servers[0]?.status).toBe("running");
 
     // Now modify file to trigger didChange with higher version
     const aPath = join(root, "a.ts");
@@ -234,14 +234,14 @@ describe.sequential("LspManager", () => {
 
     const snap = mgr.getSnapshot(root)!;
     // Normalized: file is uri, line 1-based
-    expect(snap.diagnostics[0].file).toMatch(/^file:/);
-    expect(snap.diagnostics[0].line).toBeGreaterThanOrEqual(1);
-    expect(snap.diagnostics[0].severity).toBe("error");
+    expect(snap.diagnostics[0]?.file).toMatch(/^file:/);
+    expect(snap.diagnostics[0]?.line).toBeGreaterThanOrEqual(1);
+    expect(snap.diagnostics[0]?.severity).toBe("error");
 
     // Pi notifier should have been called with bounded diagnostics (debounced)
     await waitFor(() => piCalls.length > 0, 2000);
-    expect(piCalls[0].length).toBeGreaterThan(0);
-    expect(piCalls[0][0].severity).toBe("error");
+    expect(piCalls[0]?.length).toBeGreaterThan(0);
+    expect(piCalls[0]?.[0]?.severity).toBe("error");
   });
 
 
@@ -264,7 +264,7 @@ describe.sequential("LspManager", () => {
       return !!s && s.servers.some((sv) => sv.status === "running");
     }, 5000);
     const snapA = mgr.getSnapshot(rootA)!;
-    const pidA = snapA.servers[0].pid;
+    const pidA = snapA.servers[0]?.pid;
     expect(pidA).toBeDefined();
 
     // Switch to B
@@ -308,13 +308,13 @@ describe.sequential("LspManager", () => {
     }, 8000);
 
     const snap = mgr.getSnapshot(root)!;
-    expect(snap.servers[0].status).toBe("crashed");
-    expect(snap.servers[0].restartCount).toBe(2);
+    expect(snap.servers[0]?.status).toBe("crashed");
+    expect(snap.servers[0]?.restartCount).toBe(2);
     // Ensure no further restart after crashed
     await new Promise((r) => setTimeout(r, 800));
     const snap2 = mgr.getSnapshot(root)!;
-    expect(snap2.servers[0].restartCount).toBe(2);
-    expect(snap2.servers[0].status).toBe("crashed");
+    expect(snap2.servers[0]?.restartCount).toBe(2);
+    expect(snap2.servers[0]?.status).toBe("crashed");
   });
 
   it("unavailable command is represented truthfully without unhandled rejection", async () => {
@@ -330,12 +330,12 @@ describe.sequential("LspManager", () => {
     await expect(mgr.setActiveProject(root)).resolves.toBeDefined();
     await waitFor(() => {
       const s = mgr.getSnapshot(root);
-      return !!s && s.servers.length > 0 && (s.servers[0].status === "unavailable" || s.servers[0].status === "crashed");
+      return !!s && s.servers.length > 0 && (s.servers[0]?.status === "unavailable" || s.servers[0]?.status === "crashed");
     }, 8000);
 
     const snap = mgr.getSnapshot(root)!;
-    expect(snap.servers[0].status).toBe("unavailable");
-    expect(snap.servers[0].message).toBeDefined();
+    expect(snap.servers[0]?.status).toBe("unavailable");
+    expect(snap.servers[0]?.message).toBeDefined();
     // No unhandled rejection should have occurred (test would have failed)
   });
 
@@ -352,10 +352,10 @@ describe.sequential("LspManager", () => {
     await mgr.setActiveProject(root);
     await waitFor(() => {
       const s = mgr.getSnapshot(root);
-      return !!s && s.servers.length > 0 && (s.servers[0].status === "unavailable" || s.servers[0].status === "crashed");
+      return !!s && s.servers.length > 0 && (s.servers[0]?.status === "unavailable" || s.servers[0]?.status === "crashed");
     }, 8000);
     await mgr.refresh(root);
-    const after = mgr.getSnapshot(root)!.servers[0].status;
+    const after = mgr.getSnapshot(root)!.servers[0]?.status;
     expect(after).toBe("unavailable");
     // Refresh should not throw
   });
@@ -396,7 +396,7 @@ describe.sequential("LspManager", () => {
       const s = mgr.getSnapshot(root);
       return !!s && s.servers.some((sv) => sv.status === "running");
     }, 5000);
-    const pid = mgr.getSnapshot(root)!.servers[0].pid!;
+    const pid = mgr.getSnapshot(root)!.servers[0]?.pid!;
     mgr.dispose();
     // After dispose, snapshots empty
     expect(mgr.listSnapshots().length).toBe(0);

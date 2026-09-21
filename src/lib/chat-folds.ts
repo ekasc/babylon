@@ -1,4 +1,5 @@
 import type { ChatItem } from "../store";
+import { wireOf, wireStr } from "../store";
 
 export interface TurnFold {
   start: number;
@@ -19,15 +20,12 @@ export function summarizeTurnTools(tools: Array<Extract<ChatItem, { kind: "tool"
   let commands = 0;
   let other = 0;
   for (const t of tools) {
-    const details: any = (t as any).details;
-    const args: any = (t as any).args;
+    const details = t.details;
+    const args = wireOf(t.args);
     const hasPatch = typeof details?.patch === "string" && details.patch.trim().length > 0;
     const name = (t.name ?? "").toLowerCase();
     const filePath: string | null =
-      (typeof args?.file_path === "string" && args.file_path) ||
-      (typeof args?.path === "string" && args.path) ||
-      (typeof details?.file === "string" && details.file) ||
-      null;
+      wireStr(args, "file_path") || wireStr(args, "path") || wireStr(details, "file") || null;
     if (hasPatch || name.includes("edit") || name.includes("write")) {
       editOps++;
       if (filePath) editedFiles.add(filePath);
@@ -66,13 +64,18 @@ export function buildTurnFolds(
   const map = new Map<number, TurnFold>();
   for (let t = 0; t < userIndices.length; t++) {
     const start = userIndices[t];
-    const end = t + 1 < userIndices.length ? userIndices[t + 1] : shown.length;
+    if (start === undefined) continue;
+    const next = t + 1 < userIndices.length ? userIndices[t + 1] : undefined;
+    const end = next ?? shown.length;
 
     const hasAssistant = shown.slice(start + 1, end).some((it) => it.kind === "assistant");
     if (!hasAssistant) continue;
 
     let terminalIdx = -1;
-    for (let i = start + 1; i < end; i++) if (shown[i]?.kind === "assistant") terminalIdx = i;
+    for (let i = start + 1; i < end; i++) {
+      const cand = shown[i];
+      if (cand !== undefined && cand.kind === "assistant") terminalIdx = i;
+    }
 
     const hiddenItems = shown.slice(start + 1, end).filter((_, i) => {
       const idx = start + 1 + i;
@@ -83,12 +86,14 @@ export function buildTurnFolds(
     // block is work: it is hidden while the turn is collapsed, so a
     // reasoning-only turn still needs a fold (to reveal the trace on expand).
     const terminal = terminalIdx >= 0 ? shown[terminalIdx] : undefined;
+    if (terminalIdx >= 0 && terminal === undefined) continue;
     const hasReasoning =
       terminal?.kind === "assistant" && terminal.blocks.some((b) => b.type === "thinking");
     if (hiddenItems.length < 1 && !hasReasoning) continue;
 
-    const tools = hiddenItems.filter((it) => it.kind === "tool") as Array<Extract<ChatItem, { kind: "tool" }>>;
-    const userItem = shown[start] as Extract<ChatItem, { kind: "user" }>;
+    const tools = hiddenItems.filter((it): it is Extract<ChatItem, { kind: "tool" }> => it.kind === "tool");
+    const userItem = shown[start];
+    if (userItem === undefined || userItem.kind !== "user") continue;
     const turnId = userItem.entryId ?? userItem.key;
     if (!turnId) continue;
 

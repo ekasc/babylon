@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, promises as fsp } from "node:fs";
 import { join } from "node:path";
+import { isArrayOf, isString, wireOf, wireStr } from "../src/store";
 import { DatabaseSync } from "node:sqlite";
 
 export interface TurnCheckpoint {
@@ -55,6 +56,102 @@ export interface Ledger {
   checkpoints: TurnCheckpoint[];
   receipts?: TurnReceipt[];
   active?: ActiveRollback;
+}
+
+function badLedger(what: string): Error {
+  return new Error(`corrupt rollback ledger: invalid ${what}`);
+}
+
+function reqStr(wire: Record<string, unknown>, key: string): string {
+  const v = wire[key];
+  if (typeof v !== "string") throw badLedger(key);
+  return v;
+}
+
+function optStr(wire: Record<string, unknown>, key: string): string | null | undefined {
+  const v = wire[key];
+  if (v === undefined || v === null) return v ?? undefined;
+  if (typeof v !== "string") throw badLedger(key);
+  return v;
+}
+
+function reqStrArr(wire: Record<string, unknown>, key: string): string[] {
+  const v = wire[key];
+  if (!isArrayOf(v, isString)) throw badLedger(key);
+  return v;
+}
+
+/** Validate one ledger checkpoint (all fields required). */
+function toTurnCheckpoint(value: unknown): TurnCheckpoint {
+  const w = wireOf(value);
+  if (!w) throw badLedger("checkpoint");
+  return {
+    sessionId: reqStr(w, "sessionId"),
+    sessionFile: reqStr(w, "sessionFile"),
+    userEntryId: reqStr(w, "userEntryId"),
+    parentLeafId: optStr(w, "parentLeafId") ?? null,
+    finalLeafId: reqStr(w, "finalLeafId"),
+    beforeTree: reqStr(w, "beforeTree"),
+    afterTree: reqStr(w, "afterTree"),
+    changedPaths: reqStrArr(w, "changedPaths"),
+    complete: w.complete === true,
+    exclusions: reqStrArr(w, "exclusions"),
+    createdAt: reqStr(w, "createdAt"),
+  };
+}
+
+/** Validate one ledger receipt. */
+function toTurnReceipt(value: unknown): TurnReceipt {
+  const w = wireOf(value);
+  if (!w) throw badLedger("receipt");
+  const outcome = w.outcome;
+  if (outcome !== "checkpointed" && outcome !== "skipped" && outcome !== "failed") throw badLedger("receipt outcome");
+  return {
+    sessionId: reqStr(w, "sessionId"),
+    sessionFile: reqStr(w, "sessionFile"),
+    userEntryId: reqStr(w, "userEntryId"),
+    outcome,
+    reason: reqStr(w, "reason"),
+    createdAt: reqStr(w, "createdAt"),
+  };
+}
+
+/** Validate the in-progress rollback record. */
+function toActiveRollback(value: unknown): ActiveRollback {
+  const w = wireOf(value);
+  if (!w) throw badLedger("active rollback");
+  if (w.version !== 1) throw badLedger("active rollback version");
+  if (w.state !== "active") throw badLedger("active rollback state");
+  const restoreMapRaw = w.restoreMap;
+  if (typeof restoreMapRaw !== "object" || restoreMapRaw === null || Array.isArray(restoreMapRaw)) {
+    throw badLedger("active rollback restoreMap");
+  }
+  const restoreMap: Record<string, string> = {};
+  for (const [k, v] of Object.entries(restoreMapRaw)) {
+    if (typeof v !== "string") throw badLedger("active rollback restoreMap");
+    restoreMap[k] = v;
+  }
+  const strArr = (key: string): string[] => {
+    const v = w[key];
+    if (!isArrayOf(v, isString)) throw badLedger(key);
+    return v;
+  };
+  return {
+    version: 1,
+    sessionId: reqStr(w, "sessionId"),
+    sessionFile: reqStr(w, "sessionFile"),
+    targetUserEntryId: reqStr(w, "targetUserEntryId"),
+    rollbackLeafId: optStr(w, "rollbackLeafId") ?? null,
+    previousLeafId: reqStr(w, "previousLeafId"),
+    entryDigest: reqStr(w, "entryDigest"),
+    redoTree: reqStr(w, "redoTree"),
+    restoreMap,
+    restoredPaths: strArr("restoredPaths"),
+    abandonedUserEntryIds: strArr("abandonedUserEntryIds"),
+    editorText: reqStr(w, "editorText"),
+    createdAt: reqStr(w, "createdAt"),
+    state: "active",
+  };
 }
 
 export function entryDigest(entries: Array<{ id?: unknown; parentId?: unknown; type?: unknown }>): string {
@@ -265,20 +362,27 @@ export class RollbackStore {
     let raw: string;
     try {
       raw = await fsp.readFile(target, "utf8");
-    } catch (error: any) {
-      if (error?.code === "ENOENT") return;
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return;
       throw error;
     }
-    const parsed = JSON.parse(raw) as Partial<Ledger> & { checkpoints?: TurnCheckpoint[]; active?: ActiveRollback };
-    if (parsed?.version !== 1 || !Array.isArray(parsed.checkpoints)) {
+    const parsed = wireOf(JSON.parse(raw) as unknown);
+    if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.checkpoints)) {
       await fsp.rm(target, { force: true });
       return;
     }
-    const receipts = Array.isArray((parsed as any).receipts) ? (parsed as any).receipts : [];
+    const receipts = Array.isArray(parsed.receipts) ? parsed.receipts : [];
+    const checkpoints = Array.isArray(parsed.checkpoints) ? parsed.checkpoints : [];
+    // Same-writer ledger files (version-gated above), but the file is still
+    // untrusted JSON: every item is validated before it enters the store, so
+    // a corrupt ledger fails the import instead of poisoning queries.
     this.atomic(() => {
-      for (const checkpoint of parsed.checkpoints!) this.upsertCheckpoint(checkpoint);
-      for (const receipt of receipts) this.upsertReceipt(receipt);
-      if (parsed.active && parsed.active.sessionId === sessionId) this.upsertActive(parsed.active);
+      for (const checkpoint of checkpoints) this.upsertCheckpoint(toTurnCheckpoint(checkpoint));
+      for (const receipt of receipts) this.upsertReceipt(toTurnReceipt(receipt));
+      const active = wireOf(parsed.active);
+      if (active && wireStr(active, "sessionId") === sessionId) {
+        this.upsertActive(toActiveRollback(active));
+      }
     });
     const check = (this.db.prepare("SELECT COUNT(*) AS n FROM rollback_checkpoints WHERE session_id = ?").get(sessionId) as { n: number }).n;
     if (check !== parsed.checkpoints.length) throw new Error("legacy import count mismatch");

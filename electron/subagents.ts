@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
+import { wireOf, wireStr } from "../src/store";
 import {
   ModelRuntime,
   SessionManager,
@@ -8,10 +9,11 @@ import {
   createAgentSessionFromServices,
   createAgentSessionServices,
   type AgentSession,
+  type AgentSessionEvent,
   type ExtensionContext,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { installAgentGuards } from "./permission-hook";
+import { installAgentGuards, type GuardedAgent } from "./permission-hook";
 import type { BabylonPermissionController } from "./permissions";
 
 export type SubagentDelivery = "steer" | "follow-up";
@@ -78,7 +80,13 @@ const MAX_MESSAGE = 24_000;
 function textOf(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
-  return content.map((part: any) => typeof part === "string" ? part : part?.text ?? part?.thinking ?? "").join("");
+  return content
+    .map((part) => {
+      if (typeof part === "string") return part;
+      const w = wireOf(part);
+      return wireStr(w, "text") ?? wireStr(w, "thinking") ?? "";
+    })
+    .join("");
 }
 
 function exactModel(model: { provider: string; id: string }): string {
@@ -103,6 +111,14 @@ function recordPath(cwd: string, runId: string): string {
 export class ManagedSubagents {
   private runtimes = new Map<string, ManagedRuntime>();
 
+  /**
+   * Test seam: the live runtime map. Production code never calls this;
+   * tests seed runtimes to exercise control/promote without spawning.
+   */
+  testRuntimes(): Map<string, ManagedRuntime> {
+    return this.runtimes;
+  }
+
   constructor(
     private readonly options: {
       agentDir: string;
@@ -126,7 +142,7 @@ export class ManagedSubagents {
     return this.options.modelRuntime;
   }
 
-  tool(): ToolDefinition<any, any> {
+  tool(): ToolDefinition {
     return {
       name: "subagent",
       label: "Subagent",
@@ -151,10 +167,47 @@ export class ManagedSubagents {
           persistent: { type: "boolean", description: "Keep pursuing a goal across follow-up turns (multi-turn agent, like a thread)." },
           goal: { type: "string", description: "Standing goal for persistent agents; defaults to the task." },
         },
-      } as any,
+      } as unknown as ToolDefinition["parameters"],
+      // NOTE: plain JSON Schema bridged to the SDK's TypeBox-branded params
+      // type. Nominal only: the SDK validates calls against this schema at
+      // runtime, so a malformed literal fails at registration, not in use.
       execute: async (_toolCallId, raw, signal, onUpdate, ctx) => {
         try {
-          const runtime = await this.create(raw as SubagentParams, ctx);
+          // The SDK validates params against `parameters` before execute,
+          // but defense in depth: re-narrow here so a malformed call fails
+          // with a named error instead of corrupting the run record.
+          const params = wireOf(raw);
+          const task = wireStr(params, "task");
+          if (!task) throw new Error("subagent requires a task");
+          const profileRaw = wireStr(params, "profile");
+          const profile =
+            profileRaw === "read-only" || profileRaw === "verify" || profileRaw === "write"
+              ? profileRaw
+              : undefined;
+          const thinkingRaw = wireStr(params, "thinking");
+          const thinking =
+            thinkingRaw === "off" || thinkingRaw === "minimal" || thinkingRaw === "low" ||
+            thinkingRaw === "medium" || thinkingRaw === "high" || thinkingRaw === "xhigh"
+              ? thinkingRaw
+              : undefined;
+          const timeoutMs = wireOf(params)?.timeoutMs;
+          const model = wireStr(params, "model");
+          const name = wireStr(params, "name");
+          const persistent = wireOf(params)?.persistent;
+          const goal = wireStr(params, "goal");
+          const runtime = await this.create(
+            {
+              task,
+              ...(model !== undefined ? { model } : {}),
+              ...(profile !== undefined ? { profile } : {}),
+              ...(thinking !== undefined ? { thinking } : {}),
+              ...(typeof timeoutMs === "number" ? { timeoutMs } : {}),
+              ...(name !== undefined ? { name } : {}),
+              ...(typeof persistent === "boolean" ? { persistent } : {}),
+              ...(goal !== undefined ? { goal } : {}),
+            },
+            ctx
+          );
           onUpdate?.({
             content: [{ type: "text", text: `Subagent ${runtime.record.runId} started. It can receive steer and follow-up messages from Activity.` }],
             details: { runId: runtime.record.runId, status: "running", controllable: true },
@@ -195,7 +248,7 @@ export class ManagedSubagents {
           };
         }
       },
-    } as ToolDefinition<any, any>;
+    };
   }
 
   async control(cwd: string, action: SubagentControlAction, runId: string, message?: string): Promise<ManagedSubagentRecord> {
@@ -370,7 +423,7 @@ export class ManagedSubagents {
 
   /** Custom tool available inside persistent subagent sessions: the agent
    *  reports a milestone checkpoint toward its goal, mirroring threads. */
-  milestoneTool(): ToolDefinition<any, any> {
+  milestoneTool(): ToolDefinition {
     return {
       name: "report_milestone",
       label: "Report Milestone",
@@ -388,8 +441,11 @@ export class ManagedSubagents {
           name: { type: "string", minLength: 1, maxLength: 80, description: "Short milestone name." },
           note: { type: "string", maxLength: 2000, description: "Optional evidence note." },
         },
-      } as any,
-      execute: async (_toolCallId: string, raw: any, _signal, _onUpdate, ctx: any) => {
+      } as unknown as ToolDefinition["parameters"],
+      // NOTE: plain JSON Schema bridged to the SDK's TypeBox-branded params
+      // type. Nominal only: the SDK validates calls against this schema at
+      // runtime, so a malformed literal fails at registration, not in use.
+      execute: async (_toolCallId, raw, _signal, _onUpdate, ctx) => {
         const sessionId = ctx.sessionManager?.getSessionId?.();
         const runtime = sessionId
           ? [...this.runtimes.values()].find((r) => r.session.sessionId === sessionId)
@@ -402,15 +458,18 @@ export class ManagedSubagents {
           };
         }
         const record = runtime.record;
+        const params = wireOf(raw);
+        const milestoneName = wireStr(params, "name") ?? "";
+        const milestoneNote = wireStr(params, "note");
         (record.milestones ??= []).push({
           at: new Date().toISOString(),
-          name: String(raw?.name ?? "").slice(0, 80),
-          note: raw?.note ? String(raw.note).slice(0, 2000) : undefined,
+          name: milestoneName.slice(0, 80),
+          note: milestoneNote ? milestoneNote.slice(0, 2000) : undefined,
         });
         await this.save(record);
         return {
-          content: [{ type: "text", text: `Milestone reported: ${raw?.name}.` }],
-          details: { milestone: raw?.name },
+          content: [{ type: "text", text: `Milestone reported: ${milestoneName}.` }],
+          details: { milestone: milestoneName },
         };
       },
     };
@@ -489,10 +548,10 @@ export class ManagedSubagents {
       services,
       sessionManager: manager,
       model,
-      thinkingLevel: record.thinking as any,
+      thinkingLevel: record.thinking,
       tools: PROFILE_TOOLS[record.profile],
       customTools: record.persistent ? [this.milestoneTool()] : undefined,
-      excludeTools: ["subagent", "workflow", "spawn_thread", "send_input"] as any,
+      excludeTools: ["subagent", "workflow", "spawn_thread", "send_input"],
     });
     // Gate the subagent's tool calls through the same Babylon permission policy
     // as the parent session, so isolated agents can't bypass it. Scoped to
@@ -500,7 +559,7 @@ export class ManagedSubagents {
     // conversation the user supervises, not the child's internal session.
     if (this.options.permission) {
       if (this.options.permission) {
-        installAgentGuards(created.session.agent as any, {
+        installAgentGuards(created.session.agent as GuardedAgent, {
           controller: this.options.permission,
           cwd: record.cwd,
           hookManager: this.options.hookManager,
@@ -511,9 +570,10 @@ export class ManagedSubagents {
     }
     const runtime: ManagedRuntime = { record, session: created.session, running: null, unsubscribe: null, timeout: null };
     record.sessionFile = created.session.sessionFile ?? manager.getSessionFile() ?? null;
-    runtime.unsubscribe = created.session.subscribe((event: any) => {
+    runtime.unsubscribe = created.session.subscribe((event: AgentSessionEvent) => {
       if (event.type === "tool_execution_start") {
-        const suffix = event.args?.path ?? event.args?.command ?? "";
+        const args = wireOf(event.args);
+        const suffix = wireStr(args, "path") ?? wireStr(args, "command") ?? "";
         record.latestActivity = `${event.toolName}${suffix ? ` ${suffix}` : ""}`.slice(0, 1000);
         this.addMessage(record, "activity", record.latestActivity);
         void this.save(record);

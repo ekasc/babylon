@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { promises as fsp } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { wireOf, wireStr } from "../src/store";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 
@@ -126,9 +127,11 @@ async function runGit(args: string[], cwd: string, timeoutMs: number | null = DE
       maxBuffer: 16 * 1024 * 1024,
     });
     return { exitCode: 0, stdout, stderr };
-  } catch (err: any) {
-    if (typeof err?.code === "number") {
-      return { exitCode: err.code, stdout: err.stdout ?? "", stderr: err.stderr ?? "" };
+  } catch (err: unknown) {
+    const code = wireOf(err)?.code;
+    if (typeof code === "number") {
+      const w = wireOf(err);
+      return { exitCode: code, stdout: wireStr(w, "stdout") ?? "", stderr: wireStr(w, "stderr") ?? "" };
     }
     throw err;
   }
@@ -173,6 +176,7 @@ function parseNumstatEntries(stdout: string): Array<{ path: string; insertions: 
   const records = stdout.includes("\0") ? stdout.split("\0") : stdout.split(/\r?\n/g);
   for (let i = 0; i < records.length; i++) {
     const line = records[i];
+    if (line === undefined) continue;
     if (line.length === 0) continue;
     const tab = line.indexOf("\t");
     if (tab === -1) continue;
@@ -236,7 +240,10 @@ function parsePorcelainStatus(line: string): string | null {
   if (!(line.startsWith("1 ") || line.startsWith("2 ") || line.startsWith("u "))) return null;
   const xy = line.slice(2, 4);
   if (xy.length < 2) return null;
-  const chosen = xy[1] !== "." ? xy[1] : xy[0];
+  const first = xy[0];
+  const second = xy[1];
+  if (first === undefined || second === undefined) return null;
+  const chosen = second !== "." ? second : first;
   return chosen === "." ? "M" : chosen;
 }
 
@@ -326,6 +333,7 @@ export async function statusDetails(cwd: string): Promise<GitStatusDetails> {
   const records = status.stdout.includes("\0") ? status.stdout.split("\0") : status.stdout.split(/\r?\n/g);
   for (let i = 0; i < records.length; i++) {
     const line = records[i];
+    if (line === undefined) continue;
     if (line.startsWith("# branch.head ")) {
       const value = line.slice("# branch.head ".length).trim();
       branch = value.startsWith("(") ? null : value;
@@ -476,7 +484,7 @@ export async function prepareCommitContext(cwd: string): Promise<PreparedCommitC
   const stats = parseNumstatEntries(numstatResult.stdout);
   const insertions = stats.reduce((total, entry) => total + entry.insertions, 0);
   const deletions = stats.reduce((total, entry) => total + entry.deletions, 0);
-  const areas = [...new Set(stats.map((entry) => entry.path.includes("/") ? entry.path.split("/", 1)[0] : "repository root"))];
+  const areas = [...new Set(stats.map((entry) => entry.path.includes("/") ? (entry.path.split("/", 1)[0] ?? "repository root") : "repository root"))];
   const truncatedPatch = patchResult.stdout.length > PREPARED_COMMIT_PATCH_CHARS;
   const patch = truncatedPatch
     ? `${patchResult.stdout.slice(0, PREPARED_COMMIT_PATCH_CHARS)}\n[patch truncated at ${PREPARED_COMMIT_PATCH_CHARS} characters]`
@@ -521,6 +529,7 @@ export async function commitStaged(cwd: string, message: string): Promise<GitCom
   const normalized = message.replace(/\r\n/g, "\n").trim();
   if (!normalized) throw new GitError("commit message is required");
   const [subject, ...rest] = normalized.split("\n");
+  if (subject === undefined) throw new GitError("commit message is required");
   const body = rest.join("\n").trim();
   const staged = await runGit(["diff", "--cached", "--quiet"], cwd);
   if (staged.exitCode === 0) throw new GitError("no staged changes to commit");
@@ -558,7 +567,7 @@ async function resolvePushRemoteName(cwd: string): Promise<string | null> {
   const remotes = await runGit(["remote"], cwd);
   if (remotes.exitCode !== 0) return null;
   const names = remotes.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
-  return names.length === 1 ? names[0] : null;
+  return names.length === 1 ? (names[0] ?? null) : null;
 }
 
 export async function pushCurrentBranch(cwd: string): Promise<GitPushResult> {
@@ -724,9 +733,10 @@ async function toolAvailable(command: "gh" | "glab"): Promise<{ installed: boole
     const authArgs = command === "gh" ? ["auth", "status"] : ["auth", "status"];
     await execFileAsync(command, authArgs, { timeout: 10_000 });
     return { installed, authenticated: true };
-  } catch (err: any) {
+  } catch (err: unknown) {
     // gh exits non-zero when signed out but prints "Logged in to ..." lines when authed.
-    const combined = `${err?.stdout ?? ""}${err?.stderr ?? ""}`;
+    const w = wireOf(err);
+    const combined = `${wireStr(w, "stdout") ?? ""}${wireStr(w, "stderr") ?? ""}`;
     return { installed, authenticated: /logged in to/i.test(combined) };
   }
 }
@@ -741,14 +751,17 @@ async function ghListOpenPrs(cwd: string, headSelector: string): Promise<GitPrSu
   if (!raw) return [];
   const parsed = JSON.parse(raw);
   if (!Array.isArray(parsed)) return [];
-  return parsed.map((item: any) => ({
-    number: Number(item.number),
-    title: String(item.title ?? ""),
-    url: String(item.url ?? ""),
-    baseRef: String(item.baseRefName ?? ""),
-    headRef: String(item.headRefName ?? ""),
-    state: "open" as const,
-  }));
+  return parsed.map((item) => {
+    const w = wireOf(item);
+    return {
+      number: Number(w?.number),
+      title: String(wireStr(w, "title") ?? ""),
+      url: String(wireStr(w, "url") ?? ""),
+      baseRef: String(wireStr(w, "baseRefName") ?? ""),
+      headRef: String(wireStr(w, "headRefName") ?? ""),
+      state: "open" as const,
+    };
+  });
 }
 
 async function glabListOpenMrs(cwd: string, sourceBranch: string): Promise<GitPrSummary[]> {
@@ -761,14 +774,17 @@ async function glabListOpenMrs(cwd: string, sourceBranch: string): Promise<GitPr
   if (!raw) return [];
   const parsed = JSON.parse(raw);
   if (!Array.isArray(parsed)) return [];
-  return parsed.map((item: any) => ({
-    number: Number(item.iid),
-    title: String(item.title ?? ""),
-    url: String(item.web_url ?? ""),
-    baseRef: String(item.target_branch ?? ""),
-    headRef: String(item.source_branch ?? ""),
-    state: "open" as const,
-  }));
+  return parsed.map((item) => {
+    const w = wireOf(item);
+    return {
+      number: Number(w?.iid),
+      title: String(wireStr(w, "title") ?? ""),
+      url: String(wireStr(w, "web_url") ?? ""),
+      baseRef: String(wireStr(w, "target_branch") ?? ""),
+      headRef: String(wireStr(w, "source_branch") ?? ""),
+      state: "open" as const,
+    };
+  });
 }
 
 async function findOpenPr(cwd: string, provider: GitProviderKind, branch: string): Promise<GitPrSummary | null> {
@@ -825,7 +841,8 @@ export async function suggestPrContent(
 
   let title: string;
   if (commits.length === 1) {
-    title = commits[0].replace(/^[0-9a-f]+\s+/, "");
+    const only = commits[0];
+    title = only !== undefined ? only.replace(/^[0-9a-f]+\s+/, "") : details.branch;
   } else if (commits.length > 1) {
     title = `${details.branch}: ${commits.length} commits`;
   } else {
@@ -914,8 +931,9 @@ export async function createPr(cwd: string, input: { title: string; body?: strin
       baseBranch,
       headBranch: branch,
     };
-  } catch (err: any) {
-    const message = firstLine(String(err?.stderr ?? err?.message ?? ""));
+  } catch (err: unknown) {
+    const w = wireOf(err);
+    const message = firstLine(String(wireStr(w, "stderr") ?? wireStr(w, "message") ?? ""));
     throw new GitError(message || `${command} PR creation failed`);
   } finally {
     await fsp.rm(bodyFile, { force: true }).catch(() => {});

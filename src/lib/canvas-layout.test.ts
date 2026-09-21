@@ -6,7 +6,25 @@ function scene(nodes: Scene["nodes"], edges: Scene["edges"] = [], direction?: Sc
   return { nodes, edges, ink: [], ...(direction ? { direction } : {}) };
 }
 
-const box = (layout: SceneLayout, id: string) => layout.boxes.find((candidate) => candidate.id === id)!;
+const box = (layout: SceneLayout, id: string) => {
+  const found = layout.boxes.find((candidate) => candidate.id === id);
+  if (!found) throw new Error(`missing box ${id}`);
+  return found;
+};
+
+const firstEdge = (layout: SceneLayout) => {
+  const edge = layout.edges[0];
+  if (!edge) throw new Error("missing edge");
+  return edge;
+};
+
+const pointAt = (points: Array<{ x: number; y: number }>, index: number): { x: number; y: number } => {
+  const point = points[index];
+  if (!point) throw new Error(`missing point ${index}`);
+  return point;
+};
+
+const firstPoint = (edge: { points: Array<{ x: number; y: number }> }) => pointAt(edge.points, 0);
 
 describe("ranks", () => {
   it("ranks a chain by distance from its entry", () => {
@@ -186,10 +204,10 @@ describe("edges", () => {
     );
     const a = box(layout, "a");
     const b = box(layout, "b");
-    const edge = layout.edges[0];
-    expect(edge.points[0].y).toBeCloseTo(a.y + a.height);
-    expect(edge.points[0].x).toBeCloseTo(a.x + a.width / 2);
-    expect(edge.points[1].y).toBeCloseTo(b.y);
+    const edge = firstEdge(layout);
+    expect(pointAt(edge.points, 0).y).toBeCloseTo(a.y + a.height);
+    expect(pointAt(edge.points, 0).x).toBeCloseTo(a.x + a.width / 2);
+    expect(pointAt(edge.points, 1).y).toBeCloseTo(b.y);
   });
 
   it("runs a left to right edge between the facing sides", () => {
@@ -198,27 +216,27 @@ describe("edges", () => {
     );
     const a = box(layout, "a");
     const b = box(layout, "b");
-    expect(layout.edges[0].points[0].x).toBeCloseTo(a.x + a.width);
-    expect(layout.edges[0].points[1].x).toBeCloseTo(b.x);
+    expect(pointAt(firstEdge(layout).points, 0).x).toBeCloseTo(a.x + a.width);
+    expect(pointAt(firstEdge(layout).points, 1).x).toBeCloseTo(b.x);
   });
 
   it("routes a self edge out of the right side and back into the top", () => {
     const layout = layoutScene(scene([{ id: "a", kind: "process", label: "A" }], [{ from: "a", to: "a" }]));
     const a = box(layout, "a");
-    const points = layout.edges[0].points;
+    const points = firstEdge(layout).points;
     expect(points.length).toBeGreaterThan(2);
-    expect(points[0].x).toBeCloseTo(a.x + a.width);
-    expect(points[points.length - 1].y).toBeCloseTo(a.y);
+    expect(pointAt(points, 0).x).toBeCloseTo(a.x + a.width);
+    expect(pointAt(points, points.length - 1).y).toBeCloseTo(a.y);
   });
 
   it("places an edge label between the endpoints", () => {
     const layout = layoutScene(
       scene([{ id: "a", kind: "process", label: "A" }, { id: "b", kind: "process", label: "B" }], [{ from: "a", to: "b", label: "go" }])
     );
-    const edge = layout.edges[0];
+    const edge = firstEdge(layout);
     expect(edge.label).toBe("go");
-    expect(edge.labelAt.y).toBeGreaterThan(edge.points[0].y);
-    expect(edge.labelAt.y).toBeLessThan(edge.points[1].y);
+    expect(edge.labelAt.y).toBeGreaterThan(pointAt(edge.points, 0).y);
+    expect(edge.labelAt.y).toBeLessThan(pointAt(edge.points, 1).y);
   });
 
   it("hangs an edge off a group's border", () => {
@@ -230,7 +248,7 @@ describe("edges", () => {
       ], [{ from: "s", to: "b" }])
     );
     const group = box(layout, "s");
-    const start = layout.edges[0].points[0];
+    const start = pointAt(firstEdge(layout).points, 0);
     const onBorder =
       Math.min(Math.abs(start.x - group.x), Math.abs(start.x - (group.x + group.width)), Math.abs(start.y - group.y), Math.abs(start.y - (group.y + group.height))) < 0.005;
     expect(onBorder).toBe(true);

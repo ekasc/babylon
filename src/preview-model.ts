@@ -55,7 +55,8 @@ export function detectServerFromCommand(command: string): DetectedServer | null 
   if (colon) return { port: Number(colon[1]) };
 
   const framework = inferFramework(command);
-  if (framework) return { port: FRAMEWORK_DEFAULT_PORT[framework], framework };
+  const frameworkPort = framework ? FRAMEWORK_DEFAULT_PORT[framework] : undefined;
+  if (framework && frameworkPort !== undefined) return { port: frameworkPort, framework };
 
   // Generic package-manager dev script (most often Vite's 5173).
   if (/\b(?:pnpm|yarn|bun|npm)\b[^\n]*\bdev\b/i.test(command) && !/\/dev\//.test(lower)) {

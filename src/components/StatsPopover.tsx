@@ -1,21 +1,13 @@
 import { useRef, useState } from "react";
 import { PopoverPanel, PopoverRoot, PopoverTrigger } from "./ui/Popover";
 import { fmtTokens } from "../store";
+import type { SessionStats } from "../bridge";
 import { CompressIcon, GaugeIcon } from "./icons";
 
-export interface Stats {
-  userMessages?: number;
-  assistantMessages?: number;
-  toolCalls?: number;
-  toolResults?: number;
-  totalMessages?: number;
-  tokens?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; total?: number };
-  cost?: number;
-  contextUsage?: { tokens?: number | null; contextWindow?: number; percent?: number | null };
-}
+export type { SessionStats as Stats };
 
 interface Props {
-  stats: Stats | null;
+  stats: SessionStats | null;
   hasSession: boolean;
   onCompact(): void;
 }

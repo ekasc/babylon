@@ -23,7 +23,7 @@ describe("decodeLspMessages", () => {
     const msg: LspMessage = { jsonrpc: "2.0", method: "initialized" };
     const { messages, rest } = decodeLspMessages(encodeLspMessage(msg));
     expect(messages).toHaveLength(1);
-    expect(messages[0].method).toBe("initialized");
+    expect(messages[0]?.method).toBe("initialized");
     expect(rest.length).toBe(0);
   });
 
@@ -42,7 +42,7 @@ describe("decodeLspMessages", () => {
     expect(r1.messages).toHaveLength(0);
     const r2 = decodeLspMessages(Buffer.concat([r1.rest, second]));
     expect(r2.messages).toHaveLength(1);
-    expect(r2.messages[0].method).toBe("window/logMessage");
+    expect(r2.messages[0]?.method).toBe("window/logMessage");
   });
 
   it("skips malformed bodies without losing the stream", () => {
@@ -52,7 +52,7 @@ describe("decodeLspMessages", () => {
     const bad = Buffer.from("Content-Length: 9\r\n\r\n{notjson}");
     const { messages } = decodeLspMessages(Buffer.concat([bad, good]));
     expect(messages).toHaveLength(1);
-    expect(messages[0].method).toBe("ok");
+    expect(messages[0]?.method).toBe("ok");
   });
 });
 
@@ -83,7 +83,7 @@ describe("mapDiagnostics", () => {
 
   it("defaults missing severity to error", () => {
     const out = mapDiagnostics("file:///a.ts", [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, message: "x" }]);
-    expect(out[0].severity).toBe("error");
+    expect(out[0]?.severity).toBe("error");
   });
 });
 
@@ -95,7 +95,7 @@ describe("header flexibility", () => {
     );
     const { messages } = decodeLspMessages(buf);
     expect(messages).toHaveLength(1);
-    expect(messages[0].method).toBe("a");
+    expect(messages[0]?.method).toBe("a");
   });
 
   it("tolerates extra headers", () => {
@@ -105,7 +105,7 @@ describe("header flexibility", () => {
     );
     const { messages } = decodeLspMessages(buf);
     expect(messages).toHaveLength(1);
-    expect(messages[0].method).toBe("b");
+    expect(messages[0]?.method).toBe("b");
   });
 
   it("returns a detached rest that still parses the next message", () => {
@@ -118,7 +118,7 @@ describe("header flexibility", () => {
     // of b not already consumed into rest.
     const r2 = decodeLspMessages(Buffer.concat([r1.rest, b.subarray(3)]));
     expect(r2.messages).toHaveLength(1);
-    expect(r2.messages[0].method).toBe("b");
+    expect(r2.messages[0]?.method).toBe("b");
   });
 });
 
@@ -145,7 +145,7 @@ describe("newDiagnostics", () => {
     ];
     const added = newDiagnostics(base, next);
     expect(added).toHaveLength(1);
-    expect(added[0].message).toBe("b");
+    expect(added[0]?.message).toBe("b");
   });
 
   it("returns none when the set is unchanged", () => {

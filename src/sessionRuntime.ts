@@ -27,6 +27,7 @@
 
 import { listAttention, type AttentionRegistry } from "./attention";
 import { type Bot } from "./bots";
+import type { SubagentActivity, ThreadActivity, ThreadStatus, WorkflowRunSummary } from "./bridge";
 
 export type SessionLifecycle = "open" | "settled";
 
@@ -68,26 +69,34 @@ const EXECUTION_RANK: Record<ExecutionState, number> = {
  * can neither resurrect nor kill activity.
  */
 export interface SourceSnapshots {
-  threads: Array<{ status: string; sessionFile?: string | null; parentSessionFile?: string | null }>;
-  subagents: Array<{ status: string; sessionFile?: string | null; parentSessionFile?: string | null }>;
-  workflows: Array<{ status: string; sessionId?: string }>;
+  threads: Array<Pick<ThreadActivity, "status" | "sessionFile" | "parentSessionFile">>;
+  subagents: Array<Pick<SubagentActivity, "status" | "sessionFile" | "parentSessionFile">>;
+  workflows: Array<Pick<WorkflowRunSummary, "status" | "sessionId">>;
+}
+
+/** One work item with the fields failure/unread tracking reads. Shared with
+ *  App's failure watcher so the two can't drift apart. */
+export interface WorkSourceItem {
+  status: string;
+  sessionFile?: string | null;
+  parentSessionFile?: string | null;
 }
 
 const THREAD_LIVE = new Set(["queued", "starting", "running", "interrupting"]);
 
-function threadExecution(status: string): ExecutionState {
+function threadExecution(status: ThreadStatus): ExecutionState {
   if (THREAD_LIVE.has(status)) return "working";
   if (status === "interrupted" || status === "failed") return "failed";
   return "idle";
 }
 
-function subagentExecution(status: string): ExecutionState {
+function subagentExecution(status: SubagentActivity["status"]): ExecutionState {
   if (status === "running" || status === "starting") return "working";
   if (status === "interrupted" || status === "failed") return "failed";
   return "idle";
 }
 
-function workflowExecution(status: string): ExecutionState {
+function workflowExecution(status: WorkflowRunSummary["status"]): ExecutionState {
   if (status === "pending" || status === "running") return "working";
   if (status === "paused") return "waiting";
   return "idle";
@@ -232,7 +241,7 @@ function setExec(
   const wasLive = cur ? isLiveExecution(cur.execution) : false;
   const next: PathExecution = {
     execution,
-    startedAt: isLiveExecution(execution) ? (wasLive ? cur!.startedAt : now) : null,
+    startedAt: isLiveExecution(execution) ? (wasLive && cur ? cur.startedAt : now) : null,
     seq,
   };
   if (cur && cur.execution === next.execution && cur.startedAt === next.startedAt) return prev;

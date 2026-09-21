@@ -62,6 +62,13 @@ Before finishing:
 Never say "should work" when verification was available.
 Never hide failing checks.
 
+## Type Safety (critical)
+
+- `any`, `as any`, and `as never` are banned everywhere, including tests.
+  `pnpm lint` (scripts/check-no-any.mjs) enforces this and must pass.
+- Use `unknown` plus narrowing for untyped boundaries (SDK objects, IPC
+  payloads, parsed JSON). Prefer minimal structural interfaces over casts.
+
 
 ## Feature Entry Points (critical)
 

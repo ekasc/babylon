@@ -7,7 +7,7 @@ import { filterModels, findModel, getProviders } from "../../lib/model-helpers";
 import { formatContextWindow } from "../../lib/format";
 import { Select, SelectOption } from "../ui/Select";
 import { modelSupportsImages } from "../../../electron/snapcompact/model-profiles";
-import type { PiSettings } from "../../bridge";
+import type { AgentModel, AgentState, PiSettings } from "../../bridge";
 
 export function SettingsModels({
   models,
@@ -15,8 +15,8 @@ export function SettingsModels({
   settings,
   onSave,
 }: {
-  models: any[];
-  agentState: any | null;
+  models: AgentModel[];
+  agentState: AgentState | null;
   settings: PiSettings | null;
   onSave: (patch: Partial<PiSettings>) => void;
 }) {
@@ -29,7 +29,7 @@ export function SettingsModels({
   const titleModel = useMemo(() => findModel(models, settings?.titleModel ?? null), [settings?.titleModel, models]);
   const imageModel = useMemo(() => findModel(models, settings?.imageModel ?? null), [settings?.imageModel, models]);
   const visionModels = useMemo(
-    () => models.filter((m: any) => modelSupportsImages(m) || m?.supportsImages || m?.vision),
+    () => models.filter((m) => modelSupportsImages(m) || m.supportsImages || m.vision),
     [models]
   );
 

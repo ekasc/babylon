@@ -202,17 +202,20 @@ export function useComposerAutocomplete(input: AutocompleteInput) {
     }
     if (mentionMatches.length && e.key === "Tab") {
       e.preventDefault();
-      chooseMention(mentionMatches[selectedMention] ?? mentionMatches[0]);
+      const selected = mentionMatches[selectedMention] ?? mentionMatches[0];
+      if (selected) chooseMention(selected);
       return true;
     }
     if (commandMatches.length && e.key === "Tab") {
       e.preventDefault();
-      chooseCommand(commandMatches[selectedCommand] ?? commandMatches[0]);
+      const selected = commandMatches[selectedCommand] ?? commandMatches[0];
+      if (selected) chooseCommand(selected);
       return true;
     }
     if (skillMatches.length && e.key === "Tab") {
       e.preventDefault();
-      chooseSkill(skillMatches[selectedSkill] ?? skillMatches[0]);
+      const selected = skillMatches[selectedSkill] ?? skillMatches[0];
+      if (selected) chooseSkill(selected);
       return true;
     }
     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {

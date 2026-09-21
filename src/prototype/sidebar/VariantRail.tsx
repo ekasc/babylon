@@ -3,8 +3,9 @@ import { PROJECTS, SESSIONS, relTime, statusColor, statusLabel } from "./mock";
 
 /** A — Activity rail: two-pane. Icon rail picks a project; flat list is that project. */
 export function VariantRail() {
-  const [active, setActive] = useState(PROJECTS[0].name);
-  const project = PROJECTS.find((p) => p.name === active)!;
+  const [active, setActive] = useState(PROJECTS[0]?.name ?? "");
+  const project = PROJECTS.find((p) => p.name === active);
+  if (!project) return null;
   const sessions = SESSIONS.filter((s) => s.project === active && !s.settled);
 
   return (
@@ -21,7 +22,7 @@ export function VariantRail() {
               className={`relative grid h-10 w-10 place-items-center rounded-lg ${on ? "bg-raised" : "hover:bg-raised/60"}`}
             >
               <span className="grid h-6 w-6 place-items-center rounded-md text-[12px] font-bold" style={{ background: p.color, color: "var(--bg)" }}>
-                {p.name[0].toUpperCase()}
+                {(p.name[0] ?? "?").toUpperCase()}
               </span>
               {count > 0 ? (
                 <span className="absolute right-1 top-1 grid h-3.5 min-w-3.5 place-items-center rounded-full px-1 font-mono text-[9px] text-bg" style={{ background: "var(--accent)" }}>

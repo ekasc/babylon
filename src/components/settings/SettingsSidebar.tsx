@@ -1,4 +1,4 @@
-import type { ComponentType } from "react";
+import type { ComponentType, CSSProperties } from "react";
 import {
   BranchIcon,
   ChatIcon,
@@ -26,7 +26,7 @@ export const SECTIONS: Array<{ id: SettingsSectionId; label: string; group: stri
 export function SettingsSidebar({ active, onSelect, onBack }: { active: SettingsSectionId; onSelect: (id: SettingsSectionId) => void; onBack?: () => void; }) {
   let lastGroup = "";
   return (
-    <nav className="settings-rail w-[232px] shrink-0 p-2 pt-[60px] flex flex-col" aria-label="Settings sections" style={{WebkitAppRegion: 'drag'} as any}>
+    <nav className="settings-rail w-[232px] shrink-0 p-2 pt-[60px] flex flex-col" aria-label="Settings sections" style={{WebkitAppRegion: 'drag'} as CSSProperties}>
       <div className="flex-1 flex flex-col gap-0 pt-4">
       {SECTIONS.map((s) => {
         const showGroup = s.group !== lastGroup;
@@ -39,7 +39,7 @@ export function SettingsSidebar({ active, onSelect, onBack }: { active: Settings
               role="tab"
               aria-selected={active === s.id}
               onClick={() => onSelect(s.id)}
-              style={{WebkitAppRegion: 'no-drag'} as any}
+              style={{WebkitAppRegion: 'no-drag'} as CSSProperties}
               className={`settings-tab flex h-9 w-full items-center gap-2 px-2.5 text-[13px] tracking-[-0.01em] transition-colors rounded-md ${active === s.id ? "bg-accent/10 text-fg font-[600]" : "text-fg/70 hover:text-fg hover:bg-raised font-[450]"}`}
             >
               <Icon size={16} className="shrink-0" />
@@ -50,7 +50,7 @@ export function SettingsSidebar({ active, onSelect, onBack }: { active: Settings
       })}
       </div>
       {onBack ? (
-        <button onClick={onBack} style={{WebkitAppRegion: 'no-drag'} as any} className="settings-tab flex items-center gap-2 px-2.5 py-2 text-[14px] tracking-[-0.01em] text-fg/75 hover:text-fg border-t border-line mt-2 pt-3">
+        <button onClick={onBack} style={{WebkitAppRegion: 'no-drag'} as CSSProperties} className="settings-tab flex items-center gap-2 px-2.5 py-2 text-[14px] tracking-[-0.01em] text-fg/75 hover:text-fg border-t border-line mt-2 pt-3">
           <span aria-hidden>←</span> Back
         </button>
       ) : null}

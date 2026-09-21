@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { PiHost, defaultStateDir } from "./pi-host";
+import { PiHost, defaultStateDir, type HostOptions, type SessionEntry } from "./pi-host";
+import type { AgentEvent } from "../src/bridge";
 import { SnapshotStore } from "./snapshot-store";
 
 const roots: string[] = [];
@@ -26,16 +27,16 @@ async function makeSessionFile(cwd: string) {
 }
 
 function makeHost(cwd: string, agentDir: string, sessionsRoot?: string) {
-  const events: any[] = [];
-  const statuses: any[] = [];
+  const events: AgentEvent[] = [];
+  const statuses: Array<Parameters<HostOptions["onStatus"]>[0]> = [];
   const host = new PiHost({
     cwd,
     agentDir,
     stateDir: join(agentDir, "pideck-state"),
     ...(sessionsRoot ? { sessionsRoot } : {}),
-    onEvent: (ev: any) => events.push(ev),
-    onStatus: (s: any) => statuses.push(s),
-  } as any);
+    onEvent: (ev) => events.push(ev),
+    onStatus: (s) => statuses.push(s),
+  });
   return { host, events, statuses };
 }
 
@@ -101,7 +102,7 @@ describe("PiHost independent session execution", () => {
       expect(host.activeSessionFile).toBe(fileA);
       await host.open({ path: fileB, cwd: b.cwd });
       expect(host.activeSessionFile).toBe(fileB);
-      const sessions = (host as any).sessions as Map<string, unknown>;
+      const sessions = host.testSessions();
       expect(sessions.size).toBe(2);
       expect(sessions.has(fileA)).toBe(true);
       expect(sessions.has(fileB)).toBe(true);
@@ -127,7 +128,7 @@ describe("PiHost independent session execution", () => {
       // Idle aborts resolve without affecting the other runtime.
       await host.abort(fileA);
       await host.abort(fileB);
-      const sessions = (host as any).sessions as Map<string, unknown>;
+      const sessions = host.testSessions();
       expect(sessions.size).toBe(2);
     } finally {
       await host.dispose();
@@ -142,7 +143,7 @@ describe("PiHost independent session execution", () => {
       const fileA = await makeSessionFile(a.cwd);
       await host.open({ path: fileA, cwd: a.cwd });
       expect(await host.releaseSession(fileA)).toBe(true);
-      expect((host as any).sessions.size).toBe(0);
+      expect(host.testSessions().size).toBe(0);
       expect(await host.releaseSession("/nonexistent.json")).toBe(true);
     } finally {
       await host.dispose();
@@ -159,7 +160,7 @@ describe("PiHost independent session execution", () => {
       const fileB = await makeSessionFile(b.cwd);
       await host.open({ path: fileA, cwd: a.cwd });
       await host.open({ path: fileB, cwd: b.cwd });
-      const projects = (host as any).projectRuntimes as Map<string, unknown>;
+      const projects = host.testProjectRuntimes();
       expect([...projects.keys()].sort()).toEqual([a.cwd, b.cwd].sort());
     } finally {
       await host.dispose();
@@ -168,8 +169,12 @@ describe("PiHost independent session execution", () => {
 });
 
 describe("drain for restart", () => {
-  function liveSession(streaming: boolean) {
-    return { runtime: { session: { isStreaming: streaming, sessionId: "s1" } } };
+  function liveSession(streaming: boolean): SessionEntry {
+    // The drain path only reads isStreaming/sessionId; the fake carries
+    // exactly that (mutable here, readonly on the real session).
+    return {
+      runtime: { session: { isStreaming: streaming, sessionId: "s1" } },
+    } as unknown as SessionEntry;
   }
 
   it("refuses new turns once draining, before touching sessions", async () => {
@@ -187,7 +192,7 @@ describe("drain for restart", () => {
     const { host } = makeHost(cwd, agentDir);
     expect(host.activeTurnCount()).toBe(0);
     expect(await host.drainTurns(50)).toBe(true);
-    (host as any).sessions.set("f", liveSession(true));
+    host.testSessions().set("f", liveSession(true));
     expect(host.activeTurnCount()).toBe(1);
     expect(await host.drainTurns(60)).toBe(false);
     await host.dispose();
@@ -196,10 +201,13 @@ describe("drain for restart", () => {
   it("returns true when the turn ends mid-wait", async () => {
     const { cwd, agentDir } = await makeProject("drain-finish");
     const { host } = makeHost(cwd, agentDir);
-    const fake = liveSession(true);
-    (host as any).sessions.set("f", fake);
+    let streaming = true;
+    const fake = {
+      runtime: { session: { get isStreaming() { return streaming; }, sessionId: "s1" } },
+    } as unknown as SessionEntry;
+    host.testSessions().set("f", fake);
     setTimeout(() => {
-      fake.runtime.session.isStreaming = false;
+      streaming = false;
     }, 20);
     expect(await host.drainTurns(1000)).toBe(true);
     expect(host.activeTurnCount()).toBe(0);
@@ -209,9 +217,9 @@ describe("drain for restart", () => {
   it("counts approval-blocked sessions as live", async () => {
     const { cwd, agentDir } = await makeProject("drain-ui");
     const { host } = makeHost(cwd, agentDir);
-    (host as any).sessions.set("f", liveSession(false));
+    host.testSessions().set("f", liveSession(false));
     expect(host.activeTurnCount()).toBe(0);
-    (host as any).uiRequests.set("u1", { sessionFile: "f", resolve: () => undefined, reject: () => undefined });
+    host.testUiRequests().set("u1", { sessionFile: "f", sessionId: null, resolve: () => undefined, reject: () => undefined });
     expect(host.activeTurnCount()).toBe(1);
     await host.dispose();
   });
@@ -244,7 +252,7 @@ describe("instance session fork", () => {
     await host.start();
     try {
       await host.open({ path: inside, cwd });
-      expect((host as any).foregroundSessionFile).toBe(inside);
+      expect(host.testForegroundSessionFile()).toBe(inside);
       await expect(host.open({ path: outside, cwd })).rejects.toThrow(/outside/i);
     } finally {
       await host.dispose();

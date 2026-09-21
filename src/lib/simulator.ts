@@ -63,7 +63,9 @@ export const SIM_PRESETS: SimPreset[] = [
 ];
 
 export function findPreset(id: string): SimPreset {
-  return SIM_PRESETS.find((p) => p.id === id) ?? SIM_PRESETS[0];
+  const fallback = SIM_PRESETS[0];
+  if (fallback === undefined) throw new Error("no simulator presets");
+  return SIM_PRESETS.find((p) => p.id === id) ?? fallback;
 }
 
 /** CDP Emulation payload the main process applies to the sim guest. */
@@ -127,7 +129,7 @@ export const SIM_VIEWPORT_MIN = 200;
 export const SIM_VIEWPORT_MAX = 4000;
 
 /** Default desktop UA used for fill/freeform (no device impersonation). */
-export const SIM_DESKTOP_UA = SIM_PRESETS[0].ua;
+export const SIM_DESKTOP_UA = SIM_PRESETS[0]?.ua ?? "";
 
 /** Resolve a viewport to CDP emulation, or null for fill (clear overrides). */
 export function resolveViewport(v: SimViewport): SimEmulation | null {
@@ -211,7 +213,7 @@ export function sanitizeSimUrl(raw: unknown): string | null {
   } catch {
     // Not a full URL ("google.com") — fall through and prepend.
   }
-  const host = clean.split(/[/?#]/, 1)[0];
+  const host = clean.split(/[/?#]/, 1)[0] ?? clean;
   const scheme = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(host) ? "http" : "https";
   try {
     const parsed = new URL(`${scheme}://${clean}`);
@@ -266,7 +268,21 @@ type Store = Pick<Storage, "getItem" | "setItem">;
 function defaultStore(): Store | null {
   try {
     if (typeof globalThis !== "undefined" && "localStorage" in globalThis) {
-      return (globalThis as any).localStorage as Store;
+      const storage = (globalThis as { localStorage?: unknown }).localStorage;
+      const store = storage as { getItem?: unknown; setItem?: unknown } | null | undefined;
+      if (typeof store?.getItem === "function" && typeof store?.setItem === "function") {
+        const getItem = store.getItem.bind(storage);
+        const setItem = store.setItem.bind(storage);
+        return {
+          getItem: (key: string) => {
+            const value = getItem(key) as unknown;
+            return typeof value === "string" ? value : null;
+          },
+          setItem: (key: string, value: string) => {
+            setItem(key, value);
+          },
+        };
+      }
     }
   } catch {
     /* storage unavailable */
@@ -281,7 +297,7 @@ export interface SimPrefs {
 }
 
 export function loadSimPrefs(store: Store | null = defaultStore()): SimPrefs {
-  const fallback: SimPrefs = { presetId: SIM_PRESETS[0].id, rotated: false, deviceToolbar: false };
+  const fallback: SimPrefs = { presetId: SIM_PRESETS[0]?.id ?? "desktop", rotated: false, deviceToolbar: false };
   if (!store) return fallback;
   try {
     const raw = store.getItem(KEY);

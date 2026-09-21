@@ -54,6 +54,7 @@ export default function SettingsThinkingPicker({ current, available, disabled, o
         >
           {levels.map((l) => {
             const m = LEVEL_META[l];
+            if (m === undefined) return null;
             const active = l === current;
             return (
               <button

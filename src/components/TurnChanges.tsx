@@ -1,5 +1,6 @@
 import { memo, useEffect, useState } from "react";
 import { bridge, type HistoryTurn, type TurnFileChange, type TurnFileDiff } from "../bridge";
+import { errorMessage } from "../lib/errors";
 import { DiffView } from "./items";
 import { ChevronIcon } from "./icons";
 
@@ -74,22 +75,30 @@ export const TurnChanges = memo(function TurnChanges({ turn, isLatest }: { turn:
   const changed = turn.changedCount > 0;
   const [open, setOpen] = useState(isLatest && changed && turn.changedCount <= AUTO_EXPAND_FILE_LIMIT);
   const [data, setData] = useState<{ files: TurnFileChange[]; totals: { files: number; additions: number; deletions: number }; exclusions: string[] } | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
 
   // Totals must be truthful on the collapsed row too, so they load on mount:
   // only the per-file diffs stay lazy (each FileRow fetches its own on expand).
+  // A failed load surfaces an error with a retry instead of spinning on
+  // "loading changes…" forever: the fetch path (daemon socket, shadow
+  // repo) can fail transiently while the checkpoint itself is fine.
   useEffect(() => {
     if (data) return;
     let cancelled = false;
+    setLoadError(null);
     bridge
       .getTurnChanges(turn.entryId)
       .then((result) => {
         if (!cancelled) setData(result);
       })
-      .catch(() => undefined);
+      .catch((err) => {
+        if (!cancelled) setLoadError(errorMessage(err, "couldn't load changes"));
+      });
     return () => {
       cancelled = true;
     };
-  }, [data, turn.entryId]);
+  }, [data, turn.entryId, attempt]);
 
   const files = data?.files ?? [];
   const totals = data?.totals ?? { files: turn.changedCount, additions: 0, deletions: 0 };
@@ -122,7 +131,18 @@ export const TurnChanges = memo(function TurnChanges({ turn, isLatest }: { turn:
       </button>
       {open && (
         <div className="turn-changes-body">
-          {files.length === 0 ? (
+          {loadError ? (
+            <div className="flex items-center gap-2 px-3 py-2">
+              <p className="min-w-0 flex-1 truncate text-[12px] text-err" title={loadError}>{loadError}</p>
+              <button
+                onClick={() => setAttempt((n) => n + 1)}
+                aria-label="Retry loading changes"
+                className="shrink-0 rounded-full border border-line px-3 py-1 text-[12px] text-dim hover:border-accent/30 hover:text-accent"
+              >
+                Retry
+              </button>
+            </div>
+          ) : files.length === 0 ? (
             <p className="px-3 py-2 text-[12px] text-dim">loading changes…</p>
           ) : (
             <>

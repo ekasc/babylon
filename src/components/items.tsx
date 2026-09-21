@@ -1,17 +1,48 @@
 import { memo, useEffect, useRef, useState } from "react";
 import type { ChatItem } from "../store";
 import { bridge, type HistoryTurn } from "../bridge";
-import { parseSkillRef } from "../lib/skillRef";
+import { parseSkillRef, skillDisplayBody } from "../lib/skillRef";
 import Markdown from "./Markdown";
 import BashCard from "./BashCard";
+import { CheckIcon, CopyIcon } from "./icons";
 
-export const UserMessage = memo(function UserMessage({ item, historyTurn, rollbackDisabled, onRollback }: { item: Extract<ChatItem, { kind: "user" }>; historyTurn?: HistoryTurn; rollbackDisabled?: boolean; onRollback?(entryId: string): void }) {
+/** Hover-reveal icon button copying an assistant reply (text blocks only,
+ *  never reasoning). Mirrors CodeBlock's copied feedback. */
+export const CopyMessageButton = memo(function CopyMessageButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (timer.current !== null) window.clearTimeout(timer.current);
+  }, []);
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        void navigator.clipboard.writeText(text).then(
+          () => {
+            setCopied(true);
+            if (timer.current !== null) window.clearTimeout(timer.current);
+            timer.current = window.setTimeout(() => setCopied(false), 1200);
+          },
+          () => undefined
+        );
+      }}
+      aria-label={copied ? "Copied" : "Copy message"}
+      title={copied ? "Copied" : "Copy message"}
+      className="grid h-7 w-7 place-items-center rounded-md text-dim hover:bg-inset hover:text-fg"
+    >
+      {copied ? <CheckIcon size={13} /> : <CopyIcon size={13} />}
+    </button>
+  );
+});
+
+export const UserMessage = memo(function UserMessage({ item, historyTurn, rollbackDisabled, onRollback, hideActions }: { item: Extract<ChatItem, { kind: "user" }>; historyTurn?: HistoryTurn; rollbackDisabled?: boolean; onRollback?(entryId: string): void; /** Hide the floating actions when the turn's fold row owns Rollback instead. */ hideActions?: boolean }) {
   const skillRef = parseSkillRef(item.text);
-  const afterChip = skillRef ? item.text.replace(/^\/skill:[a-z0-9-]+/, "").trimStart() : "";
+  const afterChip = skillRef?.args ?? (skillRef ? item.text.replace(/^\/skill:[a-z0-9-]+/, "").trimStart() : "");
   const [expandSkill, setExpandSkill] = useState(false);
   return (
     <article className={`conversation-user group/user relative ${item.optimistic ? "conversation-user-sent" : ""}`}>
-      <div className="whitespace-pre-wrap text-[length:var(--chat-r-15)] leading-[1.55]">
+      <div className="whitespace-pre-wrap text-[length:var(--chat-r-15)] leading-[1.55] select-text">
       {item.images && item.images.length > 0 && (
         <span className="mb-3 flex flex-wrap gap-2">
           {item.images.map((src, i) => (
@@ -28,14 +59,14 @@ export const UserMessage = memo(function UserMessage({ item, historyTurn, rollba
       )}
       {skillRef ? (
         <span className="inline-flex flex-col gap-1.5">
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-line bg-inset px-2.5 py-1 text-[11px] leading-none text-dim">
-            <span className="h-1.5 w-1.5 rounded-full bg-accent" aria-hidden />
-            /skill:{skillRef.name}
-          </span>
+          <code className="code-pill">/skill:{skillRef.name}</code>
           {skillRef.full ? (
             <>
+              {skillRef.args ? (
+                <span className="whitespace-pre-wrap text-[length:var(--chat-r-15)] leading-[1.55]">{skillRef.args}</span>
+              ) : null}
               <button onClick={() => setExpandSkill((v) => !v)} className="self-start rounded-full px-1.5 py-0.5 text-[length:var(--chat-r-11)] text-dim hover:bg-line hover:text-fg">{expandSkill ? "hide" : "show"} SKILL.md</button>
-              {expandSkill ? <span className="block max-h-64 overflow-auto rounded-lg border border-line bg-inset/50 px-3 py-2 font-mono text-[length:var(--code-font)] leading-[1.55]">{item.text}</span> : null}
+              {expandSkill ? <span className="block max-h-64 overflow-auto rounded-lg border border-line bg-inset/50 px-3 py-2 font-mono text-[length:var(--code-font)] leading-[1.55]">{skillDisplayBody(item.text)}</span> : null}
             </>
           ) : afterChip ? (
             <span className="whitespace-pre-wrap text-[length:var(--chat-r-15)] leading-[1.55]">{afterChip}</span>
@@ -43,7 +74,7 @@ export const UserMessage = memo(function UserMessage({ item, historyTurn, rollba
         </span>
       ) : item.text}
       </div>
-      {item.entryId && historyTurn ? (
+      {item.entryId && historyTurn && !hideActions ? (
         <div className="user-message-actions" aria-label="Message actions">
           <button
             onClick={() => onRollback?.(item.entryId!)}
@@ -86,12 +117,18 @@ export const AssistantMessage = memo(function AssistantMessage({ item, hideThink
     return () => window.clearInterval(id);
   }, [item.streaming]);
   const lastTextIdx = (() => {
-    for (let i = blocks.length - 1; i >= 0; i--) if (blocks[i].type === "text" && blocks[i].text.trim()) return i;
+    for (let i = blocks.length - 1; i >= 0; i--) {
+      const b = blocks[i];
+      if (b !== undefined && b.type === "text" && b.text.trim()) return i;
+    }
     return -1;
   })();
   const hasPreceding = lastTextIdx > 0 && blocks.slice(0, lastTextIdx).some((b) => b.type === "thinking" || b.text.trim());
+  const replyText = blocks
+    .flatMap((b) => (b !== undefined && b.type === "text" && b.text.trim() ? [b.text.trim()] : []))
+    .join("\n\n");
   return (
-    <article className="conversation-assistant" aria-busy={inFlight || undefined}>
+    <article className="conversation-assistant group" aria-busy={inFlight || undefined}>
       <div className="flex flex-col gap-3">
       {!!item.streaming ? (
         <div role="status" aria-live="polite" className="flex items-center gap-2 text-[12px] text-dim">
@@ -103,7 +140,7 @@ export const AssistantMessage = memo(function AssistantMessage({ item, hideThink
         const isLastText = i === lastTextIdx;
         const showDivider = isLastText && hasPreceding && !item.streaming;
         return b.type === "text" ? (
-          <div key={i} className="text-[length:var(--chat-r-15)] leading-[1.68]">
+          <div key={i} className="text-[length:var(--chat-r-15)] leading-[1.68] select-text">
             {showDivider ? <hr className="assistant-divider" /> : null}
             <TextBlock text={b.text} streaming={!!item.streaming && i === item.blocks.length - 1} />
           </div>
@@ -113,6 +150,11 @@ export const AssistantMessage = memo(function AssistantMessage({ item, hideThink
       })}
       {inFlight ? null : item.streaming ? (
         <span aria-hidden="true" className="h-4 w-[2px] animate-pulse bg-accent" />
+      ) : null}
+      {!item.streaming && replyText ? (
+        <div className="flex justify-end opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+          <CopyMessageButton text={replyText} />
+        </div>
       ) : null}
       </div>
     </article>
@@ -126,15 +168,6 @@ function Thinking({ text, streaming }: { text: string; streaming: boolean }) {
   // swallowing the transcript.
   const [expanded, setExpanded] = useState(false);
   const isStreaming = streaming;
-  const firstLine = text.split("\n").find((l) => l.trim()) ?? "";
-  const label = firstLine.length > 100 ? firstLine.slice(0, 100) + "…" : firstLine;
-  // The header already shows the first line: the expanded body continues
-  // after it instead of repeating it. Single-line reasoning falls back to
-  // the full text so the body is never empty.
-  const lines = text.split("\n");
-  const firstIdx = lines.findIndex((l) => l.trim());
-  const afterFirst = firstIdx >= 0 ? lines.slice(firstIdx + 1).join("\n").replace(/^\s+/, "") : "";
-  const bodyText = afterFirst ? afterFirst : text;
   return (
     <details
       className={`thinking-card ${expanded ? "is-open" : "is-collapsed"} ${isStreaming ? "is-streaming" : ""}`}
@@ -143,11 +176,11 @@ function Thinking({ text, streaming }: { text: string; streaming: boolean }) {
     >
       <summary className="thinking-summary">
         <span className={`thinking-dot ${isStreaming ? "is-pulse" : ""}`} aria-hidden />
-        <span className="thinking-label">// {label || (isStreaming ? "thinking…" : "thought")}</span>
+        <span className="thinking-label">{isStreaming ? "thinking…" : "thought"}</span>
         <span className="thinking-hint">{isStreaming ? "Streaming" : expanded ? "Hide" : "Show"}</span>
       </summary>
       <div className="thinking-body">
-        <div className="thinking-content">{bodyText}</div>
+        <div className="thinking-content select-text">{text}</div>
       </div>
     </details>
   );
@@ -232,14 +265,15 @@ export const RecapLine = memo(function RecapLine({ text }: { text: string }) {
 // Tool calls
 // ---------------------------------------------------------------------------
 
-function argSummary(name: string, args: Record<string, unknown> | null | undefined): string {
-  if (!args || typeof args !== "object") return "";
+function argSummary(name: string, args: unknown): string {
+  if (typeof args !== "object" || args === null) return "";
+  const record = args as Record<string, unknown>;
   const str = (v: unknown) => (typeof v === "string" ? v : "");
-  if (name === "bash") return str(args.command);
-  if (args.path) return str(args.path);
-  if (args.pattern) return str(args.pattern);
+  if (name === "bash") return str(record.command);
+  if (record.path) return str(record.path);
+  if (record.pattern) return str(record.pattern);
   try {
-    return Object.values(args)
+    return Object.values(record)
       .filter((v): v is string => typeof v === "string")
       .slice(0, 2)
       .join(" ")
@@ -319,7 +353,7 @@ export const ToolCard = memo(function ToolCard({ item, onDisclosureToggle }: { i
             <DiffView patch={patch} />
           ) : (
             <>
-              <pre className="tool-output">
+              <pre className="tool-output select-text">
                 {fullOutput ?? item.output ?? (item.status === "running" ? "running…" : "(no output)")}
               </pre>
               {item.truncated && fullOutput == null ? (
@@ -387,7 +421,7 @@ export const ToolGroup = memo(function ToolGroup({ tools, onDisclosureToggle }: 
 export const DiffView = memo(function DiffView({ patch }: { patch: string }) {
   const lines = patch.split("\n");
   return (
-    <div className="tool-diff">
+    <div className="tool-diff select-text">
       {lines.map((l, i) => {
         let cls = "tool-diff-line";
         if (l.startsWith("+++") || l.startsWith("---")) cls += " is-hunk";

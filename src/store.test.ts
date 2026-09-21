@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { formatRunDuration, initialState, mergeLiveMessages, messagesToItems, reconcileItems, reducer } from "./store";
+import { formatRunDuration, initialState, mergeLiveMessages, messagesToItems, reconcileItems, reducer, type ChatItem } from "./store";
 
 describe("subagent activity messages", () => {
   it("renders messages injected into the parent conversation", () => {
@@ -94,7 +94,9 @@ describe("live merge", () => {
       { role: "assistant", content: "four", timestamp: 400 },
     ];
     const merged = mergeLiveMessages(loaded, live);
-    expect(merged.map((m) => m.content)).toEqual(["one", "two", "three", "four"]);
+    const contentOf = (m: unknown) =>
+      typeof m === "object" && m !== null && "content" in m ? m.content : undefined;
+    expect(merged.map(contentOf)).toEqual(["one", "two", "three", "four"]);
     // Identity is preserved: the same object reference for the kept prefix.
     expect(merged[0]).toBe(loaded[0]);
   });
@@ -108,8 +110,8 @@ describe("live merge", () => {
 
 describe("tool reconciliation", () => {
   it("replaces a tool row when the middle of a large detail changes", () => {
-    const previous: any = { kind: "tool", key: "t:1", toolCallId: "call", name: "read", status: "done", details: `head${"a".repeat(200)}tail` };
-    const next: any = { ...previous, details: `head${"b".repeat(200)}tail` };
+    const previous: ChatItem = { kind: "tool", key: "t:1", toolCallId: "call", name: "read", status: "done", details: { patch: `head${"a".repeat(200)}tail` } };
+    const next: ChatItem = { ...previous, details: { patch: `head${"b".repeat(200)}tail` } };
     expect(reconcileItems([previous], [next])[0]).toBe(next);
   });
 });
@@ -140,20 +142,22 @@ describe("launch card live updates", () => {
       type: "event",
       event: { type: "babylon_launch_started", runId: "abc123", runKind: "thread", label: "worker", status: "running", sessionId: "s1" },
     });
-    const card = state.items.find((i) => i.kind === "launch") as any;
+    const card = state.items.find((i) => i.kind === "launch");
     expect(card).toMatchObject({ kind: "launch", runId: "abc123", runKind: "thread", status: "running" });
 
     state = reducer(state, {
       type: "event",
       event: { type: "babylon_launch_update", runId: "abc123", runKind: "thread", log: "reached a milestone, plan drafted", sessionId: "s1" },
     });
-    expect((state.items.find((i) => i.kind === "launch") as any).log).toBe("reached a milestone, plan drafted");
+    const updated = state.items.find((i) => i.kind === "launch");
+    expect(updated?.kind === "launch" ? updated.log : undefined).toBe("reached a milestone, plan drafted");
 
     state = reducer(state, {
       type: "event",
       event: { type: "babylon_launch_update", runId: "abc123", runKind: "thread", status: "completed", sessionId: "s1" },
     });
-    const done = state.items.find((i) => i.kind === "launch") as any;
+    const done = state.items.find((i) => i.kind === "launch");
+    if (done?.kind !== "launch") throw new Error("expected launch card");
     expect(done.status).toBe("completed");
     expect(done.log).toBe("reached a milestone, plan drafted");
   });
@@ -184,7 +188,7 @@ describe("group room transcript collapsing", () => {
       assistant("@brain, standing by."),
     ]);
     expect(items.map((i) => i.kind)).toEqual(["user", "assistant", "assistant"]);
-    expect((items[2] as any).blocks[0].text).toContain("standing by");
+    expect(items[2]).toMatchObject({ kind: "assistant", blocks: [{ text: expect.stringContaining("standing by") }] });
   });
 
   it("keeps assistant turns with tools even after a director", () => {
@@ -244,12 +248,52 @@ describe("group room speaker attribution", () => {
   });
 });
 
+describe("failed-turn visibility", () => {
+  it("surfaces exhausted retries as a sticky error plus transcript line", () => {
+    const state = reducer(initialState, {
+      type: "event",
+      event: { type: "auto_retry_end", success: false, attempt: 3, finalError: "model overloaded" },
+    });
+    expect(state.toasts.map((t) => t.text)).toContain("Chat failed: model overloaded");
+    expect(state.items).toMatchObject([{ kind: "system", text: "Chat failed: model overloaded" }]);
+  });
+
+  it("stays silent when retries recover", () => {
+    const state = reducer(initialState, {
+      type: "event",
+      event: { type: "auto_retry_end", success: true, attempt: 2 },
+    });
+    expect(state.toasts).toHaveLength(0);
+    expect(state.items).toHaveLength(0);
+  });
+
+  it("renders failed assistant messages instead of dropping them", () => {
+    expect(messagesToItems([{
+      role: "assistant",
+      stopReason: "error",
+      errorMessage: "stream reset by peer",
+      content: [],
+      model: "m",
+      timestamp: 1,
+    }])).toMatchObject([{ kind: "assistant", blocks: [{ type: "text", text: "stream reset by peer" }] }]);
+  });
+
+  it("still drops content-free assistant messages without an error", () => {
+    expect(messagesToItems([{
+      role: "assistant",
+      content: [],
+      model: "m",
+      timestamp: 1,
+    }])).toHaveLength(0);
+  });
+});
+
 describe("non-streaming completion", () => {
   it("message_end renders the completed reply when deltas were suppressed", () => {
     let state = reducer(initialState, {
       type: "event",
       event: { type: "message_start", message: { role: "assistant", model: "m" } },
-    } as any);
+    });
     // No message_update dispatched (streaming disabled).
     state = reducer(state, {
       type: "event",
@@ -263,8 +307,9 @@ describe("non-streaming completion", () => {
           ],
         },
       },
-    } as any);
-    const assistant = state.items.find((i) => i.kind === "assistant") as any;
+    });
+    const assistant = state.items.find((i) => i.kind === "assistant");
+    if (assistant?.kind !== "assistant") throw new Error("expected assistant");
     expect(assistant.streaming).toBe(false);
     expect(assistant.blocks).toEqual([
       { type: "thinking", text: "weighing options" },
@@ -290,9 +335,9 @@ describe("abort stop records", () => {
       state = reducer(state, {
         type: "event",
         event: { type: "message_start", message: { role: "assistant", model: "m" } },
-      } as any);
+      });
       now.mockReturnValue(start + 65_000);
-      state = reducer(state, { type: "event", event: { type: "agent_settled", aborted: true } } as any);
+      state = reducer(state, { type: "event", event: { type: "agent_settled", aborted: true } });
       const last = state.items[state.items.length - 1];
       expect(last).toMatchObject({ kind: "system", text: "Chat aborted after 1:05, no response completed." });
       expect(state.streaming).toBe(false);
@@ -306,9 +351,49 @@ describe("abort stop records", () => {
     let state = reducer(initialState, {
       type: "event",
       event: { type: "message_start", message: { role: "assistant", model: "m" } },
-    } as any);
-    state = reducer(state, { type: "event", event: { type: "agent_settled", aborted: true } } as any);
+    });
+    state = reducer(state, { type: "event", event: { type: "agent_settled", aborted: true } });
     const last = state.items[state.items.length - 1];
     expect(last).toMatchObject({ kind: "system", text: "Chat aborted, no response completed." });
+  });
+});
+
+describe("failed-turn visibility", () => {
+  it("surfaces exhausted retries as a sticky error plus transcript line", () => {
+    const state = reducer(initialState, {
+      type: "event",
+      event: { type: "auto_retry_end", success: false, attempt: 3, finalError: "model overloaded" },
+    });
+    expect(state.toasts.map((t) => t.text)).toContain("Chat failed: model overloaded");
+    expect(state.items).toMatchObject([{ kind: "system", text: "Chat failed: model overloaded" }]);
+  });
+
+  it("stays silent when retries recover", () => {
+    const state = reducer(initialState, {
+      type: "event",
+      event: { type: "auto_retry_end", success: true, attempt: 2 },
+    });
+    expect(state.toasts).toHaveLength(0);
+    expect(state.items).toHaveLength(0);
+  });
+
+  it("renders failed assistant messages instead of dropping them", () => {
+    expect(messagesToItems([{
+      role: "assistant",
+      stopReason: "error",
+      errorMessage: "stream reset by peer",
+      content: [],
+      model: "m",
+      timestamp: 1,
+    }])).toMatchObject([{ kind: "assistant", blocks: [{ type: "text", text: "stream reset by peer" }] }]);
+  });
+
+  it("still drops content-free assistant messages without an error", () => {
+    expect(messagesToItems([{
+      role: "assistant",
+      content: [],
+      model: "m",
+      timestamp: 1,
+    }])).toHaveLength(0);
   });
 });

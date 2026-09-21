@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { Checkbox } from "./ui/Checkbox";
 import { BotAvatar } from "./BotAvatar";
 import type { DefaultBot } from "../bots";
+import { errorMessage } from "../lib/errors";
 import {
   botHandle,
   validateNewBot,
@@ -360,8 +361,8 @@ function BotEditor({
         await onCreate(input);
       }
       onDone();
-    } catch (e: any) {
-      setError(e?.message ?? "Could not save the bot");
+    } catch (e) {
+      setError(errorMessage(e, "Could not save the bot"));
     } finally {
       setBusy(false);
     }
@@ -414,7 +415,7 @@ function BotEditor({
         {bot && onDelete ? (
           <button
             type="button"
-            onClick={() => void onDelete(bot).then(onDone).catch((e: any) => setError(e?.message ?? "Could not delete the bot"))}
+            onClick={() => void onDelete(bot).then(onDone).catch((e: unknown) => setError(errorMessage(e, "Could not delete the bot")))}
             className="text-[12px] text-err hover:underline"
           >
             Delete
@@ -472,8 +473,8 @@ function GroupEditor({
       if (group) await onUpdateGroup(group.id, { name: check.value.name, memberIds: check.value.memberIds });
       else await onCreateGroup({ name: check.value.name, memberIds: check.value.memberIds });
       onDone();
-    } catch (e: any) {
-      setError(e?.message ?? "Could not save the room");
+    } catch (e) {
+      setError(errorMessage(e, "Could not save the room"));
     } finally {
       setBusy(false);
     }
@@ -522,7 +523,7 @@ function GroupEditor({
         {group && onDeleteGroup ? (
           <button
             type="button"
-            onClick={() => void onDeleteGroup(group).then(onDone).catch((e: any) => setError(e?.message ?? "Could not delete the room"))}
+            onClick={() => void onDeleteGroup(group).then(onDone).catch((e: unknown) => setError(errorMessage(e, "Could not delete the room")))}
             className="text-[12px] text-err hover:underline"
           >
             Delete
@@ -609,8 +610,8 @@ function DefaultBotEditor({ initial, onSave, onDirty }: { initial: DefaultBot; o
                     ...(model ? { model } : {}),
                   });
                   setSaved(true);
-                } catch (e: any) {
-                  setError(e?.message ?? "Could not save the default bot");
+                } catch (e) {
+                  setError(errorMessage(e, "Could not save the default bot"));
                 } finally {
                   setBusy(false);
                 }

@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { DaemonClient } from "../src/daemon-client";
+import type { TaskManager } from "./task-manager";
+import type { AttentionManager } from "./attention-manager";
+import type { HookManager } from "./hook-manager";
 import type { PiHost } from "./pi-host";
 import { resolveRuntime } from "./runtime-select";
 
@@ -20,9 +23,9 @@ function baseDeps(overrides: Record<string, unknown> = {}) {
     runtimeOwner: "local" as const,
     daemonClient: null as DaemonClient | null,
     host: null as PiHost | null,
-    taskManager: {} as never,
-    attentionManager: {} as never,
-    hookManager: {} as never,
+    taskManager: {} as unknown as TaskManager,
+    attentionManager: {} as unknown as AttentionManager,
+    hookManager: {} as unknown as HookManager,
     contracts: new Map(),
     ...overrides,
   };

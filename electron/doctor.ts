@@ -1,6 +1,7 @@
 import { existsSync, promises as fsp } from "node:fs";
 import { join } from "node:path";
 import * as net from "node:net";
+import { wireOf } from "../src/store";
 import { readLifecycleLock } from "./daemon-lock";
 import { readRuntimeFile } from "./daemon-runtime-file";
 
@@ -31,8 +32,8 @@ function pidAlive(pid: number): "live" | "dead" | "unknown" {
   try {
     process.kill(pid, 0);
     return "live";
-  } catch (error: any) {
-    return error?.code === "ESRCH" ? "dead" : "unknown";
+  } catch (error: unknown) {
+    return (error as NodeJS.ErrnoException)?.code === "ESRCH" ? "dead" : "unknown";
   }
 }
 
@@ -59,8 +60,8 @@ export async function doctor(input: DoctorInput): Promise<{ findings: DoctorFind
 
   let daemonEnabled: boolean | null = null;
   try {
-    const settings = JSON.parse(await fsp.readFile(join(dataDir, "pideck-settings.json"), "utf8")) as any;
-    daemonEnabled = settings?.daemon?.enabled === true;
+    const settings: unknown = JSON.parse(await fsp.readFile(join(dataDir, "pideck-settings.json"), "utf8"));
+    daemonEnabled = wireOf(wireOf(settings)?.daemon)?.enabled === true;
   } catch {
     daemonEnabled = null;
   }

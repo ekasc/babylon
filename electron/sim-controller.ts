@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { WebContentsView, nativeImage, shell, type BrowserWindow } from "electron";
+import { wireArr, wireOf, wireStr } from "../src/store";
 import {
   effectiveZoom,
   normalizeZoomFactor,
@@ -527,7 +528,7 @@ export class SimController {
     }
   }
 
-  private async withDebugger<T>(tab: TabState, fn: (send: (method: string, params?: Record<string, unknown>) => Promise<any>) => Promise<T>): Promise<T> {
+  private async withDebugger<T>(tab: TabState, fn: (send: (method: string, params?: Record<string, unknown>) => Promise<unknown>) => Promise<T>): Promise<T> {
     const wc = tab.view.webContents;
     const key = tab.id;
     try {
@@ -610,7 +611,7 @@ export class SimController {
         const shot = await this.withDebugger(tab, async (send) =>
           send("Page.captureScreenshot", { format: "png", captureBeyondViewport: true })
         );
-        const buf = Buffer.from(String((shot as any)?.data ?? ""), "base64");
+        const buf = Buffer.from(String(wireStr(wireOf(shot), "data") ?? ""), "base64");
         if (buf.length > 0) return this.scaleShot(nativeImage.createFromBuffer(buf));
       } catch {
         /* fall through to viewport capture */
@@ -633,7 +634,7 @@ export class SimController {
   async snapshot(tabId?: string | null, opts?: { a11y?: boolean }): Promise<{ url: string; title: string; text: string; a11y: string }> {
     const tab = this.live(tabId);
     const wc = tab.view.webContents;
-    const run = async (code: string): Promise<any> => {
+    const run = async (code: string): Promise<unknown> => {
       try {
         return await wc.executeJavaScript(code, true);
       } catch (e) {
@@ -662,22 +663,22 @@ export class SimController {
    */
   async axTree(tab: TabState): Promise<{ text: string; refCount: number }> {
     const res = await this.withDebugger(tab, async (send) => send("Accessibility.getFullAXTree", {}));
-    const condensed = condenseAxTree(((res as any)?.nodes ?? []) as AxNodeJson[]);
+    const condensed = condenseAxTree(wireArr(wireOf(res), "nodes") ?? []);
     return { text: condensed.text, refCount: condensed.refs.length };
   }
 
   /** Resolve a ref:N marker to a clickable center via fresh-tree lookup. */
   private async resolveAxRef(tab: TabState, ref: number): Promise<{ x: number; y: number; objectId: string }> {
     const res = await this.withDebugger(tab, async (send) => send("Accessibility.getFullAXTree", {}));
-    const condensed = condenseAxTree(((res as any)?.nodes ?? []) as AxNodeJson[]);
+    const condensed = condenseAxTree(wireArr(wireOf(res), "nodes") ?? []);
     const hit = condensed.refs.find((r) => r.ref === ref);
     if (!hit) throw new Error(`ref:${ref} is stale (page changed?) — take a new browser_snapshot first.`);
     return this.withDebugger(tab, async (send) => {
-      const resolved = (await send("DOM.resolveNode", { backendNodeId: hit.backendDOMNodeId })) as any;
-      const objectId = resolved?.object?.objectId;
+      const resolved = wireOf(await send("DOM.resolveNode", { backendNodeId: hit.backendDOMNodeId }));
+      const objectId = wireStr(wireOf(resolved?.object), "objectId");
       if (!objectId) throw new Error(`ref:${ref} no longer resolves to a live element.`);
-      const quads = (await send("DOM.getContentQuads", { objectId })) as any;
-      const quad = quads?.quads?.[0];
+      const quads = wireOf(await send("DOM.getContentQuads", { objectId }));
+      const quad = wireArr(quads, "quads")?.[0];
       if (!Array.isArray(quad) || quad.length < 8) throw new Error(`ref:${ref} is not visible.`);
       const xs = [quad[0], quad[2], quad[4], quad[6]];
       const ys = [quad[1], quad[3], quad[5], quad[7]];
@@ -698,15 +699,21 @@ export class SimController {
   private async locate(tab: TabState, selector: string): Promise<{ x: number; y: number; text: string }> {
     const wc = tab.view.webContents;
     const probe = `(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return null; const r = el.getBoundingClientRect(); if (r.width < 1 || r.height < 1) return { hidden: true }; return { x: r.x + r.width / 2, y: r.y + r.height / 2, text: (el.innerText ?? el.value ?? '').slice(0, 200) }; })()`;
-    let found: any;
+    let found: unknown;
     try {
       found = await wc.executeJavaScript(probe, true);
     } catch (e) {
       throw new Error(`page query failed: ${e instanceof Error ? e.message : String(e)}`);
     }
     if (!found) throw new Error(`no element matches ${selector}`);
-    if (found.hidden) throw new Error(`element ${selector} is not visible`);
-    return { x: Math.round(found.x), y: Math.round(found.y), text: String(found.text ?? "") };
+    const located = wireOf(found);
+    if (!located) throw new Error(`no element matches ${selector}`);
+    if (located.hidden) throw new Error(`element ${selector} is not visible`);
+    return {
+      x: Math.round(typeof located.x === "number" ? located.x : 0),
+      y: Math.round(typeof located.y === "number" ? located.y : 0),
+      text: String(wireStr(located, "text") ?? ""),
+    };
   }
 
   async click(tabId: string | undefined, rawSelector: string): Promise<{ x: number; y: number; text: string }> {
@@ -755,8 +762,9 @@ export class SimController {
             objectId: r.objectId,
             functionDeclaration: "function() { return (this.value ?? this.innerText ?? '').slice(0, 500); }",
             returnByValue: true,
-          })) as any;
-          return String(res?.result?.result?.value ?? "");
+          }));
+          const callResult = wireOf(res);
+          return String(wireStr(wireOf(wireOf(callResult?.result)?.result), "value") ?? "");
         });
       } catch {
         /* best effort readback */
@@ -765,7 +773,7 @@ export class SimController {
     }
     const wc = tab.view.webContents;
     const prep = `(() => { const el = document.querySelector(${JSON.stringify(selector)}); if (!el) return 'missing'; if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) && !(el instanceof HTMLElement && el.isContentEditable)) return 'uneditable'; el.focus(); if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) el.select(); else { const r = document.createRange(); r.selectNodeContents(el); const s = getSelection(); if (s) { s.removeAllRanges(); s.addRange(r); } } return 'ok'; })()`;
-    let state: any;
+    let state: unknown;
     try {
       state = await wc.executeJavaScript(prep, true);
     } catch (e) {
@@ -790,7 +798,7 @@ export class SimController {
       throw new Error("expression must be a non-empty string (≤4000 chars)");
     }
     const wc = this.live(tabId).view.webContents;
-    let out: any;
+    let out: unknown;
     try {
       out = await wc.executeJavaScript(rawJs, true);
     } catch (e) {

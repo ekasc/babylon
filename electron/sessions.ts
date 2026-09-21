@@ -2,6 +2,7 @@ import { watch, type FSWatcher } from "node:fs";
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { wireOf, wireStr } from "../src/store";
 
 export interface SessionInfo {
   id: string;
@@ -118,7 +119,16 @@ export class SessionIndex {
     const files: string[] = [];
     let dirs: string[] = [];
     try {
-      dirs = await fs.readdir(this.root);
+      const entries = await fs.readdir(this.root, { withFileTypes: true });
+      dirs = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+      // Sessions the app creates land flat at the root (SessionManager is
+      // handed the root itself as sessionDir); only CLI-style layouts nest
+      // them per project. A flat file the scan skips vanishes from the
+      // session list, which drops its tab from the tab bar (buildTabItems
+      // keeps tabs with a list entry only) even while the session is open.
+      for (const entry of entries) {
+        if (entry.isFile() && entry.name.endsWith(".jsonl")) files.push(join(this.root, entry.name));
+      }
     } catch {
       const changedPaths = [...this.cache.keys()];
       this.cache.clear();
@@ -236,8 +246,8 @@ export async function readSessionInfo(
     const tail = tailStart > 0 ? tailRaw.slice(Math.max(0, tailRaw.indexOf("\n") + 1)) : head;
     const headObjects = parseLines(head);
     const tailObjects = tailStart > 0 ? parseLines(tail) : headObjects;
-    const header = headObjects.find((entry) => entry?.type === "session");
-    if (!header?.id) return null;
+    const header = headObjects.find((entry) => entry.type === "session");
+    if (!header || typeof header.id !== "string") return null;
 
     let name: string | undefined;
     for (const entry of [...headObjects, ...tailObjects]) {
@@ -247,8 +257,9 @@ export async function readSessionInfo(
     }
     let firstUserText: string | undefined;
     for (const entry of headObjects) {
-      if (entry?.type !== "message" || entry.message?.role !== "user") continue;
-      const text = messageText(entry.message.content).trim();
+      const message = wireOf(entry.message);
+      if (entry.type !== "message" || message?.role !== "user") continue;
+      const text = messageText(message?.content).trim();
       if (text) {
         firstUserText = truncate(text, 110);
         break;
@@ -257,8 +268,8 @@ export async function readSessionInfo(
 
     let lastMessageMs: number | null = null;
     for (const entry of [...headObjects, ...tailObjects]) {
-      if (entry?.type !== "message" || !entry.timestamp) continue;
-      const t = Date.parse(entry.timestamp);
+      if (entry.type !== "message" || !entry.timestamp) continue;
+      const t = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : NaN;
       if (Number.isFinite(t) && (lastMessageMs === null || t > lastMessageMs)) lastMessageMs = t;
     }
     const effectiveMtime = lastMessageMs !== null ? Math.max(mtime, lastMessageMs) : mtime;
@@ -267,10 +278,10 @@ export async function readSessionInfo(
     return {
       id: header.id,
       path,
-      cwd: header.cwd ?? "",
+      cwd: typeof header.cwd === "string" ? header.cwd : "",
       name: name ?? firstUserText,
       firstUserText,
-      startedAt: header.timestamp,
+      startedAt: typeof header.timestamp === "string" ? header.timestamp : undefined,
       mtime: sortMtime,
       size,
       isWorktree: !!header.parentSession,
@@ -281,12 +292,16 @@ export async function readSessionInfo(
   }
 }
 
-function parseLines(raw: string): any[] {
-  const parsed: any[] = [];
+function parseLines(raw: string): Array<Record<string, unknown>> {
+  const parsed: Array<Record<string, unknown>> = [];
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     try {
-      parsed.push(JSON.parse(line));
+      const value: unknown = JSON.parse(line);
+      // Session lines are objects; anything else is a corrupt record.
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        parsed.push(value as Record<string, unknown>);
+      }
     } catch {
       // A bounded edge can end in a partial record; later records remain usable.
     }
@@ -294,10 +309,10 @@ function parseLines(raw: string): any[] {
   return parsed;
 }
 
-function messageText(content: any): string {
+function messageText(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
-  return content.map((block) => (typeof block === "string" ? block : block?.text ?? "")).join("");
+  return content.map((block) => (typeof block === "string" ? block : String(wireOf(block)?.text ?? ""))).join("");
 }
 
 /** Non-diff tool output cap. Diffs (details.patch/diff) ship in full because
@@ -306,59 +321,61 @@ function messageText(content: any): string {
 export const TOOL_OUTPUT_CLAMP = 16 * 1024;
 
 /** Clamps tool-output text in one parsed message, in place. Returns the message. */
-export function clampToolOutput(message: any): any {
-  if (!message || typeof message !== "object") return message;
-  if (message.role === "toolResult" && Array.isArray(message.content)) {
+export function clampToolOutput(message: unknown): unknown {
+  const m = wireOf(message);
+  if (!m) return message;
+  if (m.role === "toolResult" && Array.isArray(m.content)) {
     let used = 0;
-    const kept: any[] = [];
+    const kept: unknown[] = [];
     let truncated = false;
-    for (const block of message.content) {
-      if (!block || block.type !== "text") {
+    for (const block of m.content) {
+      const b = wireOf(block);
+      if (!b || b.type !== "text") {
         kept.push(block);
         continue;
       }
-      const text = String(block.text ?? "");
+      const text = String(b.text ?? "");
       const remaining = TOOL_OUTPUT_CLAMP - used;
       if (text.length <= remaining) {
         kept.push(block);
         used += text.length;
         continue;
       }
-      if (remaining > 0) kept.push({ ...block, text: text.slice(0, remaining) });
+      if (remaining > 0) kept.push({ ...b, text: text.slice(0, remaining) });
       truncated = true;
       break; // the rest of the blocks are dropped from the wire view
     }
     if (truncated) {
-      message.content = kept;
-      message.truncated = true;
+      m.content = kept;
+      m.truncated = true;
     }
-  } else if (message.role === "bashExecution" && typeof message.output === "string" && message.output.length > TOOL_OUTPUT_CLAMP) {
-    message.output = message.output.slice(0, TOOL_OUTPUT_CLAMP);
-    message.truncated = true;
+  } else if (m.role === "bashExecution" && typeof m.output === "string" && m.output.length > TOOL_OUTPUT_CLAMP) {
+    m.output = m.output.slice(0, TOOL_OUTPUT_CLAMP);
+    m.truncated = true;
   }
   return message;
 }
 
-function projectMessages(entries: any[]): any[] {
-  const messages: any[] = [];
+function projectMessages(entries: Array<Record<string, unknown>>): unknown[] {
+  const messages: unknown[] = [];
   for (const entry of entries) {
-    if (entry?.type === "message" && entry.message) {
+    if (entry.type === "message" && entry.message) {
       const ts = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : NaN;
       messages.push({
-        ...clampToolOutput(entry.message),
+        ...(wireOf(clampToolOutput(entry.message)) ?? {}),
         entryId: entry.id,
         // Carry the entry's wall-clock time: recap merging interleaves by
         // timestamp, and recap scheduling keys off the newest message time.
         ...(Number.isFinite(ts) ? { timestamp: ts } : {}),
       });
-    } else if (entry?.type === "custom_message") {
+    } else if (entry.type === "custom_message") {
       messages.push({
         role: "custom",
         customType: entry.customType,
         content: entry.content,
         display: entry.display,
         details: entry.details,
-        timestamp: Date.parse(entry.timestamp),
+        timestamp: typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : NaN,
       });
     }
   }
@@ -370,13 +387,13 @@ const TAIL_BYTES = 2 * 1024 * 1024;
 /** Reads the tail of an append-only session file (last `maxBytes`, aligned to
  *  line boundaries) and projects the messages. Returns the byte offset of the
  *  first parsed line so older windows can be fetched on demand. */
-export async function readSessionTail(path: string, maxBytes = TAIL_BYTES): Promise<{ messages: any[]; startOffset: number }> {
+export async function readSessionTail(path: string, maxBytes = TAIL_BYTES): Promise<{ messages: unknown[]; startOffset: number }> {
   return readSessionRange(path, undefined, maxBytes);
 }
 
 /** Reads a window of the file ending at `endOffset` (undefined = EOF), aligned
  *  to line boundaries. Cost is O(maxBytes), never O(file size). */
-export async function readSessionRange(path: string, endOffset: number | undefined, maxBytes: number): Promise<{ messages: any[]; startOffset: number }> {
+export async function readSessionRange(path: string, endOffset: number | undefined, maxBytes: number): Promise<{ messages: unknown[]; startOffset: number }> {
   try {
     const { size } = await fs.stat(path);
     const end = Math.min(endOffset ?? size, size);
@@ -394,15 +411,7 @@ export async function readSessionRange(path: string, endOffset: number | undefin
       }
       const firstLine = text.indexOf("\n");
       const from = firstLine === -1 ? 0 : firstLine + 1;
-      const entries: any[] = [];
-      for (const line of text.slice(from).split("\n")) {
-        if (!line.trim()) continue;
-        try {
-          entries.push(JSON.parse(line));
-        } catch {
-          /* bounded edge: partial record */
-        }
-      }
+      const entries = parseLines(text.slice(from));
       if (entries.length || start === 0) {
         return { messages: projectMessages(entries), startOffset: start + from };
       }
@@ -423,21 +432,26 @@ export async function readToolOutput(path: string, toolCallId: string, cap = 8 *
     const raw = await fs.readFile(path, "utf8");
     for (const line of raw.split("\n")) {
       if (!line.includes(toolCallId)) continue;
-      let entry: any;
-      try {
-        entry = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      const m = entry?.message;
-      if (m?.toolCallId !== toolCallId) continue;
-      const content = messageText(m.content);
+      const entry = wireOf(parseJsonLine(line));
+      if (!entry) continue;
+      const m = wireOf(entry.message);
+      if (wireStr(m, "toolCallId") !== toolCallId) continue;
+      const content = messageText(m?.content);
       const truncated = content.length > cap;
       return { content: truncated ? content.slice(0, cap) : content, truncated };
     }
     throw new Error("Tool output not found");
-  } catch (error: any) {
-    throw new Error(`Failed to read tool output: ${error?.message ?? error}`);
+  } catch (error: unknown) {
+    throw new Error(`Failed to read tool output: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/** Parse one session-file line, undefined when corrupt (caller skips it). */
+function parseJsonLine(line: string): unknown {
+  try {
+    return JSON.parse(line) as unknown;
+  } catch {
+    return undefined;
   }
 }
 

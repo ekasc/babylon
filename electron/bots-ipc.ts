@@ -1,23 +1,22 @@
 import type { IpcMainInvokeEvent } from "electron";
+import type { IpcHandle } from "./ipc-handle";
 import { app } from "electron";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { projectHashForCwd, type ProjectSettingsStore } from "./project-settings";
 import { HandoffStore } from "./handoff-store";
-import { driveRoomTurns } from "./room-driver";
+import { driveRoomTurns, type RoomTurnIO } from "./room-driver";
 import { readSessionTail, type SessionIndex } from "./sessions";
 import { buildHandoffPrompt, normalizeHandoffText, transcriptText } from "./recap";
 import { validateSessionPath } from "./session-path";
 import { botChatForProject, botHandle, buildBotSystemPrompt, buildGroupSystemPrompt, groupAnchorCwd, isPassReply, parseBotMentions } from "../src/bots";
 import type { BotStore } from "./bots";
+import type { ProjectSettings } from "../src/bridge";
 import type { TaskManager } from "./task-manager";
 import type { RuntimeFacade } from "../src/runtime-facade";
 import type { PiHost } from "./pi-host";
 
-type Handle = (
-  channel: string,
-  listener: (event: IpcMainInvokeEvent, ...args: any[]) => unknown,
-) => void;
+type Handle = IpcHandle;
 
 export function registerBotsIpc(
   handle: Handle,
@@ -34,11 +33,11 @@ export function registerBotsIpc(
     getActiveCwd: () => string;
     broadcastBots: () => void;
     broadcastGroups: () => void;
-    projectSettingsForCwd: (cwd: string) => { settings: any; hash: string };
+    projectSettingsForCwd: (cwd: string) => { settings: ProjectSettings; hash: string };
     resolveCanonicalSessionFile: (stored: string | null | undefined) => Promise<string | undefined>;
     overlayForSessionFile: (file: string | null | undefined, cwd?: string) => string | null;
-    driveExtrasIO: () => any;
-    lastAssistantText: (messages: any[]) => string;
+    driveExtrasIO: () => RoomTurnIO;
+    lastAssistantText: (messages: unknown[]) => string;
   },
 ): void {
   const {

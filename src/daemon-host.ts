@@ -16,6 +16,7 @@ import { createEnvelope,
   type ProtocolEnvelope,
 } from "./daemon-protocol";
 import { buildId } from "./build-info";
+import { isPlainObject } from "./lib/wire";
 import { createRuntime, type RuntimeState } from "./runtime";
 import { addAttention, resolveAttention, type AttentionItem } from "./attention";
 import {
@@ -37,10 +38,6 @@ export interface DispatchResult {
 
 export function createDaemonRuntime(): RuntimeState {
   return createRuntime();
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function errorResponse(request: ProtocolEnvelope | null, message: string): ProtocolEnvelope {
@@ -103,7 +100,12 @@ export function dispatchRequest(
         break;
       }
       commitTasks(after);
-      response = createEnvelope("response", "task.updated", after.tasks[id], request.id);
+      const updated = after.tasks[id];
+      if (!updated) {
+        response = errorResponse(request, `task ${id} not found`);
+        break;
+      }
+      response = createEnvelope("response", "task.updated", updated, request.id);
       break;
     }
 

@@ -1,18 +1,18 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import ChatView, { findTranscriptMatches, formatBlockquote } from "./ChatView";
 import type { ChatItem } from "../store";
 
 // jsdom has no ResizeObserver; ChatView's follow-scroll effect needs one.
-class ResizeObserverStub {
+class ResizeObserverStub implements ResizeObserver {
   observe() {}
   unobserve() {}
   disconnect() {}
 }
 if (!globalThis.ResizeObserver) {
-  (globalThis as any).ResizeObserver = ResizeObserverStub;
+  globalThis.ResizeObserver = ResizeObserverStub;
 }
 
 afterEach(() => cleanup());
@@ -54,6 +54,110 @@ describe("ChatView turn folding with stream responses", () => {
     expect(screen.getByText("Deployed.")).toBeTruthy();
   });
 });
+describe("fold-row rollback", () => {
+  const historyTurn = {
+    entryId: "e1",
+    parentUserEntryId: null,
+    index: 1,
+    depth: 0,
+    text: "deploy it",
+    response: "Deployed.",
+    onActivePath: true,
+    current: true,
+    branchCount: 0,
+    changedCount: 0,
+    checkpointAvailable: true,
+    rollbackAvailable: true,
+  };
+
+  it("owns Rollback in the fold row and hides the floating chip on folded turns", async () => {
+    const onRollback = vi.fn();
+    render(<ChatView items={turn(false)} streaming={false} historyTurns={[historyTurn]} onRollback={onRollback} />);
+    const buttons = screen.getAllByRole("button", { name: "Rollback" });
+    expect(buttons).toHaveLength(1);
+    await userEvent.click(buttons[0]!);
+    expect(onRollback).toHaveBeenCalledWith("e1");
+  });
+
+  it("keeps the floating chip on turns without a fold", () => {
+    const onRollback = vi.fn();
+    render(
+      <ChatView
+        items={[
+          { kind: "user", key: "u1", text: "hi", entryId: "e9" },
+          { kind: "assistant", key: "a1", blocks: [{ type: "text", text: "hello" }], streaming: false },
+        ]}
+        streaming={false}
+        historyTurns={[{ ...historyTurn, entryId: "e9", text: "hi", response: "hello" }]}
+        onRollback={onRollback}
+      />
+    );
+    // No fold row: no expand/collapse toggle, floating Rollback only.
+    expect(screen.queryByRole("button", { name: /Expand|Collapse turn/ })).toBeNull();
+    expect(screen.getAllByRole("button", { name: "Rollback" })).toHaveLength(1);
+  });
+});
+
+describe("scroll follow ownership", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function scroller() {
+    const log = screen.getByRole("log");
+    Object.defineProperty(log, "scrollHeight", { value: 2000, configurable: true });
+    Object.defineProperty(log, "clientHeight", { value: 500, configurable: true });
+    return log as HTMLElement;
+  }
+
+  function pinAtBottom() {
+    const log = scroller();
+    log.scrollTop = 1500;
+    fireEvent.scroll(log);
+    return log;
+  }
+
+  it("ignores anchoring jumps with no gesture (stays pinned, no jump button)", () => {
+    render(<ChatView items={turn(false)} streaming={false} />);
+    const log = pinAtBottom();
+    // Layout shift / scroll anchoring moves the viewport isolated after
+    // quiet: no gesture, no continuity with the earlier scroll.
+    vi.setSystemTime(Date.now() + 1000);
+    log.scrollTop = 1300;
+    fireEvent.scroll(log);
+    expect(screen.queryByRole("button", { name: "Jump to bottom" })).toBeNull();
+  });
+
+  it("unsticks on genuine wheel movement (jump button appears)", () => {
+    render(<ChatView items={turn(false)} streaming={false} />);
+    const log = pinAtBottom();
+    fireEvent.wheel(log);
+    log.scrollTop = 1300;
+    fireEvent.scroll(log);
+    expect(screen.getByRole("button", { name: "Jump to bottom" })).toBeTruthy();
+  });
+
+  it("pins to the new message when pinNonce bumps (send)", () => {
+    const settled = turn(false);
+    const { rerender } = render(<ChatView items={settled} streaming={false} pinNonce={0} />);
+    const log = scroller();
+    log.scrollTop = 200;
+    fireEvent.scroll(log);
+    rerender(
+      <ChatView
+        items={[...settled, { kind: "assistant", key: "a2", blocks: [{ type: "text", text: "More." }], streaming: false }]}
+        streaming={false}
+        pinNonce={1}
+      />
+    );
+    expect(log.scrollTop).toBe(2000);
+    expect(screen.queryByRole("button", { name: "Jump to bottom" })).toBeNull();
+  });
+});
+
 describe("quote in composer", () => {
   it("formats selections as a markdown blockquote", () => {
     expect(formatBlockquote("hello\n\nworld")).toBe("> hello\n>\n> world");

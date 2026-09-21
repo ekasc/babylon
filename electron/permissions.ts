@@ -21,6 +21,11 @@ import { dirname, isAbsolute, resolve } from "node:path";
 
 export type ExecutionMode = "supervised" | "auto" | "full_access";
 
+/** Runtime narrowing for IPC payloads (mode arrives as an untyped string). */
+export function isExecutionMode(value: unknown): value is ExecutionMode {
+  return value === "supervised" || value === "auto" || value === "full_access";
+}
+
 /**
  * Policy categories Babylon can distinguish. These are the smallest meaningful
  * units of "consequential action" the agent can take.
@@ -274,6 +279,7 @@ function globToRegExp(glob: string): RegExp {
   let i = 0;
   while (i < glob.length) {
     const c = glob[i];
+    if (c === undefined) break;
     if (c === "*") {
       // `**` matches across any number of path segments (including slashes).
       if (glob[i + 1] === "*") {
@@ -467,8 +473,8 @@ export class PermissionEngine {
     let raw: string;
     try {
       raw = await readFile(this.filePath, "utf8");
-    } catch (err: any) {
-      if (err?.code === "ENOENT") return { ok: true };
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return { ok: true };
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
     try {

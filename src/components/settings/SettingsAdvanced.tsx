@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { PiSettings } from "../../bridge";
+import { errorMessage } from "../../lib/errors";
 import { confirmAction } from "../../lib/prompts";
 import { SettingSection } from "./SettingSection";
 import { SettingRow } from "./SettingRow";
@@ -27,14 +28,16 @@ export function SettingsAdvanced({ settings, onSave }: { settings: PiSettings | 
   const doImportFile = async (file: File) => {
     try {
       const text = await file.text();
-      const parsed = JSON.parse(text);
+      const parsed: unknown = JSON.parse(text);
       const { bridge } = await import("../../bridge");
-      await bridge.setSettings(parsed);
+      const { toSettingsPatch } = await import("../../lib/settings-patch");
+      await bridge.setSettings(toSettingsPatch(parsed));
       setMsg(`Imported ${file.name}`); setTimeout(() => setMsg(null), 2000);
-    } catch (e: any) { setMsg(e?.message ?? "Invalid file"); }
+    } catch (e) { setMsg(errorMessage(e, "Invalid file")); }
   };
-  const electronVer = (window as any).process?.versions?.electron;
-  const nodeVer = (window as any).process?.versions?.node;
+  const versions = (window as { process?: { versions?: { electron?: string; node?: string } } }).process?.versions;
+  const electronVer = versions?.electron;
+  const nodeVer = versions?.node;
   const verText = [electronVer ? `Electron ${electronVer}` : null, nodeVer ? `Node ${nodeVer}` : null].filter(Boolean).join(" · ") || "Runtime versions unavailable outside Electron";
   return (
     <div>

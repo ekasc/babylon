@@ -5,6 +5,7 @@ import {
   normalizeSearchQuery,
   scoreQueryMatch,
   scoreSubsequenceMatch,
+  type RankedSearchResult,
 } from "./searchRanking";
 
 describe("normalizeSearchQuery", () => {
@@ -43,10 +44,10 @@ describe("scoreQueryMatch", () => {
 
 describe("compare/insert", () => {
   it("inserts sorted", () => {
-    const list: any[] = [];
+    const list: RankedSearchResult<string>[] = [];
     insertRankedSearchResult(list, { item: "a", score: 10, tieBreaker: "a" }, 3);
     insertRankedSearchResult(list, { item: "b", score: 5, tieBreaker: "b" }, 3);
-    expect(list[0].item).toBe("b");
+    expect(list[0]?.item).toBe("b");
   });
   it("respects limit", () => {
     const list = [

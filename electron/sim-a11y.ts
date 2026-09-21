@@ -8,6 +8,8 @@
  * time and are valid until navigation.
  */
 
+import { isArrayOf, isString, wireOf } from "../src/lib/wire";
+
 export interface AxNodeJson {
   nodeId: string;
   role?: { value?: string };
@@ -55,14 +57,29 @@ function field(value: unknown): string {
   return s.length > AX_FIELD_CHARS ? `${s.slice(0, AX_FIELD_CHARS)}…` : s;
 }
 
-export function condenseAxTree(nodes: AxNodeJson[]): CondensedAxTree {
+export function condenseAxTree(nodes: unknown[]): CondensedAxTree {
+  // CDP payloads are unvalidated: gate the fields that can crash
+  // (node identity, child iteration, backend ref numbers). Everything
+  // else stays optional-chained at render, degrading gracefully.
+  const clean: AxNodeJson[] = [];
+  for (const n of nodes) {
+    const w = wireOf(n);
+    if (!w || typeof w.nodeId !== "string") continue;
+    const childIds = isArrayOf(w.childIds, isString) ? w.childIds : undefined;
+    const backendDOMNodeId = typeof w.backendDOMNodeId === "number" ? w.backendDOMNodeId : undefined;
+    // CDP extras pass through untouched: the renderer optional-chains every
+    // display field, so unknown keys degrade gracefully. This is the one
+    // place the raw shape is asserted — narrowing it further would change
+    // what the snapshot shows, not make it safer.
+    clean.push({ ...(w as Partial<AxNodeJson>), nodeId: w.nodeId, childIds, backendDOMNodeId });
+  }
   const byId = new Map<string, AxNodeJson>();
   const childed = new Set<string>();
-  for (const n of nodes) {
+  for (const n of clean) {
     byId.set(n.nodeId, n);
     for (const c of n.childIds ?? []) childed.add(c);
   }
-  const roots = nodes.filter((n) => !childed.has(n.nodeId));
+  const roots = clean.filter((n) => !childed.has(n.nodeId));
   const lines: string[] = [];
   const refs: AxRef[] = [];
   let kept = 0;

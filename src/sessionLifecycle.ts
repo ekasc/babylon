@@ -10,7 +10,9 @@ export interface SessionEventContext {
  * another session, accepting it would leak stale TUI/GUI output into the open
  * transcript.
  */
-export function shouldAcceptEvent(event: any, context: SessionEventContext): boolean {
+import type { AgentEvent } from "./bridge";
+
+export function shouldAcceptEvent(event: AgentEvent, context: SessionEventContext): boolean {
   if (!event || typeof event !== "object") return false;
   if (context.switching) return false;
   if (typeof event.sessionId !== "string") return true;

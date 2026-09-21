@@ -14,9 +14,9 @@ function decode64(s: string): Uint8Array {
   const out: number[] = [];
   for (let i = 0; i < vals.length; i += 4) {
     const n = vals.length - i;
-    out.push((vals[i] << 2) | (vals[i + 1] >> 4));
-    if (n > 2) out.push(((vals[i + 1] & 15) << 4) | (vals[i + 2] >> 2));
-    if (n > 3) out.push(((vals[i + 2] & 3) << 6) | vals[i + 3]);
+    out.push(((vals[i] ?? 0) << 2) | ((vals[i + 1] ?? 0) >> 4));
+    if (n > 2) out.push((((vals[i + 1] ?? 0) & 15) << 4) | ((vals[i + 2] ?? 0) >> 2));
+    if (n > 3) out.push((((vals[i + 2] ?? 0) & 3) << 6) | (vals[i + 3] ?? 0));
   }
   return new Uint8Array(out);
 }

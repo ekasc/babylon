@@ -14,11 +14,13 @@
 import { randomUUID } from "node:crypto";
 import { promises as fsp } from "node:fs";
 import { join, resolve } from "node:path";
-import { flattenSessionTree } from "./session-tree";
 import { projectHistory } from "./session-history";
 import { ActiveRollback, RollbackStore, entryDigest, missingCheckpointReason, type Ledger, type TurnCheckpoint } from "./rollback-store";
 import { validateSessionPath, contained } from "./session-path";
-import { SnapshotStore, type RestoreChange, type SnapshotCapture } from "./snapshot-store";
+import { SnapshotStore, isBookkeepingPath, type RestoreChange, type SnapshotCapture } from "./snapshot-store";
+import { createGoalModeExtension, isExternalGoalModeExtension } from "./goal-mode/extension";
+import { loadSessionGoal } from "./goal-mode/store";
+import type { DurableGoalState } from "../src/lib/durable-goal";
 import { shouldRelayImagesThrough, toPiImages } from "./prompt-images";
 import { clampToolOutput, readSessionTail, readToolOutput } from "./sessions";
 import { RecapStore } from "./recap-store";
@@ -26,6 +28,9 @@ import { mergeSkillEntries, readUserSkillEntries } from "./user-skills";
 import { CANVAS_PROMPT } from "../src/lib/canvas-prompt";
 import { readCrops } from "../src/lib/sketch-classify";
 import type { RegionReading } from "../src/lib/sketch-compile";
+import type { AgentEvent, AgentModel, AgentState, CommandInfo, HistoryProjection, PromptImage, RollbackPlan, SessionStats, TurnChanges, TurnFileDiff } from "../src/bridge";
+import { toAgentModel, toSessionStats, type RuntimeModelLike } from "./pi-host-shapes";
+import { wireOf, wireStr } from "../src/store";
 import { DEFAULT_GIT_COMMIT_MODEL, type PiSettings } from "./app-settings";
 import { getSettings as defaultGetSettings, saveSettings as defaultSaveSettings } from "./app-settings";
 import { buildGitCommitPrompt, extractModelText, parseGeneratedCommitMessage, type GeneratedCommitMessage } from "./git-commit-message";
@@ -39,11 +44,12 @@ import { createBabylonBashTool } from "./bash-tool";
 import { createBrowserTools } from "./sim-tools";
 import { createCanvasTools } from "./canvas-tools";
 import type { SimController } from "./sim-controller";
-import { installAgentGuards } from "./permission-hook";
+import { installAgentGuards, type GuardedAgent } from "./permission-hook";
 import { mapToolToAction } from "./permission-agent";
 import type { AgentAction, BabylonPermissionController, Risk } from "./permissions";
 import type { HookManager } from "./hook-manager";
-import { ThreadManager } from "./threads";
+import { ThreadManager, type ThreadEvent, type ThreadState } from "./threads";
+import { flattenSessionTree, type SessionTreeRow } from "./session-tree";
 import {
   AgentSessionRuntime,
   ModelRuntime,
@@ -58,20 +64,34 @@ import {
   type AgentSession,
   type CreateAgentSessionRuntimeFactory,
   type CreateAgentSessionRuntimeResult,
+  type CompactionResult,
+  type CustomMessageEntry,
+  type SessionMessageEntry,
+  type ExtensionCommandContextActions,
+  type ExtensionContext,
+  type AgentSessionServices,
+  type ExtensionError,
+  type ExtensionUIDialogOptions,
+  type PromptOptions,
+  type ResourceLoader,
+  type TerminalInputHandler,
+  Theme,
+  type ToolDefinition,
+  type WorkingIndicatorOptions,
 } from "@earendil-works/pi-coding-agent";
 
-function messageText(message: any): string {
-  const content = message?.content;
+function messageText(message: unknown): string {
+  const content = wireOf(message)?.content;
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
-  return content.map((block: any) => typeof block === "string" ? block : block?.text ?? "").join("");
+  return content.map((block) => (typeof block === "string" ? block : String(wireOf(block)?.text ?? ""))).join("");
 }
 
 /** A read failed because the session file was never flushed (canonical
  *  future path of a brand-new session), not because state is corrupt. */
 function isMissingFileError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
-  return (err as any).code === "ENOENT" || /no such file|ENOENT/i.test(err.message);
+  return (err as NodeJS.ErrnoException).code === "ENOENT" || /no such file|ENOENT/i.test(err.message);
 }
 
 function changedExclusions(
@@ -126,6 +146,82 @@ export function defaultStateDir(agentDir?: string): string {
   return join(agentDir ?? getAgentDir(), "pideck-state");
 }
 
+/** Reasoning levels the commit/title models accept, derived from the SDK's
+ *  own completeSimple signature so drift fails the build. Unknown
+ *  settings-file strings (including "off", which simple completion does
+ *  not accept) fall back to low. */
+type SdkReasoning = NonNullable<Parameters<ModelRuntime["completeSimple"]>[2]>["reasoning"];
+
+function asThinkingLevel(value: unknown): SdkReasoning {
+  switch (value) {
+    case "minimal":
+    case "low":
+    case "medium":
+    case "high":
+    case "xhigh":
+    case "max":
+      return value;
+    default:
+      return "low";
+  }
+}
+
+/** SDK resource-loader entries (untyped at the SDK boundary). */
+interface PromptLike {
+  name: string;
+  description?: string;
+  argumentHint?: string;
+}
+
+interface SkillLike {
+  name: string;
+  description?: string;
+}
+
+/** Extension command-context option shapes, via the SDK's own interface so
+ *  they stay in sync (used by commandContextActions and createSessionIn). */
+type NewSessionOptions = Parameters<ExtensionCommandContextActions["newSession"]>[0];
+type ForkOptions = Parameters<ExtensionCommandContextActions["fork"]>[1];
+type NavigateTreeOptions = Parameters<ExtensionCommandContextActions["navigateTree"]>[1];
+type SwitchSessionOptions = Parameters<ExtensionCommandContextActions["switchSession"]>[1];
+
+/**
+ * Headless TUI theme for the extension UI context. Nothing renders headless,
+ * but ExtensionUIContext requires a real Theme, so this builds one with a
+ * degenerate grayscale palette. The Record types make the key lists
+ * self-verifying: a new SDK color key fails the build until added here.
+ */
+const HEADLESS_FG_KEYS = [
+  "accent", "border", "borderAccent", "borderMuted", "success", "error",
+  "warning", "muted", "dim", "text", "thinkingText", "userMessageText",
+  "customMessageText", "customMessageLabel", "toolTitle", "toolOutput",
+  "mdHeading", "mdLink", "mdLinkUrl", "mdCode", "mdCodeBlock",
+  "mdCodeBlockBorder", "mdQuote", "mdQuoteBorder", "mdHr", "mdListBullet",
+  "toolDiffAdded", "toolDiffRemoved", "toolDiffContext", "syntaxComment",
+  "syntaxKeyword", "syntaxFunction", "syntaxVariable", "syntaxString",
+  "syntaxNumber", "syntaxType", "syntaxOperator", "syntaxPunctuation",
+  "thinkingOff", "thinkingMinimal", "thinkingLow", "thinkingMedium",
+  "thinkingHigh", "thinkingXhigh", "thinkingMax", "bashMode",
+] as const;
+
+const HEADLESS_BG_KEYS = [
+  "selectedBg", "userMessageBg", "customMessageBg",
+  "toolPendingBg", "toolSuccessBg", "toolErrorBg",
+] as const;
+
+function headlessTheme(): Theme {
+  const fg = Object.fromEntries(HEADLESS_FG_KEYS.map((k) => [k, 7])) as Record<(typeof HEADLESS_FG_KEYS)[number], number>;
+  const bg = Object.fromEntries(HEADLESS_BG_KEYS.map((k) => [k, 0])) as Record<(typeof HEADLESS_BG_KEYS)[number], number>;
+  return new Theme(fg, bg, "256color", { name: "babylon-headless" });
+}
+/**
+ * SDK services surface, re-exported under a Babylon name so call sites read
+ * intent ("the services bound to this entry") instead of SDK plumbing.
+ * Deliberately the full SDK type, not a Pick: narrowing here would hide
+ * real capabilities from future readers.
+ */
+export type PiHostServices = AgentSessionServices;
+
 export interface HostOptions {
   cwd: string;
   agentDir?: string;
@@ -134,9 +230,9 @@ export interface HostOptions {
   /** Instance sessions root. Unset keeps the SDK default (shared legacy store). */
   sessionsRoot?: string;
   /** Called for every agent event (mirrors RPC stdout events). */
-  onEvent: (event: any) => void;
+  onEvent: (event: AgentEvent) => void;
   /** Called with status changes. */
-  onStatus: (status: { status: string; message?: string; cwd?: string; sessionPath?: string; requestId?: number; state?: any }) => void;
+  onStatus: (status: { status: string; message?: string; cwd?: string; sessionPath?: string; requestId?: number; state?: AgentState | null }) => void;
   /**
    * Called when a session's stored cwd no longer exists. Return the replacement
    * cwd (e.g. from a folder picker), or null/undefined to abort the open.
@@ -161,9 +257,9 @@ export interface HostOptions {
 /** One retained session runtime. Execution belongs to the entry; the
  *  foreground pointer only decides which entry active-scoped commands
  *  (composer prompt, pickers, panels) address by default. */
-interface SessionEntry {
+export interface SessionEntry {
   runtime: AgentSessionRuntime;
-  services: Record<string, any>;
+  services: AgentSessionServices;
   cwd: string;
   sessionId: string;
   sessionFile: string;
@@ -171,7 +267,22 @@ interface SessionEntry {
   lastUsedAt: number;
 }
 
-export class PiHost {
+/**
+ * Permissive fallback controller for sessions running without the permission
+ * system (tests, hook-only hosts): every action allows, approvals auto-yes.
+ */
+function allowAllController(): BabylonPermissionController {
+  return {
+    evaluate: () => ({ decision: "allow" as const }),
+    requestApproval: async () => true,
+    clearSessionRules: () => {},
+    getMode: () => "auto" as const,
+    listRules: () => [],
+  };
+}
+
+import type { LocalPiHost } from "../src/local-pi-host";
+export class PiHost implements LocalPiHost {
   private opts: HostOptions;
   /** Per-project model runtimes (project/cwd-bound: extension provider
    *  registrations must never leak across projects). Created lazily,
@@ -192,7 +303,7 @@ export class PiHost {
   /** Services object -> live session, for closures created before the
    *  session exists (snapcompact getters run lazily per LLM call). */
   private readonly sessionForServices = new WeakMap<object, AgentSession>();
-  private uiRequests = new Map<string, { resolve: (r: any) => void; reject: (e: Error) => void; sessionFile: string | null; sessionId: string | null }>();
+  private uiRequests = new Map<string, { resolve: (r: unknown) => void; reject: (e: Error) => void; sessionFile: string | null; sessionId: string | null }>();
   private _cwd: string;
   private readonly snapshots: SnapshotStore;
   private readonly rollbacks: RollbackStore;
@@ -277,15 +388,7 @@ export class PiHost {
    *  owning session; approvals carry the exact session id. */
   private sessionPermission(entry: SessionEntry): BabylonPermissionController {
     const controller = this.opts.permission;
-    if (!controller) {
-      return {
-        evaluate: () => ({ decision: "allow" as const }),
-        requestApproval: async () => true,
-        clearSessionRules: () => {},
-        getMode: () => "auto" as const,
-        listRules: () => [],
-      } as unknown as BabylonPermissionController;
-    }
+    if (!controller) return allowAllController();
     return {
       ...controller,
       evaluate: (action: AgentAction, _sessionId?: string) => controller.evaluate(action, entry.sessionId),
@@ -302,8 +405,8 @@ export class PiHost {
    *  whatever happens to be foregrounded. Falls back to foreground only when
    *  the owner is gone (legacy behavior). */
   private getSessionTools(sessionId: string | null | undefined): {
-    getToolDefinition: (name: string) => any;
-    createContext: () => any;
+    getToolDefinition: (name: string) => ToolDefinition | undefined;
+    createContext: () => ExtensionContext;
   } {
     if (sessionId) {
       for (const entry of this.sessions.values()) {
@@ -353,6 +456,35 @@ export class PiHost {
     return this.opts.settingsProvider?.saveSettings(patch) ?? defaultSaveSettings(patch);
   }
 
+  /** Rewire event/status sinks. The daemon attaches its broadcast here so
+   *  thin clients receive live agent streaming (replaces direct opts
+   *  mutation, which cannot cross the private boundary). */
+  attachSinks(sinks: { onEvent: (event: unknown) => void; onStatus: HostOptions["onStatus"] }): void {
+    this.opts.onEvent = sinks.onEvent;
+    this.opts.onStatus = sinks.onStatus;
+  }
+
+  /**
+   * Test seams: read-only views over host internals for unit tests.
+   * Production code never calls these; they exist so tests can assert
+   * session bookkeeping without reaching through private fields.
+   */
+  testSessions(): Map<string, SessionEntry> {
+    return this.sessions;
+  }
+
+  testProjectRuntimes(): Map<string, Promise<ModelRuntime>> {
+    return this.projectRuntimes;
+  }
+
+  testUiRequests(): Map<string, { resolve: (r: unknown) => void; reject: (e: Error) => void; sessionFile: string | null; sessionId: string | null }> {
+    return this.uiRequests;
+  }
+
+  testForegroundSessionFile(): string | null {
+    return this.foregroundSessionFile;
+  }
+
   constructor(opts: HostOptions) {
     this.opts = opts;
     this._cwd = opts.cwd;
@@ -379,7 +511,7 @@ export class PiHost {
   /** Foreground entry's services (resource loader, model runtime, settings).
    *  Session creation binds its own copy; this accessor is only for
    *  foreground-scoped UI reads (commands, models, skills). */
-  get services(): Record<string, any> {
+  get services(): AgentSessionServices {
     return this.activeEntry().services;
   }
   get cwd(): string {
@@ -492,7 +624,11 @@ export class PiHost {
           extensionsOverride: (base) => ({
             ...base,
             extensions: [
-              ...base.extensions,
+              // An external goal-mode copy would double-inject the system
+              // prompt and double-dispatch follow-ups next to the hardbaked
+              // one below. Drop it from Babylon sessions only; CLI sessions
+              // keep loading whatever the user installed.
+              ...base.extensions.filter((ext) => !isExternalGoalModeExtension(ext)),
               createSnapcompactExtension({
                 archiveStore: this.snapcompact,
                 getMode: () => (this.opts.settingsProvider?.getSettings() ?? defaultGetSettings()).compaction?.mode ?? "summary",
@@ -501,13 +637,33 @@ export class PiHost {
                 // sessions created before this mapping existed.
                 getModel: () => {
                   const s = self.sessionForServices.get(services as object) ?? self.sessions.get(self.foregroundSessionFile ?? "")?.runtime.session;
-                  const m: any = s?.model;
+                  const m = s?.model;
                   if (!m) return null;
                   return { provider: m.provider, id: m.id, input: m.input };
                 },
                 getSessionId: () => self.sessionForServices.get(services as object)?.sessionId ?? self.sessions.get(self.foregroundSessionFile ?? "")?.runtime.session.sessionId ?? "",
                 getSessionFile: () => self.sessionForServices.get(services as object)?.sessionFile ?? self.sessions.get(self.foregroundSessionFile ?? "")?.runtime.session.sessionFile ?? null,
               } as SnapcompactExtensionOptions),
+              createGoalModeExtension({
+                getCwd: () => runtimeCwd,
+                getSessionId: () => {
+                  const id = self.sessionForServices.get(services as object)?.sessionId ?? "";
+                  return id || null;
+                },
+                isProjectTrusted: () => projectTrusted ?? false,
+                sendFollowUp: (text) => {
+                  const session =
+                    self.sessionForServices.get(services as object) ??
+                    (self.foregroundSessionFile ? self.sessions.get(self.foregroundSessionFile)?.runtime.session : undefined);
+                  if (!session) return;
+                  // Fire-and-forget by design (upstream pattern): a failed
+                  // dispatch must never break the turn that triggered it,
+                  // least of all inside the daemon.
+                  void session.sendUserMessage(text, { deliverAs: "followUp" }).catch((err: unknown) =>
+                    console.warn("[pideck] goal follow-up failed:", err instanceof Error ? err.message : err)
+                  );
+                },
+              }),
             ],
           }),
         },
@@ -518,10 +674,6 @@ export class PiHost {
         sessionStartEvent: input.sessionStartEvent,
         customTools: [this.managedSubagents.tool(), createAskQuestionTool(), createBabylonBashTool(runtimeCwd), ...createBrowserTools(() => self.opts.getSimController?.() ?? null), ...createCanvasTools()],
       });
-      try {
-        const hasAsk = !!(result.session as any).getToolDefinition?.("ask_question");
-        console.log(`[Babylon] ask_question registered: ${hasAsk}, tools:`, (() => { try { return (result.session as any).getToolDefinitions?.() ? Object.keys((result.session as any).getToolDefinitions()) : "unknown"; } catch { return "err"; } })());
-      } catch {}
       const out: CreateAgentSessionRuntimeResult = {
         session: result.session,
         services,
@@ -569,7 +721,7 @@ export class PiHost {
     return this.createSessionRuntimeWithManager(sessionFile, cwd, sessionManager);
   }
 
-  private async createSessionRuntimeWithManager(sessionFile: string, cwd: string, sessionManager: any): Promise<SessionEntry> {
+  private async createSessionRuntimeWithManager(sessionFile: string, cwd: string, sessionManager: SessionManager): Promise<SessionEntry> {
     const factory = this.createRuntimeFactory;
     if (!factory) throw new Error("pi host not started");
     const runtime = await createAgentSessionRuntime(factory, {
@@ -580,7 +732,7 @@ export class PiHost {
     // The SDK keeps the built services on the runtime object; register them
     // so lazily-evaluated closures (snapcompact getters) resolve the owning
     // session instead of whatever happens to be foregrounded.
-    const services = (runtime as unknown as { services: Record<string, any> }).services;
+    const services = runtime.services;
     const entry: SessionEntry = {
       runtime,
       services,
@@ -637,11 +789,11 @@ export class PiHost {
     // Every request carries its OWNING session identity (never the foreground
     // session): concurrent sessions awaiting input stay distinguishable and
     // responses route by dialog id regardless of what is on screen.
-    const dialog = (request: any, pick: (r: any) => any, opts?: any) =>
+    const dialog = <T,>(request: Record<string, unknown>, pick: (r: unknown) => T, opts?: ExtensionUIDialogOptions): Promise<T> =>
       new Promise((resolveDialog, rejectDialog) => {
         const id = `ui-${crypto.randomUUID()}`;
         let timeout: NodeJS.Timeout | undefined;
-        const finish = (response: any) => {
+        const finish = (response: unknown) => {
           if (timeout) clearTimeout(timeout);
           resolveDialog(pick(response));
         };
@@ -651,12 +803,13 @@ export class PiHost {
         };
         this.uiRequests.set(id, { resolve: finish, reject, sessionFile: session.sessionFile ?? null, sessionId: entry.sessionId });
         this.opts.onEvent({ type: "extension_ui_request", id, ...request, timeout: opts?.timeout, sessionId: session.sessionId, sessionFile: session.sessionFile ?? null });
-        if (typeof opts?.timeout === "number" && opts.timeout > 0) {
+        const timeoutMs = opts?.timeout;
+        if (typeof timeoutMs === "number" && timeoutMs > 0) {
           timeout = setTimeout(() => {
             if (!this.uiRequests.delete(id)) return;
             this.opts.onEvent({ type: "extension_ui_cancel", id });
             finish({ cancelled: true });
-          }, opts.timeout);
+          }, timeoutMs);
         }
         if (opts?.signal) {
           const abort = () => {
@@ -669,51 +822,65 @@ export class PiHost {
         }
       });
 
-    const uiContext: any = {
+    const uiContext = {
       mode: "rpc",
       hasUI: true,
-      select: (title: string, options: string[], opts?: any) =>
-        dialog({ method: "select", title, options }, (r) =>
-          r && r.cancelled ? undefined : r?.value
-        , opts),
-      confirm: (title: string, message?: string, opts?: any) =>
-        dialog({ method: "confirm", title, message }, (r) => !!r?.confirmed, opts),
-      input: (title: string, opts?: any) =>
-        dialog({ method: "input", title, placeholder: opts?.placeholder }, (r) =>
-          r && r.cancelled ? undefined : r?.value
-        , opts),
-      editor: (title: string, prefill?: string, opts?: any) =>
-        dialog({ method: "editor", title, prefill }, (r) =>
-          r && r.cancelled ? undefined : r?.value
-        , opts),
-      notify: (message: string, typeOrOptions?: any) => {
-        const notifyType =
-          typeof typeOrOptions === "string" ? typeOrOptions : typeOrOptions?.notifyType ?? "info";
+      select: (title: string, options: string[], opts?: ExtensionUIDialogOptions) =>
+        dialog({ method: "select", title, options }, (r) => {
+          const w = wireOf(r);
+          if (!w || w.cancelled) return undefined;
+          return typeof w.value === "string" ? w.value : undefined;
+        }, opts),
+      confirm: (title: string, message: string, opts?: ExtensionUIDialogOptions) =>
+        dialog({ method: "confirm", title, message }, (r) => !!wireOf(r)?.confirmed, opts),
+      input: (title: string, placeholder?: string, opts?: ExtensionUIDialogOptions) =>
+        dialog({ method: "input", title, placeholder }, (r) => {
+          const w = wireOf(r);
+          if (!w || w.cancelled) return undefined;
+          return typeof w.value === "string" ? w.value : undefined;
+        }, opts),
+      editor: (title: string, prefill?: string, opts?: ExtensionUIDialogOptions) =>
+        dialog({ method: "editor", title, prefill }, (r) => {
+          const w = wireOf(r);
+          if (!w || w.cancelled) return undefined;
+          return typeof w.value === "string" ? w.value : undefined;
+        }, opts),
+      notify: (message: string, type?: "info" | "warning" | "error") => {
         this.opts.onEvent({
           type: "extension_ui_request",
           id: `notify-${crypto.randomUUID()}`,
           method: "notify",
           message,
-          notifyType,
+          notifyType: type ?? "info",
         });
         return Promise.resolve();
       },
-      setStatus: () => Promise.resolve(),
+      // Headless host: no TUI surface, so interactive-only members are
+      // explicit no-ops (matching the setStatus/setWidget stubs below).
+      onTerminalInput: (_handler: TerminalInputHandler) => () => {},
+      setStatus: (_key: string, _text: string | undefined) => {},
+      setWorkingVisible: (_visible: boolean) => {},
+      setWorkingIndicator: (_options?: WorkingIndicatorOptions) => {},
+      setHiddenThinkingLabel: (_label?: string) => {},
+      pasteToEditor: (_text: string) => {},
       setWidget: () => Promise.resolve(),
       setTitle: () => Promise.resolve(),
+      setEditorText: (_text: string) => {},
       set_editor_text: () => Promise.resolve(),
       setWorkingMessage: () => {},
-      setWorkingIndicator: () => {},
       setFooter: () => {},
       setHeader: () => {},
       setEditorComponent: () => {},
-      setToolsExpanded: () => {},
-      getEditorText: () => "",
+      addAutocompleteProvider: () => {},
+      getEditorComponent: () => undefined,
       getToolsExpanded: () => false,
       getAllThemes: () => [],
       getTheme: () => undefined,
       setTheme: () => ({ success: false as const, error: "not supported" }),
-      custom: () => undefined,
+      setToolsExpanded: () => {},
+      getEditorText: () => "",
+      theme: headlessTheme(),
+      custom: () => Promise.reject(new Error("custom components unavailable in headless mode")),
     };
 
     await session.bindExtensions({
@@ -723,14 +890,20 @@ export class PiHost {
         waitForIdle: () => session.waitForIdle(),
         // Created without disturbing the foreground: agent-requested sessions
         // appear in the session list; only explicit user opens foreground.
-        newSession: (options: any) => this.createSessionIn(entry.cwd, options),
-        fork: async (entryId: string, forkOptions: any) => {
+        // The SDK's newSession contract reports {cancelled}: creation here
+        // never cancels (failures reject instead), matching the previous
+        // runtime behavior where the returned state carried no cancelled flag.
+        newSession: async (options?: NewSessionOptions) => {
+          await this.createSessionIn(entry.cwd, options);
+          return { cancelled: false };
+        },
+        fork: async (entryId: string, forkOptions?: ForkOptions) => {
           const sourceSessionId = session.sessionId;
           const r = await entry.runtime.fork(entryId, forkOptions);
           if (!r.cancelled) await this.rollbacks.clearActive(sourceSessionId).catch(() => undefined);
           return { cancelled: r.cancelled };
         },
-        navigateTree: async (targetId: string, options: any) => {
+        navigateTree: async (targetId: string, options?: NavigateTreeOptions) => {
           const sourceSessionId = session.sessionId;
           const previousLeaf = session.sessionManager.getLeafId();
           const r = await session.navigateTree(targetId, options);
@@ -742,14 +915,16 @@ export class PiHost {
         // Extension-requested "switch" is foregrounding, not teardown: ensure
         // the target runtime exists and report it; the renderer decides what
         // to display. Other sessions keep running untouched.
-        switchSession: (sessionPath: string, options: any) =>
-          this.ensureForeground(sessionPath, options),
+        switchSession: async (sessionPath: string, options?: SwitchSessionOptions) => {
+          await this.ensureForeground(sessionPath, options);
+          return { cancelled: false };
+        },
         reload: async () => {
           await session.reload();
         },
       },
       shutdownHandler: () => {},
-      onError: (err: any) => {
+      onError: (err: ExtensionError) => {
         const msg = err?.error ?? String(err);
         // Lifecycle noise: extension async init (e.g. MCP server startup) that
         // was still in flight when the session was replaced hits pi's stale-ctx
@@ -762,7 +937,7 @@ export class PiHost {
     });
     entry.unsubscribe?.();
     if (this.opts.permission) {
-      installAgentGuards(session.agent as any, {
+      installAgentGuards(session.agent as GuardedAgent, {
         controller: this.sessionPermission(entry),
         cwd: entry.cwd,
         hookManager: this.opts.hookManager,
@@ -770,8 +945,8 @@ export class PiHost {
         taskId: this.opts.getTaskIdForSessionFile?.(session.sessionFile ?? null),
       });
     } else if (this.opts.hookManager) {
-      installAgentGuards(session.agent as any, {
-        controller: { evaluate: () => ({ decision: "allow" as const }), requestApproval: async () => true, clearSessionRules: () => {}, getMode: () => "auto" as const, listRules: () => [] } as unknown as BabylonPermissionController,
+      installAgentGuards(session.agent as GuardedAgent, {
+        controller: allowAllController(),
         cwd: entry.cwd,
         hookManager: this.opts.hookManager,
         sessionId: session.sessionId,
@@ -781,24 +956,28 @@ export class PiHost {
 
     entry.unsubscribe = session.subscribe((event) => {
       this.opts.onEvent({ ...event, sessionId: session.sessionId, sessionFile: session.sessionFile });
-      if (event.type === "tool_execution_end" && ((event as any).toolName === "spawn_thread" || (event as any).toolName === "workflow")) {
-        const details = (event as any).result?.details ?? {};
-        const runId = details.threadId ?? details.runId ?? (event as any).toolCallId;
+      if (event.type === "tool_execution_end" && (event.toolName === "spawn_thread" || event.toolName === "workflow")) {
+        // Tool results are model-adjacent data: narrow every field instead
+        // of trusting the wire shape.
+        const details = wireOf(wireOf(event.result)?.details) ?? {};
+        const runId = wireStr(details, "threadId") ?? wireStr(details, "runId") ?? event.toolCallId;
         if (runId) {
-          const status = (event as any).isError ? "failed" : "running";
-          const args = (event as any).args ?? {};
-          const label = args.name?.trim() || args.goal?.trim()?.slice(0, 80) || details.threadId || details.runId || (event as any).toolName;
-          this.opts.onEvent({ type: "babylon_launch_started", runId, runKind: (event as any).toolName === "spawn_thread" ? "thread" : "workflow", label, status: "running", sessionId: session.sessionId, sessionFile: session.sessionFile });
+          const status = event.isError ? "failed" : "running";
+          const args = wireOf(wireOf(event)?.args);
+          const label = wireStr(args, "name")?.trim() || wireStr(args, "goal")?.trim()?.slice(0, 80) || wireStr(details, "threadId") || wireStr(details, "runId") || event.toolName;
+          this.opts.onEvent({ type: "babylon_launch_started", runId, runKind: event.toolName === "spawn_thread" ? "thread" : "workflow", label, status: "running", sessionId: session.sessionId, sessionFile: session.sessionFile });
           if (status === "failed") this.opts.onEvent({ type: "babylon_launch_terminated", runId, status: "failed", sessionId: session.sessionId, sessionFile: session.sessionFile });
         }
       }
       if (event.type === "tool_execution_end") {
-        const toolName = (event as any).toolName ?? (event as any).toolCall?.name ?? "";
+        // args/toolCall ride the wire beyond the SDK's typed surface.
+        const wired = wireOf(event);
+        const toolName = event.toolName ?? wireStr(wireOf(wired?.toolCall), "name") ?? "";
         void this.opts.hookManager?.dispatch(
           "post_tool_use",
           {
             toolName,
-            args: (event as any).args ?? (event as any).result,
+            args: wired?.args ?? event.result,
             sessionId: session.sessionId,
             taskId: this.opts.getTaskIdForSessionFile?.(session.sessionFile ?? null),
           },
@@ -834,10 +1013,10 @@ export class PiHost {
       // Under pi >= 0.84.2 the in-memory manager keeps message content out of
       // getEntries(), so the sample is read from the append-only file.
       const file = session.sessionFile ?? session.sessionManager.getSessionFile();
-      const { messages } = file ? await readSessionTail(file) : { messages: [] as any[] };
+      const { messages } = file ? await readSessionTail(file) : { messages: [] };
       const userTexts = messages
-        .filter((m: any) => m.role === "user")
-        .map((m: any) => messageText(m))
+        .filter((m) => wireOf(m)?.role === "user")
+        .map((m) => messageText(wireOf(m)?.content))
         .filter((t: string) => t.trim().length > 0);
       const sample = userTexts.slice(-4).join("\n").slice(0, 1500);
       if (!sample.trim()) return;
@@ -880,11 +1059,11 @@ export class PiHost {
     const complete = (prompt: string) =>
       modelRuntimeForCommit.completeSimple(
         model,
-        { messages: [{ role: "user", content: prompt }] } as any,
+        { messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
         { reasoning: "low", maxTokens: 4_096 }
       );
     const read = async (prompt: string): Promise<string> => {
-      let response: any;
+      let response: Awaited<ReturnType<typeof complete>>;
       try {
         response = await complete(prompt);
       } catch (cause) {
@@ -927,27 +1106,27 @@ export class PiHost {
       modelRuntime.getModel("opencode-go", "muse-spark-1.2-contributor") ??
       this.sessions.get(this.foregroundSessionFile ?? "")?.runtime.session.model;
     if (!model) return null;
-    const reasoning = (settings.titleReasoning as any) || "low";
+    const reasoning = asThinkingLevel(settings.titleReasoning);
     const effectiveMaxTokens = reasoning === "low" ? Math.max(maxTokens, 1024) : maxTokens;
     try {
       const response = await modelRuntime.completeSimple(
         model,
-        { messages: [{ role: "user", content: prompt }] } as any,
+        { messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
         { reasoning, maxTokens: effectiveMaxTokens }
       );
       const text = (response?.content ?? [])
-        .map((block: any) => (block?.type === "text" ? block.text ?? "" : ""))
+        .map((block) => (block?.type === "text" ? block.text ?? "" : ""))
         .join("")
         .trim();
       if (text) return text;
       if (response?.stopReason === "length") {
         const retry = await modelRuntime.completeSimple(
           model,
-          { messages: [{ role: "user", content: prompt }] } as any,
+        { messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
           { reasoning: "minimal", maxTokens: Math.max(effectiveMaxTokens, 1024) }
         );
         return (retry?.content ?? [])
-          .map((block: any) => (block?.type === "text" ? block.text ?? "" : ""))
+          .map((block) => (block?.type === "text" ? block.text ?? "" : ""))
           .join("")
           .trim() || null;
       }
@@ -1001,10 +1180,10 @@ export class PiHost {
       // the same projection the transcript uses, with entryIds attached.
       const { messages } = await readSessionTail(file);
       if (!messages.length) return;
-      const lastMessageAt = messages.reduce(
-        (max, m) => Math.max(max, typeof m?.timestamp === "number" ? m.timestamp : 0),
-        0
-      );
+      const lastMessageAt = messages.reduce<number>((max, m) => {
+        const ts = wireOf(m)?.timestamp;
+        return Math.max(max, typeof ts === "number" ? ts : 0);
+      }, 0);
       if (!lastMessageAt) return;
       const recaps = await this.recaps.recapsFor(file);
       const lastRecapAt = recaps.reduce((max, r) => Math.max(max, Date.parse(r.at) || 0), 0) || null;
@@ -1050,18 +1229,20 @@ export class PiHost {
   private async relayPromotedSubagentReply(session: AgentSession, text: string): Promise<void> {
     if (!text.trim()) return;
     const identity = [...session.sessionManager.getEntries()].reverse().find(
-      (entry: any) => entry.type === "custom_message" && entry.customType === "babylon_subagent_identity"
-    ) as any;
-    const parentSessionFile = identity?.details?.parentSessionFile;
+      (entry): entry is CustomMessageEntry =>
+        entry.type === "custom_message" && entry.customType === "babylon_subagent_identity"
+    );
+    const details = wireOf(identity?.details);
+    const parentSessionFile = wireStr(details, "parentSessionFile");
     if (typeof parentSessionFile !== "string" || !parentSessionFile || parentSessionFile === session.sessionFile) return;
     try {
       const parent = SessionManager.open(parentSessionFile, undefined, session.sessionManager.getCwd());
-      const label = identity.details?.name ?? identity.details?.runId?.slice?.(0, 8) ?? "subagent";
+      const label = wireStr(details, "name") ?? wireStr(details, "runId")?.slice(0, 8) ?? "subagent";
       parent.appendCustomMessageEntry(
         "babylon_subagent_activity",
         `[Babylon Subagent Activity]\nSubagent ${label} replied:\n\n${text}`,
         true,
-        { runId: identity.details?.runId, action: "reply", message: text }
+        { runId: wireStr(details, "runId"), action: "reply", message: text }
       );
     } catch {
       // Parent may have moved or been deleted; the promoted child remains usable.
@@ -1077,7 +1258,7 @@ export class PiHost {
   }
 
   /** Respond to an extension dialog request (from the renderer). */
-  respondUi(id: string, resp: any): void {
+  respondUi(id: string, resp: unknown): void {
     const p = this.uiRequests.get(id);
     if (p) {
       this.uiRequests.delete(id);
@@ -1115,7 +1296,7 @@ export class PiHost {
     }
     const file = this.foregroundSessionFile;
     const entry = file ? this.sessions.get(file) : undefined;
-    if (entry) return (entry.services as any)?.modelRuntime ?? this.ensureProjectRuntime(entry.cwd);
+    if (entry) return entry.services.modelRuntime ?? (await this.ensureProjectRuntime(entry.cwd));
     throw new Error("pi host has no model runtime available");
   }
 
@@ -1133,7 +1314,7 @@ export class PiHost {
    *  retained runtime for the file, creating it on first sight. Other
    *  sessions keep running untouched: opening B never aborts, invalidates,
    *  or rebuilds A. */
-  async open(opts: { path?: string; cwd: string; requestId?: number }): Promise<any> {
+  async open(opts: { path?: string; cwd: string; requestId?: number }): Promise<AgentState> {
     // Serialize per target file; unrelated sessions open concurrently.
     const key = opts.path ?? `new:${opts.cwd}`;
     return this.enqueueTransition(key, async () => {
@@ -1145,8 +1326,8 @@ export class PiHost {
       // source of truth until its first flush.
       try {
         await validateSessionPath(this.opts.sessionsRoot, opts.path);
-      } catch (error: any) {
-        if (error?.message === "session path does not exist") {
+      } catch (error: unknown) {
+        if (error instanceof Error && error.message === "session path does not exist") {
           if (!contained(this.opts.sessionsRoot, resolve(opts.path))) {
             throw new Error("session path is outside this instance's sessions root");
           }
@@ -1214,7 +1395,10 @@ export class PiHost {
   /** Foreground a session without disturbing anything else
    *  (extension-requested "switch" and worktree flows). Creates the runtime
    *  on demand like the old switch path did; other sessions keep running. */
-  async ensureForeground(sessionPath: string, options?: any): Promise<any> {
+  async ensureForeground(
+    sessionPath: string,
+    options?: SwitchSessionOptions & { cwdOverride?: string }
+  ): Promise<AgentState> {
     let entry = this.sessions.get(sessionPath);
     if (!entry) {
       entry = await this.ensureSessionRuntime(sessionPath, options?.cwdOverride ?? this._cwd);
@@ -1229,7 +1413,7 @@ export class PiHost {
 
   /** Create a fresh session runtime in cwd without foregrounding it (agent-
    *  requested new sessions must not hijack the user's view). */
-  private async createSessionIn(cwd: string, _options?: any): Promise<any> {
+  private async createSessionIn(cwd: string, _options?: NewSessionOptions): Promise<AgentState> {
     const sm = SessionManager.create(cwd, this.opts.sessionsRoot);
     const file = sm.getSessionFile()!;
     await this.createSessionRuntimeWithManager(file, cwd, sm);
@@ -1240,7 +1424,7 @@ export class PiHost {
   }
 
   private isMissingCwdError(err: unknown): boolean {
-    return err instanceof Error && (err as any).name === "MissingSessionCwdError";
+    return err instanceof Error && err.name === "MissingSessionCwdError";
   }
 
   async refreshFromDisk(sessionPath: string): Promise<boolean> {
@@ -1269,16 +1453,27 @@ export class PiHost {
     const sessionManager = SessionManager.open(entry.sessionFile, undefined, cwdOverride);
     const context = sessionManager.buildSessionContext();
     const session = entry.runtime.session;
-    (session as any).sessionManager = sessionManager;
+    // Deliberate swap: the disk state is newer (another pi process wrote
+    // it), so the live session adopts the fresh manager. The field is
+    // readonly in the SDK type, hence the targeted assertion.
+    (session as { sessionManager: SessionManager }).sessionManager = sessionManager;
     session.agent.state.messages = context.messages;
     if (context.model) {
-      const model = (entry.services as any)?.modelRuntime?.getModel(context.model.provider, context.model.modelId);
+      const model = entry.services.modelRuntime.getModel(context.model.provider, context.model.modelId);
       if (model) session.agent.state.model = model;
     }
-    session.agent.state.thinkingLevel = context.thinkingLevel as any;
+    // The file stores a plain string; only assign it when it names a level
+    // the agent type accepts (a corrupt value must not clobber the live one).
+    const level = context.thinkingLevel;
+    if (
+      level === "off" || level === "minimal" || level === "low" || level === "medium" ||
+      level === "high" || level === "xhigh" || level === "max"
+    ) {
+      session.agent.state.thinkingLevel = level;
+    }
   }
 
-  async newSession(opts?: { parentSession?: string }): Promise<any> {
+  async newSession(opts?: { parentSession?: string }): Promise<AgentState> {
     return this.enqueueTransition(`new:${opts?.parentSession ?? "root"}`, async () => {
       const cwd = this.foregroundSessionFile
         ? (this.sessions.get(this.foregroundSessionFile)?.cwd ?? this._cwd)
@@ -1288,12 +1483,12 @@ export class PiHost {
       await this.createSessionRuntimeWithManager(file, cwd, sm);
       this.foregroundSessionFile = file;
       const state = await this.getState();
-      this.opts.onStatus({ status: "ready", cwd, sessionPath: state.sessionFile, state });
+      this.opts.onStatus({ status: "ready", cwd, sessionPath: state.sessionFile ?? undefined, state });
       return state;
     });
   }
 
-  async switchTo(sessionPath: string, options?: any): Promise<any> {
+  async switchTo(sessionPath: string, options?: { cwdOverride?: string }): Promise<AgentState> {
     return this.enqueueTransition(sessionPath, async () => {
       const state = await this.ensureForeground(sessionPath, options);
       return state;
@@ -1318,7 +1513,7 @@ export class PiHost {
   activeTurnCount(): number {
     let count = 0;
     for (const [sessionFile, entry] of this.sessions) {
-      const session = entry?.runtime?.session as any;
+      const session = entry?.runtime?.session;
       if (!session) continue;
       if (session.isStreaming) {
         count++;
@@ -1341,7 +1536,7 @@ export class PiHost {
     }
   }
 
-  async prompt(message: string, images?: any[], streamingBehavior?: "steer" | "followUp"): Promise<any> {
+  async prompt(message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp"): Promise<void> {
     if (this.draining) throw new Error("daemon is draining for restart; please resend in a moment");
     const entry = this.activeEntry();
     const sessionAtStart = entry.runtime.session;
@@ -1350,7 +1545,7 @@ export class PiHost {
     // Mid-stream steer/follow-up messages cannot establish a race-free
     // filesystem boundary. They remain part of the active checkpointed turn.
     const checkpoint = streamingBehavior ? null : await this.captureTurnStart();
-    const opts: any = {};
+    const opts: PromptOptions = {};
     // Snapcompact no longer decorates the user message here. The
     // transient archive projection is injected by the snapcompact
     // extension's `context` handler, which runs before every LLM
@@ -1362,7 +1557,7 @@ export class PiHost {
         // own model has no vision: its description is relayed to the session
         // instead of the raw image blocks. Otherwise images attach directly.
         const settings = this._getSettings();
-        const sessionModel = entry.runtime.session.model as any;
+        const sessionModel = entry.runtime.session.model;
         const described =
           shouldRelayImagesThrough(settings.imageModel, sessionModel)
             ? await this.describeImages(message, images, entry.cwd).catch(() => null)
@@ -1391,7 +1586,7 @@ export class PiHost {
   // content; the raw image blocks are not forwarded. Returns null when no
   // image model is set or the read fails — the caller then falls back to
   // attaching the images directly.
-  private async describeImages(message: string, images: any[], cwd: string | null): Promise<string | null> {
+  private async describeImages(message: string, images: PromptImage[], cwd: string | null): Promise<string | null> {
     const settings = this._getSettings();
     const imageRef = settings.imageModel;
     if (!imageRef) return null;
@@ -1409,13 +1604,14 @@ export class PiHost {
                 { type: "text", text: "Describe each attached image in precise detail: what it shows, every visible text string, layout, colors, and anything a coding assistant needs to act on the screenshot or diagram. Be thorough and concrete." },
                 ...(toPiImages(images) ?? []),
               ],
+              timestamp: Date.now(),
             },
           ],
-        } as any,
+        },
         { reasoning: "low", maxTokens: 2048 }
       );
       const text = (response?.content ?? [])
-        .map((block: any) => (block?.type === "text" ? (block.text ?? "") : ""))
+        .map((block) => (block?.type === "text" ? (block.text ?? "") : ""))
         .join("")
         .trim();
       if (!text) return null;
@@ -1446,8 +1642,8 @@ export class PiHost {
       modelRuntime.completeSimple(
         model,
         {
-          messages: [{ role: "user", content: [{ type: "text", text: prompt }, { type: "image", ...image }] }],
-        } as any,
+          messages: [{ role: "user", content: [{ type: "text", text: prompt }, { type: "image", ...image }], timestamp: Date.now() }],
+        },
         { reasoning: "low", maxTokens: 512 }
       )
     );
@@ -1458,23 +1654,36 @@ export class PiHost {
     return readings;
   }
 
-  async steer(message: string): Promise<any> {
+  /** Run a `/goal …` control invocation on the foreground session and return
+   *  the fresh durable state. Control-plane, not a turn: extension commands
+   *  execute immediately inside `session.prompt` and never append a user
+   *  message, so unlike `prompt()` this takes no checkpoint, records no
+   *  rollback receipt, and wakes no shared-chat extras. */
+  async execGoalCommand(args: string): Promise<DurableGoalState | null> {
+    if (this.draining) throw new Error("daemon is draining for restart; please resend in a moment");
+    const text = args ? `/goal ${args}` : "/goal";
+    if (!/^\/goal(\s|$)/.test(text)) throw new Error("goal control must be a /goal invocation");
+    const entry = this.activeEntry();
+    await entry.runtime.session.prompt(text, {});
+    return loadSessionGoal(entry.cwd, entry.sessionId);
+  }
+  async steer(message: string): Promise<void> {
     const entry = this.activeEntry();
     await this.commitActiveRollback(entry.sessionId);
     return entry.runtime.session.steer(message);
   }
-  async followUp(message: string): Promise<any> {
+  async followUp(message: string): Promise<void> {
     const entry = this.activeEntry();
     await this.commitActiveRollback(entry.sessionId);
     return entry.runtime.session.followUp(message);
   }
   /** Abort one session's run. Other sessions keep running untouched — this is
    *  what the Agents dock calls to stop a background run. */
-  async abort(sessionFile?: string | null): Promise<any> {
+  async abort(sessionFile?: string | null): Promise<void> {
     const entry = this.resolveEntry(sessionFile);
     return entry.runtime.session.abort();
   }
-  async compact(customInstructions?: string): Promise<any> {
+  async compact(customInstructions?: string): Promise<CompactionResult> {
     const entry = this.activeEntry();
     return this.enqueueTransition(entry.sessionFile, async () => {
       await this.ensureSession();
@@ -1503,7 +1712,7 @@ export class PiHost {
       session.agent.state.messages = manager.buildSessionContext().messages;
       return;
     }
-    const target = manager.getEntry(targetId) as any;
+    const target = manager.getEntry(targetId);
     if (!target) throw new Error("The saved history position no longer exists");
     // navigateTree treats a user entry as an editor target and moves to its
     // parent. An old leaf can itself be a user entry after an interrupted turn,
@@ -1554,7 +1763,7 @@ export class PiHost {
       sessionId: session.sessionId,
       sessionFile,
       beforeLeafId: session.sessionManager.getLeafId(),
-      beforeEntryIds: new Set(entries.map((entry: any) => entry.id)),
+      beforeEntryIds: new Set(entries.map((entry) => entry.id)),
       before,
     };
   }
@@ -1566,7 +1775,7 @@ export class PiHost {
     const session = this.session;
     const sessionFile = session.sessionFile ?? session.sessionManager.getSessionFile();
     if (!sessionFile) return;
-    const entries = session.sessionManager.getEntries() as any[];
+    const entries = session.sessionManager.getEntries();
     const users = entries.filter((entry) => entry?.type === "message" && entry.message?.role === "user");
     const user = users[users.length - 1];
     if (!user?.id) return;
@@ -1600,6 +1809,32 @@ export class PiHost {
     });
   }
 
+  /**
+   * Test seams for the turn-checkpoint pair (private in production).
+   * Integration tests drive them directly to simulate agent turns.
+   * captureTurnStart can also report {skipped} or null (no session yet);
+   * the seam surfaces that so tests assert the real contract.
+   */
+  async testCaptureTurnStart(): Promise<{
+    sessionId: string;
+    sessionFile: string;
+    beforeLeafId: string | null;
+    beforeEntryIds: Set<string>;
+    before: SnapshotCapture;
+  } | { skipped: string } | null> {
+    return this.captureTurnStart();
+  }
+
+  async testCaptureTurnEnd(start: {
+    sessionId: string;
+    sessionFile: string;
+    beforeLeafId: string | null;
+    beforeEntryIds: Set<string>;
+    before: SnapshotCapture;
+  }): Promise<void> {
+    return this.captureTurnEnd(start);
+  }
+
   private async captureTurnEnd(start: {
     sessionId: string;
     sessionFile: string;
@@ -1623,7 +1858,7 @@ export class PiHost {
   }): Promise<void> {
     const session = this.session;
     const sessionFile = session.sessionFile ?? session.sessionManager.getSessionFile();
-    const entries = session.sessionManager.getEntries() as any[];
+    const entries = session.sessionManager.getEntries();
     const user = entries.find(
       (entry) => !start.beforeEntryIds.has(entry.id) && entry.type === "message" && entry.message?.role === "user"
     );
@@ -1650,7 +1885,12 @@ export class PiHost {
       );
       return;
     }
-    const changedPaths = await this.snapshots.changedFiles(this.cwd, start.before.tree, after.tree);
+    // Bookkeeping (the engine's own `.pi/state` logs) mutates as a side
+    // effect of running tools, so without this filter every tool-using turn
+    // — even a purely read-only one — would report "files changed".
+    const changedPaths = (await this.snapshots.changedFiles(this.cwd, start.before.tree, after.tree)).filter(
+      (path) => !isBookkeepingPath(path)
+    );
     const exclusions = changedExclusions(start.before.excluded, after.excluded);
     if (changedPaths.length > 5000) exclusions.push("More than 5,000 files changed in one turn");
     const checkpoint: TurnCheckpoint = {
@@ -1704,14 +1944,15 @@ export class PiHost {
   // State
   // -------------------------------------------------------------------------
 
-  async getState(): Promise<any> {
+  async getState(): Promise<AgentState> {
     return this.getStateFor(this.activeEntry());
   }
 
-  async getStateFor(entry: SessionEntry): Promise<any> {
+  async getStateFor(entry: SessionEntry): Promise<AgentState> {
     const s = entry.runtime.session;
+    const model = toAgentModel(s.model as RuntimeModelLike | null | undefined);
     return {
-      model: s.model ?? null,
+      model,
       thinkingLevel: s.thinkingLevel,
       isStreaming: s.isStreaming,
       isCompacting: s.isCompacting,
@@ -1723,14 +1964,16 @@ export class PiHost {
       pendingMessageCount: 0,
     };
   }
-  async getMessages(): Promise<any[]> {
+  async getMessages(): Promise<unknown[]> {
     await this.ensureSession();
     const messages = this.session.messages;
     const userEntries = this.session.sessionManager
       .getBranch()
-      .filter((entry: any) => entry.type === "message" && entry.message?.role === "user");
+      .filter(
+        (entry): entry is SessionMessageEntry => entry.type === "message" && entry.message?.role === "user"
+      );
     let userIndex = 0;
-    return messages.map((message: any) => {
+    return messages.map((message) => {
       if (message?.role !== "user") return clampToolOutput(message);
       const entry = userEntries[userIndex++];
       return entry ? clampToolOutput({ ...message, entryId: entry.id }) : clampToolOutput(message);
@@ -1741,25 +1984,25 @@ export class PiHost {
     if (!file) throw new Error("No session file for the active session");
     return readToolOutput(file, toolCallId);
   }
-  async getStats(): Promise<any> {
+  async getStats(): Promise<SessionStats> {
     await this.ensureSession();
-    return this.session.getSessionStats();
+    return toSessionStats(this.session.getSessionStats());
   }
-  async getCommands(): Promise<Array<{ name: string; description?: string; argumentHint?: string; source: string }>> {
+  async getCommands(): Promise<CommandInfo[]> {
     await this.ensureSession();
-    const extensionCommands = this.session.extensionRunner.getRegisteredCommands().map((command) => ({
+    const extensionCommands: CommandInfo[] = this.session.extensionRunner.getRegisteredCommands().map((command) => ({
       name: command.invocationName,
       description: command.description,
       source: "extension",
     }));
-    const prompts = this.services.resourceLoader.getPrompts().prompts.map((prompt: any) => ({
+    const prompts: CommandInfo[] = this.services.resourceLoader.getPrompts().prompts.map((prompt: PromptLike) => ({
       name: prompt.name,
       description: prompt.description,
       argumentHint: prompt.argumentHint,
       source: "prompt",
     }));
     const skills = mergeSkillEntries(
-      this.services.resourceLoader.getSkills().skills.map((skill: any) => ({
+      this.services.resourceLoader.getSkills().skills.map((skill: SkillLike): CommandInfo => ({
         name: `skill:${skill.name}`,
         description: skill.description,
         source: "skill",
@@ -1775,17 +2018,19 @@ export class PiHost {
       return true;
     });
   }
-  async getModels(): Promise<any[]> {
+  async getModels(): Promise<AgentModel[]> {
     await this.ensureSession();
     const available = await this.services.modelRuntime.getAvailable();
     const overrides = this._getSettings().contextWindowOverrides ?? {};
     return [...available].map((m) => {
       const key = `${m.provider}/${m.id}`;
       const override = overrides[key];
-      return typeof override === "number" && override > 0 ? { ...m, contextWindow: override } : m;
-    }) as any[];
+      const mapped = toAgentModel(m as RuntimeModelLike | null | undefined) ?? { provider: String(m.provider), id: String(m.id) };
+      if (typeof override === "number" && override > 0) mapped.contextWindow = override;
+      return mapped;
+    });
   }
-  async setModel(provider: string, modelId: string): Promise<any> {
+  async setModel(provider: string, modelId: string): Promise<{ model: unknown }> {
     const entry = this.activeEntry();
     return this.enqueueTransition(entry.sessionFile, async () => {
       await this.ensureSession();
@@ -1796,11 +2041,20 @@ export class PiHost {
       return { model };
     });
   }
-  async setThinking(level: string): Promise<any> {
+  async setThinking(level: string): Promise<unknown> {
     const entry = this.activeEntry();
     return this.enqueueTransition(entry.sessionFile, async () => {
       await this.ensureSession();
-      this.session.setThinkingLevel(level as any);
+      // The settings/UI surface only offers valid levels, but the daemon
+      // forwards raw strings: validate before handing one to the session.
+      const validated = level;
+      if (
+        validated !== "off" && validated !== "minimal" && validated !== "low" && validated !== "medium" &&
+        validated !== "high" && validated !== "xhigh" && validated !== "max"
+      ) {
+        throw new Error(`Unknown thinking level: ${level}`);
+      }
+      this.session.setThinkingLevel(validated);
       await this.commitActiveRollback();
       return {};
     });
@@ -1816,13 +2070,15 @@ export class PiHost {
   async getThinkingLevels(): Promise<string[]> {
     await this.ensureSession();
     try {
-      const levels = (this.session as any).getAvailableThinkingLevels?.();
-      return Array.isArray(levels) ? levels : [];
+      // Newer SDKs expose per-model levels; older ones do not.
+      const session = this.session as AgentSession & { getAvailableThinkingLevels?: () => unknown };
+      const levels = session.getAvailableThinkingLevels?.();
+      return Array.isArray(levels) && levels.every((l: unknown): l is string => typeof l === "string") ? levels : [];
     } catch {
       return [];
     }
   }
-  async setSessionName(name: string): Promise<any> {
+  async setSessionName(name: string): Promise<unknown> {
     const key = this.foregroundSessionFile ?? "host";
     return this.enqueueTransition(key, async () => {
       await this.ensureSession();
@@ -1836,7 +2092,7 @@ export class PiHost {
   // History, rollback, branching and worktrees
   // -------------------------------------------------------------------------
 
-  async getHistory(): Promise<any> {
+  async getHistory(): Promise<HistoryProjection> {
     await this.ensureSession();
     const session = this.session;
     const manager = session.sessionManager;
@@ -1869,7 +2125,7 @@ export class PiHost {
     });
   }
 
-  async getTurnChanges(entryId: string): Promise<any> {
+  async getTurnChanges(entryId: string): Promise<TurnChanges> {
     await this.ensureSession();
     const session = this.session;
     const ledger: Ledger = await this.rollbacks.load(session.sessionId).catch(() => ({ version: 1 as const, checkpoints: [], active: undefined }));
@@ -1889,7 +2145,7 @@ export class PiHost {
     return { userEntryId: entryId, files, totals, exclusions: checkpoint.exclusions };
   }
 
-  async getTurnFileDiff(entryId: string, path: string): Promise<any> {
+  async getTurnFileDiff(entryId: string, path: string): Promise<TurnFileDiff> {
     await this.ensureSession();
     const session = this.session;
     const ledger: Ledger = await this.rollbacks.load(session.sessionId).catch(() => ({ version: 1 as const, checkpoints: [], active: undefined }));
@@ -1899,23 +2155,32 @@ export class PiHost {
     return this.snapshots.fileDiff(this.cwd, checkpoint.beforeTree, checkpoint.afterTree, path);
   }
 
-  async prepareRollback(userEntryId: string): Promise<any> {
+  async prepareRollback(userEntryId: string): Promise<RollbackPlan> {
     await this.ensureSession();
     const session = this.session;
     if (session.isStreaming) throw new Error("Finish or stop the active response before rolling back");
     if (!session.sessionFile) throw new Error("Send at least one message before rolling back");
     const ledger = await this.rollbacks.load(session.sessionId);
     if (ledger.active) throw new Error("Undo or continue from the active rollback first");
-    const branch = session.sessionManager.getBranch() as any[];
-    const users = branch.filter((entry) => entry.type === "message" && entry.message?.role === "user");
+    const branch = session.sessionManager.getBranch();
+    const users = branch.filter(
+      (entry): entry is SessionMessageEntry => entry.type === "message" && entry.message?.role === "user"
+    );
     const targetIndex = users.findIndex((entry) => entry.id === userEntryId);
     if (targetIndex < 0) throw new Error("The selected turn is not on the active path");
     const checkpointByUser = new Map(ledger.checkpoints.map((checkpoint) => [checkpoint.userEntryId, checkpoint]));
     const selected = users.slice(targetIndex);
-    const checkpoints = selected.map((entry) => checkpointByUser.get(entry.id));
-    const missingEntry = selected.find((entry) => !checkpointByUser.get(entry.id));
-    if (missingEntry) throw new Error(missingCheckpointReason(ledger.receipts, missingEntry.id));
-    if (checkpoints.some((checkpoint) => !checkpoint!.complete)) throw new Error("This filesystem checkpoint is incomplete");
+    // Resolve every selected turn to its checkpoint up front: a missing one
+    // throws the user-facing reason here instead of failing halfway through
+    // the restore below.
+    const checkpoints: TurnCheckpoint[] = selected.map((entry) => {
+      const checkpoint = checkpointByUser.get(entry.id);
+      if (!checkpoint) throw new Error(missingCheckpointReason(ledger.receipts, entry.id));
+      return checkpoint;
+    });
+    if (checkpoints.some((checkpoint) => !checkpoint.complete)) throw new Error("This filesystem checkpoint is incomplete");
+    const target = users[targetIndex];
+    if (!target) throw new Error("The selected turn is not on the active path");
     const previousLeafId = session.sessionManager.getLeafId();
     if (!previousLeafId) throw new Error("No active session position");
     // The redo snapshot is what an "undo" later restores from. If it is stale
@@ -1926,11 +2191,14 @@ export class PiHost {
     const restoreMap: Record<string, string> = Object.create(null);
     for (const checkpoint of checkpoints as TurnCheckpoint[]) {
       for (const path of checkpoint.changedPaths) {
+        // Legacy checkpoints may still list bookkeeping admitted before the
+        // capture skip existed; rollback restores project content, never
+        // the engine's own logs.
+        if (isBookkeepingPath(path)) continue;
         if (!Object.hasOwn(restoreMap, path)) restoreMap[path] = checkpoint.beforeTree;
       }
     }
     const changes = await this.snapshots.preview(this.cwd, redo.tree, restoreMap);
-    const target = users[targetIndex];
     const plan = {
       id: randomUUID(),
       sessionId: session.sessionId,
@@ -1963,7 +2231,7 @@ export class PiHost {
     };
   }
 
-  async commitRollback(planId: string): Promise<any> {
+  async commitRollback(planId: string): Promise<{ editorText: string; history: HistoryProjection }> {
     const key = this.foregroundSessionFile ?? "host";
     return this.enqueueTransition(key, async () => {
       await this.ensureSession();
@@ -1984,13 +2252,15 @@ export class PiHost {
       await this.snapshots.restore(this.cwd, plan.restoreMap);
       let navigated = false;
       try {
-        const target = manager.getEntry(plan.targetUserEntryId) as any;
+        const target = manager.getEntry(plan.targetUserEntryId);
         let editorText = plan.editorText;
-        if (manager.getLeafId() === plan.targetUserEntryId && target?.type === "message" && target.message?.role === "user") {
+        const targetWire = wireOf(target);
+        const targetMessage = wireOf(targetWire?.message);
+        if (manager.getLeafId() === plan.targetUserEntryId && targetWire?.type === "message" && wireStr(targetMessage, "role") === "user") {
           // Pi's navigateTree short-circuits when target === leaf before applying
           // its user-message "move to parent and edit" semantics.
-          if (target.parentId === null) manager.resetLeaf();
-          else manager.branch(target.parentId);
+          if (targetWire.parentId === null) manager.resetLeaf();
+          else if (typeof targetWire.parentId === "string") manager.branch(targetWire.parentId);
           session.agent.state.messages = manager.buildSessionContext().messages;
         } else {
           const result = await session.navigateTree(plan.targetUserEntryId, { summarize: false });
@@ -2032,7 +2302,7 @@ export class PiHost {
     });
   }
 
-  async undoRollback(): Promise<any> {
+  async undoRollback(): Promise<{ history: HistoryProjection }> {
     const key = this.foregroundSessionFile ?? "host";
     return this.enqueueTransition(key, async () => {
       await this.ensureSession();
@@ -2074,16 +2344,16 @@ export class PiHost {
     });
   }
 
-  async getTree(): Promise<any> {
+  async getTree(): Promise<{ rows: SessionTreeRow[]; leafId: string | null }> {
     await this.ensureSession();
     const sm = this.session.sessionManager;
     return { rows: flattenSessionTree(sm.getTree()), leafId: sm.getLeafId() };
   }
-  async getForkMessages(): Promise<any[]> {
+  async getForkMessages(): Promise<{ entryId: string; text: string }[]> {
     await this.ensureSession();
     return this.session.getUserMessagesForForking();
   }
-  async fork(entryId: string): Promise<any> {
+  async fork(entryId: string): Promise<{ text?: string; cancelled?: boolean }> {
     const key = this.foregroundSessionFile ?? "host";
     return this.enqueueTransition(key, async () => {
       await this.ensureSession();
@@ -2093,7 +2363,7 @@ export class PiHost {
       return { text: r.selectedText, cancelled: r.cancelled };
     });
   }
-  async clone(): Promise<any> {
+  async clone(): Promise<{ cancelled?: boolean }> {
     const key = this.foregroundSessionFile ?? "host";
     return this.enqueueTransition(key, async () => {
       await this.ensureSession();
@@ -2136,7 +2406,7 @@ export class PiHost {
     throw new Error("Thread not found");
   }
 
-  async controlThread(action: "steer" | "follow-up" | "stop", threadId: string, message?: string): Promise<any> {
+  async controlThread(action: "steer" | "follow-up" | "stop", threadId: string, message?: string): Promise<ThreadState> {
     return this.threads.control(await this.findThreadCwd(threadId), action, threadId, message);
   }
 
@@ -2169,27 +2439,33 @@ export class PiHost {
 
   /** Milestone-watching notifications: the main agent learns when a thread
    *  reaches a checkpoint, blocks, or finishes, without polling. */
-  async notifyThreadEvent(thread: { threadId: string; name: string | null; parentSessionId?: string | null }, event: any): Promise<void> {
+  async notifyThreadEvent(thread: { threadId: string; name: string | null; parentSessionId?: string | null }, event: ThreadEvent): Promise<void> {
     if (!thread.parentSessionId) return;
     const parent = this.entryForSessionId(thread.parentSessionId);
     if (!parent) return;
     const label = thread.name ?? thread.threadId.slice(0, 8);
     let content: string;
-    if (event?.type === "milestone") {
+    // Launch-card status lives beside the content: only terminal events
+    // carry one, so it is computed inside the narrowed branch.
+    let launchStatus: "failed" | "stopped" | "completed" | undefined;
+    if (event.type === "milestone") {
       const name = event.milestone?.name ?? "checkpoint";
       content = `[Babylon Thread Activity]\nThread ${label} reached a milestone, ${name}${event.milestone?.note ? `: ${event.milestone.note}` : ""}`;
-    } else if (event?.type === "blocked") {
+      launchStatus = undefined;
+    } else if (event.type === "blocked") {
       content = `[Babylon Thread Activity]\nThread ${label} is blocked${event.blocker ? `: ${event.blocker}` : ""}.`;
+      launchStatus = undefined;
     } else {
-      const done = event?.status === "failed" ? "failed" : event?.status === "stopped" ? "was stopped" : "completed";
+      const done = event.status === "failed" ? "failed" : event.status === "stopped" ? "was stopped" : "completed";
       content = `[Babylon Thread Activity]\nThread ${label} ${done}.`;
+      launchStatus = event.status === "failed" ? "failed" : event.status === "stopped" ? "stopped" : event.status === "completed" ? "completed" : undefined;
     }
     await parent.runtime.session.sendCustomMessage({
       customType: "babylon_thread_activity",
       content,
       // CLI-invisible (see above); Babylon reads by customType.
       display: false,
-      details: { threadId: thread.threadId, ...event },
+      details: { ...event },
     });
     // Custom messages emit no renderer event on their own; deliver a
     // message_start so the line appears in the visible chat immediately.
@@ -2209,7 +2485,7 @@ export class PiHost {
       runId: thread.threadId,
       runKind: "thread",
       log: content,
-      status: event?.status === "failed" ? "failed" : event?.status === "stopped" ? "stopped" : event?.status === "completed" ? "completed" : undefined,
+      status: launchStatus,
       sessionId: parentSession.sessionId,
       sessionFile: parentSession.sessionFile,
     });
@@ -2255,7 +2531,7 @@ export class PiHost {
 
   /** Room turn presence for the renderer ("@x is thinking…"). Carries the
    *  live session identity so stale-session filtering keeps working. */
-  emitRoomEvent(ev: Record<string, unknown>): void {
+  emitRoomEvent(ev: Record<string, unknown> & { type: string }): void {
     const file = this.foregroundSessionFile;
     const session = file ? this.sessions.get(file)?.runtime.session : undefined;
     this.opts.onEvent({
@@ -2310,7 +2586,7 @@ export class PiHost {
   }
 
   /** Handoff-consumed presence for the renderer card. Same agent-events channel. */
-  emitHandoffEvent(ev: Record<string, unknown>): void {
+  emitHandoffEvent(ev: Record<string, unknown> & { type: string }): void {
     const file = this.foregroundSessionFile;
     const session = file ? this.sessions.get(file)?.runtime.session : undefined;
     this.opts.onEvent({
@@ -2340,7 +2616,7 @@ export class PiHost {
     throw new Error("Subagent run not found");
   }
 
-  async controlSubagent(action: SubagentControlAction, runId: string, message?: string): Promise<any> {
+  async controlSubagent(action: SubagentControlAction, runId: string, message?: string): Promise<ManagedSubagentRecord> {
     return this.managedSubagents.control(await this.findSubagentCwd(runId), action, runId, message);
   }  async promoteSubagent(runId: string): Promise<{ sessionFile: string; cwd: string; parentSessionFile: string | null }> {
     return this.managedSubagents.promote(await this.findSubagentCwd(runId), runId);
@@ -2354,15 +2630,15 @@ export class PiHost {
     for (const cwd of cwds) {
       try {
         const dir = join(cwd, ".pi", "state", "threads");
-        const entries: any[] = (await (fsp as any).readdir(dir, { withFileTypes: true }).catch(() => [])) as any[];
+        const entries = await fsp.readdir(dir, { withFileTypes: true }).catch(() => []);
         for (const entry of entries) {
           if (!entry.isDirectory?.()) continue;
           const path = join(dir, entry.name, "thread.json");
           try {
             const raw = await fsp.readFile(path, "utf8");
-            const state = JSON.parse(raw);
-            if (state?.parentSessionId !== sessionId) continue;
-            const status = state?.status as string | undefined;
+            const state: unknown = JSON.parse(raw);
+            if (wireStr(wireOf(state), "parentSessionId") !== sessionId) continue;
+            const status = wireStr(wireOf(state), "status");
             if (status && !["completed", "failed", "stopped"].includes(status)) return true;
           } catch {}
         }
@@ -2374,7 +2650,7 @@ export class PiHost {
   private async hasAnyActiveThreads(): Promise<boolean> {
     try {
       const dir = join(this.cwd, ".pi", "state", "threads");
-      const entries: any[] = (await (fsp as any).readdir(dir, { withFileTypes: true }).catch(() => [])) as any[];
+      const entries = await fsp.readdir(dir, { withFileTypes: true }).catch(() => []);
       for (const entry of entries) {
         if (!entry.isDirectory?.()) continue;
         const path = join(dir, entry.name, "thread.json");
@@ -2404,7 +2680,7 @@ export class PiHost {
         // CLI-invisible (see babylon_thread_activity above); Babylon reads by customType.
         display: false,
         details: { diagnostics: bounded },
-      } as unknown as Parameters<AgentSession["sendCustomMessage"]>[0]);
+      });
       this.opts.onEvent({
         type: "message_start",
         message: { role: "custom", customType: "babylon_diagnostics", content, display: false },

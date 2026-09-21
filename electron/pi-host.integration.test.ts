@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { PiHost } from "./pi-host";
+import type { AgentEvent } from "../src/bridge";
 
 const roots: string[] = [];
 afterAll(async () => Promise.all(roots.map((root) => rm(root, { recursive: true, force: true }))));
@@ -27,7 +28,7 @@ describe("PiHost resource and command integration", () => {
     );
     await writeFile(join(agentDir, "prompts", "review.md"), `---\ndescription: Review test\n---\nReview this.\n`);
 
-    const events: any[] = [];
+    const events: AgentEvent[] = [];
     const host = new PiHost({ cwd, agentDir, onEvent: (event) => events.push(event), onStatus: () => undefined });
     await host.start();
     // Independent runtimes: commands/prompt need an explicitly opened session

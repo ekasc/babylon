@@ -1,13 +1,13 @@
 import { useState } from "react";
 import Composer, { type Attachment } from "./Composer";
 import { GoalStrip } from "./GoalStrip";
-import type { PickerModel } from "./ModelPicker";
-import type { Stats } from "./StatsPopover";
+import type { AgentModel, AgentState, CommandInfo, SessionStats } from "../bridge";
+import type { Dialog } from "../store";
 
 interface Props {
-	agentState?: { model?: PickerModel | null; thinkingLevel?: string } | null;
-	stats?: Stats | null;
-	models?: PickerModel[];
+	agentState?: AgentState | null;
+	stats?: SessionStats | null;
+	models?: AgentModel[];
 	thinkingLevels?: string[];
 	onSetModel?: (provider: string, modelId: string) => void;
 	onSetThinking?: (level: string) => void;
@@ -15,7 +15,7 @@ interface Props {
 	streaming?: boolean;
 	steering?: string[];
 	followUp?: string[];
-	commands?: any[];
+	commands?: CommandInfo[];
 	draftRequest?: { id: number; text: string; append?: boolean } | null;
 	/** Session identity for per-session composer draft persistence. */
 	sessionKey?: string | null;
@@ -26,14 +26,14 @@ interface Props {
 		streamingBehavior?: "steer" | "followUp",
 	) => Promise<boolean>;
 	onAbort?: () => void;
-	dialogs?: any[];
+	dialogs?: Dialog[];
 	onDialogDismiss?: (id: string) => void;
 	runningWorkflows?: number;
 	subagentCount?: number;
 	/** Bots offered for @-mention completion in the composer. */
 	mentionBots?: import("../bots").Bot[];
-	/** The session's goal, as a mini strip joined to the top of the composer. */
-	goal?: import("../lib/goal-mode").GoalState | null;
+	/** The session's durable goal (hardbaked goal-mode state), as a mini strip joined to the top of the composer. */
+	goal?: import("../lib/durable-goal").DurableGoalState | null;
 	onStartGoal?: (objective: string) => void;
 	onPauseGoal?: () => void;
 	onResumeGoal?: () => void;
@@ -55,7 +55,7 @@ export default function SessionFooter({
 	commands = [],
 	draftRequest = null,
 	sessionKey = null,
-	toast = (() => {}) as any,
+	toast = () => {},
 	onSend = async () => false,
 	onAbort = () => {},
 	dialogs,

@@ -25,21 +25,21 @@ const CTX = (path: string | null, seq: number) => ({ path, seq, now: 1000 + seq 
 describe("applyRuntimeEvent", () => {
   it("marks a session working on agent_start with a start timestamp", () => {
     const next = applyRuntimeEvent(emptyExecutions(), { type: "agent_start" }, CTX("/a.json", 1));
-    expect(next["/a.json"].execution).toBe("working");
-    expect(next["/a.json"].startedAt).toBe(1010);
+    expect(next["/a.json"]?.execution).toBe("working");
+    expect(next["/a.json"]?.startedAt).toBe(1010);
   });
 
   it("clears to idle on agent_settled (completion removes live status)", () => {
     let m = applyRuntimeEvent(emptyExecutions(), { type: "agent_start" }, CTX("/a.json", 1));
     m = applyRuntimeEvent(m, { type: "agent_settled" }, CTX("/a.json", 2));
-    expect(m["/a.json"].execution).toBe("idle");
-    expect(m["/a.json"].startedAt).toBeNull();
+    expect(m["/a.json"]?.execution).toBe("idle");
+    expect(m["/a.json"]?.startedAt).toBeNull();
   });
 
   it("abort clears activity via the aborted settle event", () => {
     let m = applyRuntimeEvent(emptyExecutions(), { type: "agent_start" }, CTX("/a.json", 1));
-    m = applyRuntimeEvent(m, { type: "agent_settled", aborted: true } as any, CTX("/a.json", 2));
-    expect(m["/a.json"].execution).toBe("idle");
+    m = applyRuntimeEvent(m, { type: "agent_settled" }, CTX("/a.json", 2));
+    expect(m["/a.json"]?.execution).toBe("idle");
   });
 
   it("an immediate next run reuses the same single entry with a fresh timestamp", () => {
@@ -47,16 +47,16 @@ describe("applyRuntimeEvent", () => {
     m = applyRuntimeEvent(m, { type: "agent_settled" }, CTX("/a.json", 2));
     m = applyRuntimeEvent(m, { type: "agent_start" }, CTX("/a.json", 3));
     expect(Object.keys(m)).toEqual(["/a.json"]);
-    expect(m["/a.json"].execution).toBe("working");
-    expect(m["/a.json"].startedAt).toBe(1030);
+    expect(m["/a.json"]?.execution).toBe("working");
+    expect(m["/a.json"]?.startedAt).toBe(1030);
   });
 
   it("keeps background sessions live under their own path (switch-safe)", () => {
     let m = applyRuntimeEvent(emptyExecutions(), { type: "agent_start" }, CTX("/a.json", 1));
     m = applyRuntimeEvent(m, { type: "agent_start" }, CTX("/b.json", 2));
     m = applyRuntimeEvent(m, { type: "agent_settled" }, CTX("/b.json", 3));
-    expect(m["/a.json"].execution).toBe("working");
-    expect(m["/b.json"].execution).toBe("idle");
+    expect(m["/a.json"]?.execution).toBe("working");
+    expect(m["/b.json"]?.execution).toBe("idle");
   });
 
   it("stale (older-or-equal sequence) events cannot resurrect cleared activity", () => {
@@ -64,28 +64,28 @@ describe("applyRuntimeEvent", () => {
     m = applyRuntimeEvent(m, { type: "agent_settled" }, CTX("/a.json", 6));
     m = applyRuntimeEvent(m, { type: "agent_start" }, CTX("/a.json", 5));
     m = applyRuntimeEvent(m, { type: "agent_start" }, CTX("/a.json", 6));
-    expect(m["/a.json"].execution).toBe("idle");
+    expect(m["/a.json"]?.execution).toBe("idle");
   });
 
   it("tracks approval requests and returns to working on cancel", () => {
     let m = applyRuntimeEvent(emptyExecutions(), { type: "agent_start" }, CTX("/a.json", 1));
     m = applyRuntimeEvent(m, { type: "extension_ui_request" }, CTX("/a.json", 2));
-    expect(m["/a.json"].execution).toBe("approval");
+    expect(m["/a.json"]?.execution).toBe("approval");
     m = applyRuntimeEvent(m, { type: "extension_ui_cancel" }, CTX("/a.json", 3));
-    expect(m["/a.json"].execution).toBe("working");
+    expect(m["/a.json"]?.execution).toBe("working");
   });
 
   it("cancel after settle does not resurrect activity", () => {
     let m = applyRuntimeEvent(emptyExecutions(), { type: "agent_start" }, CTX("/a.json", 1));
     m = applyRuntimeEvent(m, { type: "agent_settled" }, CTX("/a.json", 2));
     m = applyRuntimeEvent(m, { type: "extension_ui_cancel" }, CTX("/a.json", 3));
-    expect(m["/a.json"].execution).toBe("idle");
+    expect(m["/a.json"]?.execution).toBe("idle");
   });
 
   it("resolveApprovalExecution resumes an approval entry, ignores others", () => {
     let m = applyRuntimeEvent(emptyExecutions(), { type: "extension_ui_request" }, CTX("/a.json", 1));
     m = resolveApprovalExecution(m, "/a.json", 2, 2000);
-    expect(m["/a.json"].execution).toBe("working");
+    expect(m["/a.json"]?.execution).toBe("working");
     const idle = resolveApprovalExecution(emptyExecutions(), "/b.json", 3, 2000);
     expect(idle).toEqual({});
   });
@@ -210,8 +210,8 @@ describe("reconcileAfterReconnect", () => {
   });
   it("aborted settle clears like any settle (switch-abort path)", () => {
     let m = applyRuntimeEvent(emptyExecutions(), { type: "agent_start" }, CTX("/a.json", 1));
-    m = applyRuntimeEvent(m, { type: "agent_settled", aborted: true } as any, CTX("/a.json", 2));
-    expect(m["/a.json"].execution).toBe("idle");
+    m = applyRuntimeEvent(m, { type: "agent_settled" }, CTX("/a.json", 2));
+    expect(m["/a.json"]?.execution).toBe("idle");
   });
 });
 
@@ -291,32 +291,32 @@ describe("computeRuntimeByPath", () => {
 
   it("creates an entry per session with open lifecycle", () => {
     const map = computeRuntimeByPath(base());
-    expect(map["/a.json"].lifecycle).toBe("open");
-    expect(map["/a.json"].execution).toBe("idle");
-    expect(map["/a.json"].live).toBe(false);
+    expect(map["/a.json"]?.lifecycle).toBe("open");
+    expect(map["/a.json"]?.execution).toBe("idle");
+    expect(map["/a.json"]?.live).toBe(false);
   });
 
   it("marks settled lifecycle from the settled map", () => {
     const map = computeRuntimeByPath({ ...base(), settled: { "/a.json": 123 } });
-    expect(map["/a.json"].lifecycle).toBe("settled");
+    expect(map["/a.json"]?.lifecycle).toBe("settled");
   });
 
   it("escalates execution from the event layer and carries startedAt", () => {
     const executions = applyRuntimeEvent(emptyExecutions(), { type: "agent_start" }, CTX("/a.json", 1));
     const map = computeRuntimeByPath({ ...base(), executions });
-    expect(map["/a.json"].execution).toBe("working");
-    expect(map["/a.json"].startedAt).toBe(1010);
-    expect(map["/a.json"].live).toBe(true);
+    expect(map["/a.json"]?.execution).toBe("working");
+    expect(map["/a.json"]?.startedAt).toBe(1010);
+    expect(map["/a.json"]?.live).toBe(true);
   });
 
   it("escalates the active session to working when streaming", () => {
     const map = computeRuntimeByPath({ ...base(), activeSessionPath: "/a.json", streaming: true });
-    expect(map["/a.json"].execution).toBe("working");
+    expect(map["/a.json"]?.execution).toBe("working");
   });
 
   it("derives unread and approval attention", () => {
     const unreadMap = computeRuntimeByPath({ ...base(), unread: ["/a.json"] });
-    expect(unreadMap["/a.json"].attention).toBe("unread");
+    expect(unreadMap["/a.json"]?.attention).toBe("unread");
 
     const attention = createAttentionRegistry();
     attention.items["perm-1"] = {
@@ -328,7 +328,7 @@ describe("computeRuntimeByPath", () => {
       resolved: false,
     };
     const approvalMap = computeRuntimeByPath({ ...base(), attention });
-    expect(approvalMap["/a.json"].attention).toBe("approval");
+    expect(approvalMap["/a.json"]?.attention).toBe("approval");
   });
 
   it("attributes a bot by project session", () => {
@@ -336,7 +336,7 @@ describe("computeRuntimeByPath", () => {
       ...base(),
       bots: [{ id: "b1", mainSessionFile: null, sessionsByProject: { p: "/a.json" } }],
     });
-    expect(map["/a.json"].botId).toBe("b1");
+    expect(map["/a.json"]?.botId).toBe("b1");
   });
 
   it("escalates from thread snapshots keyed by session path", () => {
@@ -344,16 +344,16 @@ describe("computeRuntimeByPath", () => {
       ...base(),
       activity: { threads: [{ status: "running", sessionFile: "/a.json" }], subagents: [] },
     });
-    expect(map["/a.json"].execution).toBe("working");
+    expect(map["/a.json"]?.execution).toBe("working");
   });
 });
 
 describe("extension_ui_response", () => {
   it("releases an approval gate back to working when a dialog is answered", () => {
     const waiting = applyRuntimeEvent(emptyExecutions(), { type: "extension_ui_request" }, CTX("/a.json", 1));
-    expect(waiting["/a.json"].execution).toBe("approval");
+    expect(waiting["/a.json"]?.execution).toBe("approval");
     const answered = applyRuntimeEvent(waiting, { type: "extension_ui_response" }, CTX("/a.json", 2));
-    expect(answered["/a.json"].execution).toBe("working");
+    expect(answered["/a.json"]?.execution).toBe("working");
   });
 
   it("does not resurrect a run that already settled", () => {

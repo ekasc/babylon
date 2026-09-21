@@ -2,6 +2,11 @@ export interface SkillRef {
 	/** Skill name without the "skill:" prefix, e.g. "review" for "/skill:review". */
 	name: string;
 	/**
+	 * Trailing user argument on an engine-expanded skill block (the text pi
+	 * appends after `</skill>`). Shown next to the chip like a slash-form arg.
+	 */
+	args?: string;
+	/**
 	 * True when the message body carries the full SKILL.md content (a pasted or
 	 * agent-injected document) rather than a bare invocation. The UI collapses
 	 * such messages to a chip and hides the markdown behind a toggle, so the
@@ -29,11 +34,29 @@ export function expandSkillMentions(text: string, skillNames: string[]): string 
   return text.replace(pattern, (_match, name: string) => `/skill:${name}`);
 }
 
+/**
+ * Body shown behind the "show SKILL.md" toggle: for an engine-expanded
+ * block, the inner document without the `<skill>` wrapper tags; anything
+ * else renders verbatim.
+ */
+export function skillDisplayBody(text: string): string {
+  const block = SKILL_BLOCK.exec(text.trimEnd());
+  return block?.[3] ?? text;
+}
+
 function escapeRegExp(value: string): string {
   return value.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 const SKILL_SLASH = /^\/skill:([a-z0-9][a-z0-9-]*)/;
+/**
+ * The pi engine's expansion of an explicit invocation: the full SKILL.md
+ * body wrapped in `<skill name location>…</skill>`, with the user's
+ * argument (if any) appended after a blank line. Mirrors pi's own
+ * `parseSkillBlock` shape so the transcript can collapse what the engine
+ * inlined back to the chip the composer sent.
+ */
+const SKILL_BLOCK = /^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n<\/skill>(?:\n\n([\s\S]+))?$/;
 const SKILL_FM = /---[\s\S]*?\bname:\s*([a-z0-9-]+)\b/;
 const SKILL_BODY = /\bname:\s*([a-z0-9-]+)/;
 
@@ -53,10 +76,22 @@ export function parseSkillRef(text: string): SkillRef | null {
 	// Explicit invocation: "/skill:name"
 	const slash = text.match(SKILL_SLASH);
 	if (slash) {
+		const name = slash[1];
+		if (name === undefined) return null;
 		const rest = text.slice(slash[0].length).trim();
 		// A newline after the chip means a document was pasted, not a one-line arg.
 		const full = /\n/.test(rest);
-		return { name: slash[1], full };
+		return { name, full };
+	}
+
+	// Engine-expanded invocation: pi replaced `/skill:name args` with the
+	// full skill body in `<skill>` tags. Collapse it back to the chip.
+	const block = SKILL_BLOCK.exec(text.trimEnd());
+	if (block) {
+		const name = block[1];
+		if (name === undefined) return null;
+		const args = block[4]?.trim();
+		return args ? { name, full: true, args } : { name, full: true };
 	}
 
 	// Pasted / injected SKILL.md: frontmatter starts the document.
@@ -64,13 +99,17 @@ export function parseSkillRef(text: string): SkillRef | null {
 	if (body.startsWith("---")) {
 		const fm = body.match(SKILL_FM);
 		if (fm && (body.includes("description:") || body.includes("# "))) {
-			return { name: fm[1], full: true };
+			const name = fm[1];
+			if (name === undefined) return null;
+			return { name, full: true };
 		}
 	}
 	// Fallback: a long body with a title and a name/description field.
 	if (text.length > 800 && text.includes("# ") && text.includes("description:")) {
 		const m2 = text.match(SKILL_BODY);
-		if (m2) return { name: m2[1], full: true };
+		const name = m2?.[1];
+		if (name === undefined) return null;
+		if (m2) return { name, full: true };
 	}
 	return null;
 }

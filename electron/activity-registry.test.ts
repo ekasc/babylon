@@ -94,6 +94,7 @@ describe("ActivityRegistry", () => {
     await writeThread(a, "thread-a1", "running");
     await registry.refreshAll();
     const last = updates[updates.length - 1];
+    if (!last) throw new Error("missing update");
     expect(last.threads.map((t) => t.threadId)).toEqual(["thread-a1"]);
     registry.disposeAll();
   });

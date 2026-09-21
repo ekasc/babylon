@@ -14,6 +14,9 @@ export default function ProjectFilter({ projects, value, onChange }: Props) {
 
   const options = [{ cwd: "all", name: "All projects" }, ...projects];
   const current = options.find((o) => o.cwd === value) ?? options[0];
+  // Unreachable: options always carries the "All projects" head. Returning
+  // null keeps the impossible case visible instead of asserting it away.
+  if (!current) return null;
 
   // Base UI Popover owns open state, Escape, outside-press dismissal, and
   // floating placement. Anchored to the root (not the trigger) with the

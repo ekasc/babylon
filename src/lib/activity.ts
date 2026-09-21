@@ -1,19 +1,19 @@
 // Single definition of "running work" for every activity surface. The sidebar
 // Agents section (running chats) is separate; this covers running subagents,
 // persistent threads, and workflow runs.
-import type { SubagentActivity, ThreadActivity, WorkflowRunSummary } from "../bridge";
+import type { SubagentActivity, ThreadActivity, ThreadStatus, WorkflowRunSummary } from "../bridge";
 
-const RUNNING_THREAD_STATUSES = ["queued", "starting", "running", "interrupting"];
+const RUNNING_THREAD_STATUSES: readonly ThreadStatus[] = ["queued", "starting", "running", "interrupting"];
 
-export function isRunningThread(status: string): boolean {
+export function isRunningThread(status: ThreadStatus): boolean {
   return RUNNING_THREAD_STATUSES.includes(status);
 }
 
-export function isRunningSubagent(status: string): boolean {
+export function isRunningSubagent(status: SubagentActivity["status"]): boolean {
   return status === "starting" || status === "running";
 }
 
-export function isActiveWorkflow(status: string): boolean {
+export function isActiveWorkflow(status: WorkflowRunSummary["status"]): boolean {
   return status === "pending" || status === "running" || status === "paused";
 }
 

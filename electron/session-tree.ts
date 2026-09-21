@@ -1,3 +1,5 @@
+import { wireOf, wireStr } from "../src/store";
+
 export interface SessionTreeRow {
   id: string;
   parentId: string | null;
@@ -9,14 +11,14 @@ export interface SessionTreeRow {
   childCount: number;
 }
 
-interface SourceNode {
-  entry?: any;
+export interface SourceNode {
+  entry?: unknown;
   children?: SourceNode[];
   label?: string;
 }
 
-function messageSnippet(entry: any): string {
-  const message = entry?.message;
+function messageSnippet(entry: unknown): string {
+  const message = wireOf(wireOf(entry)?.message);
   if (!message) return "";
   const content = message.content;
   const text =
@@ -24,9 +26,11 @@ function messageSnippet(entry: any): string {
       ? content
       : Array.isArray(content)
         ? content
-            .map((block: any) =>
-              typeof block === "string" ? block : block?.type === "thinking" ? "" : (block?.text ?? "")
-            )
+            .map((block) => {
+              if (typeof block === "string") return block;
+              const b = wireOf(block);
+              return b?.type === "thinking" ? "" : (wireStr(b, "text") ?? "");
+            })
             .join(" ")
         : "";
   const oneLine = text.replace(/\s+/g, " ").trim();
@@ -47,14 +51,14 @@ export function flattenSessionTree(roots: SourceNode[]): SessionTreeRow[] {
 
   while (stack.length) {
     const { node, depth } = stack.pop()!;
-    const entry = node.entry;
+    const entry = wireOf(node.entry);
     const children = Array.isArray(node.children) ? node.children : [];
     if (entry && typeof entry.id === "string") {
       rows.push({
         id: entry.id,
         parentId: typeof entry.parentId === "string" ? entry.parentId : null,
         type: typeof entry.type === "string" ? entry.type : "unknown",
-        role: typeof entry.message?.role === "string" ? entry.message.role : undefined,
+        role: wireStr(wireOf(entry.message), "role"),
         snippet: messageSnippet(entry),
         label: typeof node.label === "string" ? node.label : undefined,
         depth,
@@ -63,7 +67,9 @@ export function flattenSessionTree(roots: SourceNode[]): SessionTreeRow[] {
     }
     const childDepth = depth + (entry?.type === "message" ? 1 : 0);
     for (let index = children.length - 1; index >= 0; index--) {
-      stack.push({ node: children[index], depth: childDepth });
+      const child = children[index];
+      if (child === undefined) continue;
+      stack.push({ node: child, depth: childDepth });
     }
   }
   return rows;

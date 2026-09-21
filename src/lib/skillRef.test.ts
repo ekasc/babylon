@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { expandSkillMentions, parseSkillRef, stripSkillPrefix } from "./skillRef";
+import { expandSkillMentions, parseSkillRef, skillDisplayBody, stripSkillPrefix } from "./skillRef";
 
 describe("parseSkillRef", () => {
   it("detects a bare skill invocation as a non-full chip", () => {
@@ -21,6 +21,18 @@ describe("parseSkillRef", () => {
     const md =
       "---\nname: demo-skill\ndescription: Demo skill for command discovery.\n---\n\n# Demo\n\nSome body text.";
     expect(parseSkillRef(md)).toEqual({ name: "demo-skill", full: true });
+  });
+
+  it("collapses the engine's <skill> expansion back to a chip", () => {
+    const expanded =
+      '<skill name="review" location="/skills/review/SKILL.md">\nReferences are relative to /skills/review.\n\n# Review\nBe thorough.\n</skill>';
+    expect(parseSkillRef(expanded)).toEqual({ name: "review", full: true });
+    expect(skillDisplayBody(expanded)).toBe("References are relative to /skills/review.\n\n# Review\nBe thorough.");
+  });
+
+  it("keeps trailing args on an expanded block", () => {
+    const expanded = '<skill name="review" location="/loc/SKILL.md">\n# Review\n</skill>\n\nauth.ts';
+    expect(parseSkillRef(expanded)).toEqual({ name: "review", full: true, args: "auth.ts" });
   });
 
   it("returns null for ordinary messages", () => {

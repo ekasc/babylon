@@ -74,7 +74,8 @@ export function validateId(value: unknown): string {
 
 export function detectPortsFromOutput(text: string): number[] {
   const ports = new Set<number>();
-  const add = (v: string) => {
+  const add = (v: string | undefined) => {
+    if (v === undefined) return;
     const n = Number(v);
     if (Number.isInteger(n) && n >= 1 && n <= 65535) ports.add(n);
   };
@@ -134,14 +135,14 @@ export class ProcessManager {
     this.outputCap = opts?.outputCap ?? OUTPUT_CAP;
     this.killGraceMs = opts?.killGraceMs ?? KILL_GRACE_MS;
     this.spawnFn =
-      (opts?.spawnFn as SpawnFn) ??
+      opts?.spawnFn ??
       ((command: string, options: { cwd: string; shell: boolean; detached: boolean }) =>
         defaultSpawn(command, {
           cwd: options.cwd,
           shell: true,
           detached: options.detached,
           stdio: "pipe",
-        } as unknown as Parameters<typeof defaultSpawn>[1]) as ChildProcess);
+        }));
     this.nowFn = opts?.nowFn ?? (() => Date.now());
     this.detachedSupported = opts?.detachedSupported ?? process.platform !== "win32";
   }
@@ -339,7 +340,7 @@ export class ProcessManager {
         }
         // Windows or fallback: use child handle
         try {
-          (child as unknown as { kill: (s: string) => boolean }).kill(signal);
+          child.kill(signal);
         } catch {
           /* ignore */
         }
@@ -407,12 +408,12 @@ export class ProcessManager {
               process.kill(-pid, "SIGKILL");
             } catch {
               try {
-                (entry.child as unknown as { kill: (s: string) => boolean }).kill("SIGKILL");
+                entry.child.kill("SIGKILL");
               } catch {}
             }
           } else {
             try {
-              (entry.child as unknown as { kill: (s: string) => boolean }).kill("SIGKILL");
+              entry.child.kill("SIGKILL");
             } catch {}
           }
         } catch {}

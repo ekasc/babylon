@@ -1,16 +1,21 @@
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { SIM_PRESETS, buildEmulation } from "../src/lib/simulator";
+import { buildEmulation } from "../src/lib/simulator";
+import {
+  PRESET_IDS,
+  checkPreset,
+  emulateResult,
+  formatTabList,
+  parseTabArg,
+  parseTabArgOptional,
+  requireSelector,
+  requireTabId,
+  requireUrl,
+  reuseTabId,
+  snapshotBody,
+  tabParam,
+  textResult,
+} from "./sim-tool-helpers";
 import type { SimController } from "./sim-controller";
-
-const PRESET_IDS = SIM_PRESETS.map((p) => p.id);
-
-function textResult(t: string) {
-  return { content: [{ type: "text", text: t }], details: { text: t } };
-}
-
-function tabParam(description = "Tab id (defaults to the active tab; see browser_list_tabs)"): any {
-  return { type: "string", description };
-}
 
 function needCtl(getController: () => SimController | null): SimController {
   const ctl = getController();
@@ -18,16 +23,14 @@ function needCtl(getController: () => SimController | null): SimController {
   return ctl;
 }
 
-async function stateLine(ctl: SimController, note: string, tabId?: string): Promise<{ content: any[]; details: any }> {
+async function stateLine(
+  ctl: SimController,
+  note: string,
+  tabId?: string
+): Promise<{ content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> }> {
   const snap = await ctl.snapshot(tabId).catch(() => null);
   const line = snap ? `${note} — ${snap.title || "(no title)"} · ${snap.url}` : note;
-  return { content: [{ type: "text", text: line }], details: snap ? { note, ...snap, text: snap.text.slice(0, 500) } : { note } };
-}
-
-function checkPreset(raw: unknown): string {
-  const preset = String(raw ?? "");
-  if (!PRESET_IDS.includes(preset)) throw new Error(`unknown preset ${preset || "(missing)"} — one of: ${PRESET_IDS.join(", ")}`);
-  return preset;
+  return { content: [{ type: "text" as const, text: line }], details: snap ? { note, ...snap, text: snap.text.slice(0, 500) } : { note } };
 }
 
 /**
@@ -35,8 +38,8 @@ function checkPreset(raw: unknown): string {
  * device emulation, mirrored in the sidebar. Opening or navigating from here
  * also opens the sidebar for the user.
  */
-export function createBrowserTools(getController: () => SimController | null): ToolDefinition<any, any>[] {
-  const tools: ToolDefinition<any, any>[] = [
+export function createBrowserTools(getController: () => SimController | null): ToolDefinition[] {
+  const tools: ToolDefinition[] = [
     {
       name: "browser_open",
       label: "Open Browser",
@@ -52,19 +55,19 @@ export function createBrowserTools(getController: () => SimController | null): T
           preset: { type: "string", enum: PRESET_IDS, description: "Device/browser preset to emulate" },
           rotated: { type: "boolean", description: "Landscape for rotatable (mobile) presets" },
         },
-      } as any,
+      },
       execute: async (_id, raw) => {
         const ctl = needCtl(getController);
-        const url = String((raw as any)?.url ?? "").trim();
-        if (!url) throw new Error("browser_open: url is required");
+        const url = requireUrl(raw, "browser_open");
         const snap = ctl.listTabs();
-        const reuseId = (raw as any)?.newTab === true || !snap.activeId ? undefined : snap.activeId;
+        const reuseId = reuseTabId(snap.activeId, (raw as { newTab?: unknown } | null | undefined)?.newTab);
         const tab = await ctl.openTab(reuseId ? { url, tabId: reuseId } : { url });
-        const preset = typeof (raw as any)?.preset === "string" ? checkPreset((raw as any).preset) : null;
-        if (preset) await ctl.setEmulation(tab.id, buildEmulation(preset, (raw as any)?.rotated === true), "agent");
+        const rawOpts = raw as { preset?: unknown; rotated?: unknown } | null | undefined;
+        const preset = typeof rawOpts?.preset === "string" ? checkPreset(rawOpts.preset) : null;
+        if (preset) await ctl.setEmulation(tab.id, buildEmulation(preset, rawOpts?.rotated === true), "agent");
         return stateLine(ctl, `Opened ${url} in tab ${tab.id}`, tab.id);
       },
-    } as ToolDefinition<any, any>,
+    },
 
     {
       name: "browser_new_tab",
@@ -75,29 +78,28 @@ export function createBrowserTools(getController: () => SimController | null): T
         additionalProperties: false,
         required: ["url"],
         properties: { url: { type: "string", description: "http(s) URL to open" } },
-      } as any,
+      },
       execute: async (_id, raw) => {
         const ctl = needCtl(getController);
-        const url = String((raw as any)?.url ?? "").trim();
-        if (!url) throw new Error("browser_new_tab: url is required");
+        const url = requireUrl(raw, "browser_new_tab");
         const tab = await ctl.openTab({ url });
         return stateLine(ctl, `Opened ${url} in tab ${tab.id}`, tab.id);
       },
-    } as ToolDefinition<any, any>,
+    },
 
     {
       name: "browser_list_tabs",
       label: "List Browser Tabs",
       description: "List the in-app browser tabs: id, URL, title, and which is active.",
-      parameters: { type: "object", additionalProperties: false, properties: {} } as any,
+      parameters: { type: "object", additionalProperties: false, properties: {} },
       execute: async () => {
         const ctl = needCtl(getController);
         const { tabs, activeId } = ctl.listTabs();
-        if (!tabs.length) return textResult("No browser tabs open.");
-        const lines = tabs.map((t) => `${t.id === activeId ? "●" : "○"} ${t.id} — ${t.title || "(no title)"} · ${t.url}`);
-        return { content: [{ type: "text", text: lines.join("\n") }], details: { tabs, activeId } };
+        const text = formatTabList(tabs, activeId);
+        if (text === "No browser tabs open.") return textResult(text);
+        return { content: [{ type: "text", text }], details: { tabs, activeId } };
       },
-    } as ToolDefinition<any, any>,
+    },
 
     {
       name: "browser_activate_tab",
@@ -108,15 +110,14 @@ export function createBrowserTools(getController: () => SimController | null): T
         additionalProperties: false,
         required: ["tab"],
         properties: { tab: tabParam("Tab id to activate") },
-      } as any,
+      },
       execute: async (_id, raw) => {
         const ctl = needCtl(getController);
-        const tab = String((raw as any)?.tab ?? "").trim();
-        if (!tab) throw new Error("browser_activate_tab: tab is required");
+        const tab = requireTabId(raw);
         await ctl.activate(tab);
         return stateLine(ctl, `Activated tab ${tab}`, tab);
       },
-    } as ToolDefinition<any, any>,
+    },
 
     {
       name: "browser_close_tab",
@@ -126,14 +127,14 @@ export function createBrowserTools(getController: () => SimController | null): T
         type: "object",
         additionalProperties: false,
         properties: { tab: tabParam("Tab id to close") },
-      } as any,
+      },
       execute: async (_id, raw) => {
         const ctl = needCtl(getController);
-        const tab = typeof (raw as any)?.tab === "string" && (raw as any).tab ? (raw as any).tab : null;
+        const tab = parseTabArg(raw);
         const { closed } = await ctl.closeTab(tab);
         return textResult(closed ? `Closed tab ${tab ?? "(active)"}.` : "No tab to close.");
       },
-    } as ToolDefinition<any, any>,
+    },
 
     {
       name: "browser_navigate",
@@ -147,16 +148,15 @@ export function createBrowserTools(getController: () => SimController | null): T
           url: { type: "string", description: "http(s) URL to navigate to" },
           tab: tabParam(),
         },
-      } as any,
+      },
       execute: async (_id, raw) => {
         const ctl = needCtl(getController);
-        const url = String((raw as any)?.url ?? "").trim();
-        if (!url) throw new Error("browser_navigate: url is required");
-        const tab = typeof (raw as any)?.tab === "string" && (raw as any).tab ? (raw as any).tab : undefined;
+        const url = requireUrl(raw, "browser_navigate");
+        const tab = parseTabArgOptional(raw);
         await ctl.navigate(tab, url);
         return stateLine(ctl, `Navigated to ${url}`, tab);
       },
-    } as ToolDefinition<any, any>,
+    },
 
     {
       name: "browser_reload",
@@ -166,14 +166,14 @@ export function createBrowserTools(getController: () => SimController | null): T
         type: "object",
         additionalProperties: false,
         properties: { tab: tabParam() },
-      } as any,
+      },
       execute: async (_id, raw) => {
         const ctl = needCtl(getController);
-        const tab = typeof (raw as any)?.tab === "string" && (raw as any).tab ? (raw as any).tab : null;
+        const tab = parseTabArg(raw);
         ctl.reload(tab);
         return stateLine(ctl, "Reloaded", tab ?? undefined);
       },
-    } as ToolDefinition<any, any>,
+    },
 
     {
       name: "browser_back",
@@ -183,14 +183,14 @@ export function createBrowserTools(getController: () => SimController | null): T
         type: "object",
         additionalProperties: false,
         properties: { tab: tabParam() },
-      } as any,
+      },
       execute: async (_id, raw) => {
         const ctl = needCtl(getController);
-        const tab = typeof (raw as any)?.tab === "string" && (raw as any).tab ? (raw as any).tab : null;
+        const tab = parseTabArg(raw);
         ctl.back(tab);
         return stateLine(ctl, "Went back", tab ?? undefined);
       },
-    } as ToolDefinition<any, any>,
+    },
 
     {
       name: "browser_forward",
@@ -200,14 +200,14 @@ export function createBrowserTools(getController: () => SimController | null): T
         type: "object",
         additionalProperties: false,
         properties: { tab: tabParam() },
-      } as any,
+      },
       execute: async (_id, raw) => {
         const ctl = needCtl(getController);
-        const tab = typeof (raw as any)?.tab === "string" && (raw as any).tab ? (raw as any).tab : null;
+        const tab = parseTabArg(raw);
         ctl.forward(tab);
         return stateLine(ctl, "Went forward", tab ?? undefined);
       },
-    } as ToolDefinition<any, any>,
+    },
 
     {
       name: "browser_emulate",
@@ -223,17 +223,17 @@ export function createBrowserTools(getController: () => SimController | null): T
           rotated: { type: "boolean", description: "Landscape for rotatable (mobile) presets" },
           tab: tabParam(),
         },
-      } as any,
+      },
       execute: async (_id, raw) => {
         const ctl = needCtl(getController);
-        const preset = checkPreset((raw as any)?.preset);
-        const tab = typeof (raw as any)?.tab === "string" && (raw as any).tab ? (raw as any).tab : undefined;
+        const preset = checkPreset((raw as { preset?: unknown } | null | undefined)?.preset);
+        const tab = parseTabArgOptional(raw);
         await ctl.ensureOpen();
-        await ctl.setEmulation(tab, buildEmulation(preset, (raw as any)?.rotated === true), "agent");
-        const label = SIM_PRESETS.find((p) => p.id === preset)?.label ?? preset;
-        return textResult(`Emulating ${label}${(raw as any)?.rotated === true ? " (landscape)" : ""}`);
+        const rawRot = raw as { rotated?: unknown } | null | undefined;
+        await ctl.setEmulation(tab, buildEmulation(preset, rawRot?.rotated === true), "agent");
+        return textResult(emulateResult(preset, rawRot?.rotated));
       },
-    } as ToolDefinition<any, any>,
+    },
 
     {
       name: "browser_screenshot",
@@ -246,13 +246,14 @@ export function createBrowserTools(getController: () => SimController | null): T
           tab: tabParam(),
           fullPage: { type: "boolean", description: "Capture beyond the viewport (full page height)" },
         },
-      } as any,
+      },
       execute: async (_id, raw, _signal, onUpdate) => {
         const ctl = needCtl(getController);
         onUpdate?.({ content: [{ type: "text", text: "Capturing screenshot…" }], details: {} });
-        const tab = typeof (raw as any)?.tab === "string" && (raw as any).tab ? (raw as any).tab : null;
+        const tab = parseTabArg(raw);
         await ctl.ensureOpen();
-        const shot = await ctl.screenshot(tab, { fullPage: (raw as any)?.fullPage === true });
+        const fullPage = (raw as { fullPage?: unknown } | null | undefined)?.fullPage === true;
+        const shot = await ctl.screenshot(tab, { fullPage });
         const snap = await ctl.snapshot(tab).catch(() => null);
         return {
           content: [
@@ -262,7 +263,7 @@ export function createBrowserTools(getController: () => SimController | null): T
           details: { width: shot.width, height: shot.height, url: snap?.url ?? null },
         };
       },
-    } as ToolDefinition<any, any>,
+    },
 
     {
       name: "browser_snapshot",
@@ -272,20 +273,19 @@ export function createBrowserTools(getController: () => SimController | null): T
         type: "object",
         additionalProperties: false,
         properties: { tab: tabParam() },
-      } as any,
+      },
       execute: async (_id, raw) => {
         const ctl = needCtl(getController);
-        const tab = typeof (raw as any)?.tab === "string" && (raw as any).tab ? (raw as any).tab : null;
+        const tab = parseTabArg(raw);
         await ctl.ensureOpen();
         const snap = await ctl.snapshot(tab, { a11y: true });
-        const body = [`URL: ${snap.url}\nTitle: ${snap.title || "(none)"}\n\n${snap.text || "(no text)"}`];
-        if (snap.a11y) body.push(`Interactive elements (click/fill with selector "ref:N"):\n${snap.a11y}`);
+        const text = snapshotBody(snap);
         return {
-          content: [{ type: "text", text: body.join("\n\n") }],
+          content: [{ type: "text", text }],
           details: { url: snap.url, title: snap.title, chars: snap.text.length, axChars: snap.a11y.length },
         };
       },
-    } as ToolDefinition<any, any>,
+    },
 
     {
       name: "browser_click",
@@ -299,16 +299,16 @@ export function createBrowserTools(getController: () => SimController | null): T
           selector: { type: "string", description: "CSS selector of the element to click, or a ref:N marker from the latest browser_snapshot" },
           tab: tabParam(),
         },
-      } as any,
+      },
       execute: async (_id, raw) => {
         const ctl = needCtl(getController);
-        const selector = String((raw as any)?.selector ?? "");
-        const tab = typeof (raw as any)?.tab === "string" && (raw as any).tab ? (raw as any).tab : undefined;
+        const selector = requireSelector(raw, "browser_click");
+        const tab = parseTabArgOptional(raw);
         await ctl.ensureOpen();
         const at = await ctl.click(tab, selector);
         return textResult(`Clicked ${selector} at ${at.x},${at.y}${at.text ? ` (“${at.text}”)` : ""}`);
       },
-    } as ToolDefinition<any, any>,
+    },
 
     {
       name: "browser_fill",
@@ -323,16 +323,17 @@ export function createBrowserTools(getController: () => SimController | null): T
           text: { type: "string", description: "Text to type" },
           tab: tabParam(),
         },
-      } as any,
+      },
       execute: async (_id, raw) => {
         const ctl = needCtl(getController);
-        const selector = String((raw as any)?.selector ?? "");
-        const tab = typeof (raw as any)?.tab === "string" && (raw as any).tab ? (raw as any).tab : undefined;
+        const selector = requireSelector(raw, "browser_fill");
+        const tab = parseTabArgOptional(raw);
         await ctl.ensureOpen();
-        const { value } = await ctl.fill(tab, selector, String((raw as any)?.text ?? ""));
+        const fillText = String((raw as { text?: unknown } | null | undefined)?.text ?? "");
+        const { value } = await ctl.fill(tab, selector, fillText);
         return textResult(`Filled ${selector} — field now reads: “${value.slice(0, 200)}”`);
       },
-    } as ToolDefinition<any, any>,
+    },
 
     {
       name: "browser_evaluate",
@@ -346,11 +347,11 @@ export function createBrowserTools(getController: () => SimController | null): T
           expression: { type: "string", description: "JavaScript expression to evaluate" },
           tab: tabParam(),
         },
-      } as any,
+      },
       execute: async (_id, raw) => {
         const ctl = needCtl(getController);
-        const expression = String((raw as any)?.expression ?? "");
-        const tab = typeof (raw as any)?.tab === "string" && (raw as any).tab ? (raw as any).tab : undefined;
+        const expression = String((raw as { expression?: unknown } | null | undefined)?.expression ?? "");
+        const tab = parseTabArgOptional(raw);
         await ctl.ensureOpen();
         const out = await ctl.evaluate(tab, expression);
         return {
@@ -358,7 +359,7 @@ export function createBrowserTools(getController: () => SimController | null): T
           details: { chars: out.result.length },
         };
       },
-    } as ToolDefinition<any, any>,
+    },
   ];
   return tools;
 }

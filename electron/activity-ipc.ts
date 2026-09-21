@@ -1,18 +1,16 @@
 import type { IpcMainInvokeEvent } from "electron";
+import type { IpcHandle } from "./ipc-handle";
 import type { RuntimeFacade } from "../src/runtime-facade";
 import type { ActivityRegistry } from "./activity";
 
-interface WorkflowsBridgeLike {
+export interface WorkflowsBridgeLike {
   list(): Promise<unknown>;
   get(runId: string): Promise<unknown>;
   delete(runId: string): Promise<unknown>;
   control(action: string, runId: string): unknown;
 }
 
-type Handle = (
-  channel: string,
-  listener: (event: IpcMainInvokeEvent, ...args: any[]) => unknown,
-) => void;
+type Handle = IpcHandle;
 
 export function registerActivityIpc(
   handle: Handle,

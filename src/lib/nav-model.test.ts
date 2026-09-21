@@ -7,6 +7,7 @@ import {
   deriveLiveAgents,
   migrateLegacyTabs,
   pickSpaceTab,
+  tabsStore,
   visibleSpaceTabs,
 } from "./nav-model";
 
@@ -35,6 +36,18 @@ describe("migrateLegacyTabs", () => {
     const v2 = { tabs: [{ path: "p1", cwd: "/a" }], activeBySpace: { "/a": "p1" } };
     expect(migrateLegacyTabs(v2, [])).toEqual(v2);
     expect(migrateLegacyTabs({ "/a": ["p1", "p1"] }, []).tabs).toEqual([{ path: "p1", cwd: "/a" }]);
+  });
+});
+
+describe("tabsStore", () => {
+  it("accepts stamped v2 blobs and migrates legacy records", () => {
+    expect(tabsStore.validate({ tabs: [{ path: "p", cwd: "/a" }], activeBySpace: {} })).toBe(true);
+    expect(tabsStore.validate({ tabs: [{ path: "p" }] })).toBe(false);
+    expect(tabsStore.validate({ tabs: [], activeBySpace: { "/a": 42 } })).toBe(false);
+    expect(tabsStore.validate(null)).toBe(false);
+    expect(tabsStore.migrate?.({ "/a": ["p1"] }, 0)).toEqual({ tabs: [{ path: "p1", cwd: "/a" }], activeBySpace: {} });
+    const v2 = { tabs: [{ path: "p1", cwd: "/a" }], activeBySpace: {} };
+    expect(tabsStore.migrate?.(v2, 0)).toEqual(v2);
   });
 });
 

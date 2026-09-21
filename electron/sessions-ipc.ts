@@ -1,8 +1,10 @@
 import { dialog, type BrowserWindow, type IpcMainInvokeEvent } from "electron";
+import type { IpcHandle } from "./ipc-handle";
 import { promises as fsp } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import { readSessionRange, readSessionTail, type SessionIndex } from "./sessions";
-import { mergeRecaps, mergeRecapsIntoWindow } from "./recap";
+import { mergeRecaps, mergeRecapsIntoWindow, type Recap } from "./recap";
+import { wireOf, wireStr } from "../src/store";
 import { validateSessionPath } from "./session-path";
 import { buildBotSystemPrompt } from "../src/bots";
 import type { BotStore } from "./bots";
@@ -12,10 +14,7 @@ import type { DaemonClient } from "../src/daemon-client";
 import type { Task } from "../src/tasks";
 import type { PiHost } from "./pi-host";
 
-type Handle = (
-  channel: string,
-  listener: (event: IpcMainInvokeEvent, ...args: any[]) => unknown,
-) => void;
+type Handle = IpcHandle;
 
 export function registerSessionsIpc(
   handle: Handle,
@@ -48,11 +47,23 @@ export function registerSessionsIpc(
     overlayForSessionFile,
     taskManager,
   } = deps;
+
+  /** Recaps for a session file, validated: the runtime boundary hands back
+   *  unknown (daemon socket or host), and only well-formed recaps merge. */
+  const loadRecaps = async (target: string): Promise<Recap[]> => {
+    const recaps = await getRuntime().getRecaps(target);
+    if (!Array.isArray(recaps)) return [];
+    return recaps.filter((r): r is Recap => {
+      const w = wireOf(r);
+      return !!w && typeof w.id === "string" && typeof w.at === "string" && typeof w.text === "string" &&
+        (w.coveredEntryId === null || typeof w.coveredEntryId === "string");
+    });
+  };
   handle("pideck:list-sessions", () => sessionIndex.list());
   handle("pideck:get-session-messages", async (_e, path: string) => {
     const target = await validateSessionPath(sessionsRoot, path);
     const window = await readSessionTail(target);
-    return { ...window, messages: mergeRecaps(window.messages, await getRuntime().getRecaps(target) as any) };
+    return { ...window, messages: mergeRecaps(window.messages, await loadRecaps(target)) };
   });
 
   handle("pideck:get-session-window", async (_e, path: string, endOffset: number, countBytes?: number) => {
@@ -60,7 +71,7 @@ export function registerSessionsIpc(
     if (!Number.isSafeInteger(endOffset) || endOffset < 0) throw new Error("invalid session window offset");
     const maxBytes = Math.min(Math.max(countBytes ?? 2 * 1024 * 1024, 256 * 1024), 16 * 1024 * 1024);
     const window = await readSessionRange(target, endOffset, maxBytes);
-    return { ...window, messages: mergeRecapsIntoWindow(window.messages, await getRuntime().getRecaps(target) as any) };
+    return { ...window, messages: mergeRecapsIntoWindow(window.messages, await loadRecaps(target)) };
   });
 
   handle("pideck:get-tool-output", async (_e, toolCallId: string) => {

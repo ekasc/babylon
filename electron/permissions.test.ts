@@ -31,8 +31,8 @@ afterEach(async () => {
     try {
       await rm(tmp, { recursive: true, force: true });
       return;
-    } catch (err: any) {
-      if (attempt >= 5 || err?.code !== "ENOTEMPTY") throw err;
+    } catch (err: unknown) {
+      if (attempt >= 5 || (err as NodeJS.ErrnoException)?.code !== "ENOTEMPTY") throw err;
       await new Promise((r) => setTimeout(r, 25));
     }
   }
@@ -359,7 +359,7 @@ describe("applyApproval", () => {
     await engine.load();
     const deny = (category: string): PermissionRule => ({
       id: `deny-${category}`,
-      category: category as never,
+      category: category as PermissionRule["category"],
       decision: "deny",
       scope: "always",
       createdAt: Date.now(),

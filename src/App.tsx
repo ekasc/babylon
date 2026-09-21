@@ -1,8 +1,8 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { bridge, bridgeAvailable, type ActivityUpdate, type CommandInfo, type HistoryProjection, type ProjectGroup, type ProjectSettings, type SessionMeta, type SessionStatus, type SessionWindow, type SimTabState, type WorkflowRunSummary } from "./bridge";
+import { lazy, Suspense, useCallback, useEffect, useEffectEvent, useMemo, useReducer, useRef, useState } from "react";
+import { bridge, bridgeAvailable, type ActivityUpdate, type AgentModel, type AgentState, type CommandInfo, type HistoryProjection, type ProjectGroup, type ProjectSettings, type SessionMeta, type SessionStats, type SessionStatus, type SessionWindow, type SimTabState, type WorkflowRunSummary } from "./bridge";
 import type { Bot, BotGroup, BotPatch, DefaultBot, NewBotInput, NewGroupInput } from "./bots";
 import { isBotMainSession, isGroupRoom } from "./bots";
-import { initialState, mergeLiveMessages, reducer } from "./store";
+import { initialState, mergeLiveMessages, reducer, wireOf, wireStr } from "./store";
 import { shouldAcceptEvent } from "./sessionLifecycle";
 import {
   applyRuntimeEvent,
@@ -13,6 +13,7 @@ import {
   resolveRuntimePath as resolveRuntimePathPure,
   type PathExecutionMap,
   type SessionRuntimeState,
+  type WorkSourceItem,
   emptyExecutions,
 } from "./sessionRuntime";
 import {
@@ -27,11 +28,13 @@ import {
 } from "./app-selectors";
 import { insertCommand } from "./commands";
 import { countRunningWork } from "./lib/activity";
+import { errorMessage } from "./lib/errors";
 import Sidebar from "./components/Sidebar";
 import { useTheme } from "./components/hooks/useTheme";
 import { useRollback } from "./components/hooks/useRollback";
 import { useGitStatus } from "./components/hooks/useGitStatus";
 import { useSidebarState } from "./components/hooks/useSidebarState";
+import { useDurableGoal } from "./components/hooks/useDurableGoal";
 import { usePanels } from "./components/hooks/usePanels";
 import { getNumberWithFallback, getWithFallback, setWithFallback } from "./lib/storage";
 import { useBoolPref, useStringPref, writeBoolPref, writeStringPref } from "./lib/prefs";
@@ -43,6 +46,7 @@ import Hero from "./components/Hero";
 import { RollbackConfirm } from "./components/Rollback";
 import NewSessionModal from "./components/NewSessionModal";
 import SessionFooter from "./components/SessionFooter";
+import ErrorBoundary, { PaneCrashFallback } from "./components/ErrorBoundary";
 import { ApprovalGate } from "./components/ApprovalGate";
 import GitCommitPopover from "./components/GitCommitPopover";
 // Overlay panels are rarely needed at boot; lazy-load them so they stay out
@@ -61,24 +65,18 @@ import SessionSidebar, { type SessionMenuItem } from "./components/SessionSideba
 import StatsCard, { defaultStatsCardPos, type StatsCardPos } from "./components/StatsCard";
 import { countCompactions, pushTurnSample, type TurnSample } from "./lib/session-stats";
 import {
-  bumpGoalTurn,
-  clearGoal,
-  finishGoal,
-  loadGoals,
-  pauseGoal,
-  resumeGoal,
-  saveGoals,
-  startGoal,
-  type GoalMap,
-} from "./lib/goal-mode";
+  type DurableGoalState,
+} from "./lib/durable-goal";
 import {
+  activeSpaceStore,
   addNavTab,
   closeNavTab,
-  migrateLegacyTabs,
   pickSpaceTab,
+  spacesStore,
+  tabsStore,
   visibleSpaceTabs,
-  type NavTabsBlob,
 } from "./lib/nav-model";
+import { useVersionedState } from "./lib/versioned-store";
 
 const BranchPanel = lazy(() => import("./components/BranchPanel"));
 const WorkflowsPanel = lazy(() => import("./components/WorkflowsPanel"));
@@ -93,16 +91,7 @@ export default function App() {
   // Bot Mode: named specialists with a canonical forever-chat each.
   const [bots, setBots] = useState<Bot[]>([]);
   const [appDefaultBot, setAppDefaultBot] = useState<DefaultBot | null>(null);
-  const [showProject, setShowProject] = useState(false);
-  // Goal mode: per-session objective with elapsed time + turn count.
-  const [goals, setGoals] = useState<GoalMap>(() => loadGoals());
-  const updateGoals = useCallback((fn: (m: GoalMap) => GoalMap) => {
-    setGoals((prev) => {
-      const next = fn(prev);
-      if (next !== prev) saveGoals(next);
-      return next;
-    });
-  }, []);
+
   // Group rooms: one shared session where member bots take serial turns.
   const [botGroups, setBotGroups] = useState<BotGroup[]>([]);
   // Per-project bots: settings snapshot for the active project (default copy,
@@ -137,27 +126,12 @@ export default function App() {
   const [status, setStatus] = useState<SessionStatus>({ status: "idle" });
   const [projectFilter, setProjectFilter] = useState("all");
   // Global session working set (browser model): open tabs in insertion
-  // order, independent of Space. v2 blob {tabs, activeBySpace}; the legacy
-  // per-space record shape migrates on load. Closing never deletes.
-  const [navTabs, setNavTabs] = useState<NavTabsBlob>(() => {
-    try {
-      return migrateLegacyTabs(JSON.parse(localStorage.getItem("babylon:tabs") ?? "null"), []);
-    } catch {
-      return { tabs: [], activeBySpace: {} };
-    }
-  });
-  const persistTabs = (blob: NavTabsBlob) =>
-    localStorage.setItem("babylon:tabs", JSON.stringify(blob));
+  // order, independent of Space. Versioned blob (v2; legacy per-space
+  // records migrate); persistence is owned by the hook. Closing never deletes.
+  const [navTabs, setNavTabs] = useVersionedState(tabsStore);
   // Explicit project context. Follows opened sessions; space selection sets
   // it directly (a space can be active with no session open — landing).
-  const [activeSpace, setActiveSpaceState] = useState<string | null>(() =>
-    localStorage.getItem("babylon:active-space")
-  );
-  const setActiveSpace = useCallback((cwd: string | null) => {
-    setActiveSpaceState(cwd);
-    if (cwd) localStorage.setItem("babylon:active-space", cwd);
-    else localStorage.removeItem("babylon:active-space");
-  }, []);
+  const [activeSpace, setActiveSpace] = useVersionedState(activeSpaceStore);
   // Pre-warm a project the moment it becomes the active space: the rollback
   // shadow index and the project's model runtime are built while the user is
   // reading, so the first session open (and the first send in it) is not cold.
@@ -169,22 +143,35 @@ export default function App() {
   const registerOpenSession = useCallback((cwd: string, path: string) => {
     setNavTabs((prev) => {
       const tabs = addNavTab(prev.tabs, cwd, path);
-      const next = { tabs, activeBySpace: { ...prev.activeBySpace, [cwd]: path } };
-      persistTabs(next);
-      return next;
+      return { tabs, activeBySpace: { ...prev.activeBySpace, [cwd]: path } };
     });
     setActiveSpace(cwd);
   }, [setActiveSpace]);
 
-  const [models, setModels] = useState<any[]>([]);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [models, setModels] = useState<AgentModel[]>([]);
+
   const { themePref, themeId, setThemePref, setThemeId } = useTheme();
   const [commands, setCommands] = useState<CommandInfo[]>([]);
-  const [agentState, setAgentState] = useState<any>(null);
+  const [agentState, setAgentState] = useState<AgentState | null>(null);
   const { gitStatuses, refreshGitStatuses, refreshGitStatusForCwd } = useGitStatus(groups);
-  const [stats, setStats] = useState<any>(null);
+  const [stats, setStats] = useState<SessionStats | null>(null);
   const [thinkingLevels, setThinkingLevels] = useState<string[]>([]);
-  const { showCommitPopover, setShowCommitPopover, showCommandPalette, setShowCommandPalette } = usePanels();
+  const {
+    showCommitPopover,
+    setShowCommitPopover,
+    showCommandPalette,
+    setShowCommandPalette,
+    settingsOpen,
+    setSettingsOpen,
+    showNewSession,
+    setShowNewSession,
+    showProject,
+    setShowProject,
+    sidebarMinimized,
+    setSidebarMinimized,
+    sideOpen,
+    setSideOpen,
+  } = usePanels();
   const [attention, setAttention] = useState<AttentionRegistry>(() =>
     createAttentionRegistry(),
   );
@@ -196,8 +183,10 @@ export default function App() {
   const statsCardOpen = useBoolPref("statsCard", false);
   const statsCardPosPref = useStringPref("statsCardPos", "");
   const statsCardPos = useMemo<StatsCardPos>(() => {
-    const [x, y] = statsCardPosPref.split(",").map(Number);
-    return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : defaultStatsCardPos();
+    const parts = statsCardPosPref.split(",").map(Number);
+    const x = parts[0];
+    const y = parts[1];
+    return x !== undefined && y !== undefined && Number.isFinite(x) && Number.isFinite(y) ? { x, y } : defaultStatsCardPos();
   }, [statsCardPosPref]);
   const [turnSamples, setTurnSamples] = useState<{ path: string | null; samples: TurnSample[] }>({
     path: null,
@@ -227,10 +216,10 @@ export default function App() {
     return Number.isFinite(stored) && stored >= 360 && stored <= 1100 ? stored : 520;
   });
 
-  const [sidebarMinimized, setSidebarMinimized] = useState(() => getWithFallback("sidebar-minimized") === "1");
+
   // The session sidebar is closed by default and opened on demand, like the app's
   // other right-hand panel. Its X puts it away; the thread header opens it again.
-  const [sideOpen, setSideOpen] = useState(() => getWithFallback("session-sidebar") === "1");
+
   const [draftRequest, setDraftRequest] = useState<{ id: number; text: string; append?: boolean } | null>(null);
   const [promotedParent, setPromotedParent] = useState<{ path: string; cwd: string } | null>(null);
   // Optimistic active session: set synchronously on click so the sidebar row
@@ -248,6 +237,8 @@ export default function App() {
   const [preparingTurn, setPreparingTurn] = useState(false);
   // Whether a stored-transcript window older than the current one exists.
   const [canLoadMore, setCanLoadMore] = useState(false);
+  // Bumped on every send so the transcript pins to the new message.
+  const [pinNonce, setPinNonce] = useState(0);
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [activity, setActivity] = useState<ActivityUpdate>({ threads: [], subagents: [] });
   const [workflowRuns, setWorkflowRuns] = useState<WorkflowRunSummary[]>([]);
@@ -295,13 +286,13 @@ export default function App() {
   // the preceding window instead of the whole file. The transcript only ever
   // grows (older windows prepend, live messages append), never shrinks, which
   // is what keeps big-session opens free of wipe-flicker.
-  const loadedMessagesRef = useRef<any[]>([]);
+  const loadedMessagesRef = useRef<unknown[]>([]);
   const earliestOffsetRef = useRef<number | null>(null);
   const loadingMoreRef = useRef(false);
   // Per-session transcript cache (bounded LRU, opencode's SESSION_CACHE
   // pattern): switching back renders from memory instead of re-reading the
   // file, and the host re-warms in the background.
-  const sessionCacheRef = useRef(new Map<string, { messages: any[]; earliestOffset: number | null; canLoadMore: boolean }>());
+  const sessionCacheRef = useRef(new Map<string, { messages: unknown[]; earliestOffset: number | null; canLoadMore: boolean }>());
   const prefetchingRef = useRef(new Set<string>());
   const streamingRef = useRef(false);
   const streamResponsesRef = useRef(streamResponses);
@@ -317,6 +308,9 @@ export default function App() {
       dispatch({ type: "toast", toast: { type, text } }),
     []
   );
+  // Durable per-session goal (hardbaked goal-mode extension state): the
+  // single source of truth the agent itself enforces.
+  const { durableGoal, setDurableGoal, goalTargetRef, refreshDurableGoal, goalControl } = useDurableGoal(toast);
 
   // Stable identity so the memoized Sidebar does not re-render every frame.
   const renameSession = useCallback(
@@ -332,11 +326,7 @@ export default function App() {
     [headerName, activeSessionPath, toast]
   );
 
-  // Ref mirror so menu callbacks read fresh execution without re-creating
-  // on every runtime tick (Sidebar rows are memoized on handler identity).
-  const runtimeByPathRef = useRef<Record<string, SessionRuntimeState>>({});
-  const groupsRef = useRef<ProjectGroup[]>([]);
-  const closeTabRef = useRef<(path: string) => void>(() => {});
+
   // Failed-transition attention: a thread/subagent that newly reports
   // interrupted/failed marks its owning sessions unread. Only transitions
   // observed while running count (seeded silently), so restarts and old
@@ -344,9 +334,9 @@ export default function App() {
   const failedSeenRef = useRef<Map<string, string>>(new Map());
   useEffect(() => {
     const FAILED = new Set(["interrupted", "failed"]);
-    const check = (
-      items: Array<{ status: string; sessionFile?: string | null; parentSessionFile?: string | null }>,
-      idOf: (item: (typeof items)[number]) => string
+    const check = <T extends WorkSourceItem>(
+      items: T[],
+      idOf: (item: T) => string
     ) => {
       for (const item of items) {
         const id = idOf(item);
@@ -359,77 +349,79 @@ export default function App() {
         }
       }
     };
-    check(activity.threads, (t: any) => `thread:${t.threadId}`);
-    check(activity.subagents, (s: any) => `subagent:${s.runId}`);
+    check(activity.threads, (t) => `thread:${t.threadId}`);
+    check(activity.subagents, (s) => `subagent:${s.runId}`);
   }, [activity, markUnread]);
   // Explicit settlement: idle (or failed) sessions leave active work for the
   // Settled shelf; live work (working/waiting/approval) rejects. Persisted.
   // Settling the open session is allowed when idle: it persists, drops its
   // tab, and falls back to a neighbor tab (or stays viewing the settled
   // transcript when nothing else is open — viewing settled work is legal).
-  const settleSession = useCallback((path: string) => {
-    const exec = runtimeByPathRef.current[path]?.execution ?? "idle";
+  // Event-style callbacks (useEffectEvent): stable identity for memoized
+  // children and one-shot subscriptions, always reading latest state.
+  // They replace the old ref mirrors (runtimeByPathRef/groupsRef/closeTabRef).
+  const settleSession = useEffectEvent((path: string) => {
+    const exec = runtimeByPath[path]?.execution ?? "idle";
     if (!canSettle(exec)) {
       toast("warning", "Still working — settle after this run finishes");
       return;
     }
     setSettled((prev) => {
       if (prev[path] != null) return prev;
-      const next = { ...prev, [path]: Date.now() };
-      localStorage.setItem("babylon:settled", JSON.stringify(next));
-      return next;
+      return { ...prev, [path]: Date.now() };
     });
     // Settled work leaves tabs and pins behind (like archive drops its pin).
-    setPinnedOrder((prev) => {
-      if (!prev.includes(path)) return prev;
-      const next = prev.filter((p) => p !== path);
-      localStorage.setItem("babylon:pinned", JSON.stringify(next));
-      return next;
-    });
-    const cwd = runtimeByPathRef.current[path]?.cwd;
+    // Persistence is owned by the versioned setters; no direct writes here.
+    setPinnedOrder((prev) => (prev.includes(path) ? prev.filter((p) => p !== path) : prev));
+    const cwd = runtimeByPath[path]?.cwd;
     setNavTabs((prev) => {
       if (!prev.tabs.some((t) => t.path === path)) return prev;
-      const next = { ...prev, tabs: prev.tabs.filter((t) => t.path !== path) };
-      persistTabs(next);
-      return next;
+      return { ...prev, tabs: prev.tabs.filter((t) => t.path !== path) };
     });
-    if (path === activePathRef.current && cwd) closeTabRef.current(path);
-  }, [toast]);
-  const unsettleSession = useCallback((path: string) => {
+    if (path === activePathRef.current && cwd) closeTab(path);
+  });
+  const unsettleSession = useEffectEvent((path: string) => {
     setSettled((prev) => {
       if (prev[path] == null) return prev;
       const next = { ...prev };
       delete next[path];
-      localStorage.setItem("babylon:settled", JSON.stringify(next));
       return next;
     });
     // Return to active work means visible work: re-add its tab under the
     // owning project (opening the row un-settles the same way).
-    const owner = groupsRef.current
+    const owner = groups
       .flatMap((g) => g.sessions.map((s) => ({ ...s, groupCwd: g.cwd })))
       .find((s) => s.path === path);
     if (owner) {
       setNavTabs((prev) => {
         const tabs = addNavTab(prev.tabs, owner.groupCwd, path);
         if (tabs === prev.tabs) return prev;
-        const next = { ...prev, tabs };
-        persistTabs(next);
-        return next;
+        return { ...prev, tabs };
       });
     }
-  }, []);
+  });
 
-  const refreshSessions = useCallback(async () => {
+  const refreshSessions = useEffectEvent(async () => {
     try {
       setGroups(await bridge.listSessions());
-    } catch {
-      /* sessions dir may not exist yet */
+    } catch (e) {
+      // An empty list with no explanation blanks tabs and history with no
+      // recourse, so that case toasts. Transient blips over a loaded list
+      // keep stale data silently rather than flashing errors.
+      if (process.env.NODE_ENV !== "production") console.warn("[babylon] listSessions failed:", e);
+      if (groups.length === 0) toast("error", errorMessage(e, "couldn't load sessions"));
     }
-  }, []);
+  });
 
   const togglePalette = useCallback((next: boolean | ((v: boolean) => boolean)) => {
-    const apply = () => setShowCommandPalette(next as any);
-    const doc: any = document as any;
+    const apply = () => setShowCommandPalette(next);
+    const doc: Document & {
+      startViewTransition?: (cb: () => void) => {
+        ready: Promise<unknown>;
+        updateCallbackDone: Promise<unknown>;
+        finished: Promise<unknown>;
+      };
+    } = document;
     // Rapid ⌘K cycling skips the in-flight transition, which rejects its
     // promises: observe and swallow so fast navigation stays console-clean.
     if (doc.startViewTransition && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
@@ -440,7 +432,7 @@ export default function App() {
         // never surfaces an unhandled AbortError.
         for (const key of ["ready", "updateCallbackDone", "finished"] as const) {
           try {
-            (transition as any)?.[key]?.catch?.(() => {});
+            transition?.[key]?.catch?.(() => {});
           } catch {
             /* ignore */
           }
@@ -615,7 +607,7 @@ export default function App() {
         .approvalsPending()
         .then((pending) => {
           for (const req of pending ?? []) {
-            const reqSessionId = (req as { sessionId?: string | null }).sessionId ?? null;
+            const reqSessionId = req.sessionId ?? null;
             const resolved = reqSessionId ? (sessionIdToPathRef.current.get(reqSessionId) ?? null) : path;
             if (resolved !== path) continue;
             if (recoveredApprovalsRef.current.has(`dialog-${req.id}`)) continue;
@@ -628,7 +620,7 @@ export default function App() {
                 method: "confirm",
                 title: "Approval required",
                 message: req.action?.description ?? req.action?.category ?? "The agent is waiting for approval.",
-              } as any,
+              },
             });
             const at = Date.now();
             const seq = ++runtimeSeqRef.current;
@@ -668,7 +660,7 @@ export default function App() {
   useEffect(() => {
     return bridge.onApprovalResolved((payload) => {
       setAttention((prev) => removeAttention(prev, `perm-${payload.id}`));
-      const sid = (payload as { sessionId?: string | null }).sessionId ?? null;
+      const sid = payload.sessionId ?? null;
       const ap = (sid && sessionIdToPathRef.current.get(sid)) || activePathRef.current;
       if (ap) {
         const seq = ++runtimeSeqRef.current;
@@ -763,10 +755,11 @@ export default function App() {
       setStats(statsData);
       setHistory(nextHistory);
       setHistoryRevision((revision) => revision + 1);
-      const rollbackCreatedAt = nextHistory.activeRollback?.createdAt ?? null;
-      if (rollbackCreatedAt && rollbackDraftRef.current !== rollbackCreatedAt) {
+      const rollback = nextHistory.activeRollback;
+      const rollbackCreatedAt = rollback?.createdAt ?? null;
+      if (rollback && rollbackCreatedAt && rollbackDraftRef.current !== rollbackCreatedAt) {
         rollbackDraftRef.current = rollbackCreatedAt;
-        setDraftRequest({ id: Date.now(), text: nextHistory.activeRollback!.editorText });
+        setDraftRequest({ id: Date.now(), text: rollback.editorText });
       } else if (!rollbackCreatedAt) {
         rollbackDraftRef.current = null;
       }
@@ -820,20 +813,20 @@ export default function App() {
           if (event?.type !== "message_update" || streamResponsesRef.current) {
             if (shouldAcceptEvent(event, context)) dispatch({ type: "event", event });
           }
-          // Goal mode: one assistant reply is one turn, on any session with an open goal.
-          if (event?.type === "message_end" && (event as any)?.message?.role === "assistant") {
-            const sid = typeof (event as any)?.sessionId === "string" ? ((event as any).sessionId as string) : null;
-            const rp = resolveRuntimePath(sid, false);
-            if (rp) updateGoals((m) => bumpGoalTurn(m, rp));
+          // Durable goal: the extension persists its own turn count on
+          // agent_end; the strip just re-reads the file for this session.
+          if (event?.type === "agent_end" || event?.type === "agent_settled") {
+            const target = goalTargetRef.current;
+            if (target) void refreshDurableGoal(target.sessionId, target.cwd);
           }
           // Session stats: bracket each assistant call (message_start ->
           // message_end) and divide its reported output tokens by that wall
           // time. Only the session on screen contributes, so TPS never leaks
           // across a switch. message_end is the authoritative usage carrier:
           // non-streaming suppresses the deltas but not the final message.
-          if ((event as any)?.message?.role === "assistant") {
-            const sid = typeof (event as any)?.sessionId === "string" ? ((event as any).sessionId as string) : null;
-            const rp = resolveRuntimePath(sid, false);
+          if (wireStr(wireOf(event.message), "role") === "assistant") {
+            const sid = wireStr(event, "sessionId");
+            const rp = resolveRuntimePath(sid ?? null, false);
             if (rp && rp === activePathRef.current) {
               if (event?.type === "message_start") {
                 turnStartRef.current = { path: rp, at: Date.now() };
@@ -841,7 +834,9 @@ export default function App() {
                 const start = turnStartRef.current;
                 turnStartRef.current = null;
                 if (start?.path === rp) {
-                  const outputTokens = Number((event as any)?.message?.usage?.output) || 0;
+                  const usage = wireOf(wireOf(event.message)?.usage);
+                  const rawOutput = usage?.output;
+                  const outputTokens = typeof rawOutput === "number" ? rawOutput : 0;
                   const ms = Date.now() - start.at;
                   if (outputTokens > 0 && ms > 0) {
                     setTurnSamples((prev) => ({
@@ -864,7 +859,7 @@ export default function App() {
             event?.type === "extension_ui_cancel" ||
             event?.type === "extension_ui_response"
           ) {
-            const sid = typeof event?.sessionId === "string" ? (event.sessionId as string) : null;
+            const sid = typeof event?.sessionId === "string" ? event?.sessionId : null;
             const lifecycle = event?.type === "agent_start" || event?.type === "agent_settled" || event?.type === "agent_end";
             const rp = resolveRuntimePath(sid, lifecycle);
             if (rp) {
@@ -901,7 +896,7 @@ export default function App() {
         if (stateChanged) bridge.getState().then(setAgentState).catch(() => {});
         if (needsResync) void resyncFromSource({ skipRefresh: true });
       }),
-    [resyncFromSource, resolveRuntimePath, markUnread, updateGoals]
+    [resyncFromSource, resolveRuntimePath, markUnread, refreshDurableGoal]
   );
 
   const hydrate = useCallback(async (expectedEpoch = epochRef.current) => {
@@ -949,16 +944,17 @@ export default function App() {
       setStats(statsData);
       setHistory(nextHistory);
       setHistoryRevision((revision) => revision + 1);
-      const rollbackCreatedAt = nextHistory.activeRollback?.createdAt ?? null;
-      if (rollbackCreatedAt && rollbackDraftRef.current !== rollbackCreatedAt) {
+      const rollback = nextHistory.activeRollback;
+      const rollbackCreatedAt = rollback?.createdAt ?? null;
+      if (rollback && rollbackCreatedAt && rollbackDraftRef.current !== rollbackCreatedAt) {
         rollbackDraftRef.current = rollbackCreatedAt;
-        setDraftRequest({ id: Date.now(), text: nextHistory.activeRollback!.editorText });
+        setDraftRequest({ id: Date.now(), text: rollback.editorText });
       } else if (!rollbackCreatedAt) {
         rollbackDraftRef.current = null;
       }
       void bridge.getThinkingLevels().then(setThinkingLevels).catch(() => undefined);
-    } catch (e: any) {
-      toast("error", e?.message ?? "failed to load session");
+    } catch (e) {
+      toast("error", errorMessage(e, "failed to load session"));
     }
   }, [toast]);
 
@@ -1165,11 +1161,11 @@ export default function App() {
       }
       try {
         await bridge.openSession({ path, cwd, requestId });
-      } catch (e: any) {
+      } catch (e) {
         if (expectedEpoch !== epochRef.current) return;
         switchingRef.current = false;
         const missingFile =
-          path != null && e?.message != null && String(e.message).includes("session path does not exist");
+          path != null && errorMessage(e, "").includes("session path does not exist");
         if (missingFile) {
           // Stale sidebar index or persisted tab: the transcript file is
           // gone. Evict every tab pointing at it, forget it per space,
@@ -1182,7 +1178,6 @@ export default function App() {
             const activeBySpace = Object.fromEntries(
               Object.entries(prev.activeBySpace).filter(([, p]) => p !== dead)
             );
-            persistTabs({ tabs, activeBySpace });
             return { tabs, activeBySpace };
           });
           void refreshSessions();
@@ -1193,7 +1188,7 @@ export default function App() {
           // Explicit opens still explain what happened.
           toast("info", "That session file no longer exists — cleaned up its tab.");
         } else {
-          toast("error", e?.message ?? "failed to open session");
+          toast("error", errorMessage(e, "failed to open session"));
         }
         if (prevPath) {
           activePathRef.current = prevPath;
@@ -1213,17 +1208,13 @@ export default function App() {
 
   // User-curated spaces (herdr): folders you add explicitly. The pi session
   // index is never auto-imported into the sidebar.
-  const [spaces, setSpaces] = useState<string[]>(() =>
-    JSON.parse(localStorage.getItem("babylon:spaces") ?? "[]")
-  );
+  const [spaces, setSpaces] = useVersionedState(spacesStore);
   const addSpace = useCallback(async () => {
     const cwd = await bridge.pickFolder();
     if (!cwd) return;
     setSpaces((prev) => {
       if (prev.includes(cwd)) return prev;
-      const next = [...prev, cwd];
-      localStorage.setItem("babylon:spaces", JSON.stringify(next));
-      return next;
+      return [...prev, cwd];
     });
     const latest = groups
       .find((g) => g.cwd === cwd)
@@ -1239,21 +1230,16 @@ export default function App() {
     }
   }, [groups, openSession, setActiveSpace, showLanding]);
   const removeSpace = useCallback((cwd: string) => {
-    setSpaces((prev) => {
-      const next = prev.filter((c) => c !== cwd);
-      localStorage.setItem("babylon:spaces", JSON.stringify(next));
-      return next;
-    });
+    setSpaces((prev) => prev.filter((c) => c !== cwd));
   }, []);
   // Explicit tab close: the tab goes away, the session stays on disk and in
   // history. Closing the active tab falls back to its neighbor (then a pinned
   // session, then landing). Idle runtimes are released (listeners/resources
   // freed); live work is never evicted by closing its tab.
-  const closeTab = useCallback((path: string) => {
+  const closeTab = useEffectEvent((path: string) => {
     const { tabs, fallback } = closeNavTab(navTabs.tabs, path);
-    persistTabs({ tabs, activeBySpace: navTabs.activeBySpace });
     setNavTabs((prev) => ({ ...prev, tabs }));
-    const exec = runtimeByPathRef.current[path]?.execution ?? "idle";
+    const exec = runtimeByPath[path]?.execution ?? "idle";
     if (exec === "idle" || exec === "failed") {
       void bridge
         .releaseSession(path)
@@ -1285,8 +1271,7 @@ export default function App() {
       if (nextTab) void openSession(nextTab.path, nextTab.cwd);
       else showLanding();
     }
-  }, [navTabs, pinnedOrder, groups, openSession, showLanding]);
-  closeTabRef.current = closeTab;
+  });
   // Space selection: adopt the project context, then resume its most recently
   // active open tab — or land on the project with no session (never auto-create).
   // The resume is speculative: a remembered tab whose file was deleted outside
@@ -1328,7 +1313,6 @@ export default function App() {
   // Every "new session" entry point opens the project picker: choose one
   // of the added projects (most recently used first) and the fresh chat
   // starts there. A folder outside the list goes through the folder picker.
-  const [showNewSession, setShowNewSession] = useState(false);
   const newSessionProjects = useMemo(() => {
     const byCwd = new Map(groups.map((g) => [g.cwd, g.sessions]));
     return spaces.map((cwd) => {
@@ -1367,8 +1351,8 @@ export default function App() {
       const v = await bridge.projectSettingsGet(cwd);
       setProjectSettings(v);
       setShowProject(true);
-    } catch (e: any) {
-      toast("error", e?.message ?? "could not load project settings");
+    } catch (e) {
+      toast("error", errorMessage(e, "could not load project settings"));
     }
   }, [projectSettings, status.cwd, toast]);
 
@@ -1397,12 +1381,12 @@ export default function App() {
         cwd = picked;
       }
       await openSession(result.sessionFile ?? undefined, cwd, bot.name);
-    } catch (e: any) {
+    } catch (e) {
       // Drop the optimistic row/header so a failed open can't strand the UI
       // on a session that never displayed (header falls back to live status).
       setActiveSessionPath(null);
       setHeaderName(null);
-      toast("error", e?.message ?? "could not open bot chat");
+      toast("error", errorMessage(e, "could not open bot chat"));
     }
   }, [openSession, projectFilter, status.cwd, toast]);
 
@@ -1439,8 +1423,8 @@ export default function App() {
       await bridge.botsDelete(bot.id);
       void bridge.botsList().then(setBots).catch(() => undefined);
       toast("info", `Bot "${bot.name}" deleted`);
-    } catch (e: any) {
-      toast("error", e?.message ?? "could not delete bot");
+    } catch (e) {
+      toast("error", errorMessage(e, "could not delete bot"));
     }
   }, [toast]);
 
@@ -1461,10 +1445,10 @@ export default function App() {
         cwd = picked;
       }
       await openSession(result.sessionFile ?? undefined, cwd, group.name);
-    } catch (e: any) {
+    } catch (e) {
       setActiveSessionPath(null);
       setHeaderName(null);
-      toast("error", e?.message ?? "could not open group room");
+      toast("error", errorMessage(e, "could not open group room"));
     }
   }, [openSession, projectFilter, status.cwd, toast, bots]);
 
@@ -1485,8 +1469,8 @@ export default function App() {
       await bridge.groupsDelete(group.id);
       void bridge.groupsList().then(setBotGroups).catch(() => undefined);
       toast("info", `Group "${group.name}" deleted`);
-    } catch (e: any) {
-      toast("error", e?.message ?? "could not delete group");
+    } catch (e) {
+      toast("error", errorMessage(e, "could not delete group"));
     }
   }, [toast]);
 
@@ -1506,8 +1490,8 @@ export default function App() {
         toast("info", "Summarizing handoff…");
         const handoff = await bridge.handoffCreate(projectSettings.hash, sourcePath);
         toast("info", `Handoff by ${handoff.author} ready, consume it from this chat's menu`);
-      } catch (e: any) {
-        toast("error", e?.message ?? "could not create handoff");
+      } catch (e) {
+        toast("error", errorMessage(e, "could not create handoff"));
       }
     },
     [projectSettings, toast]
@@ -1528,8 +1512,8 @@ export default function App() {
         }
         await bridge.handoffConsume(latest.id, live);
         toast("info", "Handoff installed");
-      } catch (e: any) {
-        toast("error", e?.message ?? "could not consume handoff");
+      } catch (e) {
+        toast("error", errorMessage(e, "could not consume handoff"));
       }
     },
     [activeSessionPath, status.sessionPath, toast]
@@ -1548,6 +1532,9 @@ export default function App() {
             text,
             images: images?.map((image) => `data:${image.mimeType};base64,${image.data}`),
           });
+          // Sending re-engages follow deterministically: the ChatView pins
+          // to the new row instead of relying on append-path gates.
+          setPinNonce((n) => n + 1);
         }
         if (history.activeRollback) {
           setHistory((current) => ({ ...current, activeRollback: undefined }));
@@ -1610,9 +1597,9 @@ export default function App() {
         // session's runtime id; no message id is fabricated when absent.
         if (history.activeRollback) await hydrate();
         return true;
-      } catch (e: any) {
+      } catch (e) {
         if (hasContent) dispatch({ type: "local-user-rollback", text });
-        toast("error", e?.message ?? "send failed");
+        toast("error", errorMessage(e, "send failed"));
         if (history.activeRollback) void hydrate();
         return false;
       }
@@ -1637,8 +1624,8 @@ export default function App() {
         if (runKind === "subagent") await bridge.subagentsControl(action, runId);
         else if (runKind === "thread") await bridge.threadsControl(action, runId);
         else if (runKind === "workflow") await bridge.workflowsControl(action, runId);
-      } catch (e: any) {
-        toast("error", e?.message ?? "failed to control launch");
+      } catch (e) {
+        toast("error", errorMessage(e, "failed to control launch"));
       }
     },
     [toast]
@@ -1660,8 +1647,8 @@ export default function App() {
             models.find((m) => m.provider === provider && m.id === modelId)?.name ?? modelId;
           dispatch({ type: "notice", text: `Switched to ${provider}/${name}` });
         }
-      } catch (e: any) {
-        toast("error", e?.message ?? "model switch failed");
+      } catch (e) {
+        toast("error", errorMessage(e, "model switch failed"));
       }
     },
     [toast, agentState, models]
@@ -1672,8 +1659,8 @@ export default function App() {
       try {
         await bridge.setThinking(level);
         setAgentState(await bridge.getState());
-      } catch (e: any) {
-        toast("error", e?.message ?? "thinking level change failed");
+      } catch (e) {
+        toast("error", errorMessage(e, "thinking level change failed"));
       }
     },
     [toast]
@@ -1684,8 +1671,8 @@ export default function App() {
   const compact = useCallback(async () => {
     try {
       await bridge.compact();
-    } catch (e: any) {
-      toast("error", e?.message ?? "compaction failed");
+    } catch (e) {
+      toast("error", errorMessage(e, "compaction failed"));
     }
   }, [toast]);
 
@@ -1697,15 +1684,14 @@ export default function App() {
       toast("info", "Forked current session");
       await hydrate();
       await refreshSessions();
-    } catch (error: any) {
-      toast("error", error?.message ?? "failed to fork session");
+    } catch (error) {
+      toast("error", errorMessage(error, "failed to fork session"));
     }
   }, [hydrate, refreshSessions, toast]);
 
   const ready = status.status === "ready";
   const activeBranch: string | undefined =
-    (agentState?.gitWorktree?.branch as string | undefined) ??
-    (agentState?.git?.branch as string | undefined);
+    agentState?.gitWorktree?.branch ?? agentState?.git?.branch;
   const runningWorkflows = workflowRuns.filter((r) => r.status === "running" || r.status === "paused").length;
   const subagentCount = activity.subagents.length;
   // Active-session busyness (transcript + host truth): drives the composer
@@ -1738,8 +1724,7 @@ export default function App() {
       }),
     [groups, executions, settled, unread, attention, activity, workflowRuns, activeSessionPath, status.sessionPath, status.cwd, state.streaming, agentIsStreaming, bots]
   );
-  runtimeByPathRef.current = runtimeByPath;
-  groupsRef.current = groups;
+
   // Per-session liveness is dead: runtimeByPath (above) owns it now.
 
   // ---- Spaces / Agents / Tabs nav model ----
@@ -1804,11 +1789,8 @@ export default function App() {
   // defeated and the whole subtree re-renders.
   const onOpenSettings = useCallback(() => setSettingsOpen(true), []);
   const onToggleMinimize = useCallback(() => {
-    setSidebarMinimized((minimized) => {
-      setWithFallback("sidebar-minimized", minimized ? "0" : "1");
-      return !minimized;
-    });
-  }, []);
+    setSidebarMinimized((minimized) => !minimized);
+  }, [setSidebarMinimized]);
   const onOpenSidebarSession = useCallback(
     (path: string | undefined, cwd: string, name?: string) => {
       setPromotedParent(null);
@@ -1822,8 +1804,8 @@ export default function App() {
       try {
         await bridge.deleteSession(path);
         toast("info", "Chat deleted");
-      } catch (error: any) {
-        toast("error", error?.message ?? "could not delete chat");
+      } catch (error) {
+        toast("error", errorMessage(error, "could not delete chat"));
       }
     },
     [toast]
@@ -1866,8 +1848,18 @@ export default function App() {
     return cwd ? cwd.split("/").filter(Boolean).pop() || cwd : null;
   }, [activeSpace, status.cwd]);
 
-  const goalPath = activeSessionPath ?? status.sessionPath ?? null;
-  const goalForPath = goalPath ? goals[goalPath] ?? null : null;
+  // Strip identity follows the visible session; a change refetches the
+  // durable goal (or clears the strip when nothing is open).
+  const goalSessionId = agentState?.sessionId ?? null;
+  const goalCwd = status.cwd ?? null;
+  useEffect(() => {
+    if (!goalSessionId || !goalCwd) {
+      goalTargetRef.current = null;
+      setDurableGoal(null);
+      return;
+    }
+    void refreshDurableGoal(goalSessionId, goalCwd);
+  }, [goalSessionId, goalCwd, refreshDurableGoal]);
 
   // The sidebar's index. Only features that render as panes appear here, because
   // a grid item has to open in the sidebar rather than somewhere else. The rest
@@ -1929,10 +1921,6 @@ export default function App() {
     sideTabsRef.current = sideTabs;
   });
 
-  const setSidebarOpen = useCallback((open: boolean) => {
-    setSideOpen(open);
-    setWithFallback("session-sidebar", open ? "1" : "0");
-  }, []);
 
   const browserTabKey = (id: string) => `browser:${id}`;
 
@@ -1962,7 +1950,7 @@ export default function App() {
             setSideTabs((prev) => (prev.some((t) => t.key === key) ? prev : [...prev, { key, feature, backendTabId: tab.id }]));
             setActiveSideTab(key);
           })
-          .catch((error: any) => toast("error", error?.message ?? "could not open browser tab"));
+          .catch((error: unknown) => toast("error", errorMessage(error, "could not open browser tab")));
         return;
       }
       sideTabCounter.current += 1;
@@ -1978,7 +1966,7 @@ export default function App() {
       setActiveSideTab(key);
       const tab = sideTabs.find((t) => t.key === key);
       if (tab?.feature === "browser" && tab.backendTabId) {
-        bridge.simActivate(tab.backendTabId).catch((error: any) => toast("error", error?.message ?? "could not switch browser tab"));
+        bridge.simActivate(tab.backendTabId).catch((error: unknown) => toast("error", errorMessage(error, "could not switch browser tab")));
       }
     },
     [sideTabs, toast]
@@ -1991,13 +1979,14 @@ export default function App() {
       if (tab.feature === "browser" && tab.backendTabId) {
         // Removal arrives through the backend tabs event, which owns the truth
         // about what still exists.
-        bridge.simCloseTab(tab.backendTabId).catch((error: any) => toast("error", error?.message ?? "could not close browser tab"));
+        bridge.simCloseTab(tab.backendTabId).catch((error: unknown) => toast("error", errorMessage(error, "could not close browser tab")));
         return;
       }
       const rest = sideTabs.filter((t) => t.key !== key);
       setSideTabs(rest);
       if (activeSideTab === key) {
-        setActiveSideTab(rest.length > 0 ? rest[rest.length - 1].key : null);
+        const last = rest[rest.length - 1];
+        setActiveSideTab(last !== undefined ? last.key : null);
       }
     },
     [sideTabs, activeSideTab, toast]
@@ -2033,7 +2022,10 @@ export default function App() {
     setBrowserTabs((prev) => {
       if (
         prev.length === tabs.length &&
-        prev.every((t, i) => t.id === tabs[i].id && t.title === tabs[i].title && t.url === tabs[i].url && t.loading === tabs[i].loading)
+        prev.every((t, i) => {
+          const n = tabs[i];
+          return n !== undefined && t.id === n.id && t.title === n.title && t.url === n.url && t.loading === n.loading;
+        })
       ) {
         return prev;
       }
@@ -2045,8 +2037,9 @@ export default function App() {
       if (fresh.length === 0 && kept.length === prev.length) return prev;
       return [...kept, ...fresh.map((t) => ({ key: browserTabKey(t.id), feature: "browser" as SideFeature, backendTabId: t.id }))];
     });
-    if (fresh.length > 0 && (sideOpenRef.current || takeOverRef.current)) {
-      setActiveSideTab(browserTabKey(fresh[fresh.length - 1].id));
+    const lastFresh = fresh[fresh.length - 1];
+    if (fresh.length > 0 && lastFresh !== undefined && (sideOpenRef.current || takeOverRef.current)) {
+      setActiveSideTab(browserTabKey(lastFresh.id));
       takeOverRef.current = false;
     } else if (removed.length > 0) {
       // A removed tab takes focus with it; fall back to the last survivor.
@@ -2054,7 +2047,8 @@ export default function App() {
       setActiveSideTab((prev) => {
         if (!prev || !removedKeys.has(prev)) return prev;
         const rest = sideTabsRef.current.filter((t) => !removedKeys.has(t.key));
-        return rest.length > 0 ? rest[rest.length - 1].key : null;
+        const last = rest[rest.length - 1];
+        return last !== undefined ? last.key : null;
       });
     }
   }, []);
@@ -2064,7 +2058,8 @@ export default function App() {
   const takeOverBrowser = useCallback(() => {
     takeOverRef.current = true;
     const tabs = browserTabsRef.current;
-    if (tabs.length > 0) setActiveSideTab(browserTabKey(tabs[tabs.length - 1].id));
+    const last = tabs[tabs.length - 1];
+    if (tabs.length > 0 && last !== undefined) setActiveSideTab(browserTabKey(last.id));
   }, []);
 
   const activeTab: SideTab | null = sideTabs.find((t) => t.key === activeSideTab) ?? null;
@@ -2094,14 +2089,14 @@ export default function App() {
   /** Put the sidebar itself away. Backend tabs survive (as before); the next
       backend event re-lists them, which is how reopening used to re-mirror. */
   const closeSidebar = useCallback(() => {
-    setSidebarOpen(false);
+    setSideOpen(false);
     setSideTabs([]);
     setActiveSideTab(null);
     setBrowserTabs([]);
     browserIdsRef.current = new Set();
     browserTabsRef.current = [];
     takeOverRef.current = false;
-  }, [setSidebarOpen]);
+  }, [setSideOpen]);
 
   const canvasOpener = useMemo(
     () => ({
@@ -2120,14 +2115,11 @@ export default function App() {
         togglePalette((open: boolean) => !open);
       } else if (command && !event.altKey && event.key.toLowerCase() === "b") {
         event.preventDefault();
-        setSidebarMinimized((minimized) => {
-          setWithFallback("sidebar-minimized", minimized ? "0" : "1");
-          return !minimized;
-        });
+        setSidebarMinimized((minimized) => !minimized);
       } else if (command && event.altKey && event.key.toLowerCase() === "b") {
         event.preventDefault();
         toggleFeatureTab("activity");
-        setSidebarOpen(true);
+        setSideOpen(true);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -2210,7 +2202,7 @@ export default function App() {
           tokens={stats?.tokens ?? null}
           totalMessages={stats?.totalMessages}
           compactionCount={compactionCount}
-          samples={turnSamples.path === goalPath ? turnSamples.samples : []}
+          samples={turnSamples.path === (activeSessionPath ?? status.sessionPath) ? turnSamples.samples : []}
           streaming={activeStreaming}
           initialPos={statsCardPos}
           onMove={(pos) => writeStringPref("statsCardPos", `${Math.round(pos.x)},${Math.round(pos.y)}`)}
@@ -2335,7 +2327,7 @@ export default function App() {
                   sidebar is closed, so open and close never share the row. */}
               {!sideOpen ? (
                 <button
-                  onClick={() => setSidebarOpen(true)}
+                  onClick={() => setSideOpen(true)}
                   title="Session sidebar (⌘⌥B)"
                   aria-label="Show session sidebar"
                   className="thread-action thread-action-text relative text-[12px]"
@@ -2354,6 +2346,7 @@ export default function App() {
 
           <div className="flex flex-1 min-h-0 flex-col">
               {hasSession ? (
+                <ErrorBoundary fallback={<PaneCrashFallback name="conversation pane" />}>
                 <ChatView
                   items={state.items}
                   canLoadMore={canLoadMore}
@@ -2374,11 +2367,13 @@ export default function App() {
                   projectName={chatProjectName}
                   streamResponses={streamResponses}
                   historyTurns={history.turns}
+                  pinNonce={pinNonce}
                   onRollback={chatOnRollback}
                   onQuote={chatOnQuote}
                   onOpenLaunch={chatOnOpenLaunch}
                   onControlLaunch={chatOnControlLaunch}
                 />
+                </ErrorBoundary>
               ) : (
                 <div className="flex flex-1 min-h-0 overflow-hidden">
                   <Hero status={status} groups={groups} onOpen={(path, cwd) => { setPromotedParent(null); void openSession(path, cwd); }} onNew={newSession} spaceCwd={activeSpace ?? status.cwd ?? null} />
@@ -2393,6 +2388,7 @@ export default function App() {
             ) : null}
 
             {hasSession ? (
+              <ErrorBoundary fallback={<PaneCrashFallback name="composer pane" />}>
               <SessionFooter
                 agentState={agentState}
                 stats={stats}
@@ -2419,23 +2415,24 @@ export default function App() {
                     ? bots.filter((b) => activeGroup.memberIds.includes(b.id))
                     : (sharedStaff ?? bots.filter((b) => !b.hidden))
                 }
-                goal={goalForPath}
+                goal={durableGoal}
                 onStartGoal={(objective) => {
-                  if (goalPath) updateGoals((m) => startGoal(m, goalPath, objective));
+                  void goalControl(objective);
                 }}
                 onPauseGoal={() => {
-                  if (goalPath) updateGoals((m) => pauseGoal(m, goalPath));
+                  void goalControl("pause");
                 }}
                 onResumeGoal={() => {
-                  if (goalPath) updateGoals((m) => resumeGoal(m, goalPath));
+                  void goalControl("resume");
                 }}
                 onFinishGoal={() => {
-                  if (goalPath) updateGoals((m) => finishGoal(m, goalPath));
+                  void goalControl("done");
                 }}
                 onClearGoal={() => {
-                  if (goalPath) updateGoals((m) => clearGoal(m, goalPath));
+                  void goalControl("clear");
                 }}
               />
+              </ErrorBoundary>
             ) : null}
           </div>
         </main>

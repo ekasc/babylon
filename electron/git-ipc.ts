@@ -1,12 +1,11 @@
 import type { IpcMainInvokeEvent } from "electron";
+import type { IpcHandle } from "./ipc-handle";
 import * as gitOps from "./git";
 import { gitStatus } from "./git-status";
+import { wireOf, wireStr } from "../src/store";
 import type { RuntimeFacade } from "../src/runtime-facade";
 
-type Handle = (
-  channel: string,
-  listener: (event: IpcMainInvokeEvent, ...args: any[]) => unknown,
-) => void;
+type Handle = IpcHandle;
 
 export function registerGitIpc(handle: Handle, deps: { getRuntime: () => RuntimeFacade }): void {
   const { getRuntime } = deps;
@@ -44,16 +43,20 @@ export function registerGitIpc(handle: Handle, deps: { getRuntime: () => Runtime
   });
   handle("pideck:git-branch-switch", (_e, cwd: unknown, name: unknown, options: unknown) => {
     if (typeof name !== "string" || name.length > 200) throw new Error("invalid branch name");
-    if (options !== undefined && (typeof options !== "object" || options === null || typeof (options as any).stash !== "boolean")) {
-      throw new Error("invalid switch options");
+    let switchOpts: { stash?: boolean } | undefined;
+    if (options !== undefined) {
+      const stash = wireOf(options)?.stash;
+      if (typeof stash !== "boolean") throw new Error("invalid switch options");
+      switchOpts = { stash };
     }
-    return gitOps.switchBranch(requireCwd(cwd), name, options as { stash?: boolean } | undefined);
+    return gitOps.switchBranch(requireCwd(cwd), name, switchOpts);
   });
   handle("pideck:git-commit-push", async (event, cwd: unknown, requestId: unknown) => {
     const root = requireCwd(cwd);
     if (typeof requestId !== "string" || requestId.length === 0 || requestId.length > 100) throw new Error("invalid request id");
     if (!/^[a-zA-Z0-9_-]+$/.test(requestId)) throw new Error("invalid request id format");
-    const emit = (phase: string, message: string) => {
+    type CommitPushPhase = "preparing" | "generating" | "committing" | "pushing" | "done" | "error";
+    const emit = (phase: CommitPushPhase, message: string) => {
       if (!event.sender.isDestroyed()) event.sender.send("pideck:git-commit-push-progress", { requestId, phase, message });
     };
     let committed = false;
@@ -66,7 +69,7 @@ export function registerGitIpc(handle: Handle, deps: { getRuntime: () => Runtime
       stagedForRecovery = true;
       if (context.truncatedPatch) emit("generating", "Generating commit message (patch truncated, using file summary for remaining changes)");
       else emit("generating", "Generating commit message");
-      const generated = await getRuntime().generateCommitMessage(context) as any;
+      const generated = await getRuntime().generateCommitMessage(context);
       emit("committing", `Committing ${generated.subject}`);
       const commit = await gitOps.commitStaged(root, generated.message);
       committed = true;
@@ -99,10 +102,10 @@ export function registerGitIpc(handle: Handle, deps: { getRuntime: () => Runtime
   handle("pideck:git-pr-context", (_e, cwd: unknown) => gitOps.prContext(requireCwd(cwd)));
   handle("pideck:git-pr-suggest", (_e, cwd: unknown) => gitOps.suggestPrContent(requireCwd(cwd)));
   handle("pideck:git-pr-create", (_e, cwd: unknown, input: unknown) => {
-    const title = (input as any)?.title;
-    const body = (input as any)?.body;
+    const title = wireStr(wireOf(input), "title");
+    const body = wireStr(wireOf(input), "body");
     if (typeof title !== "string" || title.length > 500) throw new Error("invalid PR title");
-    if (body !== undefined && (typeof body !== "string" || body.length > 100_000)) throw new Error("invalid PR body");
+    if (body !== undefined && body.length > 100_000) throw new Error("invalid PR body");
     return gitOps.createPr(requireCwd(cwd), { title, body: typeof body === "string" ? body : "" });
   });
   handle("pideck:git-stage-file", (_e, cwd: unknown, file: unknown) => {

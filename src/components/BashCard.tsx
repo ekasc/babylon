@@ -87,7 +87,7 @@ export default memo(function BashCard({ item }: BashCardProps) {
       </button>
       {open && (
         <div className="border-t border-line bg-[var(--inset)]">
-          <pre className="max-h-[320px] overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-[length:var(--code-font)] leading-[1.58] text-fg">
+          <pre className="max-h-[320px] overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-[length:var(--code-font)] leading-[1.58] text-fg select-text">
             <span className="text-dim">$ {command}</span>
             {hasOutput ? "\n" + output : hasPatch ? "" : "\n(no output)"}
           </pre>

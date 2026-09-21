@@ -51,7 +51,9 @@ describe("syncDaemonTray", () => {
     expect(handle.tips).toEqual(["up"]);
     expect(handle.menus).toEqual(["m1"]);
     expect(handle.clicks.length).toBe(1);
-    handle.clicks[0]();
+    const click = handle.clicks[0];
+    if (!click) throw new Error("missing click");
+    click();
     expect(handle.popped).toBe(1);
 
     const second = syncDaemonTray(first, { connected: true, tooltip: "up2", create, menu: () => "m2" });
@@ -65,7 +67,9 @@ describe("syncDaemonTray", () => {
 describe("tray icon", () => {
   it("is an inline PNG data URL", () => {
     expect(TRAY_ICON_DATA_URL.startsWith("data:image/png;base64,")).toBe(true);
-    const raw = Buffer.from(TRAY_ICON_DATA_URL.split(",", 2)[1], "base64");
+    const payload = TRAY_ICON_DATA_URL.split(",", 2)[1];
+    if (payload === undefined) throw new Error("missing icon payload");
+    const raw = Buffer.from(payload, "base64");
     expect([...raw.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
     expect(raw.readUInt32BE(16)).toBe(32);
     expect(raw.readUInt32BE(20)).toBe(32);

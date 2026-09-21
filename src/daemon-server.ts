@@ -27,6 +27,7 @@ import { registerHook, removeHook, type HookDefinition } from "./hooks";
 import type { HookManager } from "../electron/hook-manager";
 import { createFrameDecoder, encodeFrame, DEFAULT_MAX_FRAME_BYTES, type FrameDecoder } from "./daemon-transport";
 import { verifyToken } from "./remote-auth";
+import { isPlainObject } from "./lib/wire";
 import { dispatchRequest } from "./daemon-host";
 import {
   restoreRuntime,
@@ -47,7 +48,14 @@ import {
   type RunnerResult,
 } from "./automation-runner";
 import type { PiHost } from "../electron/pi-host";
-import { isPiDiagnostics } from "../electron/pi-host";
+import { isPiDiagnostics, type PiDiagnostic } from "../electron/pi-host";
+import type { GeneratedCommitMessage } from "../electron/git-commit-message";
+import type { PreparedCommitContext } from "../electron/git";
+import type { SubagentControlAction } from "../electron/subagents";
+import type { Recap } from "../electron/recap";
+import type { PiSettings } from "./lib/settings-shared";
+import type { DurableGoalState } from "./lib/durable-goal";
+import { toSettingsPatch } from "./lib/settings-patch";
 import {
   applyApproval,
   isApprovalChoice,
@@ -63,6 +71,13 @@ import {
   type EnvironmentSignals,
 } from "./background-policy";
 import { runBackgroundTick } from "./background-controller";
+import type {
+  AgentModel,
+  AgentState,
+  CommandInfo,
+  PromptImage,
+  SessionStats,
+} from "./bridge";
 
 const SNAPSHOT_VERSION = 1;
 
@@ -78,6 +93,57 @@ export type DaemonListenOptions =
   | { socketPath: string }
   | { port: number; host?: string };
 
+/**
+ * The PiHost surface the daemon actually calls. Structural (not the
+ * concrete Electron class) so the daemon stays decoupled and tests can
+ * fake it method by method. Unknown-returning members are forwarded to
+ * the wire through toPayload, which rejects non-objects.
+ */
+export interface DaemonPiHost {
+  open(opts: { path?: string; cwd: string; requestId?: number }): Promise<unknown>;
+  prompt(message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp"): Promise<unknown>;
+  /** Run a `/goal …` control invocation without opening a turn; returns the fresh durable goal. */
+  execGoalCommand(args: string): Promise<DurableGoalState | null>;
+  abort(sessionFile?: string): Promise<unknown>;
+  respondUi(id: string, resp: unknown): void;
+  notifyDiagnostics(diagnostics: PiDiagnostic[]): Promise<void>;
+  getToolOutput(toolCallId: string): Promise<{ content: string; truncated: boolean }>;
+  getModels(): Promise<AgentModel[]>;
+  warmProject(cwd: string): { warmed: boolean };
+  setModel(provider: string, modelId: string): Promise<unknown>;
+  getThinkingLevels(): Promise<string[]>;
+  setThinking(level: string): Promise<unknown>;
+  getSettings(): Promise<PiSettings>;
+  setSettings(patch: Partial<PiSettings>): Promise<PiSettings>;
+  setSessionName(name: string): Promise<unknown>;
+  compact(customInstructions?: string): Promise<unknown>;
+  getTree(): Promise<unknown>;
+  getHistory(): Promise<unknown>;
+  getTurnChanges(entryId: string): Promise<unknown>;
+  getTurnFileDiff(entryId: string, path: string): Promise<unknown>;
+  prepareRollback(entryId: string): Promise<unknown>;
+  commitRollback(planId: string): Promise<unknown>;
+  undoRollback(): Promise<unknown>;
+  getForkMessages(): Promise<unknown[]>;
+  fork(entryId: string): Promise<unknown>;
+  clone(): Promise<unknown>;
+  generateGitCommitMessage(context: PreparedCommitContext): Promise<GeneratedCommitMessage>;
+  getRecaps(sessionFile: string): Promise<Recap[]>;
+  refreshFromDisk(sessionFile: string): Promise<boolean>;
+  switchTo(sessionFile: string): Promise<unknown>;
+  readonly activeSessionFile: string | null;
+  controlThread(action: "steer" | "follow-up" | "stop", threadId: string, message?: string): Promise<unknown>;
+  promoteThread(threadId: string): Promise<{ sessionFile: string; cwd: string; parentSessionFile: string | null }>;
+  controlSubagent(action: SubagentControlAction, runId: string, message?: string): Promise<unknown>;
+  promoteSubagent(runId: string): Promise<{ sessionFile: string; cwd: string; parentSessionFile: string | null }>;
+  getState(): Promise<AgentState>;
+  getMessages(): Promise<unknown[]>;
+  getStats(): Promise<SessionStats>;
+  getCommands(): Promise<CommandInfo[]>;
+  /** Rewire event/status sinks (daemon broadcast attaches here). */
+  attachSinks(sinks: { onEvent: (event: unknown) => void; onStatus: (status: unknown) => void }): void;
+}
+
 export interface DaemonServerOptions {
   listen: DaemonListenOptions;
   /** Atomic JSON persistence target. Omit to run without persistence. */
@@ -88,7 +154,7 @@ export interface DaemonServerOptions {
   runAutomation?: (task: ScheduledTask) => RunnerResult;
   defaultProject?: string;
   log?: (message: string) => void;
-  piHost?: PiHost;
+  piHost?: DaemonPiHost;
   /** Permission engine enforced for daemon-owned agent sessions. */
   permissionEngine?: PermissionEngine;
   /**
@@ -126,8 +192,18 @@ export interface DaemonServer {
   close(): Promise<void>;
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+/** Narrow an untrusted images array to the renderer image shape. Non-image
+ *  entries are dropped; a non-array is rejected. */
+function toPromptImages(images: unknown): PromptImage[] | undefined {
+  if (images === undefined) return undefined;
+  if (!Array.isArray(images)) throw new Error("pi.prompt: images must be an array");
+  return images.flatMap((entry) => {
+    if (typeof entry !== "object" || entry === null) return [];
+    const data = (entry as Record<string, unknown>).data;
+    const mimeType = (entry as Record<string, unknown>).mimeType;
+    if (typeof data !== "string") return [];
+    return [{ data, ...(typeof mimeType === "string" ? { mimeType } : {}) }];
+  });
 }
 
 /** Fill a valid partial policy over the defaults; reject malformed input. */
@@ -193,20 +269,59 @@ const TRIGGER_KINDS = ["interval", "daily", "file_watch", "branch_watch"] as con
  */
 export function validateScheduledTask(payload: unknown): ScheduledTask | string {
   if (!isPlainObject(payload)) return "automation.registered requires a task object";
-  if (typeof payload.id !== "string" || payload.id.trim().length === 0) {
+  const { id, name, enabled, runCount, trigger: rawTrigger } = payload;
+  if (typeof id !== "string" || id.trim().length === 0) {
     return "automation.registered requires a non-empty string id";
   }
-  if (typeof payload.name !== "string") return "automation.registered requires a string name";
-  if (typeof payload.enabled !== "boolean") return "automation.registered requires a boolean enabled";
-  if (typeof payload.runCount !== "number" || !Number.isFinite(payload.runCount)) {
+  if (typeof name !== "string") return "automation.registered requires a string name";
+  if (typeof enabled !== "boolean") return "automation.registered requires a boolean enabled";
+  if (typeof runCount !== "number" || !Number.isFinite(runCount)) {
     return "automation.registered requires a finite number runCount";
   }
-  const trigger = payload.trigger;
-  if (!isPlainObject(trigger)) return "automation.registered requires a trigger object";
-  if (!TRIGGER_KINDS.includes(trigger.kind as (typeof TRIGGER_KINDS)[number])) {
-    return `automation.registered requires trigger.kind to be one of ${TRIGGER_KINDS.join(", ")}`;
+  if (!isPlainObject(rawTrigger)) return "automation.registered requires a trigger object";
+  switch (rawTrigger.kind) {
+    case "interval":
+    case "daily":
+    case "file_watch":
+    case "branch_watch":
+      break;
+    default:
+      return `automation.registered requires trigger.kind to be one of ${TRIGGER_KINDS.join(", ")}`;
   }
-  return payload as unknown as ScheduledTask;
+  const kind = rawTrigger.kind;
+  // Rebuild rather than pass through: only validated fields enter the
+  // registry, so extra socket keys can never become schedule behavior.
+  const trigger = { kind };
+  if (kind === "interval") {
+    const { intervalMs } = rawTrigger;
+    if (typeof intervalMs !== "number" || !Number.isFinite(intervalMs) || intervalMs <= 0) {
+      return "automation.registered requires a positive intervalMs for interval triggers";
+    }
+    Object.assign(trigger, { intervalMs });
+  }
+  if (kind === "daily") {
+    const { hour, minute } = rawTrigger;
+    if (
+      typeof hour !== "number" || !Number.isInteger(hour) || hour < 0 || hour > 23 ||
+      typeof minute !== "number" || !Number.isInteger(minute) || minute < 0 || minute > 59
+    ) {
+      return "automation.registered requires hour 0-23 and minute 0-59 for daily triggers";
+    }
+    Object.assign(trigger, { hour, minute });
+  }
+  if (kind === "file_watch") {
+    if (typeof rawTrigger.path !== "string" || !rawTrigger.path) {
+      return "automation.registered requires a path for file_watch triggers";
+    }
+    Object.assign(trigger, { path: rawTrigger.path });
+  }
+  if (kind === "branch_watch") {
+    if (typeof rawTrigger.branch !== "string" || !rawTrigger.branch) {
+      return "automation.registered requires a branch for branch_watch triggers";
+    }
+    Object.assign(trigger, { branch: rawTrigger.branch });
+  }
+  return { id, name, enabled, runCount, trigger };
 }
 
 function emptyState(): DaemonState {
@@ -321,9 +436,10 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
   // If a PiHost was supplied, wire its events to daemon broadcast so Electron
   // thin clients receive live agent streaming.
   if (options.piHost) {
-    const piHost = options.piHost as unknown as { opts: { onEvent: (ev: unknown) => void; onStatus: (s: unknown) => void } };
-    piHost.opts.onEvent = (ev: unknown) => broadcast("pi.event", ev);
-    piHost.opts.onStatus = (s: unknown) => broadcast("pi.session.status", s);
+    options.piHost.attachSinks({
+      onEvent: (ev: unknown) => broadcast("pi.event", ev),
+      onStatus: (s: unknown) => broadcast("pi.session.status", s),
+    });
   }
 
   const handleFrame = (socket: net.Socket, json: string): void => {
@@ -577,7 +693,7 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
       void (async () => {
         try {
           let payload: unknown = {};
-          switch ((request as any).type as string) {
+          switch (request.type) {
             case "pi.getState":
               payload = await piHost.getState();
               break;
@@ -592,7 +708,7 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
             case "pi.getCommands":
               // The thin client's getCommands() reads payload.commands, so the
               // daemon must wrap the array rather than send it bare.
-              payload = { commands: await (piHost as any).getCommands() };
+              payload = { commands: await piHost.getCommands() };
               break;
             case "pi.openSession": {
               const { path, cwd, requestId } = request.payload as { path?: string; cwd: string; requestId?: number };
@@ -600,16 +716,34 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
               break;
             }
             case "pi.prompt": {
-              const { message, images, streamingBehavior } = request.payload as { message: string; images?: unknown[]; streamingBehavior?: string };
+              const { message, images, streamingBehavior } = request.payload as { message: string; images?: unknown; streamingBehavior?: string };
               // Narrow the wire string to the union the host accepts rather than
               // asserting it; an unknown value simply means "no streaming mode".
               const behavior = streamingBehavior === "steer" || streamingBehavior === "followUp" ? streamingBehavior : undefined;
-              payload = await piHost.prompt(message, images, behavior);
+              // PiHost.prompt resolves void on success. The envelope payload
+              // must stay an object, so ack explicitly instead of forwarding
+              // undefined through toPayload (which rejects non-objects).
+              await piHost.prompt(message, toPromptImages(images), behavior);
+              payload = { ok: true };
               break;
             }
             case "pi.abort":
-              payload = await piHost.abort();
+              // Same void-to-object wrap as pi.prompt: PiHost.abort resolves
+              // undefined, which toPayload would reject below.
+              await piHost.abort();
+              payload = { ok: true };
               break;
+            case "pi.goalControl": {
+              const { args } = request.payload as { args?: unknown };
+              if (typeof args !== "string") {
+                send(socket, createEnvelope("response", "error", { error: "pi.goalControl requires { args }" }, request.id));
+                return;
+              }
+              // Wrapped so a missing goal reads as null, never a bare
+              // non-object payload.
+              payload = { goal: await piHost.execGoalCommand(args) };
+              break;
+            }
             case "pi.ui.respond": {
               const { id, resp } = request.payload as { id: string; resp: unknown };
               piHost.respondUi(id, resp);
@@ -657,7 +791,7 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
               break;
             case "pi.setSettings": {
               const { patch } = request.payload as { patch: unknown };
-              payload = await piHost.setSettings(patch as any);
+              payload = await piHost.setSettings(toSettingsPatch(patch));
               break;
             }
             case "pi.setSessionName": {
@@ -710,7 +844,10 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
               break;
             case "pi.generateCommitMessage": {
               const { context } = request.payload as { context: unknown };
-              payload = await (piHost as any).generateGitCommitMessage(context);
+              if (typeof context !== "object" || context === null) {
+                throw new Error("pi.generateCommitMessage requires a context object");
+              }
+              payload = await piHost.generateGitCommitMessage(context as PreparedCommitContext);
               break;
             }
             case "pi.getRecaps": {
@@ -723,33 +860,33 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
               payload = { refreshed: await piHost.refreshFromDisk(sessionFile) };
               break;
             }
-            case "pi.switchTo" as any: {
+            case "pi.switchTo": {
               const { sessionFile } = request.payload as { sessionFile: string };
-              payload = await (piHost as any).switchTo(sessionFile);
+              payload = await piHost.switchTo(sessionFile);
               break;
             }
-            case "pi.getActiveSessionFile" as any: {
-              payload = { path: (piHost as any).activeSessionFile ?? null };
+            case "pi.getActiveSessionFile": {
+              payload = { path: piHost.activeSessionFile ?? null };
               break;
             }
-            case "pi.controlThread" as any: {
+            case "pi.controlThread": {
               const { action, threadId, message } = request.payload as { action: "steer" | "follow-up" | "stop"; threadId: string; message?: string };
-              payload = await (piHost as any).controlThread(action, threadId, message);
+              payload = await piHost.controlThread(action, threadId, message);
               break;
             }
-            case "pi.promoteThread" as any: {
+            case "pi.promoteThread": {
               const { threadId } = request.payload as { threadId: string };
-              payload = await (piHost as any).promoteThread(threadId);
+              payload = await piHost.promoteThread(threadId);
               break;
             }
-            case "pi.controlSubagent" as any: {
+            case "pi.controlSubagent": {
               const { action, runId, message } = request.payload as { action: "steer" | "follow-up" | "stop"; runId: string; message?: string };
-              payload = await (piHost as any).controlSubagent(action, runId, message);
+              payload = await piHost.controlSubagent(action, runId, message);
               break;
             }
-            case "pi.promoteSubagent" as any: {
+            case "pi.promoteSubagent": {
               const { runId } = request.payload as { runId: string };
-              payload = await (piHost as any).promoteSubagent(runId);
+              payload = await piHost.promoteSubagent(runId);
               break;
             }
             default:
@@ -768,8 +905,8 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
       return;
     }
 
-    if ((request as any).type === "hooks.register") {
-      const hook = (request as any).payload as HookDefinition;
+    if (request.type === "hooks.register") {
+      const hook = request.payload as HookDefinition;
       try {
         if (!hook || typeof hook !== "object" || typeof hook.id !== "string" || hook.id.length === 0) {
           throw new Error("hooks.register requires a hook object with a non-empty string id");
@@ -782,17 +919,17 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
         if (afterHooks !== beforeHooks) {
           state = { ...state, runtime: { ...state.runtime, hooks: afterHooks } };
           persist();
-          broadcast("hooks.updated" as any, afterHooks as any, socket);
+          broadcast("hooks.updated", afterHooks, socket);
         }
       } catch (err) {
         send(socket, createEnvelope("response", "error", { error: err instanceof Error ? err.message : String(err) }, request.id));
         return;
       }
-      send(socket, createEnvelope("response", "hooks.register" as any, { ok: true } as any, request.id));
+      send(socket, createEnvelope("response", "hooks.register", { ok: true }, request.id));
       return;
     }
-    if ((request as any).type === "hooks.remove") {
-      const { id } = ((request as any).payload ?? {}) as { id?: unknown };
+    if (request.type === "hooks.remove") {
+      const { id } = request.payload as { id?: unknown };
       if (typeof id !== "string" || id.length === 0) {
         send(socket, createEnvelope("response", "error", { error: "hooks.remove requires a non-empty string id" }, request.id));
         return;
@@ -806,9 +943,9 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
         if (afterHooks !== beforeHooks) {
           state = { ...state, runtime: { ...state.runtime, hooks: afterHooks } };
           persist();
-          broadcast("hooks.updated" as any, afterHooks as any, socket);
+          broadcast("hooks.updated", afterHooks, socket);
         }
-        send(socket, createEnvelope("response", "hooks.remove" as any, { ok: true, removed: afterHooks !== beforeHooks } as any, request.id));
+        send(socket, createEnvelope("response", "hooks.remove", { ok: true, removed: afterHooks !== beforeHooks }, request.id));
       } catch (err) {
         send(socket, createEnvelope("response", "error", { error: err instanceof Error ? err.message : String(err) }, request.id));
       }

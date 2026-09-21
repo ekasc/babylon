@@ -79,10 +79,12 @@ export function checkCanvasText(text: string): CanvasCheckReport {
     for (let j = i + 1; j < ids.length; j++) {
       const a = ids[i];
       const b = ids[j];
+      if (a === undefined || b === undefined) continue;
       // A group contains its members by design; only siblings collide.
       if (under(scene, a, b) || under(scene, b, a)) continue;
-      const ra = boxes.get(a)!;
-      const rb = boxes.get(b)!;
+      const ra = boxes.get(a);
+      const rb = boxes.get(b);
+      if (ra === undefined || rb === undefined) continue;
       if (interiorsIntersect(ra, rb)) overlaps.push({ a, b });
     }
   }

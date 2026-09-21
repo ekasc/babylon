@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { PiSettings } from "../../bridge";
+import type { PiSettings, ProcessSnapshot } from "../../bridge";
 import { SettingSection } from "./SettingSection";
 import { SettingRow } from "./SettingRow";
 import { Switch } from "../ui/Switch";
@@ -7,7 +7,7 @@ import { bridge } from "../../bridge";
 
 export function SettingsBackground({ settings, onSave }: { settings: PiSettings | null; onSave: (p: Partial<PiSettings>) => void }) {
   const enabled = settings?.daemon?.enabled ?? false;
-  const [procs, setProcs] = useState<any[]>([]);
+  const [procs, setProcs] = useState<ProcessSnapshot[]>([]);
   useEffect(() => {
     bridge.processList().then(setProcs).catch(() => undefined);
     const off = bridge.onProcessUpdate(setProcs);

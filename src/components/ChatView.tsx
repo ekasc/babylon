@@ -1,6 +1,7 @@
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChatItem } from "../store";
 import { buildTurnFolds } from "../lib/chat-folds";
+import { isContinuousScroll, isScrollKey, shouldBreakFollow } from "../lib/scroll-follow";
 import type { HistoryTurn } from "../bridge";
 import type { Bot } from "../bots";
 import { botHandle } from "../bots";
@@ -97,18 +98,34 @@ type Entry =
 function buildEntries(shown: ChatItem[]): Entry[] {
   const entries: Entry[] = [];
   for (let i = 0; i < shown.length; ) {
-    if (shown[i].kind !== "tool") {
-      entries.push({ type: "single", item: shown[i], index: i });
+    const cur = shown[i];
+    if (cur === undefined) {
+      i++;
+      continue;
+    }
+    if (cur.kind !== "tool") {
+      entries.push({ type: "single", item: cur, index: i });
       i++;
       continue;
     }
     let j = i;
-    while (j < shown.length && shown[j].kind === "tool") j++;
-    const run = shown.slice(i, j) as Array<Extract<ChatItem, { kind: "tool" }>>;
+    while (j < shown.length) {
+      const nxt = shown[j];
+      if (nxt === undefined || nxt.kind !== "tool") break;
+      j++;
+    }
+    const run: Array<Extract<ChatItem, { kind: "tool" }>> = [];
+    for (let k = i; k < j; k++) {
+      const t = shown[k];
+      if (t !== undefined && t.kind === "tool") run.push(t);
+    }
     if (run.length >= TOOL_GROUP_MIN) {
       entries.push({ type: "group", tools: run, index: j - 1 });
     } else {
-      for (let k = i; k < j; k++) entries.push({ type: "single", item: shown[k], index: k });
+      for (let k = i; k < j; k++) {
+        const t = shown[k];
+        if (t !== undefined) entries.push({ type: "single", item: t, index: k });
+      }
     }
     i = j;
   }
@@ -162,6 +179,11 @@ interface Props {
   streamResponses?: boolean;
   historyTurns?: HistoryTurn[];
   onRollback?(entryId: string): void;
+  /** Bumped by the App on every send: sending re-engages follow and pins
+   *  to the new message deterministically, instead of relying on the
+   *  append path's stick/recency gates (which strand the optimistic row
+   *  when the user sent from a scrolled-up viewport). */
+  pinNonce?: number;
   /** Quote in composer (T3 cite): assistant text selection quoted as a
    *  markdown blockquote into the composer draft. Receives raw text. */
   onQuote?(text: string): void;
@@ -203,6 +225,7 @@ export default memo(function ChatView({
   showSpeakers = false,
   projectName = null,
   streamResponses = false,
+  pinNonce = 0,
 }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const innerRef = useRef<HTMLDivElement>(null);
@@ -213,6 +236,12 @@ export default memo(function ChatView({
   // bottom (or hits Jump to bottom).
   const stick = useRef(true);
   const lastUserScrollAt = useRef(0);
+  // Last genuine input gesture (wheel, touch, scroll keys, pointer drag).
+  // Only these — never bare scroll events — may break follow, so layout
+  // shifts, scroll anchoring, and smooth landings can't strand the viewport.
+  const lastInputAt = useRef(0);
+  const lastPointerDown = useRef(0);
+  const lastScrollSample = useRef({ at: 0, top: 0 });
   const showJumpVisible = useRef(false);
   const [showJump, setShowJump] = useState(false);
   // In-transcript find: Cmd/Ctrl+F opens a floating bar; Enter jumps between
@@ -303,6 +332,27 @@ export default memo(function ChatView({
       setShowJump(!next);
     }
   };
+  // Explicit send pin: sending re-engages follow no matter where the
+  // viewport was. Skips the first render (nonce starts at 0).
+  const lastPinNonce = useRef(pinNonce);
+  useEffect(() => {
+    if (pinNonce === lastPinNonce.current) return;
+    lastPinNonce.current = pinNonce;
+    setStick(true);
+    lastUserScrollAt.current = 0;
+    pinToBottom();
+  }, [pinNonce]);
+  // Keyboard scrolls are gestures too (the scroller itself is not focusable,
+  // so listen on window and ignore fields where keys edit text).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+      if (isScrollKey(e.key)) lastInputAt.current = Date.now();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
   // Disclosure settle (T3Code's suspendEndScrollMaintenanceForDisclosure): a
   // fold/tool expand or collapse reshapes content above the viewport. The
   // follow observer must ignore the next beat so it never yanks a pinned
@@ -328,10 +378,7 @@ export default memo(function ChatView({
   const prevFirstKey = useRef<string | null>(null);
   const prevLastKey = useRef<string | null>(null);
   const prevLength = useRef(0);
-  const onNeedEarlierRef = useRef(onNeedEarlier);
-  onNeedEarlierRef.current = onNeedEarlier;
-  const canLoadMoreRef = useRef(canLoadMore);
-  canLoadMoreRef.current = canLoadMore;
+
 
   // The full transcript is always mounted: no suffix windowing, so scroll
   // position and continuity survive streaming, prepends, and rebuilds.
@@ -341,21 +388,33 @@ export default memo(function ChatView({
     setQuoteSel(null);
     const el = ref.current;
     if (!el) return;
+    const now = Date.now();
     const pin = lastPin.current;
-    if (pin && Date.now() - pin.at < 500 && Math.abs(el.scrollTop - pin.target) < 4) {
+    if (pin && now - pin.at < 500 && Math.abs(el.scrollTop - pin.target) < 4) {
       // Our own pin landing (possibly already stale by new growth): the user
       // didn't scroll, stay pinned and let the observer follow the growth.
       setStick(true);
     } else {
       const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
       const atBottom = dist < 32;
-      if (!atBottom) lastUserScrollAt.current = Date.now();
-      setStick(atBottom);
+      if (atBottom) {
+        setStick(true);
+      } else {
+        lastUserScrollAt.current = now;
+        const gestured = now - lastInputAt.current < 400;
+        const continuous = isContinuousScroll(lastScrollSample.current, now, el.scrollTop);
+        if (shouldBreakFollow({ gestured, continuous })) setStick(false);
+      }
     }
+    lastScrollSample.current = { at: now, top: el.scrollTop };
     // Scroll-up streaming: near the top of the loaded region, ask for the next
     // older window. The App guards against duplicate concurrent fetches.
-    if (el.scrollTop < 400 && canLoadMoreRef.current) {
-      onNeedEarlierRef.current?.();
+    // Scroll-up streaming: near the top of the loaded region, ask for the next
+    // older window. The App guards against duplicate concurrent fetches.
+    // onScroll is re-bound every render, so props read here are always
+    // current; the old mirror refs were pure cruft.
+    if (el.scrollTop < 400 && canLoadMore) {
+      onNeedEarlier?.();
     }
   };
 
@@ -380,7 +439,7 @@ export default memo(function ChatView({
     // hydrate keys). While pinned that is still "new content at the tail"
     // and must follow, otherwise the viewport strands above the bottom.
     const tailSwapped = shown.length > 0 && shown.length === prevLength.current && shown[shown.length - 1]?.key !== prevLast;
-    const prepended = !isNewChat && shown.length > 0 && prevKey !== null && shown[0].key !== prevKey && !isShrink && prevKeyStillPresent;
+    const prepended = !isNewChat && shown.length > 0 && prevKey !== null && shown[0]?.key !== prevKey && !isShrink && prevKeyStillPresent;
     const before = prevHeight.current;
     prevHeight.current = el.scrollHeight;
     prevFirstKey.current = shown[0]?.key ?? null;
@@ -435,10 +494,11 @@ export default memo(function ChatView({
     let turnStart = -1;
     for (let i = 0; i < shown.length; i++) {
       const item = shown[i];
+      if (item === undefined) continue;
       if (item.kind === "user") {
         if (turnStart >= 0) {
           const start = shown[turnStart];
-          const turn = start.kind === "user" && start.entryId ? historyById.get(start.entryId) : undefined;
+          const turn = start !== undefined && start.kind === "user" && start.entryId ? historyById.get(start.entryId) : undefined;
           if (turn) nextCards.set(i - 1, turn);
         }
         turnStart = i;
@@ -446,7 +506,7 @@ export default memo(function ChatView({
     }
     if (turnStart >= 0) {
       const start = shown[turnStart];
-      const turn = start.kind === "user" && start.entryId ? historyById.get(start.entryId) : undefined;
+      const turn = start !== undefined && start.kind === "user" && start.entryId ? historyById.get(start.entryId) : undefined;
       if (turn) nextCards.set(shown.length - 1, turn);
     }
     return nextCards;
@@ -459,7 +519,7 @@ export default memo(function ChatView({
   // so it re-evaluates only when the transcript empties (new chat / session
   // switch), never while a session grows. A render-phase ref mutation used
   // to do this; a memo is safe under concurrent rendering.
-  const loadId = items.length === 0 ? "" : items[0].key;
+  const loadId = items.length === 0 ? "" : (items[0]?.key ?? "");
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const longChat = useMemo(() => items.length > 60, [loadId]);
 
@@ -468,7 +528,7 @@ export default memo(function ChatView({
   const [expandedTurns, setExpandedTurns] = useState<Set<string>>(() => new Set());
   const userIndices = useMemo(() => {
     const idxs: number[] = [];
-    for (let i = 0; i < shown.length; i++) if (shown[i].kind === "user") idxs.push(i);
+    for (let i = 0; i < shown.length; i++) if (shown[i]?.kind === "user") idxs.push(i);
     return idxs;
   }, [shown]);
   const foldMap = useMemo(
@@ -517,6 +577,10 @@ export default memo(function ChatView({
     }
     const id = requestAnimationFrame(() => {
       const el = itemEls.current.get(findActive.key);
+      // Explicit navigation: mark input so the jump's own scroll events
+      // may break follow. Marking (not forcing) keeps already-centered
+      // matches exactly as pinned as they were.
+      lastInputAt.current = Date.now();
       el?.scrollIntoView?.({ block: "center" });
       clearFindFlash();
       el?.classList.add("find-target-flash");
@@ -557,6 +621,22 @@ export default memo(function ChatView({
       <div
         ref={ref}
         onScroll={onScroll}
+        onWheel={() => {
+          lastInputAt.current = Date.now();
+        }}
+        onTouchMove={() => {
+          lastInputAt.current = Date.now();
+        }}
+        onPointerDown={(e) => {
+          if (e.button === 0) lastPointerDown.current = Date.now();
+        }}
+        onPointerMove={(e) => {
+          // Scrollbar/thumb and content drags (buttons held) are genuine
+          // movement; hover moves never mark input.
+          if (e.buttons > 0 && Date.now() - lastPointerDown.current < 30_000) {
+            lastInputAt.current = Date.now();
+          }
+        }}
         className="conversation-scroll flex-1 min-h-0 overflow-y-auto"
         role="log"
         aria-live="off"
@@ -583,11 +663,11 @@ export default memo(function ChatView({
             const hiddenEntriesForFold = foldForUser
               ? (() => {
                   const slice = shown.slice(foldForUser.start + 1, foldForUser.end).filter((_, i) => allHiddenIndices.has(foldForUser.start + 1 + i));
-                  return slice.length ? buildEntries(slice as any) : [];
+                  return slice.length ? buildEntries(slice) : [];
                 })()
               : [];
             return entry.type === "group" ? (
-              <Fragment key={`g-${entry.tools[0].key}`}>
+              <Fragment key={`g-${entry.index}`}>
                 <div className={longChat ? "chat-item chat-item-long" : "chat-item"}>
                   <ToolGroup tools={entry.tools} onDisclosureToggle={suspendFollowForDisclosure} />
                 </div>
@@ -606,7 +686,7 @@ export default memo(function ChatView({
                       <>
                         {showTopDivider ? <hr className="assistant-divider" /> : null}
                         {entry.item.kind === "user" ? (
-                          <UserMessage item={entry.item} historyTurn={entry.item.entryId ? historyById.get(entry.item.entryId) : undefined} rollbackDisabled={streaming} onRollback={onRollback} />
+                          <UserMessage item={entry.item} historyTurn={entry.item.entryId ? historyById.get(entry.item.entryId) : undefined} rollbackDisabled={streaming} onRollback={onRollback} hideActions={foldForUser != null} />
                         ) : entry.item.kind === "assistant" ? (
                           <>
                             <SpeakerHead speaker={entry.item.speaker} streaming={entry.item.streaming} roomHandle={roomHandle} members={roomMembers} isRoom={isRoom} roomName={roomName} showSpeakers={showSpeakers} />
@@ -629,25 +709,48 @@ export default memo(function ChatView({
                 </div>
                 {foldForUser ? (
                   <>
-                    <button
-                      type="button"
-                      aria-expanded={isCollapsed ? "false" : "true"}
-                      aria-label={isCollapsed ? `Expand ${foldForUser.hiddenCount} hidden steps: ${foldForUser.label}` : `Collapse turn: ${foldForUser.label}`}
-                      onPointerDown={(e) => (e.currentTarget as HTMLElement).setPointerCapture?.((e as any).pointerId)}
-                      onClick={() =>
-                        setExpandedTurns((prev) => {
-                          suspendFollowForDisclosure();
-                          const n = new Set(prev);
-                          if (isCollapsed) n.add(foldForUser.turnId);
-                          else n.delete(foldForUser.turnId);
-                          return n;
-                        })
-                      }
-                      className="turn-fold my-0.5 flex w-full items-center gap-2 rounded-md border-b border-line/60 px-2 py-1 text-left text-[11px] text-dim transition-colors hover:text-fg"
-                    >
-                      <span className="truncate">{isCollapsed ? foldForUser.label : "Hide details"}</span>
-                      <span className="ml-auto shrink-0 text-[length:var(--chat-r-11)]">{isCollapsed ? (foldForUser.hiddenCount > 0 ? `${foldForUser.hiddenCount} hidden` : "Show") : "Collapse"}</span>
-                    </button>
+                    <div className="turn-fold my-0.5 flex w-full items-center gap-2 rounded-md border-b border-line/60 px-2 py-1 text-left text-[11px] text-dim">
+                      <button
+                        type="button"
+                        aria-expanded={isCollapsed ? "false" : "true"}
+                        aria-label={isCollapsed ? `Expand ${foldForUser.hiddenCount} hidden steps: ${foldForUser.label}` : `Collapse turn: ${foldForUser.label}`}
+                        onPointerDown={(e) => e.currentTarget.setPointerCapture?.(e.pointerId)}
+                        onClick={() =>
+                          setExpandedTurns((prev) => {
+                            suspendFollowForDisclosure();
+                            const n = new Set(prev);
+                            if (isCollapsed) n.add(foldForUser.turnId);
+                            else n.delete(foldForUser.turnId);
+                            return n;
+                          })
+                        }
+                        className="flex min-w-0 flex-1 items-center gap-2 text-left transition-colors hover:text-fg"
+                      >
+                        <span className="truncate">{isCollapsed ? foldForUser.label : "Hide details"}</span>
+                        <span className="ml-auto shrink-0 text-[length:var(--chat-r-11)]">{isCollapsed ? (foldForUser.hiddenCount > 0 ? `${foldForUser.hiddenCount} hidden` : "Show") : "Collapse"}</span>
+                      </button>
+                      {(() => {
+                        // The turn's Rollback lives here, not on a floating
+                        // chip: the absolutely-positioned message actions
+                        // overlap this full-width row. Turns without a fold
+                        // keep the floating chip in UserMessage.
+                        const userEntryId = entry.item.kind === "user" ? entry.item.entryId : undefined;
+                        const turn = userEntryId ? historyById.get(userEntryId) : undefined;
+                        if (!onRollback || !userEntryId || !turn) return null;
+                        const disabled = streaming || !turn.rollbackAvailable;
+                        return (
+                          <button
+                            type="button"
+                            onClick={() => onRollback(userEntryId)}
+                            disabled={disabled}
+                            title={streaming ? "Finish or stop the active response before rolling back" : turn.rollbackReason ?? "Rollback conversation and files from this turn"}
+                            className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-dim hover:text-fg disabled:opacity-40"
+                          >
+                            Rollback
+                          </button>
+                        );
+                      })()}
+                    </div>
                     <div
                       className="grid transition-[grid-template-rows] duration-200 ease-[cubic-bezier(0.2,0.8,0.2,1)] will-change-[grid-template-rows]"
                       style={{ gridTemplateRows: isCollapsed ? "0fr" : "1fr" }}
@@ -655,15 +758,27 @@ export default memo(function ChatView({
                       <div className="overflow-hidden">
                         {hiddenEntriesForFold.map((he) =>
                           he.type === "group" ? (
-                            <div key={`h-${he.tools[0].key}`} className={longChat ? "chat-item chat-item-long" : "chat-item"}>
+                            <div key={`h-${he.index}`} className={longChat ? "chat-item chat-item-long" : "chat-item"}>
                               <ToolGroup tools={he.tools} onDisclosureToggle={suspendFollowForDisclosure} />
                             </div>
                           ) : (
                             <div ref={trackItemEl(he.item.key)} key={he.item.key} className={longChat ? "chat-item chat-item-long" : "chat-item"}>
-                              {he.item.kind === "tool" ? <ToolCard item={he.item as any} onDisclosureToggle={suspendFollowForDisclosure} /> : he.item.kind === "assistant" ? (<>
-                                <SpeakerHead speaker={(he.item as any).speaker} streaming={(he.item as any).streaming} roomHandle={roomHandle} members={roomMembers} isRoom={isRoom} roomName={roomName} showSpeakers={showSpeakers} />
-                                <AssistantMessage item={he.item as any} hideThinking={isRoom} />
-                              </>) : <SystemLine text={(he.item as any).text} />}
+                              {he.item.kind === "user" ? (
+                                <UserMessage item={he.item} historyTurn={he.item.entryId ? historyById.get(he.item.entryId) : undefined} rollbackDisabled={streaming} onRollback={onRollback} />
+                              ) : he.item.kind === "assistant" ? (<>
+                                <SpeakerHead speaker={he.item.speaker} streaming={he.item.streaming} roomHandle={roomHandle} members={roomMembers} isRoom={isRoom} roomName={roomName} showSpeakers={showSpeakers} />
+                                <AssistantMessage item={he.item} hideThinking={isRoom} />
+                              </>) : he.item.kind === "tool" ? (
+                                <ToolCard item={he.item} onDisclosureToggle={suspendFollowForDisclosure} />
+                              ) : he.item.kind === "recap" ? (
+                                <RecapLine text={he.item.text} />
+                              ) : he.item.kind === "launch" ? (
+                                <LaunchCard item={he.item} onOpen={onOpenLaunch} onControl={onControlLaunch} />
+                              ) : he.item.kind === "compaction" ? (
+                                <CompactionCard item={he.item} />
+                              ) : (
+                                <SystemLine text={he.item.text} />
+                              )}
                             </div>
                           )
                         )}
@@ -758,7 +873,10 @@ export default memo(function ChatView({
             if (!el) return;
             setStick(true);
             lastUserScrollAt.current = 0;
-            el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+            // Instant, never smooth: a smooth flight toward a moving target
+            // lands short while streaming, and the short landing then reads
+            // as scrolled-up and clears the follow we just set.
+            pinToBottom();
           }}
           className="absolute bottom-4 right-4 z-10 grid h-8 w-8 place-items-center rounded-full border border-line bg-raised text-dim transition-colors hover:text-fg active:scale-[0.97]"
           aria-label="Jump to bottom"

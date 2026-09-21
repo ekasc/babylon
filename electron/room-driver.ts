@@ -7,7 +7,7 @@ import { botHandle, isPassReply, mentionedMembers, roomTurnPrompt, type Bot } fr
 export interface RoomTurnIO {
   prompt(text: string): Promise<void>;
   readReply(): Promise<string>;
-  emit(ev: Record<string, unknown>): void;
+  emit(ev: Record<string, unknown> & { type: string }): void;
 }
 
 export interface RoomDriveResult {

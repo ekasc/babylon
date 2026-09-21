@@ -1,5 +1,6 @@
 import type { ActiveRollback, TurnCheckpoint, TurnReceipt } from "./rollback-store";
 import { missingCheckpointReason } from "./rollback-store";
+import { isBookkeepingPath } from "./snapshot-store";
 import type { SessionTreeRow } from "./session-tree";
 
 export interface HistoryTurn {
@@ -102,7 +103,12 @@ export function projectHistory(input: {
       onActivePath,
       current: current?.id === row.id,
       branchCount: children.get(row.id) ?? 0,
-      changedCount: checkpoint?.complete ? checkpoint.changedPaths.length : 0,
+      // Bookkeeping-only turns read as zero: the engine's own `.pi/state`
+      // logs are hidden from turn diffs, so a read-only turn with tool calls
+      // shows no card (legacy checkpoints included).
+      changedCount: checkpoint?.complete
+        ? checkpoint.changedPaths.filter((path) => !isBookkeepingPath(path)).length
+        : 0,
       checkpointAvailable: !!checkpoint?.complete,
       rollbackAvailable: !rollbackReason,
       rollbackReason,

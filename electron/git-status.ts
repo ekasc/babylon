@@ -80,7 +80,9 @@ export async function gitStatus(cwd: string): Promise<GitStatusResult> {
   }
   try {
     const counts = await git(["rev-list", "--left-right", "--count", "@{upstream}...HEAD"], cwd);
-    const [behind, ahead] = counts.split("\t").map((n) => parseInt(n, 10) || 0);
+    const parts = counts.split("\t").map((n) => parseInt(n, 10) || 0);
+    const behind = parts[0] ?? 0;
+    const ahead = parts[1] ?? 0;
     result.behind = behind;
     result.ahead = ahead;
   } catch {

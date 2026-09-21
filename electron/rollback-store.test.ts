@@ -99,7 +99,7 @@ describe("turn receipts", () => {
     await store.recordTurnOutcome({ receipt: receipt({ outcome: "skipped", reason: "shares the active turn" }) });
     const ledger = await store.load("session-1");
     expect(ledger.receipts?.length).toBe(1);
-    expect(ledger.receipts?.[0].outcome).toBe("skipped");
+    expect(ledger.receipts?.[0]?.outcome).toBe("skipped");
     expect(missingCheckpointReason(ledger.receipts, "user-3")).toBe("No checkpoint for this turn: shares the active turn");
     expect(missingCheckpointReason(ledger.receipts, "user-9")).toBe("No filesystem checkpoint was recorded for this turn");
     expect(missingCheckpointReason(undefined, "user-3")).toBe("No filesystem checkpoint was recorded for this turn");
@@ -154,8 +154,8 @@ describe("sqlite ledger", () => {
     for (let i = 0; i < 2001; i++) await store.addCheckpoint(checkpoint(`user-${i}`));
     const ledger = await store.load("session-1");
     expect(ledger.checkpoints.length).toBe(2000);
-    expect(ledger.checkpoints[1999].userEntryId).toBe("user-2000");
-    expect(ledger.checkpoints[0].userEntryId).toBe("user-1");
+    expect(ledger.checkpoints[1999]?.userEntryId).toBe("user-2000");
+    expect(ledger.checkpoints[0]?.userEntryId).toBe("user-1");
     store.close();
   });
 

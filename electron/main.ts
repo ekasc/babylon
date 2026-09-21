@@ -7,6 +7,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { AgentEventBuffer } from "./event-buffer";
+import { buildContextMenuTemplate } from "./context-menu";
 import { registerGitIpc } from "./git-ipc";
 import { registerCanvasIpc } from "./canvas-ipc";
 import { registerRuntimeIpc } from "./runtime-ipc";
@@ -15,6 +16,8 @@ import { registerSimIpc } from "./sim-ipc";
 import { SimController } from "./sim-controller";
 import { registerSessionRuntimeIpc } from "./session-runtime-ipc";
 import { registerActivityIpc } from "./activity-ipc";
+import type { IpcHandle } from "./ipc-handle";
+import type { WorkflowsBridgeLike } from "./activity-ipc";
 import { registerSessionsIpc } from "./sessions-ipc";
 import { registerBotsIpc } from "./bots-ipc";
 import { registerPermissionsIpc } from "./permissions-ipc";
@@ -23,6 +26,8 @@ import { getSettings } from "./app-settings";
 import { PiHost, defaultStateDir } from "./pi-host";
 import { PermissionEngine, type AgentAction, type Risk } from "./permissions";
 import { isTrustedRendererUrl } from "./navigation";
+import type { AgentEvent, AgentState } from "../src/bridge";
+import { wireOf } from "../src/store";
 import { validateSessionPath } from "./session-path";
 import { SessionIndex } from "./sessions";
 import { ProcessManager, validateCwd } from "./process-manager";
@@ -228,7 +233,7 @@ function resolveApproval(id: string, choice: "allow_once" | "allow_session" | "a
   // session travels along so background resolutions land on the right run.
   win?.webContents.send("pideck:approval-resolved", { id, choice, sessionId });
 }
-let workflowsBridge: any = null;
+let workflowsBridge: WorkflowsBridgeLike | null = null;
 /** Process-wide activity observation: one bridge per project ever opened,
  *  aggregated to the renderer. Navigation only foregrounds; it never
  *  destroys tracking (see ActivityRegistry). */
@@ -321,7 +326,7 @@ function driveExtrasIO() {
       await runtime.prompt(text);
     },
     readReply: async () => lastAssistantText(await runtime.getMessages()),
-    emit: (ev: Record<string, unknown>) => {
+    emit: (ev: Record<string, unknown> & { type: string }) => {
       try {
         getHost().emitRoomEvent(ev);
       } catch {}
@@ -346,14 +351,14 @@ async function resolveCanonicalSessionFile(stored: string | null | undefined): P
   }
 }
 /** Latest assistant text in a message list (best-effort; "" when absent). */
-function lastAssistantText(messages: any[]): string {
+function lastAssistantText(messages: unknown[]): string {
   for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
+    const m = wireOf(messages[i]);
     if (!m || m.role !== "assistant") continue;
     const c = m.content;
     if (typeof c === "string") return c;
     if (Array.isArray(c)) {
-      return c.map((b: any) => (typeof b === "string" ? b : (b?.text ?? ""))).join("");
+      return c.map((b) => (typeof b === "string" ? b : String(wireOf(b)?.text ?? ""))).join("");
     }
     return "";
   }
@@ -640,16 +645,29 @@ function createWindow(): void {
   });
 
   const devUrl = process.env.VITE_DEV_SERVER_URL;
-  win.webContents.session.setPermissionRequestHandler((_wc: any, permission: string, callback: any) => {
-    if ((permission as string) === "local-fonts") callback(true);
+  // "local-fonts" is sent by newer Chromium but missing from Electron's
+  // Permission union: compare the string form instead of extending theirs.
+  win.webContents.session.setPermissionRequestHandler((_wc, permission, callback) => {
+    if (String(permission) === "local-fonts") callback(true);
     else callback(false);
   });
   // Some Chromium builds also gate local-fonts behind a check handler
   try {
-    const ses: any = win.webContents.session;
-    ses.setPermissionCheckHandler?.((wc: any, perm: string) => (perm as string) === "local-fonts" ? true : false);
+    win.webContents.session.setPermissionCheckHandler?.((_wc, permission) => String(permission) === "local-fonts");
   } catch {}
   win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  // Native right-click menu: standard edit actions in text fields, Copy on
+  // transcript selections, nothing on empty chrome. Regions with their own
+  // React menu (sidebar session rows) preventDefault the DOM event, which
+  // suppresses this request, so the two never double up.
+  win.webContents.on("context-menu", (_event, params) => {
+    if (!win || win.isDestroyed()) return;
+    const template = buildContextMenuTemplate(params, app.isPackaged, {
+      inspectAt: (x, y) => win?.webContents.inspectElement(x, y),
+    });
+    if (template.length === 0) return;
+    Menu.buildFromTemplate(template).popup({ window: win });
+  });
   win.webContents.on("will-navigate", (event, url) => {
     if (!isTrustedRendererUrl(url, devUrl, RENDERER_ENTRY)) event.preventDefault();
   });
@@ -681,12 +699,12 @@ function createWindow(): void {
   if (devUrl) {
     // Keep renderer diagnostics visible during development only. Production
     // output may contain prompts/tool data and should not be mirrored to logs.
-    win.webContents.on("console-message", (event) => {
-      const msg = (event as any).message ?? "";
-      const level = (event as any).level ?? 1;
+    // Electron delivers level/message as dedicated listener args (not on the
+    // event object); reading them positionally restores the actual text.
+    win.webContents.on("console-message", (_event, level, message) => {
       const tag =
         level === 0 ? "debug" : level === 1 ? "log" : level === 2 ? "warn" : level === 3 ? "error" : "info";
-      console.log(`[renderer:${tag}] ${msg}`);
+      console.log(`[renderer:${tag}] ${message}`);
     });
   }
 }
@@ -753,7 +771,7 @@ async function startHost(): Promise<void> {
       getTaskIdForSessionFile: (file) => taskManager.findBySessionFile(file)?.id,
       getBotIdForSessionFile: (file) => botStore.findBySessionFile(file)?.id,
       getSimController: () => simController,
-      onEvent: (ev) => {
+      onEvent: (ev: AgentEvent) => {
         agentEvents.push(ev);
         // Transient subagent rows (tool start/end) ride the same event flow
         // the renderer already consumes; each project's poll picks up the rest.
@@ -766,7 +784,7 @@ async function startHost(): Promise<void> {
           sessionIndex.touch();
         }
       },
-      onStatus: (s: any) => {
+      onStatus: (s: { status: string; message?: string; cwd?: string; sessionPath?: string; requestId?: number; state?: AgentState | null }) => {
         if (s?.cwd) applyCwd(s.cwd);
         // Forward requestId: the renderer matches ready/error against its
         // latest open to ignore stale switches. Dropping it deadens that
@@ -803,13 +821,13 @@ function assertTrustedSender(event: IpcMainInvokeEvent): void {
 }
 
 function registerIpc(): void {
-  const handle = (
+  const handle: IpcHandle = <A extends unknown[]>(
     channel: string,
-    listener: (event: IpcMainInvokeEvent, ...args: any[]) => unknown
-  ): void => {
+    listener: (event: IpcMainInvokeEvent, ...args: A) => unknown
+  ) => {
     ipcMain.handle(channel, (event, ...args) => {
       assertTrustedSender(event);
-      return listener(event, ...args);
+      return listener(event, ...(args as A));
     });
   };
 
@@ -1095,7 +1113,12 @@ async function ensureDaemon(): Promise<boolean> {
         daemonViewRefresh.enqueue("attention", undefined);
       }
       if (envelope.type === "pi.event") {
-        agentEvents.push(envelope.payload);
+        // The daemon forwards host agent events; only typed payloads enter
+        // the local event buffer (anything else is a protocol violation).
+        const payload = envelope.payload;
+        if (typeof payload === "object" && payload !== null && typeof (payload as { type?: unknown }).type === "string") {
+          agentEvents.push(payload as AgentEvent);
+        }
       }
       if (envelope.type === "pi.session.status") {
         // In daemon mode there is no local PiHost whose onStatus would call
@@ -1228,7 +1251,6 @@ app.on("window-all-closed", () => {
     sessionIndex.dispose();
     activityRegistry?.disposeAll();
     activityRegistry = null;
-    workflowsBridge?.dispose();
     void host?.dispose();
     app.quit();
   }
@@ -1249,6 +1271,5 @@ app.on("before-quit", () => {
   sessionIndex.dispose();
   activityRegistry?.disposeAll();
     activityRegistry = null;
-  workflowsBridge?.dispose();
   void host?.dispose();
 });

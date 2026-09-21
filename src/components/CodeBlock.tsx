@@ -78,7 +78,7 @@ export default function CodeBlock({ code, lang, bare, collapsed: startCollapsed,
 
   if (startCollapsed && !open) {
     return (
-      <div className={`codeblock codeblock-collapsed ${isShell ? "is-shell" : ""}`}>
+      <div className={`codeblock codeblock-collapsed select-text ${isShell ? "is-shell" : ""}`}>
         {!bare && (
           <div className="codeblock-bar">
             <span>{isShell ? <span className="codeblock-shell-prompt" aria-hidden>&gt;</span> : null}{lang ?? "text"}</span>
@@ -97,7 +97,7 @@ export default function CodeBlock({ code, lang, bare, collapsed: startCollapsed,
   }
 
   return (
-    <div className={`codeblock ${isShell ? "is-shell" : ""}`} data-language={lang ?? "text"}>
+    <div className={`codeblock select-text ${isShell ? "is-shell" : ""}`} data-language={lang ?? "text"}>
       {!bare && (
         <div className="codeblock-bar">
           <span>{isShell ? <span className="codeblock-shell-prompt" aria-hidden>&gt;</span> : null}{lang ?? "text"}</span>
@@ -114,7 +114,7 @@ export default function CodeBlock({ code, lang, bare, collapsed: startCollapsed,
             const rawLines = inner.split("\n");
             lineHtmls = rawLines.map((l) => {
               const m = l.match(/^<span class="line">(.*)<\/span>$/);
-              return m ? m[1] : l;
+              return m ? (m[1] ?? l) : l;
             });
           } else {
             lineHtmls = inner.split("\n");

@@ -73,8 +73,8 @@ describe("canvas store", () => {
 
     const scenes = await listScenes(root);
     expect(scenes.map((scene) => scene.name)).toEqual(["a", "b"]);
-    expect(scenes[0].path).toBe(join(dir, "a.canvas"));
-    expect(scenes[0].size).toBeGreaterThan(0);
+    expect(scenes[0]?.path).toBe(join(dir, "a.canvas"));
+    expect(scenes[0]?.size).toBeGreaterThan(0);
   });
 
   it("writes a scene the parser accepts", async () => {

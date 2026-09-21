@@ -103,15 +103,20 @@ function renderLinesToPng(
   const cellH = GLYPH_H * scale + Math.max(1, profile.lineGap);
   for (let li = 0; li < lines.length; li++) {
     const line = lines[li];
+    if (line === undefined) continue;
     const y = profile.marginY + li * cellH;
     if (y + GLYPH_H * scale > height) break;
     let x = profile.marginX;
     for (let k = 0; k < line.length; k++) {
       const ch = line[k];
+      if (ch === undefined) continue;
       const g = FONT_5X7[ch] ?? FONT_5X7[" "];
+      if (g === undefined) continue;
       for (let row = 0; row < GLYPH_H; row++) {
+        const glyphRow = g[row];
+        if (glyphRow === undefined) continue;
         for (let col = 0; col < GLYPH_W; col++) {
-          if (g[row][col] === "X") {
+          if (glyphRow[col] === "X") {
             fillRect(pixels, width, height, x + col * scale, y + row * scale, scale, scale, true);
           }
         }

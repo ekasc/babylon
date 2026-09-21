@@ -20,7 +20,7 @@ const request: ApprovalRequest = {
 
 function openGate() {
   render(<ApprovalGate />);
-  act(() => vi.mocked(bridge.onApprovalRequested).mock.calls[0][0](request));
+  act(() => (vi.mocked(bridge.onApprovalRequested).mock.calls[0]?.[0] ?? (() => { throw new Error("missing call"); }))(request));
 }
 
 beforeEach(() => vi.clearAllMocks());
@@ -77,7 +77,7 @@ describe("ApprovalGate", () => {
     );
     openGate();
     fireEvent.click(screen.getByRole("button", { name: "Deny" }));
-    act(() => vi.mocked(bridge.onApprovalCleared).mock.calls[0][0]({ id: request.id }));
+    act(() => (vi.mocked(bridge.onApprovalCleared).mock.calls[0]?.[0] ?? (() => { throw new Error("missing call"); }))({ id: request.id }));
     await act(async () => reject(new Error("Disconnected")));
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();

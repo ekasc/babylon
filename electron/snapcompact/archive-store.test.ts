@@ -62,7 +62,7 @@ describe("snapcompact archive store (immutable generations)", () => {
     const loaded = await store2.load(sessionFile);
     expect(loaded).not.toBeNull();
     expect(loaded!.frames.length).toBe(3);
-    expect(loaded!.symbols[0].value).toBe("/repo/electron/snapshot-store.ts");
+    expect(loaded!.symbols[0]?.value).toBe("/repo/electron/snapshot-store.ts");
   });
 
   it("stores frames under generations/<id>/frame-XXXX.png and a manifest", async () => {
@@ -135,7 +135,9 @@ describe("snapcompact archive store (immutable generations)", () => {
     const manifest = JSON.parse(await readFile(join(dir, archDir, "manifest.json"), "utf8"));
     const genDir = join(dir, archDir, "generations", manifest.generation.id);
     const frameFiles = (await readdir(genDir)).filter((f) => f.endsWith(".png"));
-    await rm(join(genDir, frameFiles[0]), { force: true });
+    const victim = frameFiles[0];
+    if (victim === undefined) throw new Error("missing frame");
+    await rm(join(genDir, victim), { force: true });
     const fresh = new ArchiveStore({ stateDir });
     await expect(fresh.load(sessionFile)).rejects.toBeInstanceOf(ArchiveIntegrityError);
   });

@@ -125,7 +125,8 @@ export function SettingsAppearance({ settings, onSave, theme, onThemeChange, the
       let fonts: string[] = [];
       try {
         if ("queryLocalFonts" in window) {
-          const localFonts: Array<{ family: string }> = await (window as any).queryLocalFonts();
+          const withFonts = window as Window & { queryLocalFonts?: () => Promise<Array<{ family: string }>> };
+          const localFonts: Array<{ family: string }> = await withFonts.queryLocalFonts?.() ?? [];
           fonts = [...new Set(localFonts.map((f) => f.family))].sort((a, b) => a.localeCompare(b));
         }
       } catch {}

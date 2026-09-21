@@ -1,13 +1,11 @@
 import type { BrowserWindow, IpcMainInvokeEvent } from "electron";
+import type { IpcHandle } from "./ipc-handle";
 import { validateId } from "./process-manager";
 import type { RuntimeFacade } from "../src/runtime-facade";
 import type { DaemonClient } from "../src/daemon-client";
 import type { CheckResult, CompletionContract } from "../src/completion-contracts";
 
-type Handle = (
-  channel: string,
-  listener: (event: IpcMainInvokeEvent, ...args: any[]) => unknown,
-) => void;
+type Handle = IpcHandle;
 
 export function registerRuntimeIpc(
   handle: Handle,
@@ -37,7 +35,7 @@ export function registerRuntimeIpc(
     // 1) Try font-list (may be inside asar, may fallback)
     try {
       const { getFonts } = await import("font-list");
-      const fonts: string[] = await (getFonts as any)({ disableQuoting: true });
+      const fonts: string[] = await getFonts({ disableQuoting: true });
       for (const f of fonts) {
         const c = f.replace(/^[\"']|[\"']$/g, "").trim();
         if (c) all.add(c);
@@ -45,7 +43,7 @@ export function registerRuntimeIpc(
     } catch {}
     // 2) system_profiler, most reliable on macOS, includes Miracode
     try {
-      const { stdout } = await pexec(`system_profiler SPFontsDataType 2>/dev/null | grep "Family:" | awk -F: '{print $2}' | sort | uniq`, { maxBuffer: 10 * 1024 * 1024 }) as any;
+      const { stdout } = await pexec(`system_profiler SPFontsDataType 2>/dev/null | grep "Family:" | awk -F: '{print $2}' | sort | uniq`, { maxBuffer: 10 * 1024 * 1024 });
       for (const line of String(stdout).split("\n")) {
         const c = line.trim();
         if (c) all.add(c);
@@ -77,7 +75,7 @@ export function registerRuntimeIpc(
     return sorted;
   });
   handle("pideck:get-settings", () => getRuntime().getSettings());
-  handle("pideck:set-settings", (_e, patch: any) => getRuntime().setSettings(patch));
+  handle("pideck:set-settings", (_e, patch: unknown) => getRuntime().setSettings(patch));
   handle("pideck:set-session-name", (_e, name: string) => {
     if (typeof name !== "string" || name.length > 500) throw new Error("invalid session name");
     return getRuntime().setSessionName(name);

@@ -1,12 +1,24 @@
 // Off-thread image resize via OffscreenCanvas — keeps Composer 60fps
 // Falls back to main-thread canvas if OffscreenCanvas unavailable
+import { wireOf } from "./lib/wire";
+declare function postMessage(msg: unknown): void;
 self.onmessage = async (e: MessageEvent) => {
-  const { id, blob, maxEdge } = e.data as { id: number; blob: Blob; maxEdge: number };
+  // MessageEvent.data is any by DOM typing: validate the wire shape before
+  // touching it so a malformed post never throws mid-destructure.
+  const data: unknown = e.data;
+  const wire = wireOf(data);
+  const id = typeof wire?.id === "number" ? wire.id : -1;
+  const maxEdge = typeof wire?.maxEdge === "number" ? wire.maxEdge : 1280;
+  const blob = wire?.blob;
+  const reply = (msg: unknown) => {
+    postMessage(msg);
+  };
   try {
+    if (!(blob instanceof Blob)) throw new Error("image worker: missing image blob");
     const bitmap = await createImageBitmap(blob);
     const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height));
     if (scale === 1) {
-      (self as any).postMessage({ id, ok: true, blob });
+      reply({ id, ok: true, blob });
       bitmap.close();
       return;
     }
@@ -24,8 +36,8 @@ self.onmessage = async (e: MessageEvent) => {
       throw new Error("no OffscreenCanvas");
     }
     bitmap.close();
-    (self as any).postMessage({ id, ok: true, blob: outBlob });
-  } catch (err: any) {
-    (self as any).postMessage({ id, ok: false, error: err?.message ?? String(err) });
+    reply({ id, ok: true, blob: outBlob });
+  } catch (err: unknown) {
+    reply({ id, ok: false, error: err instanceof Error ? err.message : String(err) });
   }
 };

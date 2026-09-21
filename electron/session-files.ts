@@ -1,14 +1,18 @@
 import { existsSync, promises as fsp } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 
-export async function readSessionHeader(file: string): Promise<any> {
+/** First-line session header (id/cwd/timestamp), unvalidated JSON. */
+export async function readSessionHeader(file: string): Promise<Record<string, unknown> | null> {
   try {
     const fd = await fsp.open(file, "r");
     try {
       const buf = Buffer.alloc(16 * 1024);
       const { bytesRead } = await fd.read(buf, 0, buf.length, 0);
-      const firstLine = buf.toString("utf8", 0, bytesRead).split("\n")[0];
-      return JSON.parse(firstLine);
+      const firstLine = buf.toString("utf8", 0, bytesRead).split("\n")[0] ?? "";
+      const parsed: unknown = JSON.parse(firstLine);
+      return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : null;
     } finally {
       await fd.close();
     }

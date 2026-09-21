@@ -2,20 +2,13 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { CheckIcon, ChevronIcon, CpuIcon, SparkleIcon } from "./icons";
 import { PopoverPanel, PopoverRoot, PopoverTrigger } from "./ui/Popover";
 
-interface Model {
-  id: string;
-  name?: string;
-  provider: string;
-  contextWindow?: number;
-  cost?: { input?: number; output?: number; cacheRead?: number };
-  reasoning?: boolean;
-}
+import type { AgentModel } from "../bridge";
 
-export type { Model as PickerModel };
+export type { AgentModel as PickerModel };
 
 interface Props {
-  models: Model[];
-  current?: Model | null;
+  models: AgentModel[];
+  current?: AgentModel | null;
   disabled?: boolean;
   align?: "left" | "right";
   wide?: boolean;
@@ -50,7 +43,7 @@ function loadRecents(): string[] {
 
 interface Group {
   label: string;
-  models: Model[];
+  models: AgentModel[];
 }
 
 export default function ModelPicker({ models, current, disabled, align = "left", wide, side, compactTrigger, onSelect }: Props) {
@@ -94,10 +87,10 @@ export default function ModelPicker({ models, current, disabled, align = "left",
     if (!searching && recent.length > 0) {
       const rec = recent
         .map((key) => models.find((m) => `${m.provider}/${m.id}` === key))
-        .filter((m): m is Model => !!m);
+        .filter((m): m is AgentModel => !!m);
       if (rec.length > 0) out.push({ label: RECENT_LABEL, models: rec });
     }
-    const byProvider = new Map<string, Model[]>();
+    const byProvider = new Map<string, AgentModel[]>();
     for (const m of filtered) {
       const arr = byProvider.get(m.provider) ?? [];
       arr.push(m);
@@ -107,7 +100,7 @@ export default function ModelPicker({ models, current, disabled, align = "left",
     // registry in unstable insertion order and gets rebuilt behind our back;
     // without a derived sort, rows permute after mount and any scroll-to-
     // selected lands stale.
-    const byName = (a: Model, b: Model) =>
+    const byName = (a: AgentModel, b: AgentModel) =>
       (a.name ?? a.id).localeCompare(b.name ?? b.id) || a.id.localeCompare(b.id);
     for (const [label, ms] of [...byProvider.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
       out.push({ label, models: [...ms].sort(byName) });
@@ -202,7 +195,8 @@ export default function ModelPicker({ models, current, disabled, align = "left",
         setActiveLabel((prev) => {
           const idx = tabs.findIndex((t) => t.label === prev);
           const next = e.key === "ArrowRight" ? Math.min(idx + 1, tabs.length - 1) : Math.max(idx - 1, 0);
-          return tabs[next === -1 ? 0 : next].label;
+          const tab = tabs[next === -1 ? 0 : next];
+        return tab !== undefined ? tab.label : prev;
         });
       } else if (e.key === "Enter") {
         e.preventDefault();

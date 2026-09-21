@@ -122,7 +122,8 @@ export class BotStore {
   update(id: string, patch: BotPatch): Bot {
     const index = this.bots.findIndex((b) => b.id === id);
     if (index < 0) throw new Error("Bot not found");
-    const current = this.bots[index]!;
+    const current = this.bots[index];
+    if (!current) throw new Error("Bot not found");
     if (patch.name !== undefined) {
       const name = patch.name.trim().replaceAll(/\s+/g, " ");
       if (!name) throw new Error("Give the bot a name");
@@ -223,7 +224,8 @@ export class BotStore {
   updateGroup(id: string, patch: { name?: string; memberIds?: string[]; cwd?: string; mainSessionFile?: string | null; projectHash?: string }): BotGroup {
     const index = this.groups.findIndex((g) => g.id === id);
     if (index < 0) throw new Error("Group not found");
-    const current = this.groups[index]!;
+    const current = this.groups[index];
+    if (!current) throw new Error("Group not found");
     if (patch.name !== undefined) {
       const name = patch.name.trim().replaceAll(/\s+/g, " ");
       if (!name) throw new Error("Give the group a name");

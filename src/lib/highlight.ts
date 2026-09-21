@@ -8,6 +8,9 @@
 
 import type { HighlighterCore } from "shiki/core";
 
+/** Whatever shiki's loadLanguage accepts (registrations, getters, specials). */
+type ShikiLang = Parameters<HighlighterCore["loadLanguage"]>[number];
+
 const HEAVY_LANGS: Record<string, () => Promise<unknown>> = {
   c: () => import("shiki/langs/c.mjs"),
   cpp: () => import("shiki/langs/cpp.mjs"),
@@ -102,7 +105,16 @@ async function loadLang(hl: HighlighterCore, lang: string): Promise<void> {
     langLoads.set(
       lang,
       factory()
-        .then((module) => hl.loadLanguage(((module as { default?: unknown }).default ?? module) as any))
+        .then((module) => {
+          const registration = (module as { default?: unknown }).default ?? module;
+          // Dynamic lang bundles export a registration object (or getter);
+          // anything else is a bundling surprise, surfaced as a load failure
+          // so the grammar stays unloaded exactly as before.
+          if ((typeof registration !== "object" || registration === null) && typeof registration !== "function") {
+            throw new Error(`unexpected language module for ${lang}`);
+          }
+          return hl.loadLanguage(registration as ShikiLang);
+        })
         .catch(() => undefined)
     );
   }

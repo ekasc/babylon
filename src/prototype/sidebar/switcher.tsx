@@ -10,13 +10,16 @@ export function PrototypeSwitcher({
   nameFor,
   onSelect,
 }: {
-  variants: string[];
+  variants: readonly string[];
   current: string;
   nameFor: (v: string) => string;
   onSelect: (v: string) => void;
 }) {
   const idx = variants.indexOf(current);
-  const go = (delta: number) => onSelect(variants[(idx + delta + variants.length) % variants.length]);
+  const go = (delta: number) => {
+    const next = variants[(idx + delta + variants.length) % variants.length];
+    if (next !== undefined) onSelect(next);
+  };
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

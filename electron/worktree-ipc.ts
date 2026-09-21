@@ -1,20 +1,19 @@
 import { shell, type IpcMainInvokeEvent } from "electron";
+import type { IpcHandle } from "./ipc-handle";
 import { randomUUID } from "node:crypto";
 import { existsSync, promises as fsp } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import * as gitOps from "./git";
 import { branchExists, git, gitInfo } from "./git-status";
 import { ensureClonedSessionFile, readSessionHeader, rewriteSessionHeader, sanitizeWorktreeName, uniquePath } from "./session-files";
+import { wireOf, wireStr } from "../src/store";
 import type { RuntimeFacade } from "../src/runtime-facade";
 import type { DaemonClient } from "../src/daemon-client";
 import type { Task } from "../src/tasks";
 import type { TaskManager } from "./task-manager";
 import type { ProcessManager } from "./process-manager";
 
-type Handle = (
-  channel: string,
-  listener: (event: IpcMainInvokeEvent, ...args: any[]) => unknown,
-) => void;
+type Handle = IpcHandle;
 
 export function registerWorktreeIpc(
   handle: Handle,
@@ -47,14 +46,14 @@ export function registerWorktreeIpc(
   } = deps;
   handle("pideck:worktree-info", async () => {
     try {
-      const state = await getRuntime().getState() as any;
-      const file = state?.sessionFile;
+      const state = await getRuntime().getState();
+      const file = state?.sessionFile ?? null;
       const header = file ? await readSessionHeader(file) : null;
       const task = isDaemonOwned()
         ? await daemonTaskBySessionFile(file)
         : taskManager.findBySessionFile(file);
-      const parentSession = header?.parentSession ?? task?.parentSessionFile;
-      const cwd = header?.cwd ?? task?.cwd ?? getActiveCwd();
+      const parentSession = wireStr(header ?? undefined, "parentSession") ?? task?.parentSessionFile;
+      const cwd = wireStr(header ?? undefined, "cwd") ?? task?.cwd ?? getActiveCwd();
       const g = cwd ? await gitInfo(cwd) : { isRepo: false };
       return {
         isWorktree: !!parentSession,
@@ -76,31 +75,31 @@ export function registerWorktreeIpc(
       if (opts.description !== undefined && (typeof opts.description !== "string" || opts.description.length > 20_000)) {
         throw new Error("invalid worktree description");
       }
-      const before: any = await getRuntime().getState();
+      const before = await getRuntime().getState();
       if (!before?.sessionFile) {
         throw new Error("no persisted session to worktree yet, send at least one message first");
       }
       const originalPath = before.sessionFile;
       const originalCwd = getActiveCwd();
-      let worktreePath: string | undefined;
       let gitWorktree: { path: string; branch: string; baseBranch?: string } | null = null;
       let gitRoot: string | undefined;
 
+      let worktreePath: string | undefined;
       try {
-        const cloneRes: any = await getRuntime().clone();
+        const cloneRes = await getRuntime().clone();
         if (cloneRes?.cancelled) throw new Error("worktree cancelled by extension");
-        worktreePath = (await getRuntime().getState() as any)?.sessionFile;
+        worktreePath = (await getRuntime().getState())?.sessionFile ?? undefined;
         if (!worktreePath || worktreePath === originalPath) throw new Error("clone did not produce a session file");
 
         const safeName = sanitizeWorktreeName(opts.name) || `exp-${Date.now().toString(36)}`;
         await getRuntime().setSessionName(`worktree: ${safeName}`);
-        const afterNameState: any = await getRuntime().getState();
+        const afterNameState = await getRuntime().getState();
         await ensureClonedSessionFile(worktreePath, originalPath, getActiveCwd(), afterNameState?.sessionId);
         let workCwd = getActiveCwd();
 
         if (opts.useGit) {
           const header = (await readSessionHeader(worktreePath)) ?? {};
-          const baseCwd = header.cwd ?? getActiveCwd();
+          const baseCwd = wireStr(header ?? undefined, "cwd") ?? getActiveCwd();
           const info = await gitInfo(baseCwd);
           if (!info.isRepo || !info.root) {
             throw new Error("project is not a git repository, uncheck the git worktree option");
@@ -112,7 +111,8 @@ export function registerWorktreeIpc(
           await git(["worktree", "add", "-b", branch, wtPath], info.root);
           gitWorktree = { path: wtPath, branch, baseBranch: info.branch };
           await rewriteSessionHeader(worktreePath, { cwd: wtPath });
-          await getRuntime().switchTo(worktreePath as any);
+          if (!worktreePath) throw new Error("clone did not produce a session file");
+          await getRuntime().switchTo(worktreePath);
           workCwd = wtPath;
           applyCwd(wtPath);
         }
@@ -125,7 +125,7 @@ export function registerWorktreeIpc(
             .catch(() => {});
         }
 
-        const state: any = await getRuntime().getState();
+        const state = await getRuntime().getState();
         if (!state?.sessionId) throw new Error("cloned session has no runtime identity");
         let task: import("../src/tasks").Task;
         if (isDaemonOwned()) {
@@ -167,7 +167,7 @@ export function registerWorktreeIpc(
         // runtime first, then remove only artifacts this attempt created.
         let restored = false;
         try {
-          await getRuntime().switchTo(originalPath as any);
+          await getRuntime().switchTo(originalPath);
           restored = true;
           applyCwd(originalCwd);
         } catch {
@@ -186,25 +186,25 @@ export function registerWorktreeIpc(
 
   handle("pideck:worktree-exit", async (_e, opts: { keep: boolean }) => {
     if (!opts || typeof opts.keep !== "boolean") throw new Error("invalid worktree exit options");
-    const state: any = await getRuntime().getState();
+    const state = await getRuntime().getState();
     const file = state?.sessionFile;
     if (!file) throw new Error("no active session");
     const header = await readSessionHeader(file);
     const task = isDaemonOwned()
       ? await daemonTaskBySessionFileStrict(requireDaemonClient(), file)
       : taskManager.findBySessionFile(file);
-    const originalPath = header?.parentSession ?? task?.parentSessionFile;
+    const originalPath = wireStr(header ?? undefined, "parentSession") ?? task?.parentSessionFile;
     if (!originalPath || !existsSync(originalPath)) {
       throw new Error("this session has no original to return to");
     }
-    const workCwd = header?.cwd ?? task?.cwd;
+    const workCwd = wireStr(header ?? undefined, "cwd") ?? task?.cwd;
     const gitWorktree = workCwd ? await gitInfo(workCwd) : { isRepo: false };
-    const dirty = gitWorktree.isLinkedWorktree
+    const dirty = gitWorktree.isLinkedWorktree && workCwd
       ? (await gitOps.statusDetails(workCwd)).hasChanges
       : false;
 
     const cleanup = async () => {
-      await getRuntime().switchTo(originalPath as any);
+      await getRuntime().switchTo(originalPath);
 
       let gitRemoved = false;
       if (!opts.keep) {
@@ -219,9 +219,9 @@ export function registerWorktreeIpc(
         await fsp.rm(file);
       }
 
-      const newState: any = await getRuntime().getState();
+      const newState = await getRuntime().getState();
       const origHeader = await readSessionHeader(originalPath);
-      applyCwd(origHeader?.cwd ?? getActiveCwd());
+      applyCwd(wireStr(origHeader ?? undefined, "cwd") ?? getActiveCwd());
       sendStatus("ready", { state: newState, sessionPath: originalPath, cwd: getActiveCwd() });
       return { originalPath, kept: opts.keep, gitRemoved };
     };

@@ -167,14 +167,14 @@ describe("sanitizers", () => {
 describe("sim prefs", () => {
   it("round-trips and rejects garbage", () => {
     const store = memStore();
-    expect(loadSimPrefs(store)).toEqual({ presetId: SIM_PRESETS[0].id, rotated: false, deviceToolbar: false });
+    expect(loadSimPrefs(store)).toEqual({ presetId: (SIM_PRESETS[0]?.id ?? ""), rotated: false, deviceToolbar: false });
     saveSimPrefs({ presetId: "iphone", rotated: true, deviceToolbar: true }, store);
     expect(loadSimPrefs(store)).toEqual({ presetId: "iphone", rotated: true, deviceToolbar: true });
     const bad = memStore();
     bad.setItem("babylon:simulator:v1", "{nope");
-    expect(loadSimPrefs(bad)).toEqual({ presetId: SIM_PRESETS[0].id, rotated: false, deviceToolbar: false });
+    expect(loadSimPrefs(bad)).toEqual({ presetId: (SIM_PRESETS[0]?.id ?? ""), rotated: false, deviceToolbar: false });
     const wrong = memStore();
     wrong.setItem("babylon:simulator:v1", JSON.stringify({ presetId: "nope" }));
-    expect(loadSimPrefs(wrong).presetId).toBe(SIM_PRESETS[0].id);
+    expect(loadSimPrefs(wrong)?.presetId).toBe((SIM_PRESETS[0]?.id ?? ""));
   });
 });

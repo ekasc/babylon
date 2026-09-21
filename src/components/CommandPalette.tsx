@@ -207,7 +207,7 @@ export default function CommandPalette({
     const heights = items.map((it) => (it.kind === "header" ? HEADER_H : ROW_H));
     const topsArr = new Array<number>(heights.length + 1);
     topsArr[0] = 0;
-    for (let i = 0; i < heights.length; i++) topsArr[i + 1] = topsArr[i] + heights[i];
+    for (let i = 0; i < heights.length; i++) topsArr[i + 1] = (topsArr[i] ?? 0) + (heights[i] ?? 0);
     return { displayItems: items, rowItems: rows, total: topsArr[heights.length], tops: topsArr };
   }, [order, byCat, modelRows]);
 
@@ -218,7 +218,7 @@ export default function CommandPalette({
     let hi = tops.length - 1;
     while (lo < hi) {
       const mid = (lo + hi) >> 1;
-      if (tops[mid + 1] <= y) lo = mid + 1;
+      if ((tops[mid + 1] ?? Number.POSITIVE_INFINITY) <= y) lo = mid + 1;
       else hi = mid;
     }
     return lo;

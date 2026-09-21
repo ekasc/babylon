@@ -4,8 +4,9 @@ import { SettingSection } from "./SettingSection";
 import { SettingRow } from "./SettingRow";
 import ModelPicker from "../ModelPicker";
 import { DEFAULT_GIT_COMMIT_PROMPT } from "../../lib/settings-shared";
+import type { AgentModel } from "../../bridge";
 
-export function SettingsGit({ settings, onSave, models }: { settings: PiSettings | null; onSave: (p: Partial<PiSettings>) => void; models: any[] }) {
+export function SettingsGit({ settings, onSave, models }: { settings: PiSettings | null; onSave: (p: Partial<PiSettings>) => void; models: AgentModel[] }) {
   const [draft, setDraft] = useState(settings?.gitCommitPrompt ?? DEFAULT_GIT_COMMIT_PROMPT);
   useEffect(() => { setDraft(settings?.gitCommitPrompt ?? DEFAULT_GIT_COMMIT_PROMPT); }, [settings?.gitCommitPrompt]);
 

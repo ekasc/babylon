@@ -25,7 +25,8 @@ export default function ThinkingPicker({ current, available, disabled, align = "
 
   const levels = useMemo(() => {
     const supported = available && available.length ? new Set(available) : null;
-    return Object.keys(LEVEL_META).filter((l) => !supported || supported.has(l));
+    // Entries (not keys) so the meta stays attached: no index lookup to fail.
+    return Object.entries(LEVEL_META).filter(([l]) => !supported || supported.has(l));
   }, [available]);
 
   const meta = LEVEL_META[current] ?? { label: current, desc: "" };
@@ -53,8 +54,7 @@ export default function ThinkingPicker({ current, available, disabled, align = "
           positionerClassName="z-[70]"
           className="operator-popover w-[280px] max-w-[calc(100vw-32px)] overflow-hidden px-1.5 py-1.5"
         >
-          {levels.map((l) => {
-            const m = LEVEL_META[l];
+          {levels.map(([l, m]) => {
             const active = l === current;
             return (
               <button

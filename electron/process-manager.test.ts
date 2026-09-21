@@ -2,9 +2,11 @@ import { describe, expect, it, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ProcessManager, OUTPUT_CAP, detectPortsFromOutput, validateCommand, validateCwd, validateId } from "./process-manager";
+import { ProcessManager, OUTPUT_CAP, detectPortsFromOutput, validateCommand, validateCwd, validateId, type ProcessSnapshot } from "./process-manager";
 
-function waitFor(manager: ProcessManager, id: string, predicate: (s: any) => boolean, timeoutMs = 5000): Promise<any> {
+function waitFor(manager: ProcessManager, id: string, predicate: (s: ProcessSnapshot) => boolean, timeoutMs = 5000): Promise<ProcessSnapshot> {
+  // waitFor only resolves on a snapshot that satisfies the predicate, so
+  // the result is always defined (timeout rejects instead).
   const start = Date.now();
   return new Promise((resolve, reject) => {
     const tick = () => {

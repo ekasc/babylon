@@ -478,6 +478,7 @@ export default function CanvasPanel({ cwd, mermaid, onImported }: CanvasPanelPro
               if (stroke && svgRef.current) {
                 const point = toScenePoint(svgRef.current, event.clientX, event.clientY);
                 const last = stroke[stroke.length - 1];
+                if (last === undefined) return;
                 // Sample sparsely: a path per mouse event makes an unreadable file.
                 if (Math.hypot(point.x - last.x, point.y - last.y) >= STROKE_SAMPLE) {
                   setStroke([...stroke, point]);

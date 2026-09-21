@@ -74,7 +74,9 @@ describe("snapcompact offline coverage harness", () => {
 
 describe("snapcompact live retrieval scaffold", () => {
   it("emits a model-ready request with frames as base64 ImageContent", () => {
-    const req = emitLiveRequest(EVAL_FIXTURES[0]);
+    const fixture = EVAL_FIXTURES[0];
+    if (!fixture) throw new Error("missing fixture");
+    const req = emitLiveRequest(fixture);
     expect(req.frames.length).toBeGreaterThan(0);
     for (const f of req.frames) {
       expect(typeof f.base64).toBe("string");

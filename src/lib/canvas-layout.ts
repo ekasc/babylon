@@ -138,7 +138,10 @@ export function layoutScene(scene: Scene): SceneLayout {
   const horizontal = scene.direction === "LR";
   const rankCount = ranks.size ? Math.max(...ranks.values()) + 1 : 0;
   const columns: string[][] = Array.from({ length: rankCount }, () => []);
-  for (const node of leaves) columns[ranks.get(node.id) ?? 0].push(node.id);
+  for (const node of leaves) {
+    const col = columns[ranks.get(node.id) ?? 0];
+    if (col !== undefined) col.push(node.id);
+  }
 
   const spanOf = (ids: string[]) =>
     ids.reduce((total, id) => total + (sizes.get(id) ?? MIN_WIDTH), 0) + SIBLING_GAP * Math.max(0, ids.length - 1);
@@ -159,14 +162,14 @@ export function layoutScene(scene: Scene): SceneLayout {
 
   const placed = new Map<string, Rect>();
   columns.forEach((ids, index) => {
-    let cross = (widestSpan - spans[index]) / 2;
+    let cross = (widestSpan - (spans[index] ?? 0)) / 2;
     for (const id of ids) {
       const width = sizes.get(id) ?? MIN_WIDTH;
       placed.set(
         id,
         horizontal
-          ? { x: MARGIN + offsets[index], y: MARGIN + cross, width, height: NODE_HEIGHT }
-          : { x: MARGIN + cross, y: MARGIN + offsets[index], width, height: NODE_HEIGHT }
+          ? { x: MARGIN + (offsets[index] ?? 0), y: MARGIN + cross, width, height: NODE_HEIGHT }
+          : { x: MARGIN + cross, y: MARGIN + (offsets[index] ?? 0), width, height: NODE_HEIGHT }
       );
       cross += width + SIBLING_GAP;
     }
@@ -214,6 +217,7 @@ export function layoutScene(scene: Scene): SceneLayout {
         : [clipToRect(from, centre(to)), clipToRect(to, centre(from))];
     const first = points[0];
     const last = points[points.length - 1];
+    if (first === undefined || last === undefined) continue;
     edges.push({
       from: edge.from,
       to: edge.to,

@@ -1,5 +1,6 @@
 import { useCallback, useState, type Dispatch, type SetStateAction } from "react";
 import { bridge, type HistoryProjection, type RollbackPlan } from "../../bridge";
+import { errorMessage } from "../../lib/errors";
 
 type Toast = (type: "info" | "warning" | "error", text: string) => void;
 
@@ -17,8 +18,8 @@ export function useRollback(deps: {
   const prepareRollback = useCallback(async (entryId: string) => {
     try {
       setRollbackPlan(await bridge.prepareRollback(entryId));
-    } catch (error: any) {
-      toast("error", error?.message ?? "rollback is unavailable");
+    } catch (error) {
+      toast("error", errorMessage(error, "rollback is unavailable"));
     }
   }, [toast]);
 
@@ -33,8 +34,8 @@ export function useRollback(deps: {
       setDraftRequest({ id: Date.now(), text: result.editorText });
       await hydrate();
       toast("info", "Conversation and files rolled back");
-    } catch (error: any) {
-      toast("error", error?.message ?? "rollback failed");
+    } catch (error) {
+      toast("error", errorMessage(error, "rollback failed"));
     } finally {
       setRollbackBusy(false);
     }
@@ -50,8 +51,8 @@ export function useRollback(deps: {
       setDraftRequest({ id: Date.now(), text: "" });
       await hydrate();
       toast("info", "Rollback undone");
-    } catch (error: any) {
-      toast("error", error?.message ?? "could not undo rollback");
+    } catch (error) {
+      toast("error", errorMessage(error, "could not undo rollback"));
       void hydrate();
     } finally {
       setRollbackBusy(false);

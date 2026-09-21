@@ -12,7 +12,7 @@ describe("checkCanvasText", () => {
     const report = checkCanvasText(scene(`node a widget "A"`));
     expect(report.ok).toBe(false);
     expect(report.errors.length).toBeGreaterThan(0);
-    expect(report.errors[0].line).toBe(3);
+    expect(report.errors[0]?.line).toBe(3);
     expect(formatCheckReport(report)).toMatch(/^canvas_check: invalid/);
   });
 

@@ -1,13 +1,15 @@
 import type { IpcMainInvokeEvent } from "electron";
+import type { IpcHandle } from "./ipc-handle";
 import { validateSessionPath } from "./session-path";
 import type { RuntimeFacade } from "../src/runtime-facade";
+import type { PromptImage } from "../src/bridge";
+import { wireOf, wireStr } from "../src/store";
 import type { DaemonClient } from "../src/daemon-client";
 import type { PiHost } from "./pi-host";
+import { loadSessionGoal } from "./goal-mode/store";
+import { unwrapDurableGoalResult } from "../src/lib/durable-goal";
 
-type Handle = (
-  channel: string,
-  listener: (event: IpcMainInvokeEvent, ...args: any[]) => unknown,
-) => void;
+type Handle = IpcHandle;
 
 export function registerSessionRuntimeIpc(
   handle: Handle,
@@ -21,28 +23,33 @@ export function registerSessionRuntimeIpc(
   },
 ): void {
   const { sessionsRoot, getRuntime, getHost, isDaemonOwned, requireDaemonClient, driveSharedChatExtras } = deps;
-  handle("pideck:prompt", async (_e, message: string, images?: any[], streamingBehavior?: string) => {
+  handle("pideck:prompt", async (_e, message: string, images?: unknown[], streamingBehavior?: string) => {
     if (typeof message !== "string" || message.length > 2_000_000) throw new Error("invalid prompt payload");
     if (streamingBehavior !== undefined && streamingBehavior !== "steer" && streamingBehavior !== "followUp") {
       throw new Error("invalid streaming behavior");
     }
+    let cleanImages: PromptImage[] | undefined;
     if (images !== undefined) {
       if (!Array.isArray(images) || images.length > 20) throw new Error("invalid image payload");
-      for (const image of images) {
-        if (image?.type !== "image" || typeof image.data !== "string" || image.data.length > 15_000_000) {
+      cleanImages = images.map((entry) => {
+        const img = wireOf(entry);
+        const data = wireStr(img, "data");
+        if (img?.type !== "image" || data === undefined || data.length > 15_000_000) {
           throw new Error("invalid image payload");
         }
-        if (typeof image.mimeType !== "string" || !image.mimeType.startsWith("image/")) {
+        const mimeType = wireStr(img, "mimeType");
+        if (mimeType === undefined || !mimeType.startsWith("image/")) {
           throw new Error("invalid image MIME type");
         }
-      }
+        return { data, mimeType };
+      });
     }
     if (isDaemonOwned()) {
       const client = requireDaemonClient();
-      const res = await client.request("pi.prompt", { message, images, streamingBehavior });
+      const res = await client.request("pi.prompt", { message, images: cleanImages, streamingBehavior });
       return res.payload;
     }
-    const result = await getRuntime().prompt(message, images, streamingBehavior);
+    const result = await getRuntime().prompt(message, cleanImages, streamingBehavior);
     // Shared project chats: after the default bot's turn settles, staffed
     // extras speak when asked (or freely when the project opted in). Never on
     // mid-stream steer/follow-up turns, and never loudly, a skipped driver is
@@ -61,6 +68,22 @@ export function registerSessionRuntimeIpc(
       return res.payload;
     }
     return getRuntime().abort(opts?.sessionFile);
+  });
+  handle("pideck:goal-get", async (_e, sessionId: string, cwd: string) => {
+    // The state file is the shared source of truth on this machine: the
+    // daemon (or the in-process host) writes it, main reads it straight
+    // off disk in both modes. No socket round trip, no staleness window.
+    if (typeof sessionId !== "string" || typeof cwd !== "string") throw new Error("invalid goal request");
+    return { goal: await loadSessionGoal(cwd, sessionId) };
+  });
+  handle("pideck:goal-control", async (_e, args: string) => {
+    if (typeof args !== "string" || args.length > 5000) throw new Error("invalid goal control");
+    if (isDaemonOwned()) {
+      const client = requireDaemonClient();
+      const res = await client.request("pi.goalControl", { args });
+      return { goal: unwrapDurableGoalResult(res.payload, "pi.goalControl") };
+    }
+    return { goal: await getRuntime().goalControl(args) };
   });
   handle("pideck:session:release", async (_e, path: string) => {
     const target = await validateSessionPath(sessionsRoot, path);
@@ -97,6 +120,6 @@ export function registerSessionRuntimeIpc(
       const res = await client.request("pi.getStats", {});
       return res.payload;
     }
-    return (getRuntime() as any).getStats?.() ?? (getHost() as any).getStats();
+    return getRuntime().getStats();
   });
 }

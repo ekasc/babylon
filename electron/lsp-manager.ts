@@ -4,11 +4,12 @@
 // filesystem changes drive didOpen/didChange notifications.
 
 import { spawn as defaultSpawn, type ChildProcess } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, statSync, watch, type FSWatcher } from "node:fs";
 import { promises as fsp } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { decodeLspMessages, encodeLspMessage, mapDiagnostics, type LspMessage, type NormalizedDiagnostic } from "./lsp";
+import { wireArr, wireOf } from "../src/lib/wire";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -564,16 +565,16 @@ export class LspManager {
     // Use fs.watch with recursive where available; fallback to watching discovered dirs.
     // We add a watcher on cwd recursively (darwin/win) and per-dir watchers as fallback.
     try {
-      const watcher = require("node:fs").watch(
+      const watcher: FSWatcher = watch(
         project.cwd,
-        { recursive: true } as unknown as { recursive: boolean },
+        { recursive: true },
         (_event: string, filename: string | null) => {
           if (!filename) return;
           const full = join(project.cwd, filename);
           this.onFileEvent(project, full);
         }
-      ) as unknown as { close(): void; on(event: string, cb: (e: Error) => void): void };
-      if (watcher && typeof watcher.on === "function") watcher.on("error", () => {});
+      );
+      watcher.on("error", () => {});
       project.watchers.push(watcher);
       return;
     } catch {
@@ -586,12 +587,12 @@ export class LspManager {
     dirs.add(project.cwd);
     for (const dir of dirs) {
       try {
-        const w = require("node:fs").watch(dir, (_event: string, filename: string | null) => {
+        const w: FSWatcher = watch(dir, (_event: string, filename: string | null) => {
           if (!filename) return;
           const full = join(dir, filename);
           this.onFileEvent(project, full);
-        }) as { close(): void; on(event: string, cb: (e: Error) => void): void };
-        if (w && typeof (w as unknown as { on?: unknown }).on === "function") (w as unknown as { on(e: string, cb: (e: Error) => void): void }).on("error", () => {});
+        });
+        w.on("error", () => {});
         project.watchers.push(w);
       } catch {}
     }
@@ -612,9 +613,7 @@ export class LspManager {
       project.pendingChanges.clear();
       void this.flushChanges(project, batch).catch(() => undefined);
     }, DEBOUNCE_MS);
-    if (project.debounceTimer && typeof (project.debounceTimer as unknown as { unref?: () => void }).unref === "function") {
-      (project.debounceTimer as unknown as { unref(): void }).unref();
-    }
+    project.debounceTimer?.unref?.();
   }
 
   private isExcludedPath(projectCwd: string, filePath: string): boolean {
@@ -780,6 +779,7 @@ export class LspManager {
   private createServerHandle(project: Project, descriptor: LanguageDescriptor): ServerHandle {
     const cmds = commandsForDescriptor(project.cwd, descriptor);
     const primary = cmds[0];
+    if (!primary) throw new Error(`no start command for ${descriptor.language}`);
     return {
       language: descriptor.language,
       descriptor,
@@ -976,8 +976,7 @@ export class LspManager {
       const id = msg.id;
       let result: unknown = null;
       if (msg.method === "workspace/configuration") {
-        const params = msg.params as { items?: unknown[] } | undefined;
-        const count = Array.isArray(params?.items) ? params.items.length : 0;
+        const count = wireArr(wireOf(msg.params), "items")?.length ?? 0;
         result = Array(count).fill(null);
       } else if (msg.method === "client/registerCapability" || msg.method === "client/unregisterCapability") {
         result = null;
@@ -1079,7 +1078,7 @@ export class LspManager {
   private sendRequest(project: Project, server: ServerHandle, method: string, params: unknown): Promise<unknown> {
     if (!server.child || server.shouldStop) return Promise.reject(new Error("server not running"));
     const id = server.nextId++;
-    const msg: LspMessage = { jsonrpc: "2.0", id, method, params: params as Record<string, unknown> };
+    const msg: LspMessage = { jsonrpc: "2.0", id, method, params };
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         server.pending.delete(id);
@@ -1092,7 +1091,7 @@ export class LspManager {
 
   private sendNotification(server: ServerHandle, method: string, params: unknown): void {
     if (!server.child || server.shouldStop) return;
-    const msg: LspMessage = { jsonrpc: "2.0", method, params: params as Record<string, unknown> };
+    const msg: LspMessage = { jsonrpc: "2.0", method, params };
     this.sendJson(server, msg);
   }
 
@@ -1140,9 +1139,7 @@ export class LspManager {
         } catch {}
       }
     }, 200);
-    if (this.piDebounce && typeof (this.piDebounce as unknown as { unref?: () => void }).unref === "function") {
-      (this.piDebounce as unknown as { unref(): void }).unref();
-    }
+    this.piDebounce?.unref?.();
   }
 }
 

@@ -66,11 +66,19 @@ export function removeHook(registry: HookRegistry, id: string): HookRegistry {
 
 /** Enabled hooks for an event, in registration order. */
 export function listHooks(registry: HookRegistry, event: HookEvent): HookDefinition[] {
-  return registry.order
-    .map((id) => registry.hooks[id])
-    .filter((h) => h.event === event && h.enabled);
+  const out: HookDefinition[] = [];
+  for (const id of registry.order) {
+    const h = registry.hooks[id];
+    if (h !== undefined && h.event === event && h.enabled) out.push(h);
+  }
+  return out;
 }
 
 export function listAllHooks(registry: HookRegistry): HookDefinition[] {
-  return registry.order.map((id) => registry.hooks[id]);
+  const out: HookDefinition[] = [];
+  for (const id of registry.order) {
+    const h = registry.hooks[id];
+    if (h !== undefined) out.push(h);
+  }
+  return out;
 }

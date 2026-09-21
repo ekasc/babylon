@@ -1,14 +1,11 @@
 import { BrowserWindow, Menu } from "electron";
 import type { IpcMainInvokeEvent } from "electron";
+import type { IpcHandle } from "./ipc-handle";
 import type { SimController } from "./sim-controller";
 import { probePort } from "./port-probe";
+import { wireOf, wireStr } from "../src/store";
 
-type Handle = (
-  channel: string,
-  listener: (event: IpcMainInvokeEvent, ...args: any[]) => unknown,
-) => void;
-
-const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
+type Handle = IpcHandle;
 
 /** Renderer IPC surface over the shared multi-tab simulator controller. */
 export function registerSimIpc(handle: Handle, deps: { getSimController: () => SimController | null }): void {
@@ -19,15 +16,15 @@ export function registerSimIpc(handle: Handle, deps: { getSimController: () => S
   };
 
   handle("pideck:sim-open-tab", (_e, raw: unknown) => {
-    const url = str((raw as any)?.url);
+    const url = wireStr(wireOf(raw), "url");
     return ctl().openTab(url ? { url } : {});
   });
   handle("pideck:sim-activate", (_e, raw: unknown) => {
-    const tabId = str((raw as any)?.tabId);
+    const tabId = wireStr(wireOf(raw), "tabId");
     if (!tabId) throw new Error("tabId is required");
     return ctl().activate(tabId);
   });
-  handle("pideck:sim-close-tab", (_e, raw: unknown) => ctl().closeTab(str((raw as any)?.tabId) ?? null));
+  handle("pideck:sim-close-tab", (_e, raw: unknown) => ctl().closeTab(wireStr(wireOf(raw), "tabId") ?? null));
   handle("pideck:sim-tabs", () => ctl().listTabs());
   handle("pideck:sim-attach", () => ctl().attach());
   handle("pideck:sim-detach", () => {
@@ -37,45 +34,45 @@ export function registerSimIpc(handle: Handle, deps: { getSimController: () => S
     ctl().closeAll();
   });
   handle("pideck:sim-bounds", (_e, raw: unknown) =>
-    ctl().setBounds(str((raw as any)?.tabId), (raw as any)?.rect)
+    ctl().setBounds(wireStr(wireOf(raw), "tabId"), wireOf(raw)?.rect)
   );
   handle("pideck:sim-emulate", (_e, raw: unknown) =>
-    ctl().setEmulation(str((raw as any)?.tabId), (raw as any)?.emulation, "renderer")
+    ctl().setEmulation(wireStr(wireOf(raw), "tabId"), wireOf(raw)?.emulation, "renderer")
   );
   handle("pideck:sim-viewport", (_e, raw: unknown) =>
-    ctl().setViewport(str((raw as any)?.tabId), (raw as any)?.viewport)
+    ctl().setViewport(wireStr(wireOf(raw), "tabId"), wireOf(raw)?.viewport)
   );
   handle("pideck:sim-zoom", (_e, raw: unknown) =>
-    ctl().setZoomFactor(str((raw as any)?.tabId), (raw as any)?.factor)
+    ctl().setZoomFactor(wireStr(wireOf(raw), "tabId"), wireOf(raw)?.factor)
   );
   handle("pideck:sim-fit-zoom", (_e, raw: unknown) => {
-    ctl().setFitZoom(str((raw as any)?.tabId) ?? null, (raw as any)?.scale);
+    ctl().setFitZoom(wireStr(wireOf(raw), "tabId") ?? null, wireOf(raw)?.scale);
   });
   handle("pideck:sim-hard-reload", (_e, raw: unknown) =>
-    ctl().hardReload(str((raw as any)?.tabId) ?? null)
+    ctl().hardReload(wireStr(wireOf(raw), "tabId") ?? null)
   );
   handle("pideck:sim-devtools", (_e, raw: unknown) => {
-    ctl().openDevTools(str((raw as any)?.tabId) ?? null);
+    ctl().openDevTools(wireStr(wireOf(raw), "tabId") ?? null);
   });
   handle("pideck:sim-clear-cookies", (_e, raw: unknown) =>
-    ctl().clearCookies(str((raw as any)?.tabId) ?? null)
+    ctl().clearCookies(wireStr(wireOf(raw), "tabId") ?? null)
   );
   handle("pideck:sim-clear-cache", (_e, raw: unknown) =>
-    ctl().clearCache(str((raw as any)?.tabId) ?? null)
+    ctl().clearCache(wireStr(wireOf(raw), "tabId") ?? null)
   );
   handle("pideck:sim-navigate", (_e, raw: unknown) => {
-    const url = str((raw as any)?.url);
+    const url = wireStr(wireOf(raw), "url");
     if (!url) throw new Error("url is required");
-    return ctl().navigate(str((raw as any)?.tabId), url);
+    return ctl().navigate(wireStr(wireOf(raw), "tabId"), url);
   });
   handle("pideck:sim-reload", (_e, raw: unknown) => {
-    ctl().reload(str((raw as any)?.tabId) ?? null);
+    ctl().reload(wireStr(wireOf(raw), "tabId") ?? null);
   });
   handle("pideck:sim-back", (_e, raw: unknown) => {
-    ctl().back(str((raw as any)?.tabId) ?? null);
+    ctl().back(wireStr(wireOf(raw), "tabId") ?? null);
   });
   handle("pideck:sim-forward", (_e, raw: unknown) => {
-    ctl().forward(str((raw as any)?.tabId) ?? null);
+    ctl().forward(wireStr(wireOf(raw), "tabId") ?? null);
   });
   handle("pideck:sim-probe", async (_e, rawPort: unknown) => {
     const port = typeof rawPort === "number" ? rawPort : Number(rawPort);
@@ -86,15 +83,15 @@ export function registerSimIpc(handle: Handle, deps: { getSimController: () => S
   // OS surface), so the ⋮ menu must be a real Menu.popup to be visible.
   handle("pideck:sim-menu", (e, raw: unknown) => {
     const c = ctl();
-    const tabId = str((raw as any)?.tabId) ?? null;
-    const showDeviceToolbar = (raw as any)?.showDeviceToolbar === true;
+    const tabId = wireStr(wireOf(raw), "tabId") ?? null;
+    const showDeviceToolbar = wireOf(raw)?.showDeviceToolbar === true;
     const tab = tabId ? c.listTabs().tabs.find((t) => t.id === tabId) ?? null : null;
     const zoom = tab?.zoomFactor ?? 1;
     let result: { deviceToolbar?: boolean; dismissed?: boolean } = { dismissed: true };
     const run = (fn: () => unknown) => {
       try {
-        const r = fn() as Promise<unknown> | undefined;
-        (r as Promise<unknown> | undefined)?.catch?.(() => undefined);
+        const r = fn();
+        if (r instanceof Promise) r.catch(() => undefined);
       } catch {
         /* menu action failed: nothing to show */
       }

@@ -5,6 +5,7 @@
 import { watch, type FSWatcher } from "node:fs";
 import { basename } from "node:path";
 import type { BrowserWindow, IpcMainInvokeEvent } from "electron";
+import type { IpcHandle } from "./ipc-handle";
 import type { RegionReading } from "../src/lib/sketch-compile";
 import type { AgentAction } from "./permissions";
 import {
@@ -17,10 +18,7 @@ import {
   writeScene,
 } from "./canvas-store";
 
-type Handle = (
-  channel: string,
-  listener: (event: IpcMainInvokeEvent, ...args: any[]) => unknown,
-) => void;
+type Handle = IpcHandle;
 
 export type SketchCrop = { regionId: string; dataUrl: string };
 

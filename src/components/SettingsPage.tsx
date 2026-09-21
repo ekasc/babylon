@@ -11,10 +11,12 @@ import { SettingsAppearance } from "./settings/SettingsAppearance";
 import { SettingsAdvanced } from "./settings/SettingsAdvanced";
 import { SettingsBots } from "./settings/SettingsBots";
 import type { BotsManagerProps } from "./BotsManager";
+import { errorMessage } from "../lib/errors";
+import type { AgentModel, AgentState } from "../bridge";
 
 interface Props {
-  models: any[];
-  agentState: any | null;
+  models: AgentModel[];
+  agentState: AgentState | null;
   theme: ThemePref;
   onThemeChange(theme: ThemePref): void;
   themeId: ThemeId;
@@ -48,7 +50,7 @@ export default function SettingsPage(props: Props) {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const searchRef = useRef<HTMLInputElement>(null);
-  const [catalogue, setCatalogue] = useState<any[]>(props.models);
+  const [catalogue, setCatalogue] = useState<AgentModel[]>(props.models);
 
   useEffect(() => { localStorage.setItem("babylon:settings-section", section); }, [section]);
 
@@ -79,8 +81,8 @@ export default function SettingsPage(props: Props) {
     try {
       const next = await bridge.setSettings(patch);
       setSettings(next);
-    } catch (e: any) {
-      setSaveError(e?.message ?? "Failed to save");
+    } catch (e) {
+      setSaveError(errorMessage(e, "Failed to save"));
     }
   };
 

@@ -146,7 +146,9 @@ export function parseCanvas(text: string): CanvasParseResult {
   const lines = text.split("\n");
   for (let index = 0; index < lines.length; index++) {
     const line = index + 1;
-    const trimmed = lines[index].trim();
+    const raw = lines[index];
+    if (raw === undefined) continue;
+    const trimmed = raw.trim();
     if (!trimmed) continue;
 
     const tokenized = tokenize(trimmed);
@@ -159,7 +161,7 @@ export function parseCanvas(text: string): CanvasParseResult {
     if (!sawHeader) {
       sawHeader = true;
       const version = tokens[1]?.text;
-      if (tokens[0].text !== "canvas" || tokens.length !== 2) {
+      if (tokens[0]?.text !== "canvas" || tokens.length !== 2) {
         errors.push({ line, message: `expected ${quote(`canvas ${CANVAS_DSL_VERSION}`)} on the first line` });
       } else if (version !== String(CANVAS_DSL_VERSION)) {
         errors.push({
@@ -171,8 +173,8 @@ export function parseCanvas(text: string): CanvasParseResult {
     }
 
     const directive = tokens[0];
-    if (directive.quoted) {
-      errors.push({ line, message: `unknown directive ${quote(directive.text)}` });
+    if (directive === undefined || directive.quoted) {
+      errors.push({ line, message: `unknown directive ${quote(directive?.text ?? "")}` });
       continue;
     }
 
@@ -191,6 +193,10 @@ export function parseCanvas(text: string): CanvasParseResult {
       const id = tokens[1];
       const kind = tokens[2];
       const label = tokens[3];
+      if (id === undefined || kind === undefined || label === undefined) {
+        errors.push({ line, message: "node needs an id, a kind and a quoted label" });
+        continue;
+      }
       if (!id || !kind || !label) {
         errors.push({ line, message: "node needs an id, a kind and a quoted label" });
         continue;
@@ -220,20 +226,27 @@ export function parseCanvas(text: string): CanvasParseResult {
       for (let i = 4; i < tokens.length; i++) {
         const keyword = tokens[i];
         const value = tokens[i + 1];
-        if (keyword.quoted || value === undefined || value.quoted === undefined) {
+        if (keyword === undefined || value === undefined) {
+          errors.push({ line, message: `unexpected trailing tokens in node ${quote(id.text)}` });
+          bad = true;
+          break;
+        }
+        if (keyword.quoted || value.quoted === undefined) {
           errors.push({ line, message: `unexpected trailing ${quote(keyword.text)} in node ${quote(id.text)}` });
           bad = true;
           break;
         }
         if (keyword.text === "at") {
           const parts = value.text.split(",");
-          if (parts.length !== 2) {
+          const pxRaw = parts[0];
+          const pyRaw = parts[1];
+          if (parts.length !== 2 || pxRaw === undefined || pyRaw === undefined) {
             errors.push({ line, message: `at takes two numbers, got ${quote(value.text)}` });
             bad = true;
             break;
           }
-          const px = parseNumber(parts[0], line, "at x", errors);
-          const py = parseNumber(parts[1], line, "at y", errors);
+          const px = parseNumber(pxRaw, line, "at x", errors);
+          const py = parseNumber(pyRaw, line, "at y", errors);
           if (px === null || py === null) {
             bad = true;
             break;
@@ -278,6 +291,7 @@ export function parseCanvas(text: string): CanvasParseResult {
       let bad = false;
       for (let i = 4; i < tokens.length; i++) {
         const token = tokens[i];
+        if (token === undefined) continue;
         if (token.quoted) {
           if (edge.label !== undefined) {
             errors.push({ line, message: "edge has more than one label" });
@@ -324,6 +338,7 @@ export function parseCanvas(text: string): CanvasParseResult {
       let bad = false;
       for (let i = 3; i < tokens.length; i++) {
         const keyword = tokens[i];
+        if (keyword === undefined) continue;
         if (keyword.quoted) {
           errors.push({ line, message: `unexpected trailing ${quote(keyword.text)} in ink ${quote(id.text)}` });
           bad = true;

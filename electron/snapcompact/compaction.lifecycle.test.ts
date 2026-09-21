@@ -5,6 +5,10 @@ import { join } from "node:path";
 import { PiHost } from "../pi-host";
 import { SessionManager, buildContextEntries } from "@earendil-works/pi-coding-agent";
 import { saveSettings, getSettings } from "../app-settings";
+import type { PiSettings } from "../../src/lib/settings-shared";
+
+type CompactionMode = NonNullable<PiSettings["compaction"]>["mode"];
+import { wireOf, wireStr } from "../../src/store";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -17,7 +21,7 @@ describe("snapcompact lifecycle regression (real PiHost.compact)", () => {
   let stateDir = "";
   let host: PiHost | null = null;
   let sessionFile = "";
-  let originalMode: any = null;
+  let originalMode: CompactionMode | undefined;
 
   beforeEach(async () => {
     originalMode = getSettings().compaction?.mode;
@@ -88,7 +92,7 @@ describe("snapcompact lifecycle regression (real PiHost.compact)", () => {
     const model = host.session.model!;
     expect(model).toBeDefined();
     // The default model (gpt-5.5) already supports images; ensure we have a fake key for the provider
-    await (host.session as any)._modelRuntime.setRuntimeApiKey(model!.provider, "sk-fake-test-lifecycle");
+    await host.services.modelRuntime.setRuntimeApiKey(model!.provider, "sk-fake-test-lifecycle");
 
     saveSettings({ compaction: { mode: "snapcompact" } });
 
@@ -96,33 +100,33 @@ describe("snapcompact lifecycle regression (real PiHost.compact)", () => {
 
     // Build enough history: 70 pairs ~ 140 messages + header, each ~2k chars
     for (let i = 0; i < 70; i++) {
-      sm.appendMessage({ role: "user", content: `message ${i} ` + "x".repeat(2000), timestamp: Date.now() } as any);
+      sm.appendMessage({ role: "user", content: `message ${i} ` + "x".repeat(2000), timestamp: Date.now() });
       sm.appendMessage({
         role: "assistant",
         content: [{ type: "text", text: `reply ${i} ` + "y".repeat(2000) }],
         provider: model!.provider,
         model: model!.id,
-        api: (model as any).api ?? "openai",
+        api: "openai",
         usage: { input: 100, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: 200, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
         stopReason: "stop",
         timestamp: Date.now(),
-      } as any);
+      });
     }
     // Add a final large-usage assistant to make pre-compaction contextUsage large and deterministic
-    sm.appendMessage({ role: "user", content: "final user " + "x".repeat(2000), timestamp: Date.now() } as any);
+    sm.appendMessage({ role: "user", content: "final user " + "x".repeat(2000), timestamp: Date.now() });
     sm.appendMessage({
       role: "assistant",
       content: [{ type: "text", text: "final reply" }],
       provider: model!.provider,
       model: model!.id,
-      api: (model as any).api ?? "openai",
+      api: "openai",
       usage: { input: 50000, output: 10000, cacheRead: 0, cacheWrite: 0, totalTokens: 60000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
       stopReason: "stop",
       timestamp: Date.now(),
-    } as any);
+    });
 
     // Sync agent state so getSessionStats reflects the full history before compact
-    (host.session.agent.state as any).messages = sm.buildSessionContext().messages;
+    (host.session.agent.state as { messages: unknown }).messages = sm.buildSessionContext().messages;
     const beforeStats = host.session.getSessionStats();
     expect(beforeStats.contextUsage!.percent).not.toBeNull();
     expect(beforeStats.contextUsage!.tokens).toBeGreaterThan(10000);
@@ -131,29 +135,33 @@ describe("snapcompact lifecycle regression (real PiHost.compact)", () => {
     // 2. Run actual PiHost.compact
     const result = await host.compact();
     expect(result).toBeDefined();
-    expect(result.details?.snapcompactGeneration).toBeDefined();
+    const resultDetails = wireOf(result.details);
+    expect(wireStr(resultDetails, "snapcompactGeneration")).toBeDefined();
 
     // 3. JSONL contains new CompactionEntry with snapcompactGeneration
     const raw = await readFile(sessionFile, "utf8");
-    const fileEntries = raw.split("\n").filter(Boolean).map((l) => JSON.parse(l));
-    const compEntry = fileEntries.filter((e: any) => e.type === "compaction").pop();
+    const fileEntries: unknown[] = raw.split("\n").filter(Boolean).map((l) => JSON.parse(l) as unknown);
+    const compEntry = fileEntries.filter((e) => wireOf(e)?.type === "compaction").pop();
     expect(compEntry).toBeDefined();
-    expect(compEntry.details?.snapcompactGeneration).toBe(result.details.snapcompactGeneration);
-    expect(compEntry.fromHook).toBe(true);
+    const compId = wireStr(wireOf(compEntry), "id");
+    const compDetails = wireOf(wireOf(compEntry)?.details);
+    expect(wireStr(compDetails, "snapcompactGeneration")).toBe(wireStr(resultDetails, "snapcompactGeneration"));
+    expect(wireOf(compEntry)?.fromHook).toBe(true);
 
     // 4. getBranch contains compaction on active branch
     const branch = sm.getBranch();
-    expect(branch.some((e: any) => e.id === compEntry.id)).toBe(true);
-    expect(branch[branch.length - 1].id).toBe(compEntry.id);
+    expect(branch.some((e) => e.id === compId)).toBe(true);
+    expect(branch[branch.length - 1]?.id).toBe(compId);
 
     // 5. buildContextEntries resolves through compaction and excludes archived prefix
     const ctxEntries = buildContextEntries(sm.getEntries(), sm.getLeafId());
-    expect(ctxEntries[0].id).toBe(compEntry.id);
-    expect(ctxEntries[0].type).toBe("compaction");
-    const firstUserId = fileEntries.find((e: any) => e.type === "message" && e.message?.role === "user")?.id;
+    expect(ctxEntries[0]?.id).toBe(compId);
+    expect(ctxEntries[0]?.type).toBe("compaction");
+    const firstUser = fileEntries.find((e) => wireOf(e)?.type === "message" && wireStr(wireOf(wireOf(e)?.message), "role") === "user");
+    const firstUserId = wireStr(wireOf(firstUser), "id");
     expect(firstUserId).toBeDefined();
-    expect(ctxEntries.some((e: any) => e.id === firstUserId)).toBe(false);
-    expect(ctxEntries.some((e: any) => e.id === result.firstKeptEntryId)).toBe(true);
+    expect(ctxEntries.some((e) => e.id === firstUserId)).toBe(false);
+    expect(ctxEntries.some((e) => e.id === result.firstKeptEntryId)).toBe(true);
     expect(ctxEntries.length).toBeLessThan(branch.length);
 
     // 6. Immediately after compact, contextUsage percent is null
@@ -164,10 +172,10 @@ describe("snapcompact lifecycle regression (real PiHost.compact)", () => {
     // 7. Reopen SAME JSONL with fresh SessionManager and PiHost, repeat 4-6
     const freshSM = SessionManager.open(sessionFile, undefined, cwd);
     const freshBranch = freshSM.getBranch();
-    expect(freshBranch.some((e: any) => e.id === compEntry.id)).toBe(true);
+    expect(freshBranch.some((e) => e.id === compId)).toBe(true);
     const freshCtx = buildContextEntries(freshSM.getEntries(), freshSM.getLeafId());
-    expect(freshCtx[0].id).toBe(compEntry.id);
-    expect(freshCtx.some((e: any) => e.id === firstUserId)).toBe(false);
+    expect(freshCtx[0]?.id).toBe(compId);
+    expect(freshCtx.some((e) => e.id === firstUserId)).toBe(false);
 
     const host2 = new PiHost({ cwd, agentDir, stateDir, onEvent: () => {}, onStatus: () => {} });
     await host2.start();
@@ -175,7 +183,7 @@ describe("snapcompact lifecycle regression (real PiHost.compact)", () => {
     // Re-apply fake key for the reopened host's model (may be same provider)
     const model2 = host2.session.model ?? model;
     if (model2) {
-      await (host2.session as any)._modelRuntime.setRuntimeApiKey(model2.provider, "sk-fake-test-lifecycle-2");
+      await host2.services.modelRuntime.setRuntimeApiKey(model2.provider, "sk-fake-test-lifecycle-2");
     }
     const freshStats = host2.session.getSessionStats();
     expect(freshStats.contextUsage!.percent).toBeNull();
@@ -188,12 +196,12 @@ describe("snapcompact lifecycle regression (real PiHost.compact)", () => {
       content: [{ type: "text", text: "post compact reply" }],
       provider: model2!.provider,
       model: model2!.id,
-      api: (model2 as any).api ?? "openai",
+      api: "openai",
       usage: newUsage,
       stopReason: "stop",
       timestamp: Date.now(),
-    } as any);
-    (host2.session.agent.state as any).messages = host2.session.sessionManager.buildSessionContext().messages;
+    });
+    (host2.session.agent.state as { messages: unknown }).messages = host2.session.sessionManager.buildSessionContext().messages;
     const postStats = host2.session.getSessionStats();
     expect(postStats.contextUsage!.percent).not.toBeNull();
     expect(postStats.contextUsage!.tokens).not.toBeNull();

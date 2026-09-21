@@ -259,6 +259,6 @@ describe("reading a set of crops", () => {
 
     expect(calls).toBe(MAX_SKETCH_CROPS);
     expect(result.problems).toHaveLength(2);
-    expect(result.problems[0].reason).toBe(`not read: a compile reads at most ${MAX_SKETCH_CROPS} shapes`);
+    expect(result.problems[0]?.reason).toBe(`not read: a compile reads at most ${MAX_SKETCH_CROPS} shapes`);
   });
 });

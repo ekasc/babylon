@@ -133,7 +133,7 @@ describe("git workspace — bulletproof", () => {
     const after = await statusDetails(root);
     expect(after.hasChanges).toBe(true);
     // git diff --cached should be empty
-    const cached = await exec("git", ["diff", "--cached", "--quiet"], { cwd: root }).then(() => 0).catch((e: any) => e.code);
+    const cached = await exec("git", ["diff", "--cached", "--quiet"], { cwd: root }).then(() => 0).catch((e: unknown) => (e as NodeJS.ErrnoException)?.code);
     expect(cached).toBe(0); // 0 = no diff (unstaged)
   });
 
@@ -385,7 +385,7 @@ describe("PiHost cheap-model integration", () => {
     };
     const settings = { gitCommitPrompt: "" };
     const prompt1 = buildGitCommitPrompt(ctx, settings.gitCommitPrompt);
-    const text1 = (fakeComplete as any)(prompt1).then((r: any) => r.content[0].text);
+    const text1 = fakeComplete(prompt1).then((r) => (r.content[0] as { text: string }).text);
     // actual retry simulation via PiHost logic: we just check parse fails then retry succeeds
     expect(() => parseGeneratedCommitMessage('{"subject":"Refine thing","body":""}', false)).toThrow();
     expect(parseGeneratedCommitMessage('{"subject":"Add cheap commit flow","body":""}', false).subject).toBe("Add cheap commit flow");

@@ -46,6 +46,7 @@
 
 import { promises as fsp } from "node:fs";
 import { join } from "node:path";
+import { wireArr, wireOf, wireStr } from "../../src/store";
 import { serializeTranscript } from "./serializer";
 import { extractHighValueTokens } from "./symbol-dictionary";
 import { renderFrames } from "./renderer";
@@ -365,11 +366,13 @@ export async function runLiveRetrieval(req: LiveRequest, cfg: LiveRunConfig): Pr
   }
   // Build an OpenAI-compatible chat completions request with the
   // header as a text message and each frame as an image_url.
-  const content: any[] = [{ type: "text", text: req.headerText }];
+  const content: Array<{ type: string; text?: string; image_url?: { url: string } }> = [
+    { type: "text", text: req.headerText },
+  ];
   for (const f of req.frames) {
     content.push({ type: "image_url", image_url: { url: `data:image/png;base64,${f.base64}` } });
   }
-  const userContent: any[] = [...content, { type: "text", text: questionsPrompt(req.questions) }];
+  const userContent: Array<{ type: string; text?: string; image_url?: { url: string } }> = [...content, { type: "text", text: questionsPrompt(req.questions) }];
   const body = {
     model: cfg.model,
     messages: [
@@ -383,12 +386,14 @@ export async function runLiveRetrieval(req: LiveRequest, cfg: LiveRunConfig): Pr
       headers: { "content-type": "application/json", "authorization": `Bearer ${cfg.apiKey}` },
       body: JSON.stringify(body),
     });
-    const json = await resp.json() as any;
-    const text = json?.choices?.[0]?.message?.content ?? "";
+    const json: unknown = await resp.json();
+    const choices = wireArr(wireOf(json), "choices") ?? [];
+    const first = wireOf(choices[0]);
+    const text = wireStr(wireOf(first?.message), "content") ?? "";
     const parsed = parseModelAnswers(text, req.questions);
     return { fixtureId: req.fixtureId, requestPath, ran: true, answers: parsed };
-  } catch (err: any) {
-    return { fixtureId: req.fixtureId, requestPath, ran: true, error: err?.message ?? String(err) };
+  } catch (err: unknown) {
+    return { fixtureId: req.fixtureId, requestPath, ran: true, error: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -417,6 +422,7 @@ function parseModelAnswers(text: string, questions: EvalQuestion[]): Array<{ que
   }
   for (let i = 0; i < questions.length; i++) {
     const q = questions[i];
+    if (q === undefined) continue;
     const modelAnswer = (parsed[String(i + 1)] ?? "").toString();
     let exact: boolean | undefined;
     if (q.exact) exact = q.exact.some((a) => modelAnswer.includes(a));

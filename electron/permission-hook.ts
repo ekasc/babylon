@@ -11,8 +11,21 @@ import { mapToolToAction } from "./permission-agent";
 import type { BabylonPermissionController } from "./permissions";
 import type { HookManager } from "./hook-manager";
 
+/** The agent surface the permission hook wraps (subset of the SDK agent). */
+export interface GuardedAgent {
+  beforeToolCall?:
+    | ((ctx: AgentHookContext, signal: AbortSignal | undefined) => Promise<unknown>)
+    | undefined;
+}
+
+export interface AgentHookContext {
+  toolCall?: { name?: string } | null;
+  args?: unknown;
+  [key: string]: unknown;
+}
+
 export function installPermissionHook(
-  agent: any,
+  agent: GuardedAgent,
   controller: BabylonPermissionController,
   cwd: string
 ): void {
@@ -20,11 +33,11 @@ export function installPermissionHook(
 }
 
 export function installAgentGuards(
-  agent: any,
+  agent: GuardedAgent,
   opts: { controller: BabylonPermissionController; cwd: string; hookManager?: HookManager; sessionId?: string; taskId?: string }
 ): void {
   const originalBefore = agent.beforeToolCall?.bind(agent);
-  agent.beforeToolCall = async (ctx: any, signal: any) => {
+  agent.beforeToolCall = async (ctx: AgentHookContext, signal: AbortSignal | undefined) => {
     const hookManager = opts.hookManager;
     if (hookManager) {
       const outcome = await hookManager.dispatch(

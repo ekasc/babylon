@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import type { PiSettings } from "../../bridge";
+import type { AgentModel, AgentState, PiSettings } from "../../bridge";
 import { SettingSection } from "./SettingSection";
 import { filterModels, getProviders } from "../../lib/model-helpers";
 import { Select, SelectOption } from "../ui/Select";
@@ -14,8 +14,8 @@ export function SettingsContext({
   settings,
   onSave,
 }: {
-  models: any[];
-  agentState: any | null;
+  models: AgentModel[];
+  agentState: AgentState | null;
   settings: PiSettings | null;
   onSave: (p: Partial<PiSettings>) => void;
 }) {
@@ -25,7 +25,7 @@ export function SettingsContext({
   const [draft, setDraft] = useState<Record<string, string>>({});
   const overrides = settings?.contextWindowOverrides ?? {};
 
-  const currentModel: any = agentState?.model ?? null;
+  const currentModel = agentState?.model ?? null;
   const supportsVision = !!(
     modelSupportsImages(currentModel) ||
     currentModel?.supportsImages ||
@@ -33,7 +33,7 @@ export function SettingsContext({
     currentModel?.capabilities?.vision
   );
 
-  const effective = (m: any) => {
+  const effective = (m: AgentModel) => {
     const key = `${m.provider}/${m.id}`;
     return overrides[key] ?? m.contextWindow;
   };

@@ -68,6 +68,12 @@ export function addTask(registry: TaskRegistry, task: Task): TaskRegistry {
   return { tasks: { ...registry.tasks, [task.id]: task } };
 }
 
+/** Insert or replace a task wholesale (local runtime's create path, which
+ *  intentionally overwrites — unlike addTask's no-clobber rule). */
+export function putTask(registry: TaskRegistry, task: Task): TaskRegistry {
+  return { tasks: { ...registry.tasks, [task.id]: task } };
+}
+
 export function updateTask(
   registry: TaskRegistry,
   id: string,

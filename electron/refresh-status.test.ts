@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { PiHost } from "./pi-host";
+import { PiHost, type HostOptions } from "./pi-host";
 
 const roots: string[] = [];
 afterAll(async () => Promise.all(roots.map((root) => rm(root, { recursive: true, force: true }))));
@@ -21,7 +21,7 @@ describe("PiHost refreshFromDisk status contract", () => {
     const cwd = join(root, "project");
     await Promise.all([mkdir(agentDir, { recursive: true }), mkdir(cwd, { recursive: true })]);
 
-    const statuses: any[] = [];
+    const statuses: Array<Parameters<HostOptions["onStatus"]>[0]> = [];
     const host = new PiHost({ cwd, agentDir, onEvent: () => undefined, onStatus: (s) => statuses.push(s) });
     await host.start();
     try {

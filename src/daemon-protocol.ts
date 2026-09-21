@@ -87,6 +87,7 @@ export const KNOWN_MESSAGE_TYPES = [
   "pi.getState",
   "pi.getMessages",
   "pi.getStats",
+  "pi.goalControl",
   "pi.openSession",
   "pi.notifyDiagnostics",
   "pi.event",

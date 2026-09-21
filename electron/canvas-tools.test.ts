@@ -2,8 +2,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { createCanvasTools } from "./canvas-tools";
 import { canvasPath, readScene, writeScene } from "./canvas-store";
+import { wireOf, wireStr } from "../src/store";
 
 let root: string;
 let check: ReturnType<typeof createCanvasTools>[0];
@@ -15,22 +17,26 @@ const invalid = `canvas 1\nnode a widget "A"`;
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "canvas-tools-"));
-  [check, write] = createCanvasTools();
+  {
+    const [c, w] = createCanvasTools();
+    if (!c || !w) throw new Error("missing canvas tools");
+    check = c;
+    write = w;
+  }
 });
 
 afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-type LooseTool = { execute: (...args: any[]) => Promise<unknown> };
-
-function run(tool: LooseTool, params: unknown): Promise<unknown> {
-  return tool.execute("test-call", params, undefined, undefined, {} as any);
+function run(tool: ToolDefinition, params: unknown): Promise<unknown> {
+  // These tools never touch ctx; the undefined stand-in only satisfies arity.
+  const ctx = undefined as unknown as ExtensionContext;
+  return tool.execute("test-call", params, undefined, undefined, ctx);
 }
 
 function textOf(result: unknown): string {
-  const details = (result as any)?.details;
-  return typeof details?.text === "string" ? details.text : "";
+  return wireStr(wireOf(wireOf(result)?.details), "text") ?? "";
 }
 
 describe("canvas_check", () => {

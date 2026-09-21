@@ -1,5 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { CommandInfo } from "../bridge";
+import type { AgentModel, AgentState, SessionStats } from "../bridge";
+import type { Dialog } from "../store";
 import type { Bot } from "../bots";
 import { expandSkillMentions } from "../lib/skillRef";
 import {
@@ -14,9 +16,7 @@ import {
   shouldAttachPastedText,
 } from "../lib/attachments";
 import { truncate } from "../lib/string";
-import type { PickerModel } from "./ModelPicker";
-import type { Stats } from "./StatsPopover";
-import type { Dialog } from "../store";
+import { errorMessage } from "../lib/errors";
 import { useComposerAutocomplete } from "./useComposerAutocomplete";
 import PermissionModePicker from "./PermissionModePicker";
 import ModelPicker from "./ComposerModelPicker";
@@ -32,7 +32,7 @@ function ThroughputBars({ active }: { active: boolean }) {
 				<span
 					key={i}
 					className={`throughput-bar ${active ? "is-active" : "is-idle"}`}
-					style={{ animationDelay: `${i * 90}ms` } as any}
+					style={{ animationDelay: `${i * 90}ms` }}
 					aria-hidden
 				/>
 			))}
@@ -52,9 +52,9 @@ interface Props {
 	steering: string[];
 	followUp: string[];
 	commands: CommandInfo[];
-	agentState?: { model?: PickerModel | null; thinkingLevel?: string } | null;
-	stats?: Stats | null;
-	models?: PickerModel[];
+	agentState?: AgentState | null;
+	stats?: SessionStats | null;
+	models?: AgentModel[];
 	thinkingLevels: string[];
 	draftRequest?: { id: number; text: string; append?: boolean } | null;
 	/** Session identity for per-session draft persistence. Null skips it. */
@@ -347,6 +347,7 @@ const Composer = memo(function Composer({
 			});
 			const fileBlocks = decoded.map((content, idx) => {
 				const f = fileAttachments[idx];
+				if (!f) return "";
 				const isTextLike = f.mimeType.startsWith("text/") || f.mimeType === "application/json" || f.name.match(/\.(txt|md|json|csv|log|js|ts|tsx|py|sh|yaml|yml)$/i);
 				if (isTextLike) return `[File: ${f.name}]\n${content}`;
 				return `[File: ${f.name} (${f.mimeType}, ${Math.round((f.data.length * 3) / 4 / 1024)}KB)]`;
@@ -394,7 +395,8 @@ const Composer = memo(function Composer({
 		setAttachments([]);
 	};
 
-	const hasBlockingDialog = !!dialogs?.[0] && (dialogs[0].method === "select" || dialogs[0].method === "input" || dialogs[0].method === "editor");
+	const dialog = dialogs?.[0];
+	const hasBlockingDialog = dialog !== undefined && (dialog.method === "select" || dialog.method === "input" || dialog.method === "editor");
 
 	// A fresh dialog starts with an empty custom-answer box.
 	useEffect(() => setDialogText(""), [dialogs?.[0]?.id]);
@@ -405,19 +407,21 @@ const Composer = memo(function Composer({
 			if (e.metaKey || e.ctrlKey || e.altKey) return;
 			if (!/^[1-9]$/.test(e.key)) return;
 			const idx = Number(e.key) - 1;
-			const opts = dialogs[0].options as string[];
+			if (!dialog) return;
+			const opts = dialog.options;
+			if (!Array.isArray(opts)) return;
 			if (idx < 0 || idx >= opts.length || idx >= 9) return;
 			const target = e.target as HTMLElement | null;
 			if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
 			e.preventDefault();
-			const id = dialogs[0].id;
 			// Typed text wins over the numeric shortcut (matches the buttons).
 			const value = dialogText.trim() || opts[idx];
+			const id = dialog.id;
 			onDialogDismiss?.(id);
 			try {
 				const { bridge: b } = await import("../bridge");
 				await b.uiRespond({ id, value });
-			} catch (err: any) {
+			} catch (err) {
 				toast?.("error", (err as Error)?.message ?? "failed");
 			}
 		};
@@ -581,16 +585,17 @@ const Composer = memo(function Composer({
 				<div
 					className="composer-surface group relative flex flex-col"
 				>
-					{dialogs?.[0] ? (
+					{dialog !== undefined ? (
 						<div role="dialog" aria-modal="true" aria-labelledby="composer-dialog-title" className="border-b border-line px-4 py-3">
 							<div className="flex items-start justify-between gap-2">
 								<div className="min-w-0 flex-1">
-									<p id="composer-dialog-title" className="text-[length:var(--chat-r-14)] font-semibold leading-snug tracking-tight break-words">{dialogs[0].title ?? "Question"}</p>
-									{dialogs[0].message && <div className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md border border-line/60 bg-inset/40 px-3 py-2 text-[length:var(--chat-r-13)] leading-[1.6] text-dim">{dialogs[0].message}</div>}
+									<p id="composer-dialog-title" className="text-[length:var(--chat-r-14)] font-semibold leading-snug tracking-tight break-words">{dialog.title ?? "Question"}</p>
+									{dialog.message && <div className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md border border-line/60 bg-inset/40 px-3 py-2 text-[length:var(--chat-r-13)] leading-[1.6] text-dim">{dialog.message}</div>}
 								</div>
 								<button
 									onClick={async () => {
-										const id = dialogs[0].id;
+										const id = dialog?.id;
+												if (!id) return;
 										onDialogDismiss?.(id);
 										try {
 											const { bridge: b } = await import("../bridge");
@@ -603,19 +608,20 @@ const Composer = memo(function Composer({
 									✕
 								</button>
 							</div>
-							{dialogs[0].method === "select" && Array.isArray(dialogs[0].options) ? (
+							{dialog.method === "select" && Array.isArray(dialog.options) ? (
 								<div className="mt-3 flex flex-col gap-1">
-									{dialogs[0].options!.map((o: string, idx: number) => (
+									{dialog.options.map((o: string, idx: number) => (
 										<button
 											key={`${o}-${idx}`}
 											onClick={async () => {
-												const id = dialogs[0].id;
+												const id = dialog?.id;
+												if (!id) return;
 												onDialogDismiss?.(id);
 												try {
 													const { bridge: b } = await import("../bridge");
 													await b.uiRespond({ id, value: dialogText.trim() || o });
-												} catch (e: any) {
-													toast?.("error", e?.message ?? "failed");
+												} catch (e) {
+													toast?.("error", errorMessage(e, "failed"));
 												}
 											}}
 											className="flex w-full items-center justify-between rounded-xl border border-line bg-bg px-3 py-2 text-left text-[12px] transition-colors hover:border-accent/30 hover:bg-accent/5 hover:text-accent"
@@ -636,13 +642,14 @@ const Composer = memo(function Composer({
 												e.preventDefault();
 												const custom = dialogText.trim();
 												if (!custom) return;
-												const id = dialogs[0].id;
+												const id = dialog?.id;
+												if (!id) return;
 												onDialogDismiss?.(id);
 												try {
 													const { bridge: b } = await import("../bridge");
 													await b.uiRespond({ id, value: custom });
-												} catch (err: any) {
-													toast?.("error", err?.message ?? "failed");
+												} catch (err) {
+													toast?.("error", errorMessage(err, "failed"));
 												}
 											}}
 											placeholder="Or type a custom answer…"
@@ -653,13 +660,14 @@ const Composer = memo(function Composer({
 											onClick={async () => {
 												const custom = dialogText.trim();
 												if (!custom) return;
-												const id = dialogs[0].id;
+												const id = dialog?.id;
+												if (!id) return;
 												onDialogDismiss?.(id);
 												try {
 													const { bridge: b } = await import("../bridge");
 													await b.uiRespond({ id, value: custom });
-												} catch (err: any) {
-													toast?.("error", err?.message ?? "failed");
+												} catch (err) {
+													toast?.("error", errorMessage(err, "failed"));
 												}
 											}}
 											disabled={!dialogText.trim()}
@@ -669,10 +677,10 @@ const Composer = memo(function Composer({
 										</button>
 									</div>
 								</div>
-							) : dialogs[0].method === "input" || dialogs[0].method === "editor" ? (
-								<ComposerDialogInput dialog={dialogs[0]} onDismiss={onDialogDismiss!} toast={toast} />
+							) : dialog.method === "input" || dialog.method === "editor" ? (
+								<ComposerDialogInput dialog={dialog} onDismiss={onDialogDismiss!} toast={toast} />
 							) : null}
-							<p className="mt-2 text-[length:var(--chat-r-11)] text-dim">Press 1,{Math.min(9, dialogs[0].options?.length ?? 0)} to choose, type a custom answer, or Esc to dismiss.</p>
+							<p className="mt-2 text-[length:var(--chat-r-11)] text-dim">Press 1,{Math.min(9, dialog.options?.length ?? 0)} to choose, type a custom answer, or Esc to dismiss.</p>
 						</div>
 					) : null}
 
@@ -759,7 +767,7 @@ const Composer = memo(function Composer({
 							</span>
 							{!goalSet && onStartGoal ? (
 								<span className="flex shrink-0 items-center">
-									<button type="button" onClick={onStartGoal} title="Set a goal: track elapsed time and turns toward an objective" className="operator-meta-control">Goal</button>
+									<button type="button" onClick={onStartGoal} title="Set a durable goal the agent works toward (/goal)" className="operator-meta-control">Goal</button>
 								</span>
 							) : null}
 							<div className="flex-1" />
@@ -787,8 +795,8 @@ function ComposerDialogInput({ dialog, onDismiss, toast }: { dialog: Dialog; onD
 		try {
 			const { bridge } = await import("../bridge");
 			await bridge.uiRespond({ id: dialog.id, ...payload });
-		} catch (e: any) {
-			toast("error", e?.message ?? "failed to answer");
+		} catch (e) {
+			toast("error", errorMessage(e, "failed to answer"));
 		}
 	};
 	return (

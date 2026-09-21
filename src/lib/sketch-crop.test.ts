@@ -87,6 +87,7 @@ describe("building a crop", () => {
   it("leaves out strokes belonging to a different shape", () => {
     const sketch = readSketch([ink("a", box(0, 0, 100, 60)), ink("b", box(300, 0, 100, 60))]);
     const first = sketch.regions[0];
+    if (!first) throw new Error("missing region");
     const crop = regionCrop([ink("a", box(0, 0, 100, 60)), ink("b", box(300, 0, 100, 60))], first);
     const strokes = crop.svg.match(/<path/g) ?? [];
     expect(strokes).toHaveLength(1);

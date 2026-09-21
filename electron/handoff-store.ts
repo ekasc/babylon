@@ -80,7 +80,8 @@ export class HandoffStore {
     for (const [key, list] of Object.entries(ledger.byFile)) {
       const idx = list.findIndex((h) => h.id === id);
       if (idx < 0) continue;
-      const current = list[idx]!;
+      const current = list[idx];
+      if (!current) continue;
       const next: Handoff = {
         ...current,
         consumedInto: [...current.consumedInto, { file, at: new Date().toISOString() }],

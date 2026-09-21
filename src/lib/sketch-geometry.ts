@@ -81,8 +81,12 @@ export function parseStroke(d: string): Point[] | null {
   const isCommand = (token: string): boolean => /^[A-Za-z]$/.test(token);
 
   while (index < tokens.length) {
-    if (isCommand(tokens[index])) command = tokens[index++];
-    else if (!command) return null;
+    const tok = tokens[index];
+    if (tok === undefined) break;
+    if (isCommand(tok)) {
+      command = tok;
+      index++;
+    } else if (!command) return null;
 
     const upper = command.toUpperCase();
     const relative = command !== upper;
@@ -132,8 +136,14 @@ export function parseStroke(d: string): Point[] | null {
       for (let i = 0; i < controlCount; i++) controls.push({ x: ax(read()), y: ay(read()) });
       const end = { x: ax(read()), y: ay(read()) };
       const from = { x, y };
-      if (upper === "Q") flattenQuadratic(points, from, controls[0], end);
-      else flattenCubic(points, from, controls[0], controls[1], end);
+      const c0 = controls[0];
+      if (c0 === undefined) return null;
+      if (upper === "Q") flattenQuadratic(points, from, c0, end);
+      else {
+        const c1 = controls[1];
+        if (c1 === undefined) return null;
+        flattenCubic(points, from, c0, c1, end);
+      }
       x = end.x;
       y = end.y;
       continue;
@@ -176,7 +186,12 @@ export function boundsOfPoints(points: Point[]): Rect {
 
 export function pathLength(points: Point[]): number {
   let total = 0;
-  for (let i = 1; i < points.length; i++) total += Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1];
+    const b = points[i];
+    if (a === undefined || b === undefined) continue;
+    total += Math.hypot(b.x - a.x, b.y - a.y);
+  }
   return total;
 }
 
@@ -186,6 +201,7 @@ export function polygonArea(points: Point[]): number {
   for (let i = 0; i < points.length; i++) {
     const current = points[i];
     const next = points[(i + 1) % points.length];
+    if (current === undefined || next === undefined) continue;
     sum += current.x * next.y - next.x * current.y;
   }
   return Math.abs(sum) / 2;
@@ -193,7 +209,10 @@ export function polygonArea(points: Point[]): number {
 
 export function isClosed(points: Point[], closeRatio: number): boolean {
   if (points.length < 4) return false;
-  const gap = Math.hypot(points[points.length - 1].x - points[0].x, points[points.length - 1].y - points[0].y);
+  const first = points[0];
+  const last = points[points.length - 1];
+  if (first === undefined || last === undefined) return false;
+  const gap = Math.hypot(last.x - first.x, last.y - first.y);
   return gap <= Math.max(10, closeRatio * pathLength(points));
 }
 
@@ -295,8 +314,14 @@ export function readSketch(ink: CanvasInk[], options: SketchReadOptions = {}): S
       loose.push(stroke.ink);
       continue;
     }
-    const from = regionAt(regions, stroke.points[0], config.slack);
-    const to = regionAt(regions, stroke.points[stroke.points.length - 1], config.slack);
+    const first = stroke.points[0];
+    const last = stroke.points[stroke.points.length - 1];
+    if (first === undefined || last === undefined) {
+      loose.push(stroke.ink);
+      continue;
+    }
+    const from = regionAt(regions, first, config.slack);
+    const to = regionAt(regions, last, config.slack);
     // A stroke that never reaches a region is a marking, not a connection, and a
     // stroke that starts and ends inside the same shape is writing or an
     // annotation rather than a link. A connector has to join two different

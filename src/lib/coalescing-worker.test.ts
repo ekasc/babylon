@@ -11,7 +11,7 @@ describe("coalescing worker", () => {
     for (let i = 0; i < 20; i++) worker.enqueue("tasks", [`e${i}`]);
     await worker.drain("tasks");
     expect(seen.length).toBe(1);
-    expect(seen[0][1]).toBe(Array.from({ length: 20 }, (_, i) => `e${i}`).join(","));
+    expect(seen[0]?.[1]).toBe(Array.from({ length: 20 }, (_, i) => `e${i}`).join(","));
     worker.dispose();
   });
 

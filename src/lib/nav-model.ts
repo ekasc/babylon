@@ -3,6 +3,7 @@ import type {
   ExecutionState,
   SessionRuntimeState,
 } from "../sessionRuntime";
+import { defineStore } from "./versioned-store";
 
 /**
  * Pure nav-model helpers for the Spaces / Agents / Tabs IA.
@@ -57,6 +58,52 @@ export function migrateLegacyTabs(
   }
   return { tabs, activeBySpace: {} };
 }
+
+function isNavTabsBlob(value: unknown): value is NavTabsBlob {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as { tabs?: unknown; activeBySpace?: unknown };
+  if (!Array.isArray(record.tabs)) return false;
+  if (
+    !record.tabs.every(
+      (entry): entry is NavTab =>
+        !!entry && typeof entry === "object" &&
+        typeof (entry as { path?: unknown }).path === "string" &&
+        typeof (entry as { cwd?: unknown }).cwd === "string"
+    )
+  ) {
+    return false;
+  }
+  if (record.activeBySpace === null || typeof record.activeBySpace !== "object" || Array.isArray(record.activeBySpace)) {
+    return false;
+  }
+  return Object.values(record.activeBySpace).every((path): path is string => typeof path === "string");
+}
+
+/** User-curated project spaces (plain cwd list). */
+export const spacesStore = defineStore<string[]>({
+  key: "spaces",
+  version: 1,
+  fallback: () => [],
+  validate: (value): value is string[] =>
+    Array.isArray(value) && value.every((entry): entry is string => typeof entry === "string"),
+});
+
+/** Explicit project context; null on landing with no space selected. */
+export const activeSpaceStore = defineStore<string | null>({
+  key: "active-space",
+  version: 1,
+  fallback: () => null,
+  validate: (value): value is string | null => value === null || typeof value === "string",
+});
+
+/** Versioned working-set store (v2 blob; v1 per-space records migrate). */
+export const tabsStore = defineStore<NavTabsBlob>({
+  key: "tabs",
+  version: 2,
+  fallback: () => ({ tabs: [], activeBySpace: {} }),
+  validate: isNavTabsBlob,
+  migrate: (value) => (isNavTabsBlob(value) ? value : migrateLegacyTabs(value, [])),
+});
 
 /** Insert a tab (no reorder on re-add); bounded working set. */
 export function addNavTab(tabs: NavTab[], cwd: string, path: string, cap = 24): NavTab[] {

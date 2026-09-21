@@ -127,7 +127,10 @@ export function imageFromDataUrl(dataUrl: unknown): { data: string; mimeType: st
   if (typeof dataUrl !== "string") return null;
   const match = /^data:(image\/[a-z+]+);base64,(.+)$/.exec(dataUrl);
   if (!match) return null;
-  return { mimeType: match[1], data: match[2] };
+  const mimeType = match[1];
+  const data = match[2];
+  if (mimeType === undefined || data === undefined) return null;
+  return { mimeType, data };
 }
 
 export type CropAnswer = { ok: true; reading: RegionReading } | { ok: false; reason: string };

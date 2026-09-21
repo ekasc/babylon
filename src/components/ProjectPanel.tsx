@@ -6,6 +6,7 @@ import { botHandle } from "../bots";
 import type { ProjectSettings } from "../bridge";
 import type { Bot, NewBotInput } from "../bots";
 import { BotAvatar } from "./BotAvatar";
+import { errorMessage } from "../lib/errors";
 
 const inputCls = "w-full rounded border border-line bg-raised px-2 py-1.5 text-[13px]";
 const labelCls = "mb-1 block text-[12px] font-semibold text-dim";
@@ -67,8 +68,8 @@ export default function ProjectPanel({
         onChanged(result as ProjectSettings);
       }
       done?.();
-    } catch (e: any) {
-      setError(e?.message ?? "Could not save project settings");
+    } catch (e) {
+      setError(errorMessage(e, "Could not save project settings"));
     } finally {
       setBusy(false);
     }

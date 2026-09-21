@@ -35,7 +35,7 @@ describe("scheduler decision engine", () => {
     const policy: BackgroundPolicy = { ...defaultPolicy(), mode: "never" };
     const sel = selectRunnableTasks(r, policy, "p", signals(), NOW);
     expect(sel.runnable).toHaveLength(0);
-    expect(sel.blocked[0].reasons.join()).toMatch(/never/);
+    expect(sel.blocked[0]?.reasons.join()).toMatch(/never/);
   });
 
   it("blocks a due task when on battery and policy pauses on battery", () => {
@@ -55,7 +55,7 @@ describe("scheduler decision engine", () => {
     };
     const sel = selectRunnableTasks(r, policy, "default", signals(), NOW);
     expect(sel.runnable).toHaveLength(0);
-    expect(sel.blocked[0].task.id).toBe("a");
+    expect(sel.blocked[0]?.task.id).toBe("a");
   });
 
   it("ignores non-due and disabled tasks", () => {
@@ -73,7 +73,7 @@ describe("scheduler decision engine", () => {
     const policy: BackgroundPolicy = { ...defaultPolicy(), perProjectPermission: { p: false } };
     const sel = selectRunnableTasks(r, policy, "p", signals(), NOW);
     expect(sel.runnable).toHaveLength(0);
-    expect(sel.blocked[0].task.id).toBe("a");
+    expect(sel.blocked[0]?.task.id).toBe("a");
   });
 
   it("separates runnable and blocked tasks in one call", () => {

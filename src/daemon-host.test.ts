@@ -45,7 +45,7 @@ describe("babylon daemon host", () => {
     const rt = createDaemonRuntime();
     const task = createTask({ id: "t1", title: "x" });
     const res = dispatchRequest(rt, request("task.created", task));
-    expect(res.runtime.tasks.tasks.t1.title).toBe("x");
+    expect(res.runtime.tasks.tasks.t1?.title).toBe("x");
     expect(res.response.type).toBe("task.created");
   });
 
@@ -53,7 +53,7 @@ describe("babylon daemon host", () => {
     let rt = createDaemonRuntime();
     rt = dispatchRequest(rt, request("task.created", createTask({ id: "t1", title: "x" }))).runtime;
     const res = dispatchRequest(rt, request("task.updated", { id: "t1", patch: { title: "y" } }));
-    expect(res.runtime.tasks.tasks.t1.title).toBe("y");
+    expect(res.runtime.tasks.tasks.t1?.title).toBe("y");
   });
 
   it("removes a task on task.removed", () => {
@@ -73,9 +73,9 @@ describe("babylon daemon host", () => {
       resolved: false,
     };
     rt = dispatchRequest(rt, request("attention.raised", item)).runtime;
-    expect(rt.attention.items.a1.resolved).toBe(false);
+    expect(rt.attention.items.a1?.resolved).toBe(false);
     rt = dispatchRequest(rt, request("attention.resolved", { id: "a1" })).runtime;
-    expect(rt.attention.items.a1.resolved).toBe(true);
+    expect(rt.attention.items.a1?.resolved).toBe(true);
   });
 
   it("returns an explicit error response for unsupported types", () => {
@@ -98,7 +98,7 @@ describe("babylon daemon host", () => {
     const out = processFrame(rt, frame);
     const response = parseEnvelope(out.responseJson);
     expect(response.type).toBe("task.created");
-    expect(out.runtime.tasks.tasks.t1.title).toBe("x");
+    expect(out.runtime.tasks.tasks.t1?.title).toBe("x");
   });
 
   it("processFrame returns an error for malformed JSON without mutating", () => {
@@ -135,7 +135,7 @@ describe("babylon daemon host", () => {
     const twice = dispatchRequest(once, request("task.created", createTask({ id: "t1", title: "y" })));
     expect(twice.response.type).toBe("error");
     expect(twice.runtime).toBe(once);
-    expect(twice.runtime.tasks.tasks.t1.title).toBe("x");
+    expect(twice.runtime.tasks.tasks.t1?.title).toBe("x");
   });
 
   it("returns an error on duplicate attention.raised and preserves the first item", () => {
@@ -145,7 +145,7 @@ describe("babylon daemon host", () => {
     const again = dispatchRequest(rt, request("attention.raised", { ...item, title: "second" }));
     expect(again.response.type).toBe("error");
     expect(again.runtime).toBe(rt);
-    expect(again.runtime.attention.items.a1.title).toBe("first");
+    expect(again.runtime.attention.items.a1?.title).toBe("first");
   });
 
   it("leaves runtime unchanged and signals removed false for a missing task.removed", () => {
@@ -188,7 +188,7 @@ describe("babylon daemon host", () => {
     const second = createContract({ id: "c1", title: "Ship it harder", checks: [{ kind: "lint", label: "lint clean", required: true }] });
     const res = dispatchRequest(rt, request("contract.registered", second));
     expect(res.response.type).toBe("contract.registered");
-    expect(res.runtime.contracts.c1.title).toBe("Ship it harder");
+    expect(res.runtime.contracts.c1?.title).toBe("Ship it harder");
   });
 
   it("rejects malformed contract.registered payloads", () => {
@@ -218,7 +218,7 @@ describe("babylon daemon host", () => {
     const res = dispatchRequest(rt, request("task.complete", { id: "t1", results: [] }));
     expect(res.response.type).toBe("task.complete");
     expect(res.response.payload).toMatchObject({ blocked: false });
-    expect(res.runtime.tasks.tasks.t1.status).toBe("completed");
+    expect(res.runtime.tasks.tasks.t1?.status).toBe("completed");
   });
 
   it("task.complete passes when the contract checks pass", () => {
@@ -233,7 +233,7 @@ describe("babylon daemon host", () => {
     expect(res.response.payload).toMatchObject({ blocked: false });
     const evaluation = (res.response.payload as { evaluation?: { passed: boolean } }).evaluation;
     expect(evaluation?.passed).toBe(true);
-    expect(res.runtime.tasks.tasks.t1.status).toBe("completed");
+    expect(res.runtime.tasks.tasks.t1?.status).toBe("completed");
     expect(res.runtime.attention.items).toEqual({});
   });
 
@@ -247,8 +247,9 @@ describe("babylon daemon host", () => {
     ).runtime;
     const res = dispatchRequest(rt, request("task.complete", { id: "t1", results: [{ kind: "tests", passed: false }] }));
     expect(res.response.payload).toMatchObject({ blocked: true, reason: "contract failed: tests pass" });
-    expect(res.runtime.tasks.tasks.t1.status).not.toBe("completed");
+    expect(res.runtime.tasks.tasks.t1?.status).not.toBe("completed");
     const item = Object.values(res.runtime.attention.items)[0];
+    if (!item) throw new Error("missing attention item");
     expect(item).toMatchObject({ type: "failed_task", title: "Completion blocked: Ship it", source: "t1", resolved: false });
     expect((res.response.payload as { attention?: { id: string } }).attention?.id).toBe(item.id);
   });

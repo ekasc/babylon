@@ -6,6 +6,7 @@ import {
   type SimViewport,
 } from "../lib/simulator";
 import { bridge, type SimEvent } from "../bridge";
+import { errorMessage } from "../lib/errors";
 
 /** Viewport stage for one browser tab. Fill paints 1:1 edge-to-edge (T3's
  * default); preset/freeform center a fitted device slot. The sidebar owns
@@ -48,9 +49,9 @@ export function SimulatorPanel({ tabId, viewport }: { tabId: string; viewport: S
         setReady(true);
         reportBounds();
       })
-      .catch((e: any) => setFatal(e?.message ?? "Could not attach to the tab"));
+      .catch((e: unknown) => setFatal(errorMessage(e, "Could not attach to the tab")));
     const off = bridge.onSimEvent((ev: SimEvent) => {
-      if (!("tabId" in ev) || (ev as { tabId: string }).tabId !== tabId) return;
+      if (!("tabId" in ev) || ev.tabId !== tabId) return;
       if (ev.type === "crashed") {
         readyRef.current = false;
         setReady(false);

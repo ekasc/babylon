@@ -14,7 +14,9 @@ export const PROJECT_PALETTE = [
 // Deterministic, stable color for a project (keyed by its cwd) so the same
 // project always reads with the same accent across sessions and restarts.
 export function projectColor(cwd: string): string {
-  return PROJECT_PALETTE[hashStr(cwd) % PROJECT_PALETTE.length];
+  // The palette literal below is non-empty, so the modulo index always hits;
+  // the fallback only satisfies the checker, it never runs.
+  return PROJECT_PALETTE[hashStr(cwd) % PROJECT_PALETTE.length] ?? "#8b5cf6";
 }
 
 function hashStr(s: string): number {
@@ -41,7 +43,7 @@ export const PROJECT_ICONS = [
 export type ProjectIconKey = (typeof PROJECT_ICONS)[number];
 
 export function projectIcon(cwd: string): ProjectIconKey {
-  return PROJECT_ICONS[hashStr(cwd) % PROJECT_ICONS.length];
+  return PROJECT_ICONS[hashStr(cwd) % PROJECT_ICONS.length] ?? "folder";
 }
 
 export interface ProjectIdentity {
@@ -72,6 +74,7 @@ export function assignProjectIdentities(cwds: string[]): Map<string, ProjectIden
       const base = PROJECT_PALETTE.indexOf(color as (typeof PROJECT_PALETTE)[number]);
       for (let k = 1; k <= PROJECT_PALETTE.length; k++) {
         const candidate = PROJECT_PALETTE[(base + k) % PROJECT_PALETTE.length];
+        if (candidate === undefined) break;
         if (!usedColors.has(candidate)) {
           color = candidate;
           break;

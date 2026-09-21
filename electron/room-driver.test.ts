@@ -37,7 +37,9 @@ describe("babylon room driver", () => {
   it("pulls a named outsider into an addressed room", async () => {
     // Addressed room (order=[alpha]); alpha names Gamma, who is not queued.
     const { calls, io } = scripted({ alpha: ["@gamma take it"], gamma: ["on it"] });
-    const res = await driveRoomTurns({ groupId: "g", members, order: [members[0]], io, maxTurns: 6 });
+    const first = members[0];
+    if (!first) throw new Error("missing member");
+    const res = await driveRoomTurns({ groupId: "g", members, order: [first], io, maxTurns: 6 });
     expect(calls.slice(0, 2)).toEqual(["alpha", "gamma"]);
     expect(res.spoke).toBe(2);
   });

@@ -21,6 +21,8 @@ import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import type { ThreadStatus } from "../src/bridge";
+import { wireArr, wireOf, wireStr } from "../src/store";
 
 export type ThreadControlAction = "steer" | "follow-up" | "stop";
 
@@ -32,7 +34,7 @@ export interface ThreadMilestone {
 
 export type ThreadEvent =
   | { type: "milestone"; threadId: string; name: string | null; milestone: ThreadMilestone }
-  | { type: "terminal"; threadId: string; name: string | null; status: string }
+  | { type: "terminal"; threadId: string; name: string | null; status: ThreadStatus }
   | { type: "blocked"; threadId: string; name: string | null; blocker: string | null };
 
 /** Pure transition detector: diff one thread's polled state against the last
@@ -51,9 +53,9 @@ export function detectThreadEvents(
       events.push({ type: "milestone", threadId: next.threadId, name: next.name, milestone });
     }
   }
-  const terminal = ["completed", "failed", "stopped"];
-  if (prev && prev.status !== next.status && next.status && terminal.includes(next.status)) {
-    events.push({ type: "terminal", threadId: next.threadId, name: next.name, status: next.status });
+  const status = next.status;
+  if (prev && prev.status !== status && (status === "completed" || status === "failed" || status === "stopped")) {
+    events.push({ type: "terminal", threadId: next.threadId, name: next.name, status });
   }
   if (prev && prev.status !== "blocked" && next.status === "blocked") {
     events.push({ type: "blocked", threadId: next.threadId, name: next.name, blocker: next.blocker ?? null });
@@ -73,6 +75,16 @@ export interface ThreadManagerOptions {
 }
 
 const THREAD_ID = /^[a-zA-Z0-9-]{1,64}$/;
+
+/** Persisted thread.json shape (read back unvalidated JSON). */
+export interface ThreadState {
+  threadId: string;
+  name?: string | null;
+  parentSessionId?: string | null;
+  sessionFile?: string | null;
+  status?: ThreadStatus;
+  [key: string]: unknown;
+}
 
 /** Threads whose runtime still owns the session file must not be promoted. */
 const LIVE_STATUS = new Set(["queued", "starting", "running", "interrupting", "idle", "blocked"]);
@@ -125,15 +137,18 @@ export class ThreadManager {
     return join(cwd, ".pi", "state", "threads", threadId, "thread.json");
   }
 
-  async readState(cwd: string, threadId: string): Promise<any | null> {
+  async readState(cwd: string, threadId: string): Promise<ThreadState | null> {
     try {
-      return JSON.parse(await fs.readFile(this.threadFile(cwd, threadId), "utf8"));
+      const parsed: unknown = JSON.parse(await fs.readFile(this.threadFile(cwd, threadId), "utf8"));
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+      const state = parsed as ThreadState;
+      return typeof state.threadId === "string" ? state : null;
     } catch {
       return null;
     }
   }
 
-  async control(cwd: string, action: ThreadControlAction, threadId: string, message?: string): Promise<any> {
+  async control(cwd: string, action: ThreadControlAction, threadId: string, message?: string): Promise<ThreadState> {
     if (!THREAD_ID.test(threadId)) throw new Error("Invalid thread id");
     const state = await this.readState(cwd, threadId);
     if (!state) throw new Error("Thread not found");
@@ -145,7 +160,12 @@ export class ThreadManager {
         : { threadId, message: message!.trim(), delivery: action === "steer" ? "steer" : "follow_up" },
       state.parentSessionId ?? null
     );
-    if ((result as any)?.isError) throw new Error((result as any)?.content?.[0]?.text ?? "Thread control failed");
+    const failed = wireOf(result);
+    if (failed?.isError) {
+      const content = wireArr(failed, "content");
+      const firstText = content && content.length > 0 ? wireStr(wireOf(content[0]), "text") : undefined;
+      throw new Error(firstText ?? "Thread control failed");
+    }
     await this.opts.onParentMessage?.(
       { threadId: state.threadId, name: state.name ?? null, parentSessionId: state.parentSessionId ?? null },
       action,
@@ -166,7 +186,7 @@ export class ThreadManager {
     await fs.access(state.sessionFile).catch(() => {
       throw new Error("The thread session file no longer exists");
     });
-    if (LIVE_STATUS.has(state.status)) {
+    if (state.status && LIVE_STATUS.has(state.status)) {
       throw new Error("Stop or wait for the thread to finish before opening it as the main session");
     }
     const supervision = [

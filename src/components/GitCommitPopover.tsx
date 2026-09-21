@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { bridge } from "../bridge";
 import { ModalDialog } from "./ui/Dialog";
+import { errorMessage } from "../lib/errors";
 
 interface Props {
   cwd?: string;
@@ -35,9 +36,9 @@ export default function GitCommitPopover({ cwd, onClose, toast, onChanged }: Pro
       toast("info", `Committed ${res.commit.subject} — ${res.push.status === "skipped_up_to_date" ? "up to date" : "pushed"}`);
       onChanged();
       setTimeout(() => onClose(), 900);
-    } catch (e: any) {
-      setError(e?.message ?? "commit failed");
-      toast("error", e?.message ?? "commit failed");
+    } catch (e) {
+      setError(errorMessage(e, "commit failed"));
+      toast("error", errorMessage(e, "commit failed"));
     } finally {
       setBusy(false);
     }

@@ -9,12 +9,51 @@ import {
   threadCwd,
   workflowCwd,
 } from "./activity";
+import type { SubagentActivity, ThreadActivity, WorkflowRunSummary } from "../bridge";
+
+function thread(overrides: Partial<ThreadActivity> & Pick<ThreadActivity, "threadId" | "status">): ThreadActivity {
+  return {
+    name: null,
+    goal: "",
+    mode: "",
+    profile: "",
+    model: "",
+    parentSessionId: "",
+    sessionFile: null,
+    createdAt: "",
+    updatedAt: "",
+    completedAt: null,
+    latestSummary: null,
+    latestActivity: null,
+    filesChanged: [],
+    commandsRun: [],
+    testsRun: [],
+    blocker: null,
+    failureReason: null,
+    ...overrides,
+  };
+}
+
+function subagent(overrides: Partial<SubagentActivity> & Pick<SubagentActivity, "runId" | "status">): SubagentActivity {
+  return {
+    updatedAt: "",
+    ...overrides,
+  };
+}
+
+function workflowRun(overrides: Partial<WorkflowRunSummary> & Pick<WorkflowRunSummary, "runId" | "status">): WorkflowRunSummary {
+  return {
+    workflowName: "w",
+    phases: [],
+    ...overrides,
+  };
+}
 
 describe("activity running predicates", () => {
   it("classifies thread statuses", () => {
     expect(isRunningThread("running")).toBe(true);
     expect(isRunningThread("queued")).toBe(true);
-    expect(isRunningThread("done")).toBe(false);
+    expect(isRunningThread("completed")).toBe(false);
     expect(isRunningThread("failed")).toBe(false);
   });
 
@@ -60,11 +99,11 @@ describe("activity cwd attribution", () => {
 });
 
 describe("countRunningWork", () => {
-  const runningThread = { threadId: "t1", status: "running", cwd: "/a" } as any;
-  const doneThread = { threadId: "t2", status: "done", cwd: "/a" } as any;
-  const runningSub = { runId: "r1", status: "running", parentSessionFile: "/s.json" } as any;
-  const run = { runId: "w1", status: "running", workflowName: "w", sessionId: "s1" } as any;
-  const doneRun = { runId: "w2", status: "completed", workflowName: "w" } as any;
+  const runningThread = thread({ threadId: "t1", status: "running", cwd: "/a" });
+  const doneThread = thread({ threadId: "t2", status: "completed", cwd: "/a" });
+  const runningSub = subagent({ runId: "r1", status: "running", parentSessionFile: "/s.json" });
+  const run = workflowRun({ runId: "w1", status: "running", sessionId: "s1" });
+  const doneRun = workflowRun({ runId: "w2", status: "completed" });
 
   it("counts only running work in scope", () => {
     const n = countRunningWork({
@@ -80,7 +119,7 @@ describe("countRunningWork", () => {
 
   it("excludes work outside the scope but keeps unattributed work", () => {
     const n = countRunningWork({
-      threads: [{ threadId: "t3", status: "running", cwd: "/other" } as any],
+      threads: [thread({ threadId: "t3", status: "running", cwd: "/other" })],
       subagents: [],
       workflows: [run],
       scope: "/a",

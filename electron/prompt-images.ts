@@ -20,8 +20,11 @@ export function toPiImages(images?: RendererImage[]): Array<{ type: "image"; dat
  *  model instead of attaching them directly: only when an image model is set
  *  AND the session's chat model has no vision (a vision-capable chat model
  *  keeps the raw images, where it can read them with full fidelity). */
-export function shouldRelayImagesThrough(imageModel: ModelRef | undefined, sessionModel: any): boolean {
+export function shouldRelayImagesThrough(
+  imageModel: ModelRef | undefined,
+  sessionModel: { supportsImages?: boolean; vision?: boolean; input?: string[] } | null | undefined
+): boolean {
   if (!imageModel) return false;
-  const vision = modelSupportsImages(sessionModel) || !!sessionModel?.supportsImages || !!sessionModel?.vision;
+  const vision = modelSupportsImages(sessionModel ?? undefined) || !!sessionModel?.supportsImages || !!sessionModel?.vision;
   return !vision;
 }

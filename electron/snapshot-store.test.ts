@@ -126,6 +126,51 @@ describe("SnapshotStore", () => {
     ]);
   });
 
+  it("ignores agent bookkeeping (.pi/state) in captures and diffs", async () => {
+    const base = await mkdtemp(join(tmpdir(), "pideck-bookkeeping-"));
+    roots.push(base);
+    const root = join(base, "project");
+    await mkdir(root);
+    await git(root, ["init"]);
+    await git(root, ["config", "user.email", "test@example.com"]);
+    await git(root, ["config", "user.name", "Test"]);
+    await writeFile(join(root, "code.ts"), "v1\n");
+    await git(root, ["add", "code.ts"]);
+
+    const store = new SnapshotStore(join(base, "state"));
+    const before = await store.capture(root);
+    expect(before).not.toBeNull();
+
+    // A read-only turn's side effect: the guardrail log appends while
+    // project content is untouched. The capture must stay stable (no
+    // "mutating continuously" throw) and the diff must be empty.
+    await mkdir(join(root, ".pi", "state", "guardrails"), { recursive: true });
+    await writeFile(join(root, ".pi", "state", "guardrails", "decisions.jsonl"), '{"at":1}\n');
+    const afterLogsOnly = await store.capture(root, { authoritative: true });
+    expect(afterLogsOnly).not.toBeNull();
+    expect(await store.changedFiles(root, before!.tree, afterLogsOnly!.tree)).toEqual([]);
+    expect(await store.turnChanges(root, before!.tree, afterLogsOnly!.tree)).toEqual([]);
+
+    // A real edit alongside log writes still reports only the real edit.
+    await writeFile(join(root, "code.ts"), "v2\n");
+    await writeFile(join(root, ".pi", "state", "guardrails", "decisions.jsonl"), '{"at":1}\n{"at":2}\n');
+    const after = await store.capture(root, { authoritative: true });
+    expect(after).not.toBeNull();
+    expect(await store.changedFiles(root, before!.tree, after!.tree)).toEqual(["code.ts"]);
+    expect(await store.turnChanges(root, before!.tree, after!.tree)).toEqual([
+      { path: "code.ts", kind: "modified", additions: 1, deletions: 1 },
+    ]);
+  });
+
+  it("never admits user-authored .pi content outside state/ as bookkeeping", async () => {
+    const { isBookkeepingPath } = await import("./snapshot-store");
+    expect(isBookkeepingPath(".pi/state/guardrails/decisions.jsonl")).toBe(true);
+    expect(isBookkeepingPath(".pi/state")).toBe(true);
+    expect(isBookkeepingPath(".pi/agent/skills/my-skill.md")).toBe(false);
+    expect(isBookkeepingPath(".pi/config.json")).toBe(false);
+    expect(isBookkeepingPath("src/a.ts")).toBe(false);
+  });
+
   it("returns a unified diff for a single changed file", async () => {
     const base = await mkdtemp(join(tmpdir(), "pideck-filediff-"));
     roots.push(base);

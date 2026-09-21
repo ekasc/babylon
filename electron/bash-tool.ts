@@ -5,7 +5,10 @@
 // truncation behavior.
 
 import { createBashTool, createBashToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { BashToolInput, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
+import { wireArr, wireOf, wireStr } from "../src/store";
+import type { BabylonBashMeta } from "../src/store";
 
 type ShellHint = { kind: "explain"; label: string; description: string };
 
@@ -31,13 +34,13 @@ function buildHints(command: string): ShellHint[] {
   } else if (/^find\b/.test(lower)) {
     hints.push({ kind: "explain", label: "find", description: "Walk the filesystem. Use -type f for files only, -name '*.ts' to narrow." });
   } else if (/^sed\b/.test(lower) || /^awk\b/.test(lower)) {
-    hints.push({ kind: "explain", label: command.split(/\s+/, 1)[0], description: "Stream-edit. Use -i.bak to keep a rollback copy." });
+    hints.push({ kind: "explain", label: command.split(/\s+/, 1)[0] ?? command, description: "Stream-edit. Use -i.bak to keep a rollback copy." });
   } else if (/^curl\b/.test(lower) || /^wget\b/.test(lower)) {
-    hints.push({ kind: "explain", label: command.split(/\s+/, 1)[0], description: "Network fetch. Add --fail-with-body and a timeout; never pipe to a shell." });
+    hints.push({ kind: "explain", label: command.split(/\s+/, 1)[0] ?? command, description: "Network fetch. Add --fail-with-body and a timeout; never pipe to a shell." });
   } else if (/^npm\b/.test(lower) || /^pnpm\b/.test(lower) || /^yarn\b/.test(lower)) {
-    hints.push({ kind: "explain", label: command.split(/\s+/, 1)[0], description: "Package manager. Pin to install, never run scripts blindly in untrusted repos." });
+    hints.push({ kind: "explain", label: command.split(/\s+/, 1)[0] ?? command, description: "Package manager. Pin to install, never run scripts blindly in untrusted repos." });
   } else if (/^node\b/.test(lower) || /^python\b/.test(lower) || /^ruby\b/.test(lower)) {
-    hints.push({ kind: "explain", label: command.split(/\s+/, 1)[0], description: "Interpreter. Watch for shebangs and module syntax errors." });
+    hints.push({ kind: "explain", label: command.split(/\s+/, 1)[0] ?? command, description: "Interpreter. Watch for shebangs and module syntax errors." });
   }
   return hints.slice(0, 2);
 }
@@ -116,7 +119,7 @@ function shortCwd(cwd: string): string {
   return `~/.../${parts.slice(-2).join("/")}`;
 }
 
-export function createBabylonBashTool(cwd: string) {
+export function createBabylonBashTool(cwd: string): ToolDefinition {
   const inner = createBashTool(cwd);
   const innerDef = createBashToolDefinition(cwd);
 
@@ -127,8 +130,8 @@ export function createBabylonBashTool(cwd: string) {
     promptSnippet: innerDef.promptSnippet,
     promptGuidelines: innerDef.promptGuidelines,
     parameters: innerDef.parameters,
-    async execute(toolCallId: string, args: any, signal: any, onUpdate: any, ctx: any) {
-      const command: string = String(args?.command ?? "");
+    async execute(toolCallId: string, args, signal, onUpdate, ctx) {
+      const command: string = String(wireOf(args)?.command ?? "");
       const startedAt = Date.now();
       const argv = tokenizeArgv(command);
       const head = argv[0] || "";
@@ -136,32 +139,45 @@ export function createBabylonBashTool(cwd: string) {
       const unsafe = detectUnsafe(command);
       const hints = buildHints(command);
       const callId = toolCallId || `babylon-bash-${randomUUID()}`;
+      // Last content snapshot, re-emitted with every update so the renderer
+      // can render a header immediately (pi also fires its own initial
+      // update; subsequent calls re-emit the stored snapshot).
+      let lastContent: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = [];
 
-      const emit = (extra: any = {}) => {
+      const emit = (extra: {
+        endedAt?: number;
+        exitCode?: number;
+        exitSignal?: string;
+        status?: BabylonBashMeta["status"];
+        truncated?: boolean;
+        fullOutputPath?: string;
+        truncation?: unknown;
+      } = {}) => {
         if (!onUpdate) return;
+        const meta: BabylonBashMeta = {
+          kind: "babylon_bash",
+          version: 1,
+          callId,
+          command,
+          argv,
+          head,
+          headBase,
+          startedAt,
+          endedAt: extra.endedAt,
+          exitCode: extra.exitCode,
+          exitSignal: extra.exitSignal,
+          status: extra.status ?? "running",
+          cwd: shortCwd(cwd),
+          truncated: extra.truncated ?? false,
+          fullOutputPath: extra.fullOutputPath,
+          unsafe,
+          hints,
+          durationMs: extra.endedAt ? extra.endedAt - startedAt : undefined,
+        };
         onUpdate({
-          content: onUpdate.__content ?? [],
+          content: lastContent,
           details: {
-            babylon: {
-              kind: "babylon_bash",
-              version: 1,
-              callId,
-              command,
-              argv,
-              head,
-              headBase,
-              startedAt,
-              endedAt: extra.endedAt,
-              exitCode: extra.exitCode,
-              exitSignal: extra.exitSignal,
-              status: extra.status,
-              cwd: shortCwd(cwd),
-              truncated: extra.truncated ?? false,
-              fullOutputPath: extra.fullOutputPath,
-              unsafe,
-              hints,
-              durationMs: extra.endedAt ? extra.endedAt - startedAt : undefined,
-            },
+            babylon: meta,
             ...(extra.truncation ? { truncation: extra.truncation } : {}),
             ...(extra.fullOutputPath ? { fullOutputPath: extra.fullOutputPath } : {}),
           },
@@ -173,13 +189,26 @@ export function createBabylonBashTool(cwd: string) {
       // the last content snapshot on the callback so subsequent calls
       // re-emit it.
       try {
-        const result = await (inner as any).execute(callId, args, signal, (u: any) => {
+        const result = await inner.execute(callId, args as BashToolInput, signal, (u) => {
           if (!onUpdate) return;
-          onUpdate.__content = u?.content ?? [];
+          const update = wireOf(u);
+          const content = wireArr(update, "content") ?? [];
+          // Keep only well-formed blocks: the snapshot re-renders verbatim,
+          // so a malformed block must not reach the transcript.
+          const blocks: typeof lastContent = [];
+          for (const b of content) {
+            const w = wireOf(b);
+            if (w?.type === "text" && typeof w.text === "string") blocks.push({ type: "text", text: w.text });
+            else if (w?.type === "image" && typeof w.data === "string" && typeof w.mimeType === "string") {
+              blocks.push({ type: "image", data: w.data, mimeType: w.mimeType });
+            }
+          }
+          lastContent = blocks;
           onUpdate({
-            ...u,
+            ...(update ?? {}),
+            content: lastContent,
             details: {
-              ...(u?.details ?? {}),
+              ...(wireOf(update?.details) ?? {}),
               babylon: {
                 kind: "babylon_bash",
                 version: 1,
@@ -189,34 +218,38 @@ export function createBabylonBashTool(cwd: string) {
                 head,
                 headBase,
                 startedAt,
+                status: "running",
                 cwd: shortCwd(cwd),
+                truncated: false,
                 unsafe,
                 hints,
-              },
+              } satisfies BabylonBashMeta,
             },
           });
-        }, ctx);
+        });
         const endedAt = Date.now();
-        const text = (result?.content ?? [])
-          .map((b: any) => (b?.text ?? ""))
+        const resultContent = wireArr(wireOf(result), "content") ?? [];
+        const text = resultContent
+          .map((b) => wireStr(wireOf(b), "text") ?? "")
           .join("");
         // Pi throws an Error with a "Command exited with code N" suffix when
         // exitCode !== 0. We want the renderer to still see the actual exit
         // code, so we re-extract and pass it through even on error.
         let exitCode: number | undefined;
         let exitSignal: string | undefined;
-        const exitMatch = /exited with code (-?\d+)/.exec(result?.error?.message ?? "");
+        const resultError = wireStr(wireOf(result), "error");
+        const exitMatch = /exited with code (-?\d+)/.exec(resultError ?? "");
         if (exitMatch) exitCode = Number(exitMatch[1]);
-        const sigMatch = /(SIG[A-Z]+|killed by signal \d+)/.exec(result?.error?.message ?? "");
+        const sigMatch = /(SIG[A-Z]+|killed by signal \d+)/.exec(resultError ?? "");
         if (sigMatch) exitSignal = sigMatch[1];
-        const details = (result?.details ?? {}) as any;
+        const details = wireOf(wireOf(result)?.details) ?? {};
         emit({
           endedAt,
           exitCode,
           exitSignal,
           status: exitCode === undefined ? (exitSignal ? "signaled" : "completed") : "exited",
-          truncated: !!details.truncation?.truncated,
-          fullOutputPath: details.fullOutputPath,
+          truncated: wireOf(details.truncation)?.truncated === true,
+          fullOutputPath: wireStr(details, "fullOutputPath"),
           truncation: details.truncation,
         });
         return result;
@@ -234,7 +267,7 @@ export function createBabylonBashTool(cwd: string) {
         const status = timedOut ? "timeout" : aborted ? "aborted" : exitCode !== undefined ? "exited" : exitSignal ? "signaled" : "failed";
         // Last-chance emit so the renderer still sees the metadata.
         onUpdate?.({
-          content: onUpdate.__content ?? [],
+          content: lastContent,
           details: {
             babylon: {
               kind: "babylon_bash",
@@ -262,5 +295,5 @@ export function createBabylonBashTool(cwd: string) {
         throw new Error(cleaned);
       }
     },
-  } as any;
+  };
 }

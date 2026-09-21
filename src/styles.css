@@ -572,6 +572,10 @@ html.dark .context-button.is-primary{color:var(--bg)}
 .md p{margin:.65em 0;max-width:68ch}.md-heading{margin:1em 0 .35em;font-weight:650;line-height:1.32;letter-spacing:-.01em;color:var(--fg)}.md-heading:is(h1){font-size:1.14em}.md-heading:is(h2){font-size:1.06em}.md-heading:is(h3){font-size:1em;color:color-mix(in srgb,var(--fg) 92%,var(--dim))}.md-heading:is(h4),.md-heading:is(h5),.md-heading:is(h6){font-size:.95em;color:var(--dim)}
 .md ul,.md ol{margin:.75em 0;padding-left:1.6em}.md ul{list-style:disc}.md ol{list-style:decimal}.md li{margin:.32em 0}.md li::marker{color:var(--dim)}
 .md code{border-radius:5px;background:var(--accent-soft);border:1px solid color-mix(in srgb,var(--accent) 14%,transparent);padding:.12em .36em;font-family:var(--mono);font-size:.86em;color:color-mix(in srgb,var(--accent) 78%,var(--fg));font-weight:500}
+/* Standalone twin of the markdown inline-code pill, for references that
+   live outside rendered markdown (skill chips). Same geometry and theme
+   colors, no dot, no pill rounding. */
+.code-pill{border-radius:5px;background:var(--md-code-bg);border:1px solid var(--md-code-border);padding:.12em .36em;font-family:var(--mono);font-size:.86em;color:var(--md-code-fg);font-weight:500;white-space:nowrap}
 .md pre{overflow-x:auto;margin:.9em 0;border:1px solid var(--line);border-radius:10px;background:var(--inset);padding:.95em 1em}.md pre code{background:none;border:0;padding:0;font-size:.86em;line-height:1.58;color:inherit;font-weight:400}
 .md a{color:var(--accent);text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:1.2px}.md a:hover{color:color-mix(in srgb,var(--accent) 82%,var(--fg))}
 .md blockquote{margin:.9em 0;border-left:3px solid var(--line-strong);padding:.45em 0 .45em 1em;color:var(--dim);background:color-mix(in srgb,var(--inset) 55%,transparent);border-radius:0 8px 8px 0}
@@ -751,6 +755,14 @@ button:focus-visible{outline:2px solid color-mix(in srgb,var(--focus) 60%,transp
 
 /* ── Markdown + code colors, vivid in both themes (brutalist --accent is monochrome) ── */
 html,body{letter-spacing:-0.01em}
+/* Dragging app chrome (tabs, sidebar, header, buttons, empty canvas,
+   menus) must never leave text selected behind. Only genuine message
+   content opts back in (see `select-text` on message/code/diff/output
+   containers), so deliberate selection keeps working exactly where users
+   expect it — including the transcript Quote action. Form fields stay
+   selectable regardless of the ancestor rule. */
+body{-webkit-user-select:none;user-select:none}
+body input,body textarea,body [contenteditable="true"]{-webkit-user-select:text;user-select:text}
 ::-webkit-scrollbar-thumb{background:var(--line-strong)}
 *::selection{background:var(--accent-soft);color:var(--fg)}
 .md-heading:is(h1){color:var(--md-h1);border-bottom:1px solid var(--line);padding-bottom:0.2em}

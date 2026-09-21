@@ -49,10 +49,20 @@ describe("projectHistory", () => {
     expect(history.turns.find((turn) => turn.entryId === "u2b")).toMatchObject({ onActivePath: false, rollbackAvailable: false, rollbackReason: "This turn is not on the active path" });
   });
 
+  it("hides bookkeeping-only turns from the files-changed count", () => {
+    const rows = [row("u1", null, "user", "one"), row("a1", "u1", "assistant", "reply")];
+    const onlyLogs = { ...checkpoint("u1"), changedPaths: [".pi/state/guardrails/decisions.jsonl"] };
+    const history = projectHistory({ rows, leafId: "a1", checkpoints: [onlyLogs], gitAvailable: true, streaming: false });
+    expect(history.turns[0]?.changedCount).toBe(0);
+    const mixed = { ...checkpoint("u1"), changedPaths: [".pi/state/guardrails/decisions.jsonl", "src/file.ts"] };
+    const mixedHistory = projectHistory({ rows, leafId: "a1", checkpoints: [mixed], gitAvailable: true, streaming: false });
+    expect(mixedHistory.turns[0]?.changedCount).toBe(1);
+  });
+
   it("explains a missing checkpoint from its receipt, and keeps the legacy message without one", () => {
     const rows = [row("u1", null, "user", "one"), row("a1", "u1", "assistant", "reply")];
     const legacy = projectHistory({ rows, leafId: "a1", checkpoints: [], gitAvailable: true, streaming: false });
-    expect(legacy.turns[0].rollbackReason).toBe("No filesystem checkpoint was recorded for this turn");
+    expect(legacy.turns[0]?.rollbackReason).toBe("No filesystem checkpoint was recorded for this turn");
     const explained = projectHistory({
       rows,
       leafId: "a1",
@@ -70,6 +80,6 @@ describe("projectHistory", () => {
       gitAvailable: true,
       streaming: false,
     });
-    expect(explained.turns[0].rollbackReason).toBe("Checkpoint capture failed for this turn: the post-turn snapshot failed");
+    expect(explained.turns[0]?.rollbackReason).toBe("Checkpoint capture failed for this turn: the post-turn snapshot failed");
   });
 });

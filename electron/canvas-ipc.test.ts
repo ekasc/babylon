@@ -28,8 +28,11 @@ function harness(options: { approved: boolean }) {
   };
 }
 
-const lastAction = (approval: ReturnType<typeof vi.fn>): AgentAction =>
-  approval.mock.calls[approval.mock.calls.length - 1][0] as AgentAction;
+const lastAction = (approval: { mock: { calls: Array<[AgentAction]> } }): AgentAction => {
+  const last = approval.mock.calls[approval.mock.calls.length - 1]?.[0];
+  if (!last) throw new Error("missing approval call");
+  return last;
+};
 
 describe("sketch egress", () => {
   it("asks before a drawing leaves the machine", async () => {

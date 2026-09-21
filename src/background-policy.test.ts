@@ -3,6 +3,7 @@ import {
   canRunInBackground,
   defaultPolicy,
   type BackgroundMode,
+  type BackgroundPolicy,
   type EnvironmentSignals,
 } from "./background-policy";
 
@@ -81,7 +82,8 @@ describe("background execution policies", () => {
     expect(canRunInBackground(withEmpty, "p", signals()).allowed).toBe(true);
     const without = defaultPolicy() as unknown as Record<string, unknown>;
     delete without.perProjectPermission;
-    expect(canRunInBackground(without as never, "p", signals()).allowed).toBe(true);
+    // Intentionally malformed (absent required field): the runtime tolerates it.
+    expect(canRunInBackground(without as BackgroundPolicy, "p", signals()).allowed).toBe(true);
   });
 
   it("denies an unknown background mode", () => {

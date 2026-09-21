@@ -57,14 +57,14 @@ describe("compiling a sketch", () => {
 
   it("treats an explicit unknown as a question", () => {
     const result = compile([ink("a", box(10, 10, 120, 60))], { r1: reading("unknown", "Thing", 0.99) });
-    expect(result.scene.nodes[0].kind).toBe("process");
+    expect(result.scene.nodes[0]?.kind).toBe("process");
     expect(result.unsure).toHaveLength(1);
   });
 
   it("reports a region that produced no reading at all", () => {
     const result = compile([ink("a", box(10, 10, 120, 60))], {});
-    expect(result.scene.nodes[0].kind).toBe("process");
-    expect(result.unsure[0].reason).toBe("no reading was produced for this shape");
+    expect(result.scene.nodes[0]?.kind).toBe("process");
+    expect(result.unsure[0]?.reason).toBe("no reading was produced for this shape");
   });
 
   it("makes a box that holds other boxes a group, whatever it was read as", () => {
@@ -113,7 +113,7 @@ describe("compiling against an existing scene", () => {
 
   it("joins by label and reuses the id instead of renaming the node", () => {
     const result = compile([ink("a", box(10, 10, 120, 60))], { r1: reading("process", "Cart") }, existing);
-    expect(result.scene.nodes[0].id).toBe("cart");
+    expect(result.scene.nodes[0]?.id).toBe("cart");
     // Nothing was added, retyped or relabelled; the node the sketch left out is reported.
     expect(result.changes).toEqual([{ kind: "node-removed", id: "legacy", label: "Old" }]);
   });

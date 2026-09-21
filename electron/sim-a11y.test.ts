@@ -46,7 +46,9 @@ describe("condenseAxTree", () => {
     for (let i = 0; i < AX_MAX_NODES + 10; i++) {
       const id = `n${i}`;
       nodes.push(node({ nodeId: id, role: { value: "button" }, name: { value: `B${i}` }, backendDOMNodeId: 100 + i }));
-      (nodes[0].childIds as string[]).push(id);
+      const root = nodes[0];
+      if (!root) throw new Error("missing root");
+      (root.childIds ??= []).push(id);
     }
     const out = condenseAxTree(nodes);
     expect(out.truncated).toBe(true);

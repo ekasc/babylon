@@ -1,6 +1,8 @@
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { detectThreadEvents, type ThreadEvent } from "./threads";
+import type { AgentEvent } from "../src/bridge";
+import { wireArr, wireOf, wireStr } from "../src/store";
 
 export interface ThreadActivity {
   threadId: string;
@@ -81,7 +83,7 @@ export class ActivityBridge {
   private signature = "";
   private last: ActivityUpdate = { threads: [], subagents: [] };
   private transientSubagents = new Map<string, SubagentActivity>();
-  private prevThreads = new Map<string, { status?: string; blocker?: string | null; milestones?: any[] }>();
+  private prevThreads = new Map<string, { status?: string; blocker?: string | null; milestones?: ThreadActivity["milestones"] }>();
   private lastThreadNotify = new Map<string, number>();
 
   constructor(private readonly options: Options) {
@@ -100,35 +102,40 @@ export class ActivityBridge {
     this.timer = null;
   }
 
-  observeAgentEvent(event: any): void {
-    if (event?.type === "tool_execution_start" && event.toolName === "subagent") {
+  observeAgentEvent(event: AgentEvent): void {
+    if (event.type === "tool_execution_start" && event.toolName === "subagent") {
       const now = new Date().toISOString();
-      this.transientSubagents.set(event.toolCallId, {
-        runId: `pending-${event.toolCallId}`,
+      const toolCallId = wireStr(event, "toolCallId") ?? "";
+      this.transientSubagents.set(toolCallId, {
+        runId: `pending-${toolCallId}`,
         status: "running",
-        requestedModel: event.args?.model,
+        requestedModel: wireStr(wireOf(event.args), "model"),
         startedAt: now,
         updatedAt: now,
       });
       this.publishTransient();
       return;
     }
-    if (event?.type === "tool_execution_end" && event.toolName === "subagent") {
-      const details = event.result?.details ?? {};
-      const previous = this.transientSubagents.get(event.toolCallId);
-      this.transientSubagents.delete(event.toolCallId);
-      const runId = typeof details.runId === "string" ? details.runId : `result-${event.toolCallId}`;
+    if (event.type === "tool_execution_end" && event.toolName === "subagent") {
+      const toolCallId = wireStr(event, "toolCallId") ?? "";
+      const details = wireOf(wireOf(event.result)?.details) ?? {};
+      const previous = this.transientSubagents.get(toolCallId);
+      this.transientSubagents.delete(toolCallId);
+      const runId = wireStr(details, "runId") ?? `result-${toolCallId}`;
+      const status = wireStr(details, "status");
+      const content = wireArr(wireOf(event.result), "content") ?? [];
+      const payloadObserved = wireArr(details, "payloadModelsObserved")?.[0];
       this.transientSubagents.set(runId, {
         runId,
-        status: details.status === "routing_mismatch" ? "routing_mismatch" : event.isError ? "unknown" : "completed",
-        requestedModel: details.requestedModel ?? previous?.requestedModel,
-        sessionModel: details.primaryModel ?? undefined,
-        payloadModel: details.payloadModelsObserved?.[0],
-        matched: details.status !== "routing_mismatch",
+        status: status === "routing_mismatch" ? "routing_mismatch" : event.isError ? "unknown" : "completed",
+        requestedModel: wireStr(details, "requestedModel") ?? previous?.requestedModel,
+        sessionModel: wireStr(details, "primaryModel"),
+        payloadModel: typeof payloadObserved === "string" ? payloadObserved : undefined,
+        matched: status !== "routing_mismatch",
         startedAt: previous?.startedAt,
         updatedAt: new Date().toISOString(),
-        output: event.result?.content?.map((block: any) => block?.text ?? "").join("").trim() || undefined,
-        stderr: details.stderr || undefined,
+        output: content.map((block) => wireStr(wireOf(block), "text") ?? "").join("").trim() || undefined,
+        stderr: wireStr(details, "stderr") || undefined,
       });
       this.publishTransient();
       setTimeout(() => {
@@ -312,10 +319,10 @@ export class ActivityBridge {
               }
             }
             const routes = routeStat ? parseJsonLines(await fs.readFile(routePath, "utf8").catch(() => "")) : [];
-            const lastRoute = routes[routes.length - 1] as any;
+            const lastRoute = wireOf(routes[routes.length - 1]);
             const output = stdoutStat ? await readTail(stdoutPath, 32 * 1024) : undefined;
             const stderr = stderrStat ? await readTail(stderrPath, 16 * 1024) : undefined;
-            const mismatch = routes.some((route: any) => route?.matched === false);
+            const mismatch = routes.some((route) => wireOf(route)?.matched === false);
             const recentlyActive = Date.now() - newest < 10 * 60_000;
             const status: SubagentActivity["status"] = mismatch
               ? "routing_mismatch"
@@ -324,14 +331,15 @@ export class ActivityBridge {
                 : recentlyActive
                   ? "running"
                   : "unknown";
+            const firstRoute = wireOf(routes[0]);
             return {
               runId: entry.name,
               status,
-              requestedModel: lastRoute?.requestedModel,
-              sessionModel: lastRoute?.sessionModel,
-              payloadModel: lastRoute?.payloadModel,
-              matched: lastRoute?.matched,
-              startedAt: routes[0]?.at,
+              requestedModel: wireStr(lastRoute, "requestedModel"),
+              sessionModel: wireStr(lastRoute, "sessionModel"),
+              payloadModel: wireStr(lastRoute, "payloadModel"),
+              matched: typeof lastRoute?.matched === "boolean" ? lastRoute.matched : undefined,
+              startedAt: wireStr(firstRoute, "at"),
               updatedAt: new Date(newest).toISOString(),
               output: output?.trim() || undefined,
               stderr: stderr?.trim() || undefined,
@@ -344,12 +352,12 @@ export class ActivityBridge {
   }
 }
 
-function parseJsonLines(raw: string): any[] {
-  const values: any[] = [];
+function parseJsonLines(raw: string): unknown[] {
+  const values: unknown[] = [];
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     try {
-      values.push(JSON.parse(line));
+      values.push(JSON.parse(line) as unknown);
     } catch {
       // A writer may be appending the final line; the next poll retries it.
     }
@@ -437,7 +445,7 @@ export class ActivityRegistry {
    *  stream, which always runs under the foregrounded project; the persisted
    *  records surface through each project's own poll. Routing them everywhere
    *  would duplicate the same pending entry once per tracked project. */
-  observeAgentEvent(event: any): void {
+  observeAgentEvent(event: AgentEvent): void {
     if (!this.activeCwd) return;
     this.bridges.get(this.activeCwd)?.observeAgentEvent(event);
   }

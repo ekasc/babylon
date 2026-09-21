@@ -1,4 +1,5 @@
 import type { BrowserWindow, IpcMainInvokeEvent } from "electron";
+import type { IpcHandle } from "./ipc-handle";
 import { validateCommand, validateCwd, validateId, type ProcessManager } from "./process-manager";
 import { validateCwd as validateLspCwd, type LspManager } from "./lsp-manager";
 import type { TaskManager } from "./task-manager";
@@ -7,10 +8,7 @@ import type { Task } from "../src/tasks";
 import type { PiHost } from "./pi-host";
 import { cwdWithin } from "./session-files";
 
-type Handle = (
-  channel: string,
-  listener: (event: IpcMainInvokeEvent, ...args: any[]) => unknown,
-) => void;
+type Handle = IpcHandle;
 
 export function registerLspProcessIpc(
   handle: Handle,

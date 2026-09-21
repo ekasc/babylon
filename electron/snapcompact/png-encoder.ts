@@ -22,7 +22,11 @@ const CRC_TABLE: Uint32Array = (() => {
 
 function crc32(buf: Uint8Array): number {
   let c = 0xFFFFFFFF;
-  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xFF] ^ (c >>> 8);
+  for (let i = 0; i < buf.length; i++) {
+    const b = buf[i];
+    if (b === undefined) continue;
+    c = (CRC_TABLE[(c ^ b) & 0xFF] ?? 0) ^ (c >>> 8);
+  }
   return (c ^ 0xFFFFFFFF) >>> 0;
 }
 
@@ -92,8 +96,9 @@ export function fillRect(
       if (x < 0 || x >= width) continue;
       const byte = (y * Math.ceil(width / 8)) + (x >> 3);
       const bit = 0x80 >>> (x & 7);
-      if (value === 0) pixels[byte] &= ~bit & 0xFF;
-      else pixels[byte] |= bit;
+      const cur = pixels[byte] ?? 0;
+      if (value === 0) pixels[byte] = cur & (~bit & 0xFF);
+      else pixels[byte] = cur | bit;
     }
   }
 }

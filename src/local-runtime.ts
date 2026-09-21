@@ -1,10 +1,29 @@
 import type { RuntimeFacade } from "./runtime-facade";
+import type { LocalPiHost } from "./local-pi-host";
+import { wireOf, wireStr } from "./store";
 import { TaskManager } from "../electron/task-manager";
 import { AttentionManager } from "../electron/attention-manager";
 import { HookManager } from "../electron/hook-manager";
-import { PiHost } from "../electron/pi-host";
-import type { Task } from "./tasks";
+import type {
+  AgentModel,
+  AgentState,
+  CommandInfo,
+  HistoryProjection,
+  PromptImage,
+  RollbackPlan,
+  SessionStats,
+  TurnChanges,
+  TurnFileDiff,
+} from "./bridge";
+import type { GeneratedCommitMessage } from "../electron/git-commit-message";
+import type { PreparedCommitContext } from "../electron/git";
+import type { Recap } from "../electron/recap";
+import type { SessionTreeRow } from "../electron/session-tree";
+import type { SubagentControlAction } from "../electron/subagents";
+import type { ThreadState } from "../electron/threads";
 import type { PiSettings } from "./lib/settings-shared";
+import { toSettingsPatch } from "./lib/settings-patch";
+import type { Task } from "./tasks";
 import {
   evaluateContract,
   type CheckResult,
@@ -15,7 +34,7 @@ export function createLocalRuntime(opts: {
   taskManager: TaskManager;
   attentionManager: AttentionManager;
   hookManager: HookManager;
-  piHost: PiHost;
+  piHost: LocalPiHost;
   contracts: Map<string, CompletionContract>;
 }): RuntimeFacade {
   const { taskManager, attentionManager, hookManager, piHost, contracts } = opts;
@@ -23,28 +42,15 @@ export function createLocalRuntime(opts: {
     async taskList() { return taskManager.list(); },
     async taskGet(id) { return taskManager.get(id) ?? null; },
     async taskCreate(task) {
-      // Use TaskManager's register via direct add to avoid private access
-      // TaskManager doesn't have a direct create from Task, so we use its internal registry via taskManager's public API
-      // For local, we can just add via taskManager's register if task matches TaskResources, otherwise directly insert
-      (taskManager as unknown as { registry: { tasks: Record<string, Task> } }).registry.tasks[task.id] = task;
-      (taskManager as unknown as { broadcast(): void }).broadcast();
-      return task;
+      return taskManager.upsert(task);
     },
     async taskUpdate(id, patch) {
       const t = taskManager.get(id);
       if (!t) throw new Error("unknown task");
-      (taskManager as unknown as { registry: { tasks: Record<string, Task> } }).registry.tasks[id] = { ...t, ...patch } as Task;
-      (taskManager as unknown as { broadcast(): void }).broadcast();
-      return taskManager.get(id)!;
+      return taskManager.upsert({ ...t, ...patch });
     },
     async taskRemove(id) {
-      const before = taskManager.get(id);
-      if (!before) return false;
-      (taskManager as unknown as { registry: { tasks: Record<string, Task> } }).registry.tasks = Object.fromEntries(
-        Object.entries((taskManager as unknown as { registry: { tasks: Record<string, Task> } }).registry.tasks).filter(([k]) => k !== id)
-      );
-      (taskManager as unknown as { broadcast(): void }).broadcast();
-      return true;
+      return taskManager.remove(id);
     },
     async contractGet(id) { return contracts.get(id) ?? null; },
     async contractSet(c) { contracts.set(c.id, c); },
@@ -90,10 +96,23 @@ export function createLocalRuntime(opts: {
     async openSession(o) { return piHost.open(o); },
     async prompt(m, i, s) {
       const behavior = s === "steer" || s === "followUp" ? s : undefined;
-      return piHost.prompt(m, i, behavior);
+      // The facade loosens images to unknown[]; the host needs image
+      // payloads, so malformed entries are dropped at this boundary.
+      const images = Array.isArray(i)
+        ? i.flatMap((entry) => {
+            const data = wireStr(wireOf(entry), "data");
+            if (!data) return [];
+            const mimeType = wireStr(wireOf(entry), "mimeType");
+            return [{ data, ...(mimeType ? { mimeType } : {}) }];
+          })
+        : undefined;
+      return piHost.prompt(m, images, behavior);
     },
     async abort(sessionFile?: string) { return piHost.abort(sessionFile); },
-    async releaseSession(path: string) { return (piHost as any).releaseSession?.(path) ?? { released: false }; },
+    async goalControl(args: string) { return piHost.execGoalCommand(args); },
+    async releaseSession(path: string) {
+      return { released: await piHost.releaseSession(path) };
+    },
     async getState() { return piHost.getState(); },
     async getMessages() { return piHost.getMessages(); },
     async getToolOutput(id) { return piHost.getToolOutput(id); },
@@ -104,10 +123,10 @@ export function createLocalRuntime(opts: {
     async setThinking(l) { return piHost.setThinking(l); },
     async getSettings() { return piHost.getSettings(); },
     async setSettings(p) {
-      // The renderer sends a partial settings object and `saveSettings` merges
-      // it over defaults; enforce object-ness here. Per-field validation is not
-      // done (pre-existing), so a malformed field is still merged through.
-      return piHost.setSettings(p !== null && typeof p === "object" && !Array.isArray(p) ? (p as Partial<PiSettings>) : {});
+      // The renderer sends a partial settings object: validate it the same
+      // way the daemon socket does, so malformed fields reject here instead
+      // of merging through into persistence.
+      return piHost.setSettings(toSettingsPatch(p));
     },
     async setSessionName(n) { return piHost.setSessionName(n); },
     async compact() { return piHost.compact(); },
@@ -121,18 +140,18 @@ export function createLocalRuntime(opts: {
     async getForkMessages() { return piHost.getForkMessages(); },
     async fork(e) { return piHost.fork(e); },
     async clone() { return piHost.clone(); },
-    async generateCommitMessage(c) { return (piHost as any).generateGitCommitMessage(c); },
+    async generateCommitMessage(c) { return piHost.generateGitCommitMessage(c); },
     async getRecaps(f) { return piHost.getRecaps(f); },
     async refreshFromDisk(f) { return piHost.refreshFromDisk(f); },
-    async switchTo(f) { return (piHost as any).switchTo(f); },
-    async respondUi(id, r) { return piHost.respondUi(id, r as any); },
-    async getCommands() { return (piHost as any).getCommands?.() ?? []; },
-    async getActiveSessionFile() { return (piHost as any).activeSessionFile ?? null; },
-    async controlThread(a, id, m) { return (piHost as any).controlThread(a, id, m); },
-    async promoteThread(id) { return (piHost as any).promoteThread(id); },
-    async controlSubagent(a, id, m) { return (piHost as any).controlSubagent(a, id, m); },
-    async promoteSubagent(id) { return (piHost as any).promoteSubagent(id); },
-    async getStats() { return (piHost as any).getStats?.(); },
+    async switchTo(f) { return piHost.switchTo(f); },
+    async respondUi(id, r) { return piHost.respondUi(id, r); },
+    async getCommands() { return piHost.getCommands(); },
+    async getActiveSessionFile() { return piHost.activeSessionFile ?? null; },
+    async controlThread(a, id, m) { return piHost.controlThread(a, id, m); },
+    async promoteThread(id) { return piHost.promoteThread(id); },
+    async controlSubagent(a, id, m) { return piHost.controlSubagent(a, id, m); },
+    async promoteSubagent(id) { return piHost.promoteSubagent(id); },
+    async getStats() { return piHost.getStats(); },
     onTaskUpdate(cb) { return taskManager.subscribe(cb); },
     onAttentionUpdate(cb) { return attentionManager.subscribe(cb); },
     onAgentEvent() { return () => {}; },

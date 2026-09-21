@@ -34,7 +34,7 @@ export function RollbackConfirm({ plan, busy, onCancel, onConfirm }: { plan: Rol
           <div className="mt-4 max-h-52 overflow-y-auto rounded-lg border border-line bg-bg/60 px-3 py-2">
             {plan.changes.map((change) => (
               <div key={change.path} className="flex min-w-0 items-center gap-2 py-1 text-[13px]">
-                <span className={`rollback-file-status is-${change.status}`}>{change.status[0].toUpperCase()}</span>
+                <span className={`rollback-file-status is-${change.status}`}>{(change.status[0] ?? "?").toUpperCase()}</span>
                 <span className="min-w-0 flex-1 truncate text-[12px]">{change.path}</span>
               </div>
             ))}

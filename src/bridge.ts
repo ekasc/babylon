@@ -2,6 +2,7 @@ import type { Task } from "./tasks";
 import type { Bot, BotGroup, BotPatch, DefaultBot, DefaultBotPatch, NewBotInput, NewGroupInput } from "./bots";
 import type { Handoff } from "./handoff";
 import type { PiSettings } from "./lib/settings-shared";
+import type { DurableGoalState } from "./lib/durable-goal";
 import type { SimEmulation, SimViewport } from "./lib/simulator";
 
 export interface SimBounds {
@@ -69,6 +70,60 @@ export interface SessionsUpdate {
   changedPaths: string[];
   version: number;
   source?: "filesystem" | "host";
+}
+
+/** A model entry as it crosses the bridge (pi-host maps the SDK object to
+ *  exactly these fields, so renderer code never depends on SDK internals). */
+export interface AgentModel {
+  provider: string;
+  id: string;
+  name?: string;
+  contextWindow?: number;
+  cost?: { input?: number; output?: number; cacheRead?: number };
+  reasoning?: boolean;
+  supportsImages?: boolean;
+  vision?: boolean;
+  /** Accepted input modalities (e.g. ["text", "image"]). */
+  input?: string[];
+  capabilities?: { vision?: boolean } | null;
+}
+
+/** Live session state as returned by getState(). All fields optional: the
+ *  unavailable-bridge fallback resolves null, and runtimes may omit what
+ *  they don't track. */
+export interface AgentState {
+  model?: AgentModel | null;
+  thinkingLevel?: string;
+  isStreaming?: boolean;
+  isCompacting?: boolean;
+  sessionFile?: string | null;
+  sessionId?: string;
+  sessionName?: string;
+  autoCompactionEnabled?: boolean;
+  messageCount?: number;
+  pendingMessageCount?: number;
+  gitWorktree?: { branch?: string } | null;
+  git?: { branch?: string } | null;
+}
+
+export interface SessionTokenTotals {
+  total?: number;
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+}
+
+/** Session usage as returned by getStats(). */
+export interface SessionStats {
+  userMessages?: number;
+  assistantMessages?: number;
+  toolCalls?: number;
+  toolResults?: number;
+  totalMessages?: number;
+  tokens?: SessionTokenTotals;
+  cost?: number;
+  contextUsage?: { tokens?: number | null; contextWindow?: number; percent?: number | null };
 }
 
 export interface GitFileChange {
@@ -167,17 +222,30 @@ export interface SessionStatus {
   status: "idle" | "starting" | "ready" | "exited" | "error";
   cwd?: string;
   message?: string;
-  state?: any;
+  state?: AgentState | null;
   sessionPath?: string;
   requestId?: number;
   code?: number;
 }
 
+/** Lifecycle states of an agent thread (queued through terminal). */
+export type ThreadStatus =
+  | "queued"
+  | "starting"
+  | "running"
+  | "interrupting"
+  | "idle"
+  | "blocked"
+  | "completed"
+  | "failed"
+  | "stopped"
+  | "interrupted";
+
 export interface ThreadActivity {
   threadId: string;
   name: string | null;
   goal: string;
-  status: string;
+  status: ThreadStatus;
   cwd?: string;
   parentSessionFile?: string | null;
   mode: string;
@@ -270,7 +338,7 @@ export interface WorkflowTokenUsage {
 export interface WorkflowAgentSummary {
   id: number;
   label: string;
-  status: string;
+  status: WorkflowAgentStatus;
   phase?: string;
 }
 
@@ -410,7 +478,7 @@ export interface SessionTreeRow {
 }
 
 export interface SessionWindow {
-  messages: any[];
+  messages: unknown[];
   /** Byte offset of the first message in the window (for older windows). */
   startOffset: number;
 }
@@ -453,6 +521,8 @@ export interface ApprovalRequest {
   id: string;
   action: AgentActionSummary;
   risk: Risk;
+  /** Owning session id for attribution; absent for legacy unattributed requests. */
+  sessionId?: string | null;
 }
 
 export interface PermissionState {
@@ -478,6 +548,19 @@ export interface ProcessSnapshot {
   detectedPorts: number[];
   output: string;
   outputTruncated: boolean;
+}
+
+/** An agent event off the wire. Payload fields beyond `type` are untyped
+ *  until narrowed at the handling site (see store.applyEvent). */
+export interface AgentEvent {
+  type: string;
+  [key: string]: unknown;
+}
+
+/** Image attachment as the renderer sends it (see toPiImages). */
+export interface PromptImage {
+  data: string;
+  mimeType?: string;
 }
 
 export interface Bridge {
@@ -517,10 +600,14 @@ export interface Bridge {
   handoffList(sourceFile: string): Promise<Handoff[]>;
   handoffConsume(handoffId: string, liveFile: string): Promise<{ consumedInto: string }>;
 
-  prompt(message: string, images?: any[], streamingBehavior?: "steer" | "followUp"): Promise<any>;
+  prompt(message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp"): Promise<unknown>;
   /** Abort one session's run (defaults to the foreground session). Other
    *  sessions keep running untouched. */
-  abort(sessionFile?: string): Promise<any>;
+  abort(sessionFile?: string): Promise<unknown>;
+  /** Read a session's durable goal (null when none is set). */
+  goalGet(sessionId: string, cwd: string): Promise<{ goal: DurableGoalState | null }>;
+  /** Run a `/goal …` control invocation; resolves with the fresh durable goal. */
+  goalControl(args: string): Promise<{ goal: DurableGoalState | null }>;
   /** Release an idle session runtime (tab closed). Live runtimes refuse. */
   releaseSession(path: string): Promise<{ released: boolean }>;
   refreshSession(path: string): Promise<boolean>;
@@ -533,9 +620,9 @@ export interface Bridge {
   onCanvasChanged(cb: (event: CanvasChangedEvent) => void): () => void;
   onCanvasScenes(cb: (scenes: CanvasSceneSummary[]) => void): () => void;
 
-  getMessages(): Promise<any[]>;
-  getState(): Promise<any>;
-  getStats(): Promise<any>;
+  getMessages(): Promise<unknown[]>;
+  getState(): Promise<AgentState | null>;
+  getStats(): Promise<SessionStats | null>;
   gitStatus(cwd: string): Promise<GitStatusResult | null>;
   gitStatusDetails(cwd: string): Promise<GitStatusDetails>;
   /** Unified diff of one file's working-tree changes vs HEAD (untracked files diff as all-added). */
@@ -556,16 +643,16 @@ export interface Bridge {
   gitDiscardFile(cwd: string, file: string): Promise<void>;
   gitStageHunk(cwd: string, file: string, patch: string): Promise<void>;
   gitDiscardHunk(cwd: string, file: string, patch: string): Promise<void>;
-  getModels(): Promise<any[]>;
+  getModels(): Promise<AgentModel[]>;
   /** Best-effort pre-warm of a project before its first session. */
-  warmProject(cwd: string): Promise<any>;
+  warmProject(cwd: string): Promise<{ warmed: boolean }>;
   getCommands(): Promise<CommandInfo[]>;
-  setModel(provider: string, modelId: string): Promise<any>;
-  setThinking(level: string): Promise<any>;
+  setModel(provider: string, modelId: string): Promise<unknown>;
+  setThinking(level: string): Promise<unknown>;
   getThinkingLevels(): Promise<string[]>;
   listFonts(): Promise<string[]>;
-  setSessionName(name: string): Promise<any>;
-  compact(): Promise<any>;
+  setSessionName(name: string): Promise<unknown>;
+  compact(): Promise<unknown>;
 
   getTree(): Promise<{ rows: SessionTreeRow[]; leafId: string | null }>;
   getHistory(): Promise<HistoryProjection>;
@@ -634,8 +721,8 @@ export interface Bridge {
   onSessionsUpdate(cb: (payload: SessionsUpdate) => void): () => void;
   onWorkflowsUpdate(cb: (payload: WorkflowUpdatePayload) => void): () => void;
 
-  onAgentEvents(cb: (events: any[]) => void): () => void;
-  onAgentEvent(cb: (event: any) => void): () => void;
+  onAgentEvents(cb: (events: AgentEvent[]) => void): () => void;
+  onAgentEvent(cb: (event: AgentEvent) => void): () => void;
   onStatus(cb: (status: SessionStatus) => void): () => void;
   simOpenTab(url?: string): Promise<SimTabState>;
   simActivate(tabId: string): Promise<SimTabState>;
@@ -783,6 +870,8 @@ export const bridge: Bridge = window.pideck ?? {
 
   prompt: () => Promise.resolve(),
   abort: () => Promise.resolve(),
+  goalGet: () => Promise.resolve({ goal: null }),
+  goalControl: () => Promise.resolve({ goal: null }),
   releaseSession: () => Promise.resolve({ released: false }),
   refreshSession: () => Promise.resolve(false),
 
@@ -809,7 +898,7 @@ export const bridge: Bridge = window.pideck ?? {
   gitStageHunk: () => Promise.reject(new Error("bridge unavailable")),
   gitDiscardHunk: () => Promise.reject(new Error("bridge unavailable")),
   getModels: () => Promise.resolve([]),
-  warmProject: () => Promise.resolve(),
+  warmProject: () => Promise.resolve({ warmed: false }),
   getCommands: () => Promise.resolve([]),
   setModel: () => Promise.resolve(),
   setThinking: () => Promise.resolve(),

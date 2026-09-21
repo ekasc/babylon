@@ -1,6 +1,9 @@
 import type { BrowserWindow, IpcMainInvokeEvent } from "electron";
+import type { IpcHandle } from "./ipc-handle";
 import type { AgentAction, PermissionEngine, Risk } from "./permissions";
+import { isApprovalChoice, isExecutionMode, isPermissionMatch, isPolicyCategory } from "./permissions";
 import type { DaemonClient } from "../src/daemon-client";
+import { wireOf, wireStr } from "../src/store";
 
 type PendingApproval = {
   action: AgentAction;
@@ -10,10 +13,7 @@ type PendingApproval = {
   sessionId: string | null;
 };
 
-type Handle = (
-  channel: string,
-  listener: (event: IpcMainInvokeEvent, ...args: any[]) => unknown,
-) => void;
+type Handle = IpcHandle;
 
 export function registerPermissionsIpc(
   handle: Handle,
@@ -55,8 +55,8 @@ export function registerPermissionsIpc(
     if (!engine) return { mode: "auto" as const, rules: [] };
     return { mode: engine.getMode(), rules: engine.listRules() };
   });
-  handle("pideck:permissions:set-mode", async (_e, mode: string) => {
-    if (mode !== "supervised" && mode !== "auto" && mode !== "full_access") {
+  handle("pideck:permissions:set-mode", async (_e, mode: unknown) => {
+    if (!isExecutionMode(mode)) {
       throw new Error("invalid execution mode");
     }
     if (isDaemonOwned()) {
@@ -66,9 +66,9 @@ export function registerPermissionsIpc(
     }
     const engine = getPermissionEngine();
     if (!engine) throw new Error("permission engine not ready");
-    // Await durability: the renderer acknowledges the new mode, so a failed
-    // write must reject instead of resolving into a lie.
-    await engine.setModeAndPersist(mode as any);
+    // The handler already validated the literal, so the engine receives a
+    // genuine ExecutionMode rather than an asserted string.
+    await engine.setModeAndPersist(mode);
     // A mode change retroactively re-evaluates what the agent is blocked on:
     // under Full Access the pending approvals are no longer required, so
     // release them instead of leaving the agent waiting on stale gates.
@@ -83,30 +83,39 @@ export function registerPermissionsIpc(
     notifyPermissionsChanged();
     return { mode: engine.getMode() };
   });
-  handle("pideck:permissions:add-rule", async (_e, input: any) => {
-    if (!input || typeof input.category !== "string" || (input.decision !== "allow" && input.decision !== "deny")) {
+  handle("pideck:permissions:add-rule", async (_e, input: unknown) => {
+    const rule = wireOf(input);
+    const category = wireStr(rule, "category");
+    const decision = wireStr(rule, "decision");
+    const scope = wireStr(rule, "scope");
+    if (!category || !isPolicyCategory(category) || (decision !== "allow" && decision !== "deny")) {
       throw new Error("invalid rule");
     }
-    if (input.scope !== "always" && input.scope !== "session") {
+    if (scope !== "always" && scope !== "session") {
       throw new Error("invalid rule scope");
     }
+    const match = rule?.match;
+    if (match !== undefined && !isPermissionMatch(match)) {
+      throw new Error("invalid rule match");
+    }
+    const note = wireStr(rule, "note");
     if (isDaemonOwned()) {
       const client = requireDaemonClient();
-      const res = await client.request("permissions.add-rule", input);
+      const res = await client.request("permissions.add-rule", input as Record<string, unknown>);
       return res.payload;
     }
     const engine = getPermissionEngine();
     if (!engine) throw new Error("permission engine not ready");
-    const rule = engine.addRule({
-      category: input.category,
-      decision: input.decision,
-      scope: input.scope,
-      match: input.match,
-      note: input.note,
+    const created = engine.addRule({
+      category,
+      decision,
+      scope,
+      ...(match !== undefined ? { match } : {}),
+      ...(note !== undefined ? { note } : {}),
     });
     await engine.flush();
     notifyPermissionsChanged();
-    return rule;
+    return created;
   });
   handle("pideck:permissions:remove-rule", async (_e, id: string) => {
     if (typeof id !== "string" || id.length < 1 || id.length > 200) throw new Error("invalid rule id");
@@ -123,7 +132,7 @@ export function registerPermissionsIpc(
     return { removed };
   });
   handle("pideck:permissions:resolve-approval", async (_e, payload: { id: string; choice: string }) => {
-    if (!payload || typeof payload.id !== "string" || typeof payload.choice !== "string") {
+    if (!payload || typeof payload.id !== "string" || !isApprovalChoice(payload.choice)) {
       throw new Error("invalid approval resolution");
     }
     if (isDaemonOwned()) {
@@ -136,7 +145,7 @@ export function registerPermissionsIpc(
       getWindow()?.webContents.send("pideck:approval-resolved", { id: payload.id, choice: payload.choice });
       return { ok: true };
     }
-    resolveApproval(payload.id, payload.choice as any);
+    resolveApproval(payload.id, payload.choice);
     return { ok: true };
   });
   // Pending permission approvals, for renderer recovery after reload: the

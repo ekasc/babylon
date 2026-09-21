@@ -7,9 +7,9 @@ const ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz
 export function encode64(data: Uint8Array): string {
   let out = "";
   for (let i = 0; i < data.length; i += 3) {
-    const b1 = data[i];
-    const b2 = i + 1 < data.length ? data[i + 1] : 0;
-    const b3 = i + 2 < data.length ? data[i + 2] : 0;
+    const b1 = data[i] ?? 0;
+    const b2 = i + 1 < data.length ? (data[i + 1] ?? 0) : 0;
+    const b3 = i + 2 < data.length ? (data[i + 2] ?? 0) : 0;
     out += ALPHABET[b1 >> 2];
     out += ALPHABET[((b1 & 0x03) << 4) | (b2 >> 4)];
     if (i + 1 < data.length) out += ALPHABET[((b2 & 0x0f) << 2) | (b3 >> 6)];

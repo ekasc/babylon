@@ -14,8 +14,8 @@ export const defaultLiveness: PidLiveness = (pid) => {
   try {
     process.kill(pid, 0);
     return "live";
-  } catch (error: any) {
-    return error?.code === "ESRCH" ? "dead" : "unknown";
+  } catch (error: unknown) {
+    return (error as NodeJS.ErrnoException)?.code === "ESRCH" ? "dead" : "unknown";
   }
 };
 
@@ -123,8 +123,8 @@ export async function releaseLifecycleLock(lock: LifecycleLock): Promise<void> {
   let owner: Owner;
   try {
     owner = await readOwner(lock.lockPath);
-  } catch (error: any) {
-    if (error?.code === "ENOENT") return;
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return;
     throw error;
   }
   // Never free another holder's lock.

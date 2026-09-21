@@ -15,6 +15,8 @@ import {
   type WorkflowTokenUsage,
 } from "../bridge";
 import { fmtTokens } from "../store";
+import { errorMessage } from "../lib/errors";
+import { wireOf, wireStr } from "../lib/wire";
 import { inScope, isActiveWorkflow, isRunningSubagent, isRunningThread, subagentCwd, threadCwd, workflowCwd } from "../lib/activity";
 import Markdown from "./Markdown";
 import { WorkflowsTimeline } from "./WorkflowsTimeline";
@@ -121,16 +123,26 @@ function extractAgentPrompt(raw: unknown): { text: string; label?: string } {
  *  prompts that triggered them. Once finished, everything collapses to just
  *  the final message. When there are no assistant messages at all the older
  *  fallbacks (output / error / summary) still speak for the run. */
-export function TranscriptContent({ recent, run, thread, live }: { recent?: Array<{ at: string; role: string; text: string }>; run?: any; thread?: any; live: boolean }) {
+/** Optional string field off a typed activity row (legacy payloads carry
+ *  failure text the contract never named). Unknown in, narrowed out. */
+function fieldText(obj: unknown, key: string): string | undefined {
+  return wireStr(wireOf(obj), key);
+}
+
+export function TranscriptContent({ recent, run, thread, live }: { recent?: Array<{ at: string; role: string; text: string }>; run?: SubagentActivity | null; thread?: ThreadActivity | null; live: boolean }) {
   const messages = recent ?? [];
   const agentMessages = messages.filter((m) => m.role === "assistant");
-  if (agentMessages.length) return <MiniChat messages={live ? agentMessages : [agentMessages[agentMessages.length - 1]]} />;
+  if (agentMessages.length) {
+    const last = agentMessages[agentMessages.length - 1];
+    return <MiniChat messages={live ? agentMessages : last !== undefined ? [last] : []} />;
+  }
   if (run?.output) return <Markdown text={clampText(run.output, RUN_OUTPUT_MAX)} />;
-  if ((run as any)?.error || (run as any)?.failureReason) {
+  const failure = (run && (fieldText(run, "error") ?? fieldText(run, "failureReason"))) || undefined;
+  if (failure) {
     return (
       <div className="rounded-lg border border-err/20 bg-err/5 px-3 py-3">
         <p className="text-[13px] font-medium text-err">Subagent failed</p>
-        <p className="mt-1 text-[12px] leading-5 text-err">{(run as any).error ?? (run as any).failureReason}</p>
+        <p className="mt-1 text-[12px] leading-5 text-err">{failure}</p>
       </div>
     );
   }
@@ -167,8 +179,8 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast, cwd = nu
     try {
       setRuns(await bridge.workflowsList());
       setLoadError(null);
-    } catch (e: any) {
-      setLoadError(e?.message ?? "failed to load workflow runs");
+    } catch (e) {
+      setLoadError(errorMessage(e, "failed to load workflow runs"));
     } finally {
       setLoading(false);
     }
@@ -246,8 +258,8 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast, cwd = nu
         }
         setDetail(d);
         setAgent(null);
-      } catch (e: any) {
-        toast("error", e?.message ?? "failed to load run");
+      } catch (e) {
+        toast("error", errorMessage(e, "failed to load run"));
       }
     },
     [toast]
@@ -278,8 +290,8 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast, cwd = nu
           });
         }
         void load();
-      } catch (e: any) {
-        toast("error", e?.message ?? `${action} failed`);
+      } catch (e) {
+        toast("error", errorMessage(e, `${action} failed`));
       }
     },
     [load, toast]
@@ -303,8 +315,8 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast, cwd = nu
         setAgent(null);
         void load();
         toast("info", "run deleted");
-      } catch (e: any) {
-        toast("error", e?.message ?? "delete failed");
+      } catch (e) {
+        toast("error", errorMessage(e, "delete failed"));
       }
     },
     [load, toast]
@@ -468,7 +480,7 @@ function RunList({ runs, onOpen }: { runs: WorkflowRunSummary[]; onOpen(runId: s
   const topPad = needsVirt ? start * ROW_H : 0;
   const botPad = needsVirt ? (total - end) * ROW_H : 0;
   return (
-    <div ref={listRef} onScroll={(e) => setScrollTop((e.target as HTMLDivElement).scrollTop)} className="flex flex-col gap-1.5 overflow-y-auto" style={needsVirt ? { maxHeight: viewportH, contain: "strict" } as any : undefined}>
+    <div ref={listRef} onScroll={(e) => setScrollTop((e.target as HTMLDivElement).scrollTop)} className="flex flex-col gap-1.5 overflow-y-auto" style={needsVirt ? { maxHeight: viewportH, contain: "strict" } : undefined}>
       {needsVirt && <div style={{ height: topPad, flexShrink: 0 }} />}
       {slice.map((r) => {
         const meta = RUN_STATUS[r.status] ?? RUN_STATUS.pending;
@@ -952,8 +964,8 @@ function AgentDetail({ item, toast, onOpenSession, onUpdate }: { item: AgentItem
         onUpdate({ kind: "subagent", run: next });
       }
       toast("info", action === "stop" ? "Agent stopped" : action === "steer" ? "Agent redirected" : "Follow-up sent");
-    } catch (error: any) {
-      toast("error", error?.message ?? `${action} failed`);
+    } catch (error) {
+      toast("error", errorMessage(error, `${action} failed`));
     }
   };
 
@@ -963,8 +975,8 @@ function AgentDetail({ item, toast, onOpenSession, onUpdate }: { item: AgentItem
       if (thread) onUpdate({ kind: "thread", thread: { ...thread, status: "stopped", latestActivity: "Opened as main session" } });
       else onUpdate({ kind: "subagent", run: { ...run!, status: "stopped", controllable: false, latestActivity: "Opened as main session" } });
       onOpenSession?.(target.sessionFile, target.cwd, target.parentSessionFile ?? undefined);
-    } catch (error: any) {
-      toast("error", error?.message ?? "could not open agent as a session");
+    } catch (error) {
+      toast("error", errorMessage(error, "could not open agent as a session"));
     }
   };
 

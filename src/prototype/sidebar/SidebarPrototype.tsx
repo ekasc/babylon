@@ -55,10 +55,10 @@ export function SidebarPrototype() {
       {variant === "A" ? <VariantRail /> : variant === "B" ? <VariantInbox /> : <VariantTimeline />}
       <MockChat />
       <PrototypeSwitcher
-        variants={VARIANTS as unknown as string[]}
+        variants={VARIANTS}
         current={variant}
-        nameFor={(v) => NAMES[v as Variant]}
-        onSelect={(v) => setVariant(v as Variant)}
+        nameFor={(v) => (v === "A" || v === "B" || v === "C" ? NAMES[v] : v)}
+        onSelect={(v) => setVariant(v === "A" || v === "B" || v === "C" ? v : "A")}
       />
     </div>
   );

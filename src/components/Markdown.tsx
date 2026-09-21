@@ -12,8 +12,7 @@ function textOf(node: ReactNode): string {
   if (node == null || typeof node === "boolean") return "";
   if (typeof node === "string" || typeof node === "number") return String(node);
   if (Array.isArray(node)) return node.map(textOf).join("");
-  const el = node as any;
-  if (el?.props?.children != null) return textOf(el.props.children);
+  if (React.isValidElement<{ children?: ReactNode }>(node)) return textOf(node.props.children);
   return "";
 }
 
@@ -25,13 +24,13 @@ function findCode(node: ReactNode): { lang?: string; text: string } | null {
     }
     return null;
   }
-  const el = node as any;
-  if (!el || typeof el !== "object") return null;
+  if (!React.isValidElement<{ children?: ReactNode; className?: string }>(node)) return null;
+  const el = node;
   if (el.type === "code") {
-    const m = /language-([\w+#-]+)/.exec(String(el.props?.className ?? ""));
-    return { lang: m?.[1], text: textOf(el.props?.children) };
+    const m = /language-([\w+#-]+)/.exec(String(el.props.className ?? ""));
+    return { lang: m?.[1], text: textOf(el.props.children) };
   }
-  return findCode(el.props?.children);
+  return findCode(el.props.children);
 }
 
 /** Extract `// !annotation: …` lines from the code body so CodeBlock can render
@@ -42,8 +41,10 @@ function extractAnnotations(code: string): string[] {
   for (const line of code.split("\n")) {
     const m = /^\s*\/\/\s*!\s*@?(\d+)?[: ]+(.*)$/.exec(line);
     if (!m) continue;
+    const body = m[2];
+    if (body === undefined) continue;
     const lineNo = m[1] ? Number(m[1]) : out.length + 1;
-    out[lineNo] = `${lineNo}: ${m[2].trim()}`;
+    out[lineNo] = `${lineNo}: ${body.trim()}`;
   }
   // Filter to only keep lines that match a `1:`, `2:` etc.
   return out.filter(Boolean);
@@ -117,10 +118,15 @@ function renderTextWithMath(text: string, keyBase: string): ReactNode[] {
   let i = 0;
   while ((m = re.exec(text))) {
     if (m.index > last) nodes.push(<span key={`${keyBase}-t-${i++}`}>{text.slice(last, m.index)}</span>);
+    const tex = m[2];
+    if (tex === undefined) {
+      last = m.index + m[0].length;
+      continue;
+    }
     nodes.push(
       <MathBlock
         key={`${keyBase}-m-${i++}`}
-        tex={m[2].trim()}
+        tex={tex.trim()}
         display={m[1] === "BLOCK"}
       />
     );
@@ -139,10 +145,10 @@ function wrapMath(node: ReactNode, keyBase: string): ReactNode {
     return <>{parts}</>;
   }
   if (Array.isArray(node)) return node.map((n, i) => <React.Fragment key={`${keyBase}-${i}`}>{wrapMath(n, `${keyBase}-${i}`)}</React.Fragment>);
-  if (React.isValidElement(node)) {
-    const el = node as any;
-    if (el.props?.children != null) {
-      return React.cloneElement(el, { key: el.key ?? keyBase }, wrapMath(el.props.children, keyBase));
+  if (React.isValidElement<{ children?: ReactNode }>(node)) {
+    const children = node.props.children;
+    if (children != null) {
+      return React.cloneElement(node, { key: node.key ?? keyBase }, wrapMath(children, keyBase));
     }
     return node;
   }
@@ -263,14 +269,14 @@ export default function Markdown({ text }: { text: string }) {
           },
           p: ({ children }) => <p>{wrapMath(children, "p")}</p>,
           li: ({ children, ...rest }) => {
-            const input = (rest as any).checked;
-            if (typeof input === "boolean") {
+            const checked = (rest as { checked?: unknown }).checked;
+            if (typeof checked === "boolean") {
               return (
                 <li className="md-task">
-                  <span className={`md-task-box ${input ? "is-checked" : ""}`} aria-hidden="true">
-                    {input ? "✓" : ""}
+                  <span className={`md-task-box ${checked ? "is-checked" : ""}`} aria-hidden="true">
+                    {checked ? "✓" : ""}
                   </span>
-                  <span className={input ? "md-task-text is-checked" : "md-task-text"}>{wrapMath(children, "li")}</span>
+                  <span className={checked ? "md-task-text is-checked" : "md-task-text"}>{wrapMath(children, "li")}</span>
                 </li>
               );
             }
@@ -280,9 +286,11 @@ export default function Markdown({ text }: { text: string }) {
             const raw = textOf(children);
             const m = /^\[!(NOTE|TIP|WARNING|CAUTION|IMPORTANT)\]\s*/i.exec(raw);
             if (m) {
-              const kind = m[1].toLowerCase();
+              const kindRaw = m[1];
+              if (kindRaw === undefined) return <blockquote>{children}</blockquote>;
+              const kind = kindRaw.toLowerCase();
               const body = raw.slice(m[0].length);
-              return <blockquote className={`callout callout-${kind}`}><strong className="callout-label">{m[1].toUpperCase()}</strong>{body}</blockquote>;
+              return <blockquote className={`callout callout-${kind}`}><strong className="callout-label">{kindRaw.toUpperCase()}</strong>{body}</blockquote>;
             }
             return <blockquote>{children}</blockquote>;
           },

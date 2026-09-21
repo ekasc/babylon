@@ -52,7 +52,7 @@ describe("mermaid import", () => {
 
     it("falls back to the id when there is no text", () => {
       const scene = sceneFromMermaid(graph({ vertices: [{ id: "a" }] }));
-      expect(scene.nodes[0].label).toBe("a");
+      expect(scene.nodes[0]?.label).toBe("a");
     });
   });
 
@@ -156,8 +156,8 @@ describe("mermaid import", () => {
           ],
         })
       );
-      expect(scene.edges[0].dashed).toBe(true);
-      expect(scene.edges[1].dashed).toBeUndefined();
+      expect(scene.edges[0]?.dashed).toBe(true);
+      expect(scene.edges[1]?.dashed).toBeUndefined();
     });
 
     it("drops an edge whose endpoint has no node", () => {

@@ -87,6 +87,7 @@ describe("canvas panel", () => {
     fireEvent.change(input, { target: { value: "Basket" } });
     await waitFor(() => expect(state.writes.length).toBeGreaterThan(0));
     const last = state.writes[state.writes.length - 1];
+    if (last === undefined) throw new Error("missing write");
     // The whole claim of the format: a rename touches one line, so the agent can
     // read the diff and act on it.
     expect(last.split("\n").filter((line, index) => line !== SCENE.split("\n")[index])).toEqual([

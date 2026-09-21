@@ -12,6 +12,7 @@ import {
   type SimViewport,
 } from "../lib/simulator";
 import { SimulatorPanel } from "./SimulatorPanel";
+import { errorMessage } from "../lib/errors";
 import {
   ArrowLeftIcon,
   ArrowRightIcon,
@@ -93,7 +94,7 @@ export function SimSidebar() {
         }
         if (st.tabs.length > 0 && st.activeId) setShowList(false);
       })
-      .catch((e: any) => setBackendError(e?.message ?? "Browser engine unavailable"));
+      .catch((e: unknown) => setBackendError(errorMessage(e, "Browser engine unavailable")));
   }, []);
 
   // Adopt any live tabs, then track the tab mirror + active-tab chrome state.
@@ -202,7 +203,7 @@ export function SimSidebar() {
       .then((r) => {
         if (r?.deviceToolbar !== undefined) setDevicePref({ ...devicePrefs, deviceToolbar: r.deviceToolbar });
       })
-      .catch((e: any) => setSubmitError(e?.message ?? "Browser menu unavailable — restart the app"));
+      .catch((e: unknown) => setSubmitError(errorMessage(e, "Browser menu unavailable — restart the app")));
   };
 
   const submitUrl = () => {
@@ -217,9 +218,9 @@ export function SimSidebar() {
     // with no tabs at all it bootstraps the first one.
     const cur = tabs.find((t) => t.id === activeRef.current);
     if (cur) {
-      bridge.simNavigate(cur.id, clean).catch((e: any) => setSubmitError(e?.message ?? "Navigation failed"));
+      bridge.simNavigate(cur.id, clean).catch((e: unknown) => setSubmitError(errorMessage(e, "Navigation failed")));
     } else {
-      bridge.simOpenTab(clean).catch((e: any) => setSubmitError(e?.message ?? "Could not open tab"));
+      bridge.simOpenTab(clean).catch((e: unknown) => setSubmitError(errorMessage(e, "Could not open tab")));
     }
   };
 

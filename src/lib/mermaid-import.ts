@@ -93,23 +93,30 @@ export function canvasIdMap(graph: MermaidGraph): Map<string, string> {
 
 export function sceneFromMermaid(graph: MermaidGraph): Scene {
   const ids = canvasIdMap(graph);
+  // canvasIdMap assigns every vertex and subgraph id iterated below, so a
+  // miss here is an internal inconsistency, not a data case.
+  const need = (key: string): string => {
+    const v = ids.get(key);
+    if (v === undefined) throw new Error(`missing canvas id for ${key}`);
+    return v;
+  };
   const subGraphIds = new Set(graph.subGraphs.map((subGraph) => subGraph.id));
 
   const nodes: CanvasNode[] = [];
   for (const subGraph of graph.subGraphs) {
-    const id = ids.get(subGraph.id)!;
+    const id = need(subGraph.id);
     nodes.push({ id, kind: "group", label: plainLabel(subGraph.title) || id });
   }
   for (const vertex of graph.vertices) {
     // A subgraph also appears in the vertex map. The group node already covers it.
     if (subGraphIds.has(vertex.id)) continue;
-    const id = ids.get(vertex.id)!;
+    const id = need(vertex.id);
     nodes.push({ id, kind: kindForShape(vertex.type), label: plainLabel(vertex.text) || id });
   }
 
   const byId = new Map(nodes.map((node) => [node.id, node]));
   for (const subGraph of graph.subGraphs) {
-    const parent = ids.get(subGraph.id)!;
+    const parent = need(subGraph.id);
     // A node can only sit in one group, so the last subgraph listing it wins.
     for (const child of subGraph.nodes ?? []) {
       const childId = ids.get(child);
@@ -143,7 +150,9 @@ type MermaidFlowDb = {
 export async function mermaidGraphFromText(text: string): Promise<MermaidGraph> {
   const { default: mermaid } = await import("mermaid");
   mermaid.initialize({ startOnLoad: false, securityLevel: "strict" });
-  const diagram = (await mermaid.mermaidAPI.getDiagramFromText(text)) as unknown as { db?: MermaidFlowDb };
+  const diagram = (await mermaid.mermaidAPI.getDiagramFromText(text)) as {
+    db?: MermaidFlowDb;
+  };
   const db = diagram.db;
   if (!db?.getVertices || !db.getEdges) {
     throw new Error("Only Mermaid flowcharts can be opened on the canvas.");
