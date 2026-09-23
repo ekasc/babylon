@@ -191,6 +191,44 @@ export function compensateMeasuredHeight(args: {
 }
 
 /**
+ * Fold one fresh turn measurement into scroll state. The old height MUST be
+ * the height the current layout actually used (the laid-out value, estimate
+ * included) — never recomputed from the cache after inserting the new
+ * value, which would compare the measurement against itself and drop the
+ * anchor correction for turns above the viewport.
+ */
+export function applyMeasuredHeight(args: {
+  scrollTop: number;
+  turnOffsetTop: number;
+  laidOutHeight: number | undefined;
+  measuredHeight: number;
+  fallback?: number;
+}): { scrollTop: number; store: boolean } {
+  const oldH = args.laidOutHeight ?? args.fallback ?? TURN_FALLBACK_HEIGHT;
+  if (Math.abs(oldH - args.measuredHeight) <= 0.5) return { scrollTop: args.scrollTop, store: false };
+  return {
+    scrollTop: compensateMeasuredHeight({
+      scrollTop: args.scrollTop,
+      turnOffsetTop: args.turnOffsetTop,
+      oldHeight: oldH,
+      newHeight: args.measuredHeight,
+    }),
+    store: true,
+  };
+}
+
+/** True when a column width change materially alters line wrapping (first
+ *  observation only establishes the baseline). */
+export function widthInvalidatesCache(args: {
+  prevWidth: number | null;
+  nextWidth: number;
+  threshold?: number;
+}): boolean {
+  if (args.prevWidth == null) return false;
+  return Math.abs(args.nextWidth - args.prevWidth) > (args.threshold ?? 8);
+}
+
+/**
  * Prepend anchor math: after older turns arrive above, shift scrollTop by
  * the added height above the anchor turn so the same content stays under
  * the viewport. Added heights use measured values where known, estimates

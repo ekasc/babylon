@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   TURN_FALLBACK_HEIGHT,
+  applyMeasuredHeight,
   buildTurnViewModels,
   compensateMeasuredHeight,
   estimateTurnHeight,
@@ -12,6 +13,7 @@ import {
   prependScrollCorrection,
   resolveVisibleTurnRange,
   setMeasuredHeight,
+  widthInvalidatesCache,
   type TurnEntry,
   type TurnMeasurements,
   type TurnViewModel,
@@ -189,8 +191,7 @@ describe("compensateMeasuredHeight", () => {
   });
 });
 
-describe("prependScrollCorrection", () => {
-  it("adds exactly the height that arrived above the anchor", () => {
+describe("prependScrollCorrection", () => {  it("adds exactly the height that arrived above the anchor", () => {
     expect(prependScrollCorrection({ prevScrollTop: 120, prevAnchorOffsetTop: 1000, nextAnchorOffsetTop: 1600 })).toBe(720);
   });
 
@@ -212,6 +213,44 @@ describe("findTurnIndexForItem", () => {
     expect(findTurnIndexForItem(turns, 19)).toBe(2);
     expect(findTurnIndexForItem(turns, 99)).toBe(2);
     expect(findTurnIndexForItem([], 5)).toBe(-1);
+  });
+});
+
+describe("applyMeasuredHeight", () => {
+  it("corrects the anchor against the laid-out height, not the fresh cache", () => {
+    // The regression: an unmeasured overscan turn above the viewport,
+    // laid out at the 320 estimate, measures 100. The correction must be
+    // 1000 + (100 - 320) = 780 — comparing the fresh measurement against
+    // a cache that already contains it yields delta 0 and strands the
+    // viewport 220px too low.
+    expect(
+      applyMeasuredHeight({ scrollTop: 1000, turnOffsetTop: 600, laidOutHeight: 320, measuredHeight: 100 })
+    ).toEqual({ scrollTop: 780, store: true });
+  });
+
+  it("falls back when nothing was laid out and skips noise-level changes", () => {
+    expect(
+      applyMeasuredHeight({ scrollTop: 1000, turnOffsetTop: 600, laidOutHeight: undefined, measuredHeight: 100 })
+    ).toEqual({ scrollTop: 780, store: true });
+    expect(
+      applyMeasuredHeight({ scrollTop: 1000, turnOffsetTop: 600, laidOutHeight: 320, measuredHeight: 320.2 })
+    ).toEqual({ scrollTop: 1000, store: false });
+  });
+
+  it("leaves turns at or below the viewport top alone", () => {
+    expect(
+      applyMeasuredHeight({ scrollTop: 500, turnOffsetTop: 400, laidOutHeight: 300, measuredHeight: 100 })
+    ).toEqual({ scrollTop: 500, store: true });
+  });
+});
+
+describe("widthInvalidatesCache", () => {
+  it("fires only on material changes after a baseline exists", () => {
+    expect(widthInvalidatesCache({ prevWidth: null, nextWidth: 600 })).toBe(false);
+    expect(widthInvalidatesCache({ prevWidth: 810, nextWidth: 600 })).toBe(true);
+    expect(widthInvalidatesCache({ prevWidth: 810, nextWidth: 815 })).toBe(false);
+    expect(widthInvalidatesCache({ prevWidth: 810, nextWidth: 802 })).toBe(false);
+    expect(widthInvalidatesCache({ prevWidth: 810, nextWidth: 801 })).toBe(true);
   });
 });
 

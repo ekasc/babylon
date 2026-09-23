@@ -3,8 +3,8 @@ import type { ChatItem } from "../store";
 import { buildTurnFolds } from "../lib/chat-folds";
 import {
   TURN_OVERSCAN,
+  applyMeasuredHeight,
   buildTurnViewModels,
-  compensateMeasuredHeight,
   estimateTurnHeight,
   findTurnIndexForItem,
   getMeasuredHeight,
@@ -12,6 +12,7 @@ import {
   layoutTurns,
   resolveVisibleTurnRange,
   setMeasuredHeight,
+  widthInvalidatesCache,
   type TurnEntry as Entry,
   type TurnMeasurements,
   type TurnViewModel,
@@ -789,38 +790,61 @@ export default memo(function ChatView({
   // scrollTop by the delta (anchor preservation); anything else only
   // refreshes the cache — notably, an expanding fold never fights the
   // viewport because its turn contains (or sits below) the visible area.
+  // The old height is always the laid-out value (estimate included), read
+  // before the cache insert — never recomputed after it.
   const turnObserver = useRef<ResizeObserver | null>(null);
-  if (turnObserver.current === null && typeof ResizeObserver !== "undefined") {
-    turnObserver.current = new ResizeObserver((records) => {
+  // Last conversation-column width: line wrapping (hence every turn height)
+  // is width-dependent below the 810px column cap, and offscreen turns never
+  // re-measure. A material change drops the whole cache (all sessions share
+  // the width); mounted turns re-measure immediately, the rest on visit.
+  const columnWidthRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver((records) => {
       const el = ref.current;
       const session = sessionKeyRef.current;
       let changed = false;
       for (const record of records) {
         const target = record.target as HTMLElement;
+        // Column entry (no turn id): width invalidation only.
+        if (!target.dataset.turnId) {
+          if (target !== innerRef.current) continue;
+          const width = target.clientWidth;
+          if (widthInvalidatesCache({ prevWidth: columnWidthRef.current, nextWidth: width })) {
+            measureCacheRef.current.clear();
+            changed = true;
+          }
+          columnWidthRef.current = width;
+          continue;
+        }
+        if (!el) continue;
         const id = target.dataset.turnId;
-        if (!id || !el) continue;
         const idx = turnsRef.current.findIndex((t) => t.id === id);
         if (idx < 0) continue;
         const height = target.offsetHeight;
-        const prev = getMeasuredHeight(measureCacheRef.current, session, id);
-        if (prev !== undefined && Math.abs(prev - height) <= 0.5) continue;
-        setMeasuredHeight(measureCacheRef.current, session, id, height);
-        changed = true;
-        const offs = offsetsRef.current;
-        const turnTop = offs[idx] ?? 0;
-        const oldH = prev ?? estimateTurnHeight(measureCacheRef.current, session);
-        const adjusted = compensateMeasuredHeight({
+        const laidOut = heightsRef.current[idx];
+        const { scrollTop: adjusted, store } = applyMeasuredHeight({
           scrollTop: el.scrollTop,
-          turnOffsetTop: turnTop,
-          oldHeight: oldH,
-          newHeight: height,
+          turnOffsetTop: offsetsRef.current[idx] ?? 0,
+          laidOutHeight: laidOut,
+          measuredHeight: height,
         });
+        if (store) {
+          setMeasuredHeight(measureCacheRef.current, session, id, height);
+          changed = true;
+        }
         if (adjusted !== el.scrollTop) el.scrollTop = adjusted;
       }
       if (changed) setHeightsTick((t) => t + 1);
     });
-  }
-  useEffect(() => () => turnObserver.current?.disconnect(), []);
+    turnObserver.current = ro;
+    for (const turnEl of turnEls.current.values()) ro.observe(turnEl);
+    if (innerRef.current) ro.observe(innerRef.current);
+    return () => {
+      ro.disconnect();
+      if (turnObserver.current === ro) turnObserver.current = null;
+    };
+  }, []);
   const trackTurnEl = useCallback(
     (id: string) => (el: HTMLDivElement | null) => {
       const ro = turnObserver.current;
