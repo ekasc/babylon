@@ -34,11 +34,18 @@ interface Props {
 	mentionBots?: import("../bots").Bot[];
 	/** The session's durable goal (hardbaked goal-mode state), as a mini strip joined to the top of the composer. */
 	goal?: import("../lib/durable-goal").DurableGoalState | null;
-	onStartGoal?: (objective: string) => void;
-	onPauseGoal?: () => void;
-	onResumeGoal?: () => void;
-	onFinishGoal?: () => void;
-	onClearGoal?: () => void;
+  onStartGoal?: (objective: string) => void;
+  onPauseGoal?: () => void;
+  onResumeGoal?: () => void;
+  onFinishGoal?: () => void;
+  onClearGoal?: () => void;
+  /** The session's design mode (hardbaked design-mode extension state). No
+      strip is ever rendered — the composer border signals the mode and a
+      pending approval surfaces as one button in the composer row. */
+  design?: import("../../electron/design-mode/store").DesignStatus | null;
+  onToggleDesign?: (draft: string) => void;
+  onApproveDesignBrief?: () => void;
+  onApproveDesignBrand?: () => void;
 }
 
 export default function SessionFooter({
@@ -61,14 +68,18 @@ export default function SessionFooter({
 	dialogs,
 	onDialogDismiss,
 	mentionBots = [],
-	goal = null,
-	onStartGoal = () => {},
-	onPauseGoal = () => {},
-	onResumeGoal = () => {},
-	onFinishGoal = () => {},
-	onClearGoal = () => {},
+  goal = null,
+  onStartGoal = () => {},
+  onPauseGoal = () => {},
+  onResumeGoal = () => {},
+  onFinishGoal = () => {},
+  onClearGoal = () => {},
+  design = null,
+  onToggleDesign = (_draft: string) => {},
+  onApproveDesignBrief = () => {},
+  onApproveDesignBrand = () => {},
 }: Props) {
-	const [goalEditing, setGoalEditing] = useState(false);
+  const [goalEditing, setGoalEditing] = useState(false);
 	// The session controls (permission, model, thinking, run state, usage)
 	// live in the composer surface itself. The footer is just the composer,
 	// not a permanent telemetry dashboard.
@@ -93,10 +104,13 @@ export default function SessionFooter({
 							onPause={onPauseGoal}
 							onResume={onResumeGoal}
 							onFinish={onFinishGoal}
-							onClear={onClearGoal}
-						/>
-					) : null}
-					<Composer
+            onClear={onClearGoal}
+            />
+          ) : null}
+          {/* No design strip, ever. Design mode lives entirely in the
+              composer: accent border signals the mode, and a pending
+              approval surfaces as one button in the composer row. */}
+          <Composer
 						streaming={streaming}
 						steering={steering}
 						followUp={followUp}
@@ -115,10 +129,19 @@ export default function SessionFooter({
 						onCompact={onCompact ?? (() => {})}
 						dialogs={dialogs}
 						onDialogDismiss={onDialogDismiss}
-						mentionBots={mentionBots}
-						goalSet={goal !== null}
-						onStartGoal={() => setGoalEditing(true)}
-					/>
+            mentionBots={mentionBots}
+            goalSet={goal !== null}
+            onStartGoal={() => setGoalEditing(true)}
+            designActive={design?.design !== null && design?.design !== undefined}
+            onToggleDesign={onToggleDesign}
+            designApproval={
+              design?.stage === "brief-confirm"
+                ? { label: "Approve brief", onApprove: onApproveDesignBrief }
+                : design?.stage === "brand"
+                  ? { label: "Approve brand", onApprove: onApproveDesignBrand }
+                  : null
+            }
+          />
 				</div>
 		</div>
 

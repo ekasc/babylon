@@ -35,6 +35,7 @@ import { useRollback } from "./components/hooks/useRollback";
 import { useGitStatus } from "./components/hooks/useGitStatus";
 import { useSidebarState } from "./components/hooks/useSidebarState";
 import { useDurableGoal } from "./components/hooks/useDurableGoal";
+import { useDesignMode } from "./components/hooks/useDesignMode";
 import { usePanels } from "./components/hooks/usePanels";
 import { getNumberWithFallback, getWithFallback, setWithFallback } from "./lib/storage";
 import { useBoolPref, useStringPref, writeBoolPref, writeStringPref } from "./lib/prefs";
@@ -311,6 +312,9 @@ export default function App() {
   // Durable per-session goal (hardbaked goal-mode extension state): the
   // single source of truth the agent itself enforces.
   const { durableGoal, setDurableGoal, goalTargetRef, refreshDurableGoal, goalControl } = useDurableGoal(toast);
+  // Design mode (hardbaked design-mode extension state): the toggleable
+  // phased design flow for this session, same strip pattern as the goal.
+  const { designStatus, setDesignStatus, designTargetRef, refreshDesign, designControl } = useDesignMode(toast);
 
   // Stable identity so the memoized Sidebar does not re-render every frame.
   const renameSession = useCallback(
@@ -818,6 +822,10 @@ export default function App() {
           if (event?.type === "agent_end" || event?.type === "agent_settled") {
             const target = goalTargetRef.current;
             if (target) void refreshDurableGoal(target.sessionId, target.cwd);
+            // Design mode: approvals land as files the agent writes, so the
+            // strip re-reads state + stage for this session on settle.
+            const designTarget = designTargetRef.current;
+            if (designTarget) void refreshDesign(designTarget.sessionId, designTarget.cwd);
           }
           // Session stats: bracket each assistant call (message_start ->
           // message_end) and divide its reported output tokens by that wall
@@ -1310,9 +1318,10 @@ export default function App() {
     }
   }, []);
 
-  // Every "new session" entry point opens the project picker: choose one
-  // of the added projects (most recently used first) and the fresh chat
-  // starts there. A folder outside the list goes through the folder picker.
+  // Every "new session" entry point opens a fresh chat directly in the
+  // active project. The project picker only appears when no project is
+  // active (no space selected and no session open). A folder outside the
+  // list goes through the folder picker.
   const newSessionProjects = useMemo(() => {
     const byCwd = new Map(groups.map((g) => [g.cwd, g.sessions]));
     return spaces.map((cwd) => {
@@ -1323,8 +1332,13 @@ export default function App() {
     });
   }, [spaces, groups]);
   const newSession = useCallback(() => {
+    const cwd = activeSpace ?? status.cwd;
+    if (cwd) {
+      void openSession(undefined, cwd);
+      return;
+    }
     setShowNewSession(true);
-  }, []);
+  }, [activeSpace, status.cwd, openSession]);
   const chooseNewSessionProject = useCallback(
     async (cwd: string) => {
       setShowNewSession(false);
@@ -1856,10 +1870,17 @@ export default function App() {
     if (!goalSessionId || !goalCwd) {
       goalTargetRef.current = null;
       setDurableGoal(null);
-      return;
+    } else {
+      void refreshDurableGoal(goalSessionId, goalCwd);
     }
-    void refreshDurableGoal(goalSessionId, goalCwd);
-  }, [goalSessionId, goalCwd, refreshDurableGoal]);
+    // Design strip follows the same session.
+    if (!goalSessionId || !goalCwd) {
+      designTargetRef.current = null;
+      setDesignStatus(null);
+    } else {
+      void refreshDesign(goalSessionId, goalCwd);
+    }
+  }, [goalSessionId, goalCwd, refreshDurableGoal, refreshDesign]);
 
   // The sidebar's index. Only features that render as panes appear here, because
   // a grid item has to open in the sidebar rather than somewhere else. The rest
@@ -2430,6 +2451,26 @@ export default function App() {
                 }}
                 onClearGoal={() => {
                   void goalControl("clear");
+                }}
+                design={designStatus}
+                onToggleDesign={(draft) => {
+                  // The toggle never invents a subject: on comes from the
+                  // composer draft, off finishes. The "Untitled design"
+                  // fallback below only fires on an empty composer — and the
+                  // system prompt treats it as "subject arrives with the first
+                  // message", so it never surfaces in chat (see prompts.ts).
+                  const subject = draft.trim().slice(0, 120) || "Untitled design";
+                  const d = designStatus;
+                  if (d?.design != null && d.stage !== "done") void designControl("done");
+                  else if (d?.stage === "done")
+                    void designControl("clear").then(() => designControl(`start ${subject}`));
+                  else void designControl(`start ${subject}`);
+                }}
+                onApproveDesignBrief={() => {
+                  void designControl("approve-brief");
+                }}
+                onApproveDesignBrand={() => {
+                  void designControl("approve-brand");
                 }}
               />
               </ErrorBoundary>

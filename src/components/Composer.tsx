@@ -73,6 +73,13 @@ interface Props {
 	goalSet?: boolean;
 	/** Open the goal strip's naming input. */
 	onStartGoal?: () => void;
+	/** True while design mode is on; the Design control stays visible as a toggle. */
+	designActive?: boolean;
+	/** Toggle design mode on/off. Receives the current composer draft so the
+	    toggle-on subject comes from what the user typed — never invented. */
+	onToggleDesign?: (draft: string) => void;
+	/** Pending design approval (brief/brand), if any: one button in the row, never a strip. */
+	designApproval?: { label: string; onApprove(): void } | null;
 }
 
 function trunc(s: string, n = 42): string {
@@ -172,6 +179,9 @@ const Composer = memo(function Composer({
 	mentionBots = [],
 	goalSet = false,
 	onStartGoal,
+	designActive = false,
+	onToggleDesign,
+	designApproval = null,
 }: Props) {
 	const [text, setText] = useState("");
 	const [mode, setMode] = useState<"steer" | "followUp">("followUp");
@@ -583,7 +593,7 @@ const Composer = memo(function Composer({
 					</div>
 				)}
 				<div
-					className="composer-surface group relative flex flex-col"
+					className={`composer-surface group relative flex flex-col ${designActive ? "is-design-mode" : ""}`}
 				>
 					{dialog !== undefined ? (
 						<div role="dialog" aria-modal="true" aria-labelledby="composer-dialog-title" className="border-b border-line px-4 py-3">
@@ -770,6 +780,16 @@ const Composer = memo(function Composer({
 									<button type="button" onClick={onStartGoal} title="Set a durable goal the agent works toward (/goal)" className="operator-meta-control">Goal</button>
 								</span>
 							) : null}
+						{onToggleDesign ? (
+							<span className="flex shrink-0 items-center">
+								<button type="button" onClick={() => onToggleDesign(text)} aria-pressed={designActive} title={designActive ? "Turn design mode off" : "Turn design mode on: interview, brief, brand approval, build"} className={`operator-meta-control ${designActive ? "text-fg underline underline-offset-2" : ""}`}>Design</button>
+							</span>
+						) : null}
+						{designApproval ? (
+							<span className="flex shrink-0 items-center">
+								<button type="button" onClick={designApproval.onApprove} title="Approve and continue the design flow" className="operator-meta-control text-fg underline underline-offset-2">{designApproval.label}</button>
+							</span>
+						) : null}
 							<div className="flex-1" />
 							{streaming && (
 								<span className="flex shrink-0 items-center px-1">

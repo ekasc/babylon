@@ -7,6 +7,7 @@ import { wireOf, wireStr } from "../src/store";
 import type { DaemonClient } from "../src/daemon-client";
 import type { PiHost } from "./pi-host";
 import { loadSessionGoal } from "./goal-mode/store";
+import { loadDesignState, stageOfState, unwrapDesignResult } from "./design-mode/store";
 import { unwrapDurableGoalResult } from "../src/lib/durable-goal";
 
 type Handle = IpcHandle;
@@ -84,6 +85,22 @@ export function registerSessionRuntimeIpc(
       return { goal: unwrapDurableGoalResult(res.payload, "pi.goalControl") };
     }
     return { goal: await getRuntime().goalControl(args) };
+  });
+  handle("pideck:design-get", async (_e, sessionId: string, cwd: string) => {
+    // Same contract as pideck:goal-get: the state file is the shared
+    // source of truth, read straight off disk in both modes.
+    if (typeof sessionId !== "string" || typeof cwd !== "string") throw new Error("invalid design request");
+    const design = await loadDesignState(cwd, sessionId);
+    return { design, stage: stageOfState(cwd, design) };
+  });
+  handle("pideck:design-control", async (_e, args: string) => {
+    if (typeof args !== "string" || args.length > 5000) throw new Error("invalid design control");
+    if (isDaemonOwned()) {
+      const client = requireDaemonClient();
+      const res = await client.request("pi.designControl", { args });
+      return unwrapDesignResult(res.payload, "pi.designControl");
+    }
+    return getRuntime().designControl(args);
   });
   handle("pideck:session:release", async (_e, path: string) => {
     const target = await validateSessionPath(sessionsRoot, path);

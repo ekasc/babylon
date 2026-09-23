@@ -61,6 +61,8 @@ const api: Bridge = {
   abort: (sessionFile?: string) => ipcRenderer.invoke("pideck:abort", { sessionFile }),
   goalGet: (sessionId: string, cwd: string) => ipcRenderer.invoke("pideck:goal-get", sessionId, cwd),
   goalControl: (args: string) => ipcRenderer.invoke("pideck:goal-control", args),
+  designGet: (sessionId: string, cwd: string) => ipcRenderer.invoke("pideck:design-get", sessionId, cwd),
+  designControl: (args: string) => ipcRenderer.invoke("pideck:design-control", args),
   releaseSession: (path: string): Promise<{ released: boolean }> =>
     ipcRenderer.invoke("pideck:session:release", path),
   refreshSession: (path: string): Promise<boolean> => ipcRenderer.invoke("pideck:refresh-session", path),

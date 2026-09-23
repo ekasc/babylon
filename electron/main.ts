@@ -882,7 +882,7 @@ function registerIpc(): void {
     requestEgressApproval: gateCanvasEgress,
   });
 
-  registerRuntimeIpc(handle, { getRuntime, daemonOnly, getWindow: () => win });
+  registerRuntimeIpc(handle, { getRuntime, daemonOnly, getWindow: () => win, getHostReady: () => hostReady });
 
   registerWorktreeIpc(handle, {
     getRuntime,

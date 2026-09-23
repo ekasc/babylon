@@ -186,6 +186,28 @@ describe("composer draft persistence", () => {
   });
 });
 
+describe("composer design toggle", () => {
+  it("passes the composer draft to the toggle and marks the pressed mode", async () => {
+    const onToggleDesign = vi.fn();
+    render(<Composer {...baseProps({ onToggleDesign, designActive: true })} />);
+    const box = screen.getByRole("textbox", { name: "Message Pi" });
+    await userEvent.type(box, "Rehaul the US screen");
+    await userEvent.click(screen.getByRole("button", { name: "Design" }));
+    expect(onToggleDesign).toHaveBeenCalledWith("Rehaul the US screen");
+    expect(screen.getByRole("button", { name: "Design" }).getAttribute("aria-pressed")).toBe("true");
+    expect(document.querySelector(".composer-surface.is-design-mode")).toBeTruthy();
+  });
+
+  it("shows a pending approval as one row button, never a strip", async () => {
+    const onApprove = vi.fn();
+    const { container } = render(
+      <Composer {...baseProps({ onToggleDesign: vi.fn(), designApproval: { label: "Approve brief", onApprove } })} />
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Approve brief" }));
+    expect(onApprove).toHaveBeenCalledTimes(1);
+    expect(container.querySelector(".goal-strip")).toBeNull();
+  });
+});
 describe("composer attachments policy", () => {
   beforeEach(() => {
     window.URL.createObjectURL = vi.fn(() => "blob:mock");

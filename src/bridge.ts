@@ -608,6 +608,10 @@ export interface Bridge {
   goalGet(sessionId: string, cwd: string): Promise<{ goal: DurableGoalState | null }>;
   /** Run a `/goal …` control invocation; resolves with the fresh durable goal. */
   goalControl(args: string): Promise<{ goal: DurableGoalState | null }>;
+  /** Read a session's design state (null when none is set). */
+  designGet(sessionId: string, cwd: string): Promise<import("../electron/design-mode/store").DesignStatus>;
+  /** Run a `/design …` control invocation; resolves with the fresh design state. */
+  designControl(args: string): Promise<import("../electron/design-mode/store").DesignStatus>;
   /** Release an idle session runtime (tab closed). Live runtimes refuse. */
   releaseSession(path: string): Promise<{ released: boolean }>;
   refreshSession(path: string): Promise<boolean>;
@@ -872,6 +876,8 @@ export const bridge: Bridge = window.pideck ?? {
   abort: () => Promise.resolve(),
   goalGet: () => Promise.resolve({ goal: null }),
   goalControl: () => Promise.resolve({ goal: null }),
+  designGet: () => Promise.resolve({ design: null, stage: "idle" as const }),
+  designControl: () => Promise.resolve({ design: null, stage: "idle" as const }),
   releaseSession: () => Promise.resolve({ released: false }),
   refreshSession: () => Promise.resolve(false),
 

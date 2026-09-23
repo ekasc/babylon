@@ -79,9 +79,13 @@ export interface SimEmulation {
   orientation: "portrait" | "landscape";
 }
 
-/** Resolve a preset (+ rotation) to validated CDP emulation parameters. */
+/** Resolve a preset (+ rotation) to validated CDP emulation parameters.
+ *  Throws on an unknown id: silently emulating the wrong device is worse
+ *  than an honest error. (findPreset keeps its UI fallback; the programmatic
+ *  path does not.) */
 export function buildEmulation(presetId: string, rotated: boolean): SimEmulation {
-  const p = findPreset(presetId);
+  const p = SIM_PRESETS.find((preset) => preset.id === presetId);
+  if (!p) throw new Error(`unknown preset ${presetId}`);
   const landscape = p.rotatable && rotated;
   const viewportW = landscape ? p.height : p.width;
   const viewportH = landscape ? p.width : p.height;
@@ -127,6 +131,9 @@ export type SimViewport =
 
 export const SIM_VIEWPORT_MIN = 200;
 export const SIM_VIEWPORT_MAX = 4000;
+
+/** Upper bound on viewports per review capture: each costs a settle + screenshot. */
+export const REVIEW_MAX_VIEWPORTS = 4;
 
 /** Default desktop UA used for fill/freeform (no device impersonation). */
 export const SIM_DESKTOP_UA = SIM_PRESETS[0]?.ua ?? "";

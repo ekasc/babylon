@@ -4,12 +4,15 @@ import {
   checkPreset,
   emulateResult,
   formatTabList,
+  parseReviewSelector,
+  parseReviewViewports,
   parseTabArg,
   parseTabArgOptional,
   requireSelector,
   requireTabId,
   requireUrl,
   reuseTabId,
+  reviewSummary,
   snapshotBody,
   textResult,
 } from "./sim-tool-helpers";
@@ -82,5 +85,47 @@ describe("browser tool arg helpers", () => {
 
   it("wraps plain text results", () => {
     expect(textResult("hi")).toEqual({ content: [{ type: "text", text: "hi" }], details: { text: "hi" } });
+  });
+
+  it("defaults review viewports to mobile + desktop", () => {
+    expect(parseReviewViewports(undefined)).toEqual([
+      { preset: "iphone", rotated: false },
+      { preset: "chrome-laptop", rotated: false },
+    ]);
+    expect(parseReviewViewports(null)).toHaveLength(2);
+  });
+
+  it("validates custom review viewports", () => {
+    expect(parseReviewViewports([{ preset: "pixel", rotated: true }])).toEqual([
+      { preset: "pixel", rotated: true },
+    ]);
+    expect(() => parseReviewViewports([])).toThrow("non-empty array");
+    expect(() => parseReviewViewports("iphone")).toThrow("non-empty array");
+    expect(() => parseReviewViewports([{ preset: "nope" }])).toThrow("unknown preset nope");
+    expect(() => parseReviewViewports([{ rotated: true }])).toThrow("unknown preset (missing)");
+    expect(() => parseReviewViewports([null])).toThrow("each viewport needs a preset");
+    expect(() =>
+      parseReviewViewports([
+        { preset: "iphone" },
+        { preset: "pixel" },
+        { preset: "ipad" },
+        { preset: "chrome-laptop" },
+        { preset: "pixel" },
+      ])
+    ).toThrow("at most 4 viewports");
+  });
+
+  it("parses the optional review ready selector", () => {
+    expect(parseReviewSelector(undefined)).toBeUndefined();
+    expect(parseReviewSelector("  #app ")).toBe("#app");
+    expect(() => parseReviewSelector("")).toThrow("readySelector");
+    expect(() => parseReviewSelector(42)).toThrow("readySelector");
+  });
+
+  it("summarizes a review bundle in one line", () => {
+    const line = reviewSummary("https://a.dev", [{ viewport: "V", width: 100, height: 200 }], 3, 500);
+    expect(line).toContain("https://a.dev");
+    expect(line).toContain("1 viewport(s)");
+    expect(line).toContain("3 error(s)");
   });
 });

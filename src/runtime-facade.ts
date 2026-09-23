@@ -81,6 +81,8 @@ export interface RuntimeFacade {
   getStats(): Promise<unknown>;
   /** Run a `/goal …` control invocation without opening a turn; returns the fresh durable goal. */
   goalControl(args: string): Promise<DurableGoalState | null>;
+  /** Run a `/design …` control invocation; returns the fresh design state. */
+  designControl(args: string): Promise<import("../electron/design-mode/store").DesignStatus>;
   // Lifecycle
   onTaskUpdate(cb: (tasks: Task[]) => void): () => void;
   onAttentionUpdate(cb: (reg: AttentionRegistry) => void): () => void;

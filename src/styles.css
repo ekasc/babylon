@@ -488,6 +488,10 @@ html.dark .sidebar-footer::before{background:var(--line-deep)}
 .goal-strip-input{flex:1;min-width:0;height:26px;padding:4px 9px;font-size:12px}
 .session-footer .composer-surface{box-shadow:0 1px 2px rgba(0,0,0,.06),0 12px 32px -16px rgba(0,0,0,.22);backdrop-filter:none;-webkit-backdrop-filter:none}
 .composer-surface:focus-within{border-color:color-mix(in srgb,var(--focus) 55%,var(--line));box-shadow:0 0 0 3px color-mix(in srgb,var(--focus) 13%,transparent),0 16px 40px -16px rgba(0,0,0,.28)}
+/* Design mode: the composer border alone signals the mode — no strip, no
+ * extra chrome. Accent border at rest, stronger on focus. */
+.composer-surface.is-design-mode{border-color:color-mix(in srgb,var(--accent) 65%,var(--line));box-shadow:0 0 0 1px color-mix(in srgb,var(--accent) 30%,transparent)}
+.composer-surface.is-design-mode:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 22%,transparent),0 16px 40px -16px rgba(0,0,0,.28)}
 /* Floating session-stats card: the composer's surface language, lifted off
  * the stage, so it reads as a detached instrument rather than a docked bar. */
 .stats-card-surface{border-radius:12px;box-shadow:0 1px 2px rgba(0,0,0,.06),0 12px 32px -16px rgba(0,0,0,.22)}

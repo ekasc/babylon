@@ -5,12 +5,15 @@ import {
   checkPreset,
   emulateResult,
   formatTabList,
+  parseReviewSelector,
+  parseReviewViewports,
   parseTabArg,
   parseTabArgOptional,
   requireSelector,
   requireTabId,
   requireUrl,
   reuseTabId,
+  reviewSummary,
   snapshotBody,
   tabParam,
   textResult,
@@ -261,6 +264,77 @@ export function createBrowserTools(getController: () => SimController | null): T
             { type: "image", data: shot.png.toString("base64"), mimeType: "image/png" },
           ],
           details: { width: shot.width, height: shot.height, url: snap?.url ?? null },
+        };
+      },
+    },
+
+    {
+      name: "browser_capture_review",
+      label: "Capture Design Review",
+      description:
+        "Capture a multi-viewport review bundle for a URL: DPR-correct screenshots per viewport (mobile + desktop by default), console errors, page errors, and a text + interactive-element snapshot. Navigates fresh, waits for the page to settle, then captures each viewport in turn. Slow pages cost up to ~20s per viewport; cancelling the call aborts the capture. Use for visual design review passes.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["url"],
+        properties: {
+          url: { type: "string", description: "http(s) URL to review" },
+          viewports: {
+            type: "array",
+            description: "Viewports to capture (default: iPhone + Chrome laptop). Max 4.",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["preset"],
+              properties: {
+                preset: { type: "string", enum: PRESET_IDS, description: "Device/browser preset to emulate" },
+                rotated: { type: "boolean", description: "Landscape for rotatable (mobile) presets" },
+              },
+            },
+          },
+          readySelector: {
+            type: "string",
+            description: "CSS selector to wait for after load settle (e.g. the app root when content hydrates late)",
+          },
+          fullPage: { type: "boolean", description: "Capture beyond the viewport (full page height)" },
+        },
+      },
+      execute: async (_id, raw, signal, onUpdate) => {
+        const ctl = needCtl(getController);
+        onUpdate?.({ content: [{ type: "text", text: "Capturing review bundle…" }], details: {} });
+        const rawRec = raw as {
+          viewports?: unknown;
+          readySelector?: unknown;
+          fullPage?: unknown;
+        } | null | undefined;
+        const bundle = await ctl.captureReview({
+          url: requireUrl(raw, "browser_capture_review"),
+          viewports: parseReviewViewports(rawRec?.viewports),
+          readySelector: parseReviewSelector(rawRec?.readySelector),
+          fullPage: rawRec?.fullPage === true,
+          signal,
+        });
+        const errorCount = bundle.pageErrors.length + bundle.consoleErrors.length;
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: reviewSummary(bundle.url, bundle.screenshots, errorCount, bundle.textSnapshot.length),
+            },
+            ...bundle.screenshots.map((s) => ({
+              type: "image" as const,
+              data: s.png.toString("base64"),
+              mimeType: "image/png" as const,
+            })),
+          ],
+          details: {
+            url: bundle.url,
+            shots: bundle.screenshots.map((s) => ({ viewport: s.viewport, width: s.width, height: s.height })),
+            consoleErrors: bundle.consoleErrors,
+            pageErrors: bundle.pageErrors,
+            textSnapshot: bundle.textSnapshot,
+            axSnapshot: bundle.axSnapshot,
+          },
         };
       },
     },

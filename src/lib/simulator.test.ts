@@ -87,6 +87,10 @@ describe("buildEmulation", () => {
     // Non-rotatable presets ignore rotation.
     expect(buildEmulation("chrome-laptop", true).viewportW).toBe(1440);
   });
+
+  it("throws on unknown presets instead of emulating the wrong device", () => {
+    expect(() => buildEmulation("nope", false)).toThrow("unknown preset nope");
+  });
 });
 
 describe("matchPreset", () => {

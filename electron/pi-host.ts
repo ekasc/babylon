@@ -19,7 +19,9 @@ import { ActiveRollback, RollbackStore, entryDigest, missingCheckpointReason, ty
 import { validateSessionPath, contained } from "./session-path";
 import { SnapshotStore, isBookkeepingPath, type RestoreChange, type SnapshotCapture } from "./snapshot-store";
 import { createGoalModeExtension, isExternalGoalModeExtension } from "./goal-mode/extension";
+import { createDesignModeExtension } from "./design-mode/extension";
 import { loadSessionGoal } from "./goal-mode/store";
+import { loadDesignState, stageOfState, type DesignStatus } from "./design-mode/store";
 import type { DurableGoalState } from "../src/lib/durable-goal";
 import { shouldRelayImagesThrough, toPiImages } from "./prompt-images";
 import { clampToolOutput, readSessionTail, readToolOutput } from "./sessions";
@@ -651,7 +653,7 @@ export class PiHost implements LocalPiHost {
                   return id || null;
                 },
                 isProjectTrusted: () => projectTrusted ?? false,
-                sendFollowUp: (text) => {
+                sendFollowUp: (text: string) => {
                   const session =
                     self.sessionForServices.get(services as object) ??
                     (self.foregroundSessionFile ? self.sessions.get(self.foregroundSessionFile)?.runtime.session : undefined);
@@ -661,6 +663,23 @@ export class PiHost implements LocalPiHost {
                   // least of all inside the daemon.
                   void session.sendUserMessage(text, { deliverAs: "followUp" }).catch((err: unknown) =>
                     console.warn("[pideck] goal follow-up failed:", err instanceof Error ? err.message : err)
+                  );
+                },
+              }),
+              createDesignModeExtension({
+                getCwd: () => runtimeCwd,
+                getSessionId: () => {
+                  const id = self.sessionForServices.get(services as object)?.sessionId ?? "";
+                  return id || null;
+                },
+                sendFollowUp: (text: string) => {
+                  const session =
+                    self.sessionForServices.get(services as object) ??
+                    (self.foregroundSessionFile ? self.sessions.get(self.foregroundSessionFile)?.runtime.session : undefined);
+                  if (!session) return;
+                  // Same fire-and-forget contract as the goal-mode entry above.
+                  void session.sendUserMessage(text, { deliverAs: "followUp" }).catch((err: unknown) =>
+                    console.warn("[pideck] design follow-up failed:", err instanceof Error ? err.message : err)
                   );
                 },
               }),
@@ -988,7 +1007,7 @@ export class PiHost implements LocalPiHost {
         void this.relayPromotedSubagentReply(session, messageText(event.message));
       }
       if (event.type === "message_end" && event.message?.role === "user" && !session.sessionManager.getSessionName()) {
-        void this.suggestSessionName(session);
+        void this.suggestSessionName(session, event.message);
       }
       if (event.type === "message_end" && event.message) {
         const ts = event.message.timestamp;
@@ -1005,19 +1024,24 @@ export class PiHost implements LocalPiHost {
   // persist it via a session_info entry, so the sidebar shows a real name
   // instead of the raw prompt.
   private sessionNaming = new Set<string>();
-  private async suggestSessionName(session: AgentSession): Promise<void> {
+  private async suggestSessionName(session: AgentSession, currentMessage?: unknown): Promise<void> {
     const sessionId = session.sessionId;
     if (this.sessionNaming.has(sessionId)) return;
     this.sessionNaming.add(sessionId);
     try {
       // Under pi >= 0.84.2 the in-memory manager keeps message content out of
-      // getEntries(), so the sample is read from the append-only file.
+      // getEntries(), so the sample is read from the append-only file. The
+      // triggering message is included explicitly: persistence happens after
+      // subscriber notification, so the file can lag one message behind.
       const file = session.sessionFile ?? session.sessionManager.getSessionFile();
       const { messages } = file ? await readSessionTail(file) : { messages: [] };
       const userTexts = messages
         .filter((m) => wireOf(m)?.role === "user")
-        .map((m) => messageText(wireOf(m)?.content))
+        .map((m) => messageText(m))
         .filter((t: string) => t.trim().length > 0);
+      const currentText =
+        wireOf(currentMessage)?.role === "user" ? messageText(currentMessage).trim() : "";
+      if (currentText) userTexts.push(currentText);
       const sample = userTexts.slice(-4).join("\n").slice(0, 1500);
       if (!sample.trim()) return;
       const title = await this.generateSessionTitle(sample, session.sessionManager.getCwd?.() ?? null);
@@ -1666,6 +1690,21 @@ export class PiHost implements LocalPiHost {
     const entry = this.activeEntry();
     await entry.runtime.session.prompt(text, {});
     return loadSessionGoal(entry.cwd, entry.sessionId);
+  }
+  /**
+   * Run a `/design …` control invocation through the foreground session
+   * (same contract as `execGoalCommand`): the extension command runs,
+   * follow-ups dispatch, and the fresh design state is read back. Bare
+   * `/design` only reports, so the strip calls `start`/`resume` explicitly.
+   */
+  async execDesignCommand(args: string): Promise<DesignStatus> {
+    if (this.draining) throw new Error("daemon is draining for restart; please resend in a moment");
+    const text = args ? `/design ${args}` : "/design";
+    if (!/^\/design(\s|$)/.test(text)) throw new Error("design control must be a /design invocation");
+    const entry = this.activeEntry();
+    await entry.runtime.session.prompt(text, {});
+    const design = await loadDesignState(entry.cwd, entry.sessionId);
+    return { design, stage: stageOfState(entry.cwd, design) };
   }
   async steer(message: string): Promise<void> {
     const entry = this.activeEntry();

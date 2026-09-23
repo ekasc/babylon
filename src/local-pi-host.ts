@@ -66,5 +66,7 @@ export interface LocalPiHost {
   releaseSession(sessionFile: string): Promise<boolean>;
   /** Run a `/goal …` control invocation without opening a turn; returns the fresh durable goal. */
   execGoalCommand(args: string): Promise<DurableGoalState | null>;
+  /** Run a `/design …` control invocation; returns the fresh design state. */
+  execDesignCommand(args: string): Promise<import("../electron/design-mode/store").DesignStatus>;
 }
 

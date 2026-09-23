@@ -2,6 +2,9 @@ import { randomUUID } from "node:crypto";
 import { WebContentsView, nativeImage, shell, type BrowserWindow } from "electron";
 import { wireArr, wireOf, wireStr } from "../src/store";
 import {
+  REVIEW_MAX_VIEWPORTS,
+  SIM_PRESETS,
+  buildEmulation,
   effectiveZoom,
   normalizeZoomFactor,
   resolveViewport,
@@ -47,11 +50,49 @@ interface TabState {
    *  successful navigation. Tools fail fast with a recovery hint while set. */
   crashed: boolean;
   crashReason: string | null;
+  /** Error-level console messages since the last review capture (or tab
+   *  creation). Cleared by captureReview before each fresh navigation. */
+  consoleErrors: string[];
+  /** Main-frame load failures + renderer crashes. Same lifetime as above. */
+  pageErrors: string[];
 }
 
 const APPLY_TIMEOUT_MS = 5000;
 const SSHOT_MAX_WIDTH = 1440;
 const TEXT_CAP = 8000;
+
+/** Review capture settle policy (M1): load-stop wait, quiet period, then an
+ *  optional ready-selector poll. Constants, not magic — tune per target
+ *  class (static export vs dev server vs Expo web) from live runs. */
+export const REVIEW_SETTLE_QUIET_MS = 800;
+export const REVIEW_SETTLE_TIMEOUT_MS = 10000;
+export const REVIEW_READY_POLL_MS = 250;
+/** Error buffer caps: newest wins once full. */
+export const REVIEW_CONSOLE_CAP = 100;
+export const REVIEW_CONSOLE_TEXT_CAP = 500;
+export const REVIEW_PAGE_ERROR_CAP = 20;
+
+export interface ReviewViewportRequest {
+  preset: string;
+  rotated?: boolean;
+}
+
+export interface ReviewScreenshot {
+  viewport: string;
+  preset: string;
+  png: Buffer;
+  width: number;
+  height: number;
+}
+
+export interface ReviewBundle {
+  url: string;
+  screenshots: ReviewScreenshot[];
+  consoleErrors: string[];
+  pageErrors: string[];
+  textSnapshot: string;
+  axSnapshot: string;
+}
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -59,6 +100,24 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
     timer = setTimeout(() => reject(new Error("sim command timed out")), ms);
   });
   return Promise.race([p.finally(() => { if (timer) clearTimeout(timer); }), timeout]);
+}
+
+/** Abortable sleep: cancelling the tool call cuts the settle waits short
+ *  instead of riding out the full timeout budget. */
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+  if (signal.aborted) return Promise.reject(new Error("review capture aborted"));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new Error("review capture aborted"));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 /**
@@ -155,6 +214,8 @@ export class SimController {
         loading: true,
         crashed: false,
         crashReason: null,
+        consoleErrors: [],
+        pageErrors: [],
       };
       this.wireTab(tab);
       this.tabs.set(id, tab);
@@ -232,15 +293,36 @@ export class SimController {
       void this.applyEmulation(id);
     });
     wc.on("did-fail-load", (_ev, code, desc, validatedURL, isMainFrame) => {
-      if (isMainFrame && code !== -3) this.deps.notify({ type: "fail", tabId: id, error: desc, url: validatedURL });
+      if (isMainFrame && code !== -3) {
+        const t = this.tabs.get(id);
+        if (t) {
+          t.pageErrors.push(`${validatedURL}: ${desc}`.slice(0, REVIEW_CONSOLE_TEXT_CAP));
+          if (t.pageErrors.length > REVIEW_PAGE_ERROR_CAP) t.pageErrors.shift();
+        }
+        this.deps.notify({ type: "fail", tabId: id, error: desc, url: validatedURL });
+      }
     });
     wc.on("render-process-gone", (_ev, details) => {
       const t = this.tabs.get(id);
       if (t) {
         t.crashed = true;
         t.crashReason = details?.reason ?? "gone";
+        t.pageErrors.push(`renderer crashed (${t.crashReason})`);
+        if (t.pageErrors.length > REVIEW_PAGE_ERROR_CAP) t.pageErrors.shift();
       }
       this.deps.notify({ type: "crashed", tabId: id, reason: details?.reason ?? "gone" });
+    });
+    // Error-level console messages (Chromium logs uncaught page exceptions
+    // here as "Uncaught …" lines). Read from the event details object: the
+    // positional level/message args are deprecated, and on details the level
+    // is a string union ('info' | 'warning' | 'error' | 'debug').
+    wc.on("console-message", (details) => {
+      if (details.level !== "error") return;
+      const t = this.tabs.get(id);
+      if (!t) return;
+      const where = details.sourceId ? ` [${details.sourceId}${details.lineNumber ? `:${details.lineNumber}` : ""}]` : "";
+      t.consoleErrors.push(`${details.message}${where}`.slice(0, REVIEW_CONSOLE_TEXT_CAP));
+      if (t.consoleErrors.length > REVIEW_CONSOLE_CAP) t.consoleErrors.shift();
     });
   }
 
@@ -653,6 +735,132 @@ export class SimController {
       }
     }
     return { url, title, text, a11y };
+  }
+
+  /** Wait for a freshly navigated page to settle: load-stop, quiet period,
+   *  then an optional ready-selector poll. Timeouts proceed with whatever
+   *  has rendered — escalation is the judge loop's job, not the capture's. */
+  private async settleReview(tab: TabState, readySelector?: string, signal?: AbortSignal): Promise<void> {
+    const wc = tab.view.webContents;
+    signal?.throwIfAborted();
+    if (!wc.isDestroyed() && tab.loading) {
+      await new Promise<void>((resolve, reject) => {
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const onAbort = () => {
+          if (timer) clearTimeout(timer);
+          wc.off("did-stop-loading", finish);
+          reject(new Error("review capture aborted"));
+        };
+        const finish = () => {
+          if (timer) clearTimeout(timer);
+          signal?.removeEventListener("abort", onAbort);
+          wc.off("did-stop-loading", finish);
+          resolve();
+        };
+        timer = setTimeout(finish, REVIEW_SETTLE_TIMEOUT_MS);
+        wc.on("did-stop-loading", finish);
+        signal?.addEventListener("abort", onAbort, { once: true });
+        // Load stopped between the check and the subscribe.
+        if (!tab.loading) finish();
+      });
+    }
+    await abortableSleep(REVIEW_SETTLE_QUIET_MS, signal);
+    if (readySelector && !wc.isDestroyed()) {
+      const selector = this.checkSelector(readySelector);
+      const probe = `(() => !!document.querySelector(${JSON.stringify(selector)}))()`;
+      // Fail fast on a bad selector: an invalid selector throws here as an
+      // honest error instead of dying quietly inside the poll loop, which
+      // would screenshot an unsettled page with no signal anything was skipped.
+      await wc.executeJavaScript(probe, true);
+      const deadline = Date.now() + REVIEW_SETTLE_TIMEOUT_MS;
+      for (;;) {
+        signal?.throwIfAborted();
+        let found = false;
+        try {
+          found = (await wc.executeJavaScript(probe, true)) === true;
+        } catch {
+          break; // Guest gone — screenshot/snapshot throw honestly downstream.
+        }
+        if (found || Date.now() >= deadline) break;
+        await abortableSleep(REVIEW_READY_POLL_MS, signal);
+      }
+      // A selector that appears mid-hydration still needs a beat to settle.
+      await abortableSleep(REVIEW_SETTLE_QUIET_MS, signal);
+    }
+  }
+
+  /**
+   * One call turning a URL + brief viewports into a review bundle: fresh
+   * navigation, per-viewport DPR-correct screenshots, console/page errors,
+   * and one text + a11y snapshot. Captures into a dedicated tab so a
+   * background review never navigates away or re-emulates the user's active
+   * tab; the previous tab is re-activated and the review tab closed on the
+   * way out. Serialized so concurrent reviews can't race emulation.
+   */
+  async captureReview(opts: {
+    url: string;
+    viewports: ReviewViewportRequest[];
+    readySelector?: string;
+    fullPage?: boolean;
+    signal?: AbortSignal;
+  }): Promise<ReviewBundle> {
+    const url = sanitizeSimUrl(opts.url);
+    if (!url) throw new Error("sim only loads http(s) URLs");
+    if (!opts.viewports.length) throw new Error("captureReview: at least one viewport is required");
+    if (opts.viewports.length > REVIEW_MAX_VIEWPORTS) {
+      throw new Error(`captureReview: at most ${REVIEW_MAX_VIEWPORTS} viewports per capture`);
+    }
+    for (const v of opts.viewports) {
+      if (!SIM_PRESETS.some((p) => p.id === v.preset)) throw new Error(`unknown preset ${v.preset}`);
+    }
+    return this.serial("review", async () => {
+      const previousActive =
+        this.activeId && this.tabs.has(this.activeId) ? this.activeId : null;
+      const info = await this.openTab({});
+      const tab = this.tabs.get(info.id);
+      if (!tab || tab.view.webContents.isDestroyed()) throw new Error("sim tab is not open");
+      try {
+        tab.consoleErrors = [];
+        tab.pageErrors = [];
+        await tab.view.webContents.loadURL(url);
+        tab.crashed = false;
+        tab.crashReason = null;
+        const screenshots: ReviewScreenshot[] = [];
+        for (const v of opts.viewports) {
+          opts.signal?.throwIfAborted();
+          const rotated = v.rotated === true;
+          await this.setEmulation(tab.id, buildEmulation(v.preset, rotated), "agent");
+          await this.settleReview(tab, opts.readySelector, opts.signal);
+          const shot = await this.screenshot(tab.id, { fullPage: opts.fullPage });
+          const label = SIM_PRESETS.find((p) => p.id === v.preset)?.label ?? v.preset;
+          screenshots.push({
+            viewport: rotated ? `${label} (landscape)` : label,
+            preset: v.preset,
+            png: shot.png,
+            width: shot.width,
+            height: shot.height,
+          });
+        }
+        const snap = await this.snapshot(tab.id, { a11y: true });
+        return {
+          url: snap.url,
+          screenshots,
+          consoleErrors: [...tab.consoleErrors],
+          pageErrors: [...tab.pageErrors],
+          textSnapshot: snap.text,
+          axSnapshot: snap.a11y,
+        };
+      } finally {
+        await this.closeTab(info.id).catch(() => undefined);
+        if (previousActive) {
+          try {
+            await this.activate(previousActive);
+          } catch {
+            /* user closed it mid-review */
+          }
+        }
+      }
+    });
   }
 
   /**

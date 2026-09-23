@@ -7,7 +7,7 @@
  * preset checks, and result formatting. Same error strings as the inline
  * versions so agent-visible behavior is unchanged.
  */
-import { SIM_PRESETS } from "../src/lib/simulator";
+import { REVIEW_MAX_VIEWPORTS, SIM_PRESETS } from "../src/lib/simulator";
 
 export const PRESET_IDS = SIM_PRESETS.map((p) => p.id);
 
@@ -93,4 +93,63 @@ export function snapshotBody(snap: SnapshotLike): string {
   const body = [`URL: ${snap.url}\nTitle: ${snap.title || "(none)"}\n\n${snap.text || "(no text)"}`];
   if (snap.a11y) body.push(`Interactive elements (click/fill with selector "ref:N"):\n${snap.a11y}`);
   return body.join("\n\n");
+}
+
+export interface ReviewViewportArg {
+  preset: string;
+  rotated: boolean;
+}
+
+/** Brief-driven viewports, mobile + desktop minimum. Absent means the default pair. */
+export const REVIEW_DEFAULT_VIEWPORTS: ReviewViewportArg[] = [
+  { preset: "iphone", rotated: false },
+  { preset: "chrome-laptop", rotated: false },
+];
+
+/** Validated viewport list for browser_capture_review: defaults, preset checks, cap. */
+export function parseReviewViewports(raw: unknown): ReviewViewportArg[] {
+  if (raw === undefined || raw === null) return [...REVIEW_DEFAULT_VIEWPORTS];
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new Error("browser_capture_review: viewports must be a non-empty array");
+  }
+  if (raw.length > REVIEW_MAX_VIEWPORTS) {
+    throw new Error(`browser_capture_review: at most ${REVIEW_MAX_VIEWPORTS} viewports per capture`);
+  }
+  return raw.map((entry) => {
+    if (!entry || typeof entry !== "object") {
+      throw new Error("browser_capture_review: each viewport needs a preset");
+    }
+    const rec = entry as { preset?: unknown; rotated?: unknown };
+    return { preset: checkPreset(rec.preset), rotated: rec.rotated === true };
+  });
+}
+
+/** Optional ready selector for browser_capture_review: undefined when absent. */
+export function parseReviewSelector(raw: unknown): string | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "string" || !raw.trim() || raw.length > 500) {
+    throw new Error("browser_capture_review: readySelector must be a non-empty CSS selector (≤500 chars)");
+  }
+  return raw.trim();
+}
+
+export interface ReviewShotLike {
+  viewport: string;
+  width: number;
+  height: number;
+}
+
+/** One-line tool summary for a captured review bundle. */
+export function reviewSummary(
+  url: string,
+  shots: ReviewShotLike[],
+  errorCount: number,
+  textChars: number
+): string {
+  const sizes = shots.map((s) => `${s.viewport} ${s.width}×${s.height}`).join("; ");
+  return (
+    `Review capture of ${url}: ${shots.length} viewport(s) (${sizes}). ` +
+    `${errorCount} error(s), ${textChars} text chars. ` +
+    `Console/page errors and the text snapshot are in details.`
+  );
 }

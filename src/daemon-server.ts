@@ -104,6 +104,8 @@ export interface DaemonPiHost {
   prompt(message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp"): Promise<unknown>;
   /** Run a `/goal …` control invocation without opening a turn; returns the fresh durable goal. */
   execGoalCommand(args: string): Promise<DurableGoalState | null>;
+  /** Run a `/design …` control invocation; returns the fresh design state. */
+  execDesignCommand(args: string): Promise<import("../electron/design-mode/store").DesignStatus>;
   abort(sessionFile?: string): Promise<unknown>;
   respondUi(id: string, resp: unknown): void;
   notifyDiagnostics(diagnostics: PiDiagnostic[]): Promise<void>;
@@ -742,6 +744,16 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
               // Wrapped so a missing goal reads as null, never a bare
               // non-object payload.
               payload = { goal: await piHost.execGoalCommand(args) };
+              break;
+            }
+            case "pi.designControl": {
+              const { args } = request.payload as { args?: unknown };
+              if (typeof args !== "string") {
+                send(socket, createEnvelope("response", "error", { error: "pi.designControl requires { args }" }, request.id));
+                return;
+              }
+              // Same shape as the goal branch: missing design reads as null.
+              payload = await piHost.execDesignCommand(args);
               break;
             }
             case "pi.ui.respond": {

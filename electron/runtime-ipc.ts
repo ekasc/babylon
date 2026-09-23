@@ -13,12 +13,33 @@ export function registerRuntimeIpc(
     getRuntime: () => RuntimeFacade;
     daemonOnly: () => DaemonClient | null;
     getWindow: () => BrowserWindow | null;
+    getHostReady: () => Promise<void> | null;
   },
 ): void {
-  const { getRuntime, daemonOnly, getWindow } = deps;
+  const { getRuntime, daemonOnly, getWindow, getHostReady } = deps;
+  /**
+   * Early-boot calls race startHost(): the renderer boots faster than the
+   * login-shell import + daemon handshake, so `hostReady` may not even be
+   * assigned yet. Wait for the host instead of throwing the named
+   * early-startup error. Bounded: a stuck startup still surfaces a real
+   * error from getRuntime() rather than hanging the caller forever.
+   */
+  const awaitHostReady = async (): Promise<void> => {
+    const startedAt = Date.now();
+    for (;;) {
+      const ready = getHostReady();
+      if (ready) {
+        await ready;
+        return;
+      }
+      if (Date.now() - startedAt > 30_000) return;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  };
   handle("pideck:get-models", () => getRuntime().getModels());
-  handle("pideck:warm-project", (_e, cwd: unknown) => {
+  handle("pideck:warm-project", async (_e, cwd: unknown) => {
     if (typeof cwd !== "string" || cwd.length < 1 || cwd.length > 4096) throw new Error("invalid project path");
+    await awaitHostReady();
     return getRuntime().warmProject(cwd);
   });
   handle("pideck:get-commands", () => getRuntime().getCommands());
@@ -74,7 +95,10 @@ export function registerRuntimeIpc(
     const sorted = ["System Default", ...cleaned.filter((f) => f !== "System Default")];
     return sorted;
   });
-  handle("pideck:get-settings", () => getRuntime().getSettings());
+  handle("pideck:get-settings", async () => {
+    await awaitHostReady();
+    return getRuntime().getSettings();
+  });
   handle("pideck:set-settings", (_e, patch: unknown) => getRuntime().setSettings(patch));
   handle("pideck:set-session-name", (_e, name: string) => {
     if (typeof name !== "string" || name.length > 500) throw new Error("invalid session name");

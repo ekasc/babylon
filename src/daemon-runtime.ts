@@ -16,6 +16,7 @@ import type { HookDefinition } from "./hooks";
 import type { AttentionRegistry } from "./attention";
 import type { DaemonClient } from "./daemon-client";
 import { unwrapDurableGoalResult } from "./lib/durable-goal";
+import { unwrapDesignResult } from "../electron/design-mode/store";
 
 /**
  * Socket-payload validators. The daemon speaks over a local socket, and a
@@ -288,6 +289,10 @@ export function createDaemonRuntime(client: DaemonClient): RuntimeFacade {
     async goalControl(args) {
       const res = await client.request("pi.goalControl", { args });
       return unwrapDurableGoalResult(res.payload, "pi.goalControl");
+    },
+    async designControl(args) {
+      const res = await client.request("pi.designControl", { args });
+      return unwrapDesignResult(res.payload, "pi.designControl");
     },
     async getState() {
       const res = await client.request("pi.getState", {});

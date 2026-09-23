@@ -69,6 +69,7 @@ function fakePiHost(overrides: Partial<DaemonPiHost>): DaemonPiHost {
     controlSubagent: fail("controlSubagent"),
     promoteSubagent: fail("promoteSubagent"),
     execGoalCommand: fail("execGoalCommand"),
+    execDesignCommand: fail("execDesignCommand"),
     getState: fail("getState"),
     getMessages: fail("getMessages"),
     getStats: fail("getStats"),
