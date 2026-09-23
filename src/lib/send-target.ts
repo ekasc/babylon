@@ -2,7 +2,7 @@
  * Prompt-target resolution for sends (see App send()).
  *
  * The target must resolve from the live active-path ref AFTER the session
- * warmup wait — never from the render closure's activeSessionPath /
+ * warmup wait — never from the render closure's viewedSessionPath /
  * status.sessionPath, which may still point at the previous session
  * (A → New Session → send before ready would otherwise deterministically
  * target A once explicit session routing exists). The epoch guard rejects

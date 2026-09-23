@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { PiHost, type HostOptions } from "./pi-host";
-import { isProjectExecutionBusy } from "../src/execution";
+import { isProjectExecutionBusy, type ProjectExecution } from "../src/execution";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -35,14 +35,16 @@ async function makeSessionFile(cwd: string) {
 
 function makeHost(cwd: string, agentDir: string) {
   const statuses: Array<Parameters<HostOptions["onStatus"]>[0]> = [];
+  const ownershipPushes: ProjectExecution[] = [];
   const host = new PiHost({
     cwd,
     agentDir,
     stateDir: join(agentDir, "pideck-state"),
     onEvent: () => undefined,
     onStatus: (s) => statuses.push(s),
+    onExecutionChanged: (execution) => ownershipPushes.push(execution),
   });
-  return { host, statuses };
+  return { host, statuses, ownershipPushes };
 }
 
 /** Shadow the streaming getter on a retained session (instance property
@@ -274,6 +276,38 @@ describe("deactivateExecution", () => {
       expect(await host.deactivateExecution(cwd, fileA1)).toBe(true);
       expect(host.executionForCwd(cwd)).toBeNull();
       expect(host.testSessions().size).toBe(0);
+    } finally {
+      await host.dispose();
+    }
+  }, 60_000);
+});
+
+describe("execution ownership push (pideck_execution_changed producer)", () => {
+  it("emits on activate and transfer with rising generations; view never emits", async () => {
+    const { cwd, agentDir } = await makeProject("push");
+    const { host, ownershipPushes } = makeHost(cwd, agentDir);
+    await host.start();
+    try {
+      const fileA1 = await makeSessionFile(cwd);
+      const fileA2 = await makeSessionFile(cwd);
+      // I3: plain view (open) produces no ownership push.
+      await host.open({ path: fileA1, cwd });
+      expect(ownershipPushes).toHaveLength(0);
+
+      await host.activateExecution(cwd, fileA1);
+      await new Promise((r) => setTimeout(r, 20)); // fire-and-forget emit
+      expect(ownershipPushes).toHaveLength(1);
+      expect(ownershipPushes[0]?.cwd).toBe(cwd);
+      expect(ownershipPushes[0]?.sessionFile).toBe(fileA1);
+      expect(ownershipPushes[0]?.generation).toBe(1);
+
+      // Idle transfer emits the new owner with a higher generation; the
+      // renderer merge rejects anything older than what it stored.
+      await host.activateExecution(cwd, fileA2);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(ownershipPushes).toHaveLength(2);
+      expect(ownershipPushes[1]?.sessionFile).toBe(fileA2);
+      expect(ownershipPushes[1]?.generation).toBe(2);
     } finally {
       await host.dispose();
     }

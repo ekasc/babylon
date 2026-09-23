@@ -65,6 +65,7 @@ const api: Bridge = {
   executionActivate: (cwd: string, sessionFile?: string) => ipcRenderer.invoke("pideck:execution-activate", { cwd, sessionFile }),
   executionDeactivate: (cwd: string, expectedSessionFile: string) =>
     ipcRenderer.invoke("pideck:execution-deactivate", { cwd, expectedSessionFile }),
+  onExecutionChanged: (cb) => on("pideck_execution_changed", cb),
   beginGoalPrompt: (sessionFile: string, objective: string, message: string, images?: unknown[], streamingBehavior?: string) =>
     ipcRenderer.invoke("pideck:goal-begin-prompt", { sessionFile, objective, message, images, streamingBehavior }),
   designGet: (sessionId: string, cwd: string) => ipcRenderer.invoke("pideck:design-get", sessionId, cwd),

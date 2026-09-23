@@ -283,7 +283,7 @@ describe("computeRuntimeByPath", () => {
     attention: createAttentionRegistry(),
     activity: { threads: [], subagents: [] },
     workflowRuns: [],
-    activeSessionPath: null as string | null,
+    viewedSessionPath: null as string | null,
     streaming: false,
     activeSessionId: "",
     bots: [] as Array<{ id: string; mainSessionFile: string | null; sessionsByProject?: Record<string, string> }>,
@@ -310,7 +310,7 @@ describe("computeRuntimeByPath", () => {
   });
 
   it("escalates the active session to working when streaming", () => {
-    const map = computeRuntimeByPath({ ...base(), activeSessionPath: "/a.json", streaming: true });
+    const map = computeRuntimeByPath({ ...base(), viewedSessionPath: "/a.json", streaming: true });
     expect(map["/a.json"]?.execution).toBe("working");
   });
 

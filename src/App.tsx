@@ -29,6 +29,14 @@ import {
 import { insertCommand } from "./commands";
 import { countRunningWork } from "./lib/activity";
 import { errorMessage, isSessionNotFound } from "./lib/errors";
+import {
+  indexExecutions,
+  mergeExecution,
+  showViewLanding,
+  viewSession as viewSessionImpl,
+  type ViewNavigationDeps,
+} from "./lib/view-navigation";
+import type { ProjectExecution } from "./execution";
 import { clampHard, clampWithRubberband } from "./lib/gesture-math";
 import { resolveSendTarget } from "./lib/send-target";
 import Sidebar from "./components/Sidebar";
@@ -162,7 +170,7 @@ export default function App() {
   // Settings saves clear the models map (context-window overrides remap it).
   const modelsCacheRef = useRef(new Map<string, AgentModel[]>());
   const levelsCacheRef = useRef(new Map<string, string[]>());
-  // Project of the session on screen, tracked alongside activePathRef
+  // Project of the session on screen, tracked alongside viewedPathRef
   // (openSession targets it explicitly; ready statuses carry it).
   const activeCwdRef = useRef<string | null>(null);
 
@@ -225,7 +233,7 @@ export default function App() {
   const [promotedParent, setPromotedParent] = useState<{ path: string; cwd: string } | null>(null);
   // Optimistic active session: set synchronously on click so the sidebar row
   // highlights instantly; the host's status confirm later keeps it exact.
-  const [activeSessionPath, setActiveSessionPath] = useState<string | null>(null);
+  const [viewedSessionPath, setViewedSessionPath] = useState<string | null>(null);
 
   // "Preparing…" only appears if the host stays not-ready past a beat, fast
   // switches (now <100ms) never flash it; cold first-opens still get the hint.
@@ -273,15 +281,15 @@ export default function App() {
   // only the latest token holder may clear the flag. A boolean alone lets
   // a stale refresh clear a newer tab switch's in-flight state.
   const switchGenerationRef = useRef(0);
-  const claimSwitch = () => {
+  const claimSwitch = useCallback(() => {
     switchingRef.current = true;
     return ++switchGenerationRef.current;
-  };
-  const releaseSwitch = (token: number) => {
+  }, []);
+  const releaseSwitch = useCallback((token: number) => {
     if (token === switchGenerationRef.current) switchingRef.current = false;
-  };
+  }, []);
   const liveReadyRef = useRef(false);
-  const activePathRef = useRef<string | null>(null);
+  const viewedPathRef = useRef<string | null>(null);
   // Event-driven execution per session path (all sessions, not just the open
   // one). Updated from every agent event batch; keyed by path so background
   // runs survive navigation and switching never redefines what is alive.
@@ -334,6 +342,14 @@ export default function App() {
   // message as the subject and starts the interview turn itself.
   const [designArmed, setDesignArmed] = useState(false);
   const [designPendingSubject, setDesignPendingSubject] = useState<string | null>(null);
+  /** Composer intent (Goal/Design arming) is view-bound: a new view or
+   *  landing clears it. Backend state is untouched — it settles on its own. */
+  const clearComposerArmings = useCallback(() => {
+    setGoalArmed(false);
+    setGoalPendingObjective(null);
+    setDesignArmed(false);
+    setDesignPendingSubject(null);
+  }, []);
 
   // Design mode (hardbaked design-mode extension state): the toggleable
   // phased design flow for this session, same strip pattern as the goal.
@@ -354,12 +370,12 @@ export default function App() {
     setDesignArmed((armed) => !armed);
   }, [designStatus, goalArmed, goalPendingObjective, durableGoal, toast]);
   const endDesign = useCallback(async () => {
-    const target = activePathRef.current;
+    const target = viewedPathRef.current;
     if (!target) return;
     await designControl(target, "done");
   }, [designControl]);
   const restartDesign = useCallback(async () => {
-    const target = activePathRef.current;
+    const target = viewedPathRef.current;
     if (!target) return;
     setDesignArmed(true);
     await designControl(target, "clear");
@@ -376,7 +392,7 @@ export default function App() {
       // means "stop pursuing", never "mark done" (only the model reaching
       // the stopping condition completes). Path-addressed — the foreground
       // may move before the backend handles it.
-      const target = activePathRef.current;
+      const target = viewedPathRef.current;
       setGoalArmed(false);
       setGoalPendingObjective(null);
       if (!target) return;
@@ -437,7 +453,7 @@ export default function App() {
       if (!prev.tabs.some((t) => t.path === path)) return prev;
       return { ...prev, tabs: prev.tabs.filter((t) => t.path !== path) };
     });
-    if (path === activePathRef.current && cwd) closeTab(path);
+    if (path === viewedPathRef.current && cwd) closeTab(path);
   });
   const unsettleSession = useEffectEvent((path: string) => {
     setSettled((prev) => {
@@ -620,20 +636,20 @@ export default function App() {
           type: "permission",
           title: "Approval required",
           detail: req.action.description ?? req.action.category,
-          source: source ?? activeSessionPath ?? status.sessionPath ?? undefined,
+          source: source ?? viewedSessionPath ?? status.sessionPath ?? undefined,
           createdAt: Date.now(),
           resolved: false,
         })
       );
     },
-    [activeSessionPath, status.sessionPath]
+    [viewedSessionPath, status.sessionPath]
   );
   useEffect(() => {
     return bridge.onApprovalRequested((req) => {
       registerApproval(req);
       // The gated run is live on the active session: reflect approval in the
       // canonical execution so rows/dock agree while it waits.
-      const ap = activePathRef.current;
+      const ap = viewedPathRef.current;
       if (ap) {
         const seq = ++runtimeSeqRef.current;
         setExecutions((prev) => applyRuntimeEvent(prev, { type: "extension_ui_request" }, { path: ap, seq, now: Date.now() }));
@@ -721,7 +737,7 @@ export default function App() {
         return;
       }
       toast("info", "Pi runtime reconnected");
-      setExecutions((prev) => reconcileAfterReconnect(prev, activePathRef.current));
+      setExecutions((prev) => reconcileAfterReconnect(prev, viewedPathRef.current));
       bridge.getState().then(setAgentState).catch(() => undefined);
       bridge
         .activityList()
@@ -739,7 +755,7 @@ export default function App() {
     return bridge.onApprovalResolved((payload) => {
       setAttention((prev) => removeAttention(prev, `perm-${payload.id}`));
       const sid = payload.sessionId ?? null;
-      const ap = (sid && sessionIdToPathRef.current.get(sid)) || activePathRef.current;
+      const ap = (sid && sessionIdToPathRef.current.get(sid)) || viewedPathRef.current;
       if (ap) {
         const seq = ++runtimeSeqRef.current;
         const at = Date.now();
@@ -769,20 +785,20 @@ export default function App() {
     // handler's epoch/path from before the disk sync). Defaults to entry
     // time for direct callers (settle handler, compaction resync).
     const expectedEpoch = opts?.forEpoch ?? epochRef.current;
-    const expectedPath = opts?.forPath !== undefined ? opts.forPath : activePathRef.current;
+    const expectedPath = opts?.forPath !== undefined ? opts.forPath : viewedPathRef.current;
     try {
-      const activePath = activePathRef.current;
+      const activePath = viewedPathRef.current;
       if (!opts?.skipRefresh && activePath) await bridge.refreshSession(activePath).catch(() => false);
       // A newer switch started while syncing, or the foreground moved on:
       // the data below belongs to the old session — drop it, never bind.
-      if (expectedEpoch !== epochRef.current || expectedPath !== activePathRef.current) return;
+      if (expectedEpoch !== epochRef.current || expectedPath !== viewedPathRef.current) return;
       const [msgs, st, statsData, nextHistory] = await Promise.all([
         bridge.getMessages(),
         bridge.getState(),
         bridge.getStats(),
         bridge.getHistory(),
       ]);
-      if (expectedEpoch !== epochRef.current || expectedPath !== activePathRef.current) return;
+      if (expectedEpoch !== epochRef.current || expectedPath !== viewedPathRef.current) return;
       dispatch({ type: "rebuild", messages: msgs });
       setAgentState(st);
       setStats(statsData);
@@ -806,7 +822,7 @@ export default function App() {
     void refreshSessions();
     return bridge.onSessionsUpdate((update) => {
       setGroups(update.groups);
-      const activePath = activePathRef.current;
+      const activePath = viewedPathRef.current;
       if (
         update.source !== "host" &&
         activePath &&
@@ -831,7 +847,7 @@ export default function App() {
             if (
               refreshed &&
               refreshEpoch === epochRef.current &&
-              refreshPath === activePathRef.current
+              refreshPath === viewedPathRef.current
             ) {
               void resyncFromSource({ skipRefresh: true, forEpoch: refreshEpoch, forPath: refreshPath });
             }
@@ -872,7 +888,7 @@ export default function App() {
         sessionId ?? null,
         activeSessionIdRef.current,
         sessionIdToPathRef.current,
-        activePathRef.current,
+        viewedPathRef.current,
         requireKnown
       ),
     []
@@ -925,7 +941,7 @@ export default function App() {
               // A run that finishes while you look elsewhere is unread work.
               if (
                 (event?.type === "agent_settled" || event?.type === "agent_end") &&
-                rp !== activePathRef.current
+                rp !== viewedPathRef.current
               ) {
                 markUnread(rp);
               }
@@ -958,7 +974,7 @@ export default function App() {
   const hydrate = useCallback(async (expectedEpoch = epochRef.current) => {
     // Cache keys captured at entry (epoch+path guarded below, so a switch
     // mid-flight drops the whole result — keys cannot leak across sessions).
-    const hydratePath = activePathRef.current;
+    const hydratePath = viewedPathRef.current;
     const hydrateCwd = activeCwdRef.current;
     const cachedModels = hydrateCwd != null ? modelsCacheRef.current.get(hydrateCwd) : undefined;
     try {
@@ -974,7 +990,7 @@ export default function App() {
       // (extension/worktree foregrounding emits ready without bumping it),
       // so the session path must match too — otherwise a stale hydrate
       // writes another session's messages/state/history over the screen.
-      if (expectedEpoch !== epochRef.current || hydratePath !== activePathRef.current) return;
+      if (expectedEpoch !== epochRef.current || hydratePath !== viewedPathRef.current) return;
       // Never wipe the on-screen transcript: append only live messages newer
       // than the last loaded one. This is what keeps big-session opens stable
       // (the live compacted view no longer replaces the file tail).
@@ -993,13 +1009,13 @@ export default function App() {
         const retryPath = hydratePath;
         let attempts = 6;
         const retry = async () => {
-          if (retryEpoch !== epochRef.current || retryPath !== activePathRef.current) return;
+          if (retryEpoch !== epochRef.current || retryPath !== viewedPathRef.current) return;
           if (attempts-- <= 0) return;
           await new Promise<void>((r) => setTimeout(r, 400));
-          if (retryEpoch !== epochRef.current || retryPath !== activePathRef.current) return;
+          if (retryEpoch !== epochRef.current || retryPath !== viewedPathRef.current) return;
           try {
             const refreshed = await bridge.getCommands();
-            if (retryEpoch !== epochRef.current || retryPath !== activePathRef.current) return;
+            if (retryEpoch !== epochRef.current || retryPath !== viewedPathRef.current) return;
             if (refreshed?.length) {
               setCommands(refreshed);
               return;
@@ -1038,7 +1054,7 @@ export default function App() {
         void bridge
           .getThinkingLevels()
           .then((levels) => {
-            if (levelsEpoch !== epochRef.current || levelsPath !== activePathRef.current) return;
+            if (levelsEpoch !== epochRef.current || levelsPath !== viewedPathRef.current) return;
             if (levelsKeyFor != null && levels != null) levelsCacheRef.current.set(levelsKeyFor, levels);
             setThinkingLevels(levels ?? []);
           })
@@ -1066,9 +1082,9 @@ export default function App() {
           switchingRef.current = false;
           liveReadyRef.current = true;
           activeSessionIdRef.current = s.state?.sessionId ?? null;
-          activePathRef.current = s.sessionPath ?? s.state?.sessionFile ?? activePathRef.current;
+          viewedPathRef.current = s.sessionPath ?? s.state?.sessionFile ?? viewedPathRef.current;
           if (s.cwd) activeCwdRef.current = s.cwd;
-          setActiveSessionPath(activePathRef.current);
+          setViewedSessionPath(viewedPathRef.current);
           setLiveReady(true);
           if (s.sessionPath && s.cwd) registerOpenSession(s.cwd, s.sessionPath);
           void hydrate(epochRef.current);
@@ -1114,7 +1130,7 @@ export default function App() {
   // Bot Mode: the bot whose canonical chat is on screen, if any. Drives the
   // header badge (a bot's chat is forever: reopening it resumes the same file).
   const activeBot: Bot | null = useMemo(() => {
-    const file = activeSessionPath ?? status.sessionPath ?? null;
+    const file = viewedSessionPath ?? status.sessionPath ?? null;
     if (!file) return null;
     return (
       bots.find(
@@ -1123,7 +1139,7 @@ export default function App() {
           isBotMainSession(b, file)
       ) ?? null
     );
-  }, [bots, activeSessionPath, status.sessionPath]);
+  }, [bots, viewedSessionPath, status.sessionPath]);
   // Staffed extras for the active project (null = unknown: keep global behavior).
   const sharedStaff = useMemo(() => {
     if (!projectSettings) return null;
@@ -1132,10 +1148,10 @@ export default function App() {
       .filter((b): b is Bot => !!b);
   }, [projectSettings, bots]);
   const activeGroup: BotGroup | null = useMemo(() => {
-    const file = activeSessionPath ?? status.sessionPath ?? null;
+    const file = viewedSessionPath ?? status.sessionPath ?? null;
     if (!file) return null;
     return botGroups.find((g) => isGroupRoom(g, file)) ?? null;
-  }, [botGroups, activeSessionPath, status.sessionPath]);
+  }, [botGroups, viewedSessionPath, status.sessionPath]);
   // A rule-3 default chat with staff: extra-bot turns render speaker headers
   // (thinking stays visible, unlike rooms).
   const sharedSpeakers = activeGroup == null && activeBot == null && (sharedStaff?.length ?? 0) > 0;
@@ -1144,7 +1160,7 @@ export default function App() {
   // flight so the previous session's items never land under the new path).
   useEffect(() => {
     if (switchingRef.current || state.streaming) return;
-    const path = activePathRef.current;
+    const path = viewedPathRef.current;
     if (!path || !state.items.length) return;
     const cache = sessionCacheRef.current;
     cache.delete(path);
@@ -1165,112 +1181,124 @@ export default function App() {
   // instead of restoring the previous view. Landing is navigation: it
   // invalidates the epoch, request id, and switch generation so an in-flight
   // open's late ready cannot resurrect its session over the landing page.
+  // Renderer execution registry: hydrated from executionList() on startup
+  // and reconnect, updated ONLY by execution_changed pushes (stale
+  // generations rejected inside mergeExecution). View navigation never
+  // writes it (I3) — Send and the historical-view composer read it.
+  const [executionsByCwd, setExecutionsByCwd] = useState<Record<string, ProjectExecution>>({});
+  useEffect(() => {
+    let cancelled = false;
+    void bridge
+      .executionList()
+      .then((list) => {
+        if (!cancelled) setExecutionsByCwd(indexExecutions(list));
+      })
+      .catch(() => undefined);
+    const off = bridge.onExecutionChanged((execution) =>
+      setExecutionsByCwd((prev) => mergeExecution(prev, execution))
+    );
+    return () => {
+      cancelled = true;
+      off();
+    };
+  }, []);
+  // Derived view/execution relationship (I-canvas): which slot this Space
+  // executes in, and whether the viewed session is that slot. Consumed by
+  // the Send ownership commit and the historical-view composer commit.
+  const currentExecution = activeSpace ? (executionsByCwd[activeSpace] ?? null) : null;
+  const viewingExecution = viewedSessionPath != null && currentExecution?.sessionFile === viewedSessionPath;
+
   const showLanding = useCallback(() => {
-    ++epochRef.current;
+    // Activation supersession (an in-flight open must not resurrect over
+    // the landing) stays here; view identity + liveness delegate to the
+    // extracted view landing, which never reads executionsByCwd (I3).
     ++latestRequestRef.current;
     ++switchGenerationRef.current;
     switchingRef.current = false;
-    liveReadyRef.current = false;
-    activeSessionIdRef.current = null;
-    activePathRef.current = null;
-    setActiveSessionPath(null);
-    setHasSession(false);
-    setLiveReady(false);
-    // Arming (and optimistic pursuit display) is per-composer-intent:
-    // leaving the session drops all of it. Backend ops still settle
-    // normally; only the display is session-bound.
-    setGoalArmed(false);
-    setGoalPendingObjective(null);
-    setDesignArmed(false);
-    setDesignPendingSubject(null);
-  }, []);
+    showViewLanding({
+      epochRef,
+      viewedPathRef,
+      activeSessionIdRef,
+      liveReadyRef,
+      hasSessionRef,
+      setViewedSessionPath,
+      setHasSession,
+      setLiveReady,
+      clearArmings: clearComposerArmings,
+    });
+  }, [clearComposerArmings]);
+
+  // Disk-only navigation (I2/I3): ordinary clicks load the stored
+  // transcript and register the tab — never Pi activation, execution
+  // ownership, or runtime lifetime. openSession reuses these deps for its
+  // view half before activating.
+  const viewDeps = useCallback(
+    (): ViewNavigationDeps => ({
+      epochRef,
+      viewedPathRef,
+      activeCwdRef,
+      activeSessionIdRef,
+      liveReadyRef,
+      hasSessionRef,
+      setViewedSessionPath,
+      setHasSession,
+      setLiveReady,
+      setStats,
+      setCommands,
+      resetHistory: () => setHistory({ turns: [], leafId: null, hasBranches: false }),
+      setCanLoadMore,
+      rollbackDraftRef,
+      setRollbackPlan,
+      loadedMessagesRef,
+      earliestOffsetRef,
+      sessionCacheRef,
+      resetTranscript: () => dispatch({ type: "reset" }),
+      rebuildTranscript: (messages) => dispatch({ type: "rebuild", messages }),
+      clearUnread,
+      clearArmings: clearComposerArmings,
+      registerTab: registerOpenSession,
+      claimSwitch,
+      releaseSwitch,
+      evictDeadTab: (dead) => {
+        setNavTabs((prev) => {
+          const tabs = prev.tabs.filter((t) => t.path !== dead);
+          const activeBySpace = Object.fromEntries(
+            Object.entries(prev.activeBySpace).filter(([, p]) => p !== dead)
+          );
+          return { tabs, activeBySpace };
+        });
+        void refreshSessions();
+      },
+      showLanding,
+      toast,
+      bridge,
+    }),
+    [clearComposerArmings, registerOpenSession, refreshSessions, showLanding, toast, claimSwitch, releaseSwitch, setNavTabs]
+  );
+
+  /** View a stored session: disk transcript + selected tab + Space. Never
+   *  activates Pi, changes execution ownership, or releases a runtime. */
+  const viewSession = useCallback(
+    (path: string, cwd: string, opts?: { quietMissing?: boolean }) => viewSessionImpl(path, cwd, viewDeps(), opts),
+    [viewDeps]
+  );
 
   // Clear the switch cover shortly after it fades (animation is 120ms; the
   // timeout also covers the reduced-motion path where no animation fires). The
+  // Activation path: Pi runtime work ON TOP of a view — new sessions
+  // (path null), bot/group rooms, and (until Send moves onto execution
+  // ownership) sends waiting for their historical ready. Ordinary
+  // navigation never calls this; viewSession is disk-only (I3).
   const openSession = useCallback(
     async (path: string | undefined, cwd: string, opts?: { quietMissing?: boolean }) => {
-      const expectedEpoch = ++epochRef.current;
+      // View half via the extracted path navigation uses: identity, unread,
+      // armings, disk transcript, tab. Fresh sessions commit an empty
+      // awaiting-ready view (path null skips fetch/register).
+      const view = await viewSessionImpl(path ?? null, cwd, viewDeps());
+      if (path && view.status !== "committed") return; // stale/missing/failed handled inside
+      const expectedEpoch = epochRef.current;
       const requestId = ++latestRequestRef.current;
-      // Arming (and optimistic pursuit display) never survives
-      // navigation: the objective belongs to the session it was armed in.
-      setGoalArmed(false);
-      setGoalPendingObjective(null);
-      setDesignArmed(false);
-      setDesignPendingSubject(null);
-      // Opening never changes lifecycle: a settled session renders normally
-      // and stays under Settled until explicitly un-settled. Unread clears —
-      // you are looking at it now.
-      if (path) {
-        clearUnread(path);
-      }
-      // Stash the current view so a failed switch can stay put instead of
-      // stranding the user on Home.
-      const prevPath = activePathRef.current;
-      const prevMessages = loadedMessagesRef.current;
-      const prevOffset = earliestOffsetRef.current;
       const switchToken = claimSwitch();
-      liveReadyRef.current = false;
-      activeSessionIdRef.current = null;
-      activePathRef.current = path ?? null;
-      activeCwdRef.current = cwd;
-      // Optimistic: the sidebar row highlights and the active identity flips
-      // immediately, before any data loads. The old chat stays visible until
-      // the new transcript is ready, then swaps in one frame (tail fetch is
-      // ~30ms even for the largest sessions).
-      setActiveSessionPath(path ?? null);
-      // Transcript cache (opencode's SESSION_CACHE pattern): switching back to
-      // a recently-viewed session renders from memory, no fetch, no re-read ,
-      // and the host re-warms in the background. The cache is populated by the
-      // items effect below and evicted LRU (bounded by the 16KB tool-output
-      // clamp, so a few sessions stay cheap).
-      const memo = path ? sessionCacheRef.current.get(path) : undefined;
-      if (memo) {
-        // Refresh LRU recency.
-        const cache = sessionCacheRef.current;
-        cache.delete(path!);
-        cache.set(path!, memo);
-        loadedMessagesRef.current = memo.messages;
-        earliestOffsetRef.current = memo.earliestOffset;
-        setCanLoadMore(memo.canLoadMore);
-      }
-      // Fetch the stored transcript tail FIRST so the UI never renders an
-      // empty chat while we switch, `reset` + `rebuild` batch into one render
-      // with the messages already populated (no empty-state flicker). The tail
-      // read is O(tail), not O(file); older windows load on demand.
-      let cached: SessionWindow | undefined;
-      if (path && !memo) {
-        try {
-          cached = await bridge.getSessionMessages(path);
-        } catch {
-          cached = undefined; // fall through to the live switch
-        }
-      }
-      if (expectedEpoch !== epochRef.current) return;
-      hasSessionRef.current = true;
-      setHasSession(true);
-      setLiveReady(false);
-      setStats(null);
-      // Keep the previous agentState (model, thinking level) until hydrate
-      // replaces it: nulling it here blanks the model/thinking pickers to
-      // "select model" / disabled for every switch, which reads as flicker.
-      // The new session's values land within ~100ms via hydrate.
-      // Models are session-independent (one global registry): keep them across
-      // switches so the model picker and thinking options never wait on the
-      // host open. Commands are cwd-bound and must reload per project.
-      setCommands([]);
-      setHistory({ turns: [], leafId: null, hasBranches: false });
-      rollbackDraftRef.current = null;
-      setRollbackPlan(null);
-      dispatch({ type: "reset" });
-      if (memo) {
-        // Render from memory; the host re-warms below.
-        dispatch({ type: "rebuild", messages: memo.messages });
-      } else {
-        loadedMessagesRef.current = cached?.messages ?? [];
-        earliestOffsetRef.current = cached?.startOffset ?? null;
-        setCanLoadMore(cached != null && cached.startOffset > 0);
-        if (cached?.messages.length) dispatch({ type: "rebuild", messages: cached.messages });
-      }
       try {
         await bridge.openSession({ path, cwd, requestId });
       } catch (e) {
@@ -1278,11 +1306,6 @@ export default function App() {
         releaseSwitch(switchToken);
         const missingFile = path != null && isSessionNotFound(e);
         if (missingFile) {
-          // Stale sidebar index or persisted tab: the transcript file is
-          // gone. Evict every tab pointing at it, forget it per space,
-          // refresh the index, and fall through below — or, for a speculative
-          // resume on space entry, land on the newly selected space instead
-          // of switching back to the previous view.
           const dead = path;
           setNavTabs((prev) => {
             const tabs = prev.tabs.filter((t) => t.path !== dead);
@@ -1301,20 +1324,11 @@ export default function App() {
         } else {
           toast("error", errorMessage(e, "failed to open session"));
         }
-        if (prevPath) {
-          activePathRef.current = prevPath;
-          setActiveSessionPath(prevPath);
-          loadedMessagesRef.current = prevMessages;
-          earliestOffsetRef.current = prevOffset;
-          setCanLoadMore(prevOffset != null && prevOffset > 0);
-          if (prevMessages.length) dispatch({ type: "rebuild", messages: prevMessages });
-        } else {
-          setHasSession(false);
-          setLiveReady(false);
-        }
+        // Undo the optimistic disk view: back to whatever was on screen.
+        view.rollback();
       }
     },
-    [toast, clearUnread, refreshSessions, showLanding]
+    [viewDeps, toast, refreshSessions, showLanding]
   );
 
   // User-curated spaces (herdr): folders you add explicitly. The pi session
@@ -1332,14 +1346,14 @@ export default function App() {
       ?.sessions.slice()
       .sort((a, b) => b.mtime - a.mtime)[0];
     if (latest) {
-      await openSession(latest.path, cwd);
+      await viewSession(latest.path, cwd);
     } else {
       // No sessions yet: land on the project with no session (home screen)
       // instead of auto-creating one — same as selecting an empty space.
       setActiveSpace(cwd);
       showLanding();
     }
-  }, [groups, openSession, setActiveSpace, showLanding]);
+  }, [groups, viewSession, setActiveSpace, showLanding]);
   const removeSpace = useCallback((cwd: string) => {
     setSpaces((prev) => prev.filter((c) => c !== cwd));
   }, []);
@@ -1368,7 +1382,7 @@ export default function App() {
         })
         .catch(() => undefined);
     }
-    if (path === activePathRef.current) {
+    if (path === viewedPathRef.current) {
       const pinnedHere = pinnedOrder.filter(
         (p) => p !== path && !tabs.some((t) => t.path === p) && groups.some((g) => g.sessions.some((s) => s.path === p))
       );
@@ -1379,7 +1393,7 @@ export default function App() {
         }
         return null;
       })() : null);
-      if (nextTab) void openSession(nextTab.path, nextTab.cwd);
+      if (nextTab) void viewSession(nextTab.path, nextTab.cwd);
       else showLanding();
     }
   });
@@ -1390,15 +1404,15 @@ export default function App() {
   const selectSpace = useCallback((cwd: string) => {
     setActiveSpace(cwd);
     const tab = pickSpaceTab(navTabs.tabs, navTabs.activeBySpace, cwd);
-    if (tab) void openSession(tab.path, tab.cwd, { quietMissing: true });
+    if (tab) void viewSession(tab.path, tab.cwd, { quietMissing: true });
     else showLanding();
-  }, [navTabs, openSession, setActiveSpace, showLanding]);
+  }, [navTabs, viewSession, setActiveSpace, showLanding]);
 
   // Scroll-up streaming: fetch the next older window of the stored transcript
   // and prepend it. The viewport stays put via ChatView's prepend
   // compensation; the full transcript is always mounted.
   const loadEarlier = useCallback(async () => {
-    const path = activePathRef.current;
+    const path = viewedPathRef.current;
     const endOffset = earliestOffsetRef.current;
     if (!path || endOffset == null || loadingMoreRef.current) return;
     const epoch = epochRef.current;
@@ -1501,7 +1515,7 @@ export default function App() {
     } catch (e) {
       // Drop the optimistic row/header so a failed open can't strand the UI
       // on a session that never displayed (header falls back to live status).
-      setActiveSessionPath(null);
+      setViewedSessionPath(null);
       toast("error", errorMessage(e, "could not open bot chat"));
     }
   }, [openSession, projectFilter, status.cwd, toast]);
@@ -1562,7 +1576,7 @@ export default function App() {
       }
       await openSession(result.sessionFile ?? undefined, cwd);
     } catch (e) {
-      setActiveSessionPath(null);
+      setViewedSessionPath(null);
       toast("error", errorMessage(e, "could not open group room"));
     }
   }, [openSession, projectFilter, status.cwd, toast, bots]);
@@ -1613,7 +1627,7 @@ export default function App() {
   );
   const consumeHandoff = useCallback(
     async (sourcePath: string) => {
-      const live = activeSessionPath ?? status.sessionPath;
+      const live = viewedSessionPath ?? status.sessionPath;
       if (!live) {
         toast("error", "Open the live chat first, handoffs install there");
         return;
@@ -1631,7 +1645,7 @@ export default function App() {
         toast("error", errorMessage(e, "could not consume handoff"));
       }
     },
-    [activeSessionPath, status.sessionPath, toast]
+    [viewedSessionPath, status.sessionPath, toast]
   );
   const send = useCallback(
     async (text: string, images?: Attachment[], streamingBehavior?: "steer" | "followUp"): Promise<boolean> => {
@@ -1723,7 +1737,7 @@ export default function App() {
         // Explicit identity resolved AFTER the warmup wait above (see
         // resolveSendTarget): the render closure's paths may still point
         // at the previous session, so the live ref is authoritative.
-        const target = resolveSendTarget(sendEpoch, epochRef.current, activePathRef.current);
+        const target = resolveSendTarget(sendEpoch, epochRef.current, viewedPathRef.current);
         const mappedImages = images?.map((a) => ({ type: "image", data: a.data, mimeType: a.mimeType }));
         if (goalArmed) {
           // Armed Goal mode: this message IS the goal. One transactional op
@@ -1748,7 +1762,7 @@ export default function App() {
           setGoalPendingObjective(null);
           // Session-bound: a switch mid-turn must not file A's goal into
           // B's display (B refreshes on its own open).
-          if (result.goal && activePathRef.current === target) setDurableGoal(result.goal);
+          if (result.goal && viewedPathRef.current === target) setDurableGoal(result.goal);
           if (result.error) {
             if (!result.started) {
               if (hasContent) dispatch({ type: "local-user-rollback", text });
@@ -1782,7 +1796,7 @@ export default function App() {
           setDesignPendingSubject(null);
           // Same session binding as goals: never file a switched-away
           // session's design into the visible one.
-          if (designResult.design && activePathRef.current === target) {
+          if (designResult.design && viewedPathRef.current === target) {
             setDesignStatus({ design: designResult.design, stage: designResult.stage });
           }
           if (designResult.error) {
@@ -1813,18 +1827,18 @@ export default function App() {
         return false;
       }
     },
-    // No session-path deps: the prompt target resolves from activePathRef
+    // No session-path deps: the prompt target resolves from viewedPathRef
     // after the warmup wait, never from the render closure.
     [history.activeRollback, hydrate, toast, activeGroup, goalArmed, setDurableGoal, designArmed]
   );
 
   const abort = useCallback(async () => {
     try {
-      await bridge.abort(activeSessionPath ?? status.sessionPath ?? undefined);
+      await bridge.abort(viewedSessionPath ?? status.sessionPath ?? undefined);
     } catch {
       /* ignore */
     }
-  }, [activeSessionPath, status.sessionPath]);
+  }, [viewedSessionPath, status.sessionPath]);
 
   // Stop a live subagent/thread/workflow from its LaunchCard. Routes to the
   // correct bridge control by run kind; the store flips the card to "stopped"
@@ -1925,7 +1939,7 @@ export default function App() {
         attention,
         activity,
         workflowRuns,
-        activeSessionPath,
+        viewedSessionPath,
         statusSessionPath: status.sessionPath,
         statusCwd: status.cwd,
         streaming: state.streaming,
@@ -1933,7 +1947,7 @@ export default function App() {
         activeSessionId: activeSessionIdRef.current ?? "",
         bots,
       }),
-    [groups, executions, settled, unread, attention, activity, workflowRuns, activeSessionPath, status.sessionPath, status.cwd, state.streaming, agentIsStreaming, bots]
+    [groups, executions, settled, unread, attention, activity, workflowRuns, viewedSessionPath, status.sessionPath, status.cwd, state.streaming, agentIsStreaming, bots]
   );
 
   // Per-session liveness is dead: runtimeByPath (above) owns it now.
@@ -2005,9 +2019,12 @@ export default function App() {
   const onOpenSidebarSession = useCallback(
     (path: string | undefined, cwd: string) => {
       setPromotedParent(null);
-      void openSession(path, cwd);
+      // Existing transcript → disk-only view; an undefined path (new
+      // session row) still goes through activation to create the file.
+      if (path) void viewSession(path, cwd);
+      else void openSession(path, cwd);
     },
-    [openSession]
+    [openSession, viewSession]
   );
   const onDeleteSession = useCallback(
     async (path: string, name: string) => {
@@ -2026,9 +2043,10 @@ export default function App() {
   const onOpenLiveAgent = useCallback(
     (row: (typeof liveAgentRows)[number]) => {
       setPromotedParent(null);
-      void openSession(row.agent.path, row.agent.cwd);
+      // Viewing an agent's transcript must not touch its execution (I3).
+      void viewSession(row.agent.path, row.agent.cwd);
     },
-    [openSession]
+    [viewSession]
   );
 
   // Stable ChatView props (its `items` change per token, but unrelated App
@@ -2360,14 +2378,14 @@ export default function App() {
         // Never hijacks typing: inputs keep their native behavior.
         const ae = document.activeElement;
         if (ae instanceof HTMLInputElement || ae instanceof HTMLTextAreaElement || (ae instanceof HTMLElement && ae.isContentEditable)) return;
-        if (!activeSessionPath) return;
+        if (!viewedSessionPath) return;
         event.preventDefault();
-        copySession("path", { id: activeSessionPath, path: activeSessionPath, cwd: status.cwd ?? "", mtime: Date.now() });
+        copySession("path", { id: viewedSessionPath, path: viewedSessionPath, cwd: status.cwd ?? "", mtime: Date.now() });
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [toggleFeatureTab, copySession, activeSessionPath, status.cwd]);
+  }, [toggleFeatureTab, copySession, viewedSessionPath, status.cwd]);
 
   const onOpenTree = useCallback(() => {
     if (!ready || !hasSession) return;
@@ -2463,7 +2481,7 @@ export default function App() {
       ) : null}
       <Sidebar
         groups={groups}
-        activePath={activeSessionPath ?? status.sessionPath}
+        activePath={viewedSessionPath ?? status.sessionPath}
         activeCwd={activeSpace ?? status.cwd}
         treeOpen={activeTab?.feature === "branches"}
         canOpenTree={ready && hasSession}
@@ -2525,15 +2543,15 @@ export default function App() {
                 <ChevronIcon size={13} className="text-dim" />
               </button>
             ) : null}
-            {promotedParent ? <button onClick={() => { const parent = promotedParent; setPromotedParent(null); void openSession(parent.path, parent.cwd); }} title="Back to parent session" className="thread-action thread-action-text">← Parent</button> : null}
+            {promotedParent ? <button onClick={() => { const parent = promotedParent; setPromotedParent(null); void viewSession(parent.path, parent.cwd); }} title="Back to parent session" className="thread-action thread-action-text">← Parent</button> : null}
             <SessionTabs
               tabs={visibleTabItems}
-              activePath={activeSessionPath ?? status.sessionPath ?? null}
+              activePath={viewedSessionPath ?? status.sessionPath ?? null}
               attentionByPath={attentionByPath}
               preparingActive={preparingVisible}
               onActivate={(tab) => {
                 setPromotedParent(null);
-                void openSession(tab.path, tab.cwd);
+                void viewSession(tab.path, tab.cwd);
               }}
               onClose={(path) => closeTab(path)}
               onNew={() => newSession()}
@@ -2542,7 +2560,7 @@ export default function App() {
                   entries={historyEntries}
                   onOpen={(entry) => {
                     setPromotedParent(null);
-                    void openSession(entry.path, entry.cwd);
+                    void viewSession(entry.path, entry.cwd);
                   }}
                 />
               }
@@ -2589,7 +2607,7 @@ export default function App() {
                   roomName={activeGroup?.name ?? ""}
                   showSpeakers={sharedSpeakers}
                   projectName={chatProjectName}
-                  sessionKey={activeSessionPath ?? status.sessionPath ?? null}
+                  sessionKey={viewedSessionPath ?? status.sessionPath ?? null}
                   streamResponses={streamResponses}
                   historyTurns={history.turns}
                   pinNonce={pinNonce}
@@ -2601,7 +2619,7 @@ export default function App() {
                 </ErrorBoundary>
               ) : (
                 <div className="flex flex-1 min-h-0 overflow-hidden">
-                  <Hero status={status} groups={groups} onOpen={(path, cwd) => { setPromotedParent(null); void openSession(path, cwd); }} onNew={newSession} spaceCwd={activeSpace ?? status.cwd ?? null} />
+                  <Hero status={status} groups={groups} onOpen={(path, cwd) => { setPromotedParent(null); if (path) void viewSession(path, cwd); else void openSession(path, cwd); }} onNew={newSession} spaceCwd={activeSpace ?? status.cwd ?? null} />
                 </div>
               )}
 
@@ -2627,7 +2645,7 @@ export default function App() {
                 followUp={state.followUp}
                 commands={commands}
                 draftRequest={draftRequest}
-                sessionKey={activeSessionPath ?? status.sessionPath ?? null}
+                sessionKey={viewedSessionPath ?? status.sessionPath ?? null}
                 toast={toast}
                 onSend={send}
                 onAbort={abort}
@@ -2656,12 +2674,12 @@ export default function App() {
                 onEndDesign={() => void endDesign()}
                 onRestartDesign={() => void restartDesign()}
                 onApproveDesignBrief={() => {
-                  const target = activePathRef.current;
+                  const target = viewedPathRef.current;
                   if (!target) return;
                   void designControl(target, "approve-brief");
                 }}
                 onApproveDesignBrand={() => {
-                  const target = activePathRef.current;
+                  const target = viewedPathRef.current;
                   if (!target) return;
                   void designControl(target, "approve-brand");
                 }}
@@ -2713,7 +2731,7 @@ export default function App() {
                     const cwd = targetCwd ?? status.cwd;
                     if (cwd) {
                       if (parentPath && status.cwd) setPromotedParent({ path: parentPath, cwd: status.cwd });
-                      void openSession(path, cwd);
+                      void viewSession(path, cwd);
                     }
                     if (activeSideTab) closeSideTab(activeSideTab);
                   }}
@@ -2744,7 +2762,7 @@ export default function App() {
             }}
             onOpen={(path, cwd) => {
               setPromotedParent(null);
-              void openSession(path, cwd);
+              void viewSession(path, cwd);
             }}
             onCommand={(command) =>
               setDraftRequest({ id: Date.now(), text: insertCommand(command) })

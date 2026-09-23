@@ -154,7 +154,11 @@ export interface DaemonPiHost {
   getStats(): Promise<SessionStats>;
   getCommands(): Promise<CommandInfo[]>;
   /** Rewire event/status sinks (daemon broadcast attaches here). */
-  attachSinks(sinks: { onEvent: (event: unknown) => void; onStatus: (status: unknown) => void }): void;
+  attachSinks(sinks: {
+    onEvent: (event: unknown) => void;
+    onStatus: (status: unknown) => void;
+    onExecutionChanged?: (execution: ProjectExecution) => void;
+  }): void;
 }
 
 export interface DaemonServerOptions {
@@ -452,6 +456,7 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
     options.piHost.attachSinks({
       onEvent: (ev: unknown) => broadcast("pi.event", ev),
       onStatus: (s: unknown) => broadcast("pi.session.status", s),
+      onExecutionChanged: (execution: ProjectExecution) => broadcast("pi.executionChanged", execution),
     });
   }
 

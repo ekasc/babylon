@@ -371,7 +371,7 @@ export interface RuntimeByPathInput {
   attention: AttentionRegistry;
   activity: { threads: SourceSnapshots["threads"]; subagents: SourceSnapshots["subagents"] };
   workflowRuns: SourceSnapshots["workflows"];
-  activeSessionPath: string | null;
+  viewedSessionPath: string | null;
   statusSessionPath?: string;
   statusCwd?: string;
   streaming: boolean;
@@ -389,7 +389,7 @@ export function computeRuntimeByPath(input: RuntimeByPathInput): Record<string, 
     attention,
     activity,
     workflowRuns,
-    activeSessionPath,
+    viewedSessionPath,
     statusSessionPath,
     statusCwd,
     streaming,
@@ -413,7 +413,7 @@ export function computeRuntimeByPath(input: RuntimeByPathInput): Record<string, 
     sessionIdToPath.set(s.id, s.path);
     ensure(s.id, s.path, s.cwd);
   }
-  const activePath = activeSessionPath ?? statusSessionPath ?? undefined;
+  const activePath = viewedSessionPath ?? statusSessionPath ?? undefined;
   if (activePath && !map[activePath]) {
     ensure(activeSessionId ?? "", activePath, statusCwd ?? "");
   }

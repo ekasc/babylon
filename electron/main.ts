@@ -802,6 +802,15 @@ async function startHost(): Promise<void> {
           sessionIndex.touch();
         }
       },
+      onExecutionChanged: (execution) => {
+        // Ownership push: merges into the renderer registry only — never
+        // selects/opens/navigates a transcript.
+        try {
+          if (win && !win.isDestroyed()) win.webContents.send("pideck_execution_changed", execution);
+        } catch {
+          /* best effort */
+        }
+      },
       onStatus: (s: { status: string; message?: string; cwd?: string; sessionPath?: string; requestId?: number; state?: AgentState | null }) => {
         if (s?.cwd) applyCwd(s.cwd);
         // Forward requestId: the renderer matches ready/error against its
@@ -1129,6 +1138,27 @@ async function ensureDaemon(): Promise<boolean> {
       }
       if (envelope.type === "attention.raised" || envelope.type === "attention.resolved") {
         daemonViewRefresh.enqueue("attention", undefined);
+      }
+      if (envelope.type === "pi.executionChanged") {
+        // Daemon-owned execution ownership push: structural check before it
+        // reaches the renderer registry (corrupt payloads are dropped).
+        const p = envelope.payload;
+        if (
+          p !== null &&
+          typeof p === "object" &&
+          typeof (p as { cwd?: unknown }).cwd === "string" &&
+          typeof (p as { sessionFile?: unknown }).sessionFile === "string" &&
+          typeof (p as { sessionId?: unknown }).sessionId === "string" &&
+          typeof (p as { state?: unknown }).state === "string" &&
+          typeof (p as { streaming?: unknown }).streaming === "boolean" &&
+          typeof (p as { generation?: unknown }).generation === "number"
+        ) {
+          try {
+            if (win && !win.isDestroyed()) win.webContents.send("pideck_execution_changed", p);
+          } catch {
+            /* best effort */
+          }
+        }
       }
       if (envelope.type === "pi.event") {
         // The daemon forwards host agent events; only typed payloads enter

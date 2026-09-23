@@ -618,6 +618,9 @@ export interface Bridge {
    *  a structured envelope (I4). */
   executionActivate(cwd: string, sessionFile?: string): Promise<ExecutionActivateResult>;
   executionDeactivate(cwd: string, expectedSessionFile: string): Promise<boolean>;
+  /** Ownership changed for a project: merges into the execution registry
+   *  only — never selects, opens, or navigates a transcript. */
+  onExecutionChanged(cb: (execution: ProjectExecution) => void): () => void;
   /** Read a session's design state (null when none is set). */
   designGet(sessionId: string, cwd: string): Promise<import("../electron/design-mode/store").DesignStatus>;
   /** Run a `/design …` control invocation; resolves with the fresh design state. */
@@ -894,6 +897,7 @@ export const bridge: Bridge = window.pideck ?? {
   executionList: () => Promise.resolve([]),
   executionActivate: () => Promise.reject(new Error("bridge unavailable")),
   executionDeactivate: () => Promise.resolve(false),
+  onExecutionChanged: () => () => {},
   designGet: () => Promise.resolve({ design: null, stage: "idle" as const }),
   designControl: () => Promise.resolve({ design: null, stage: "idle" as const }),
   beginDesignPrompt: () => Promise.resolve({ design: null, stage: "idle" as const, started: true, error: null }),

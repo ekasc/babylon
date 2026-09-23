@@ -387,6 +387,37 @@ describe("babylon daemon server", () => {
     expect(String((err.payload as { error?: string }).error)).toMatch(/requires \{ cwd \}/);
   });
 
+  it("broadcasts pi.executionChanged to clients when the host emits an ownership push", async () => {
+    // Holder object: TS does not track closure assignment through `let`
+    // narrowing, so the captured sinks live on a mutable property.
+    const captured: { sinks: Parameters<DaemonPiHost["attachSinks"]>[0] | null } = { sinks: null };
+    const piHost = fakePiHost({
+      attachSinks: (s) => {
+        captured.sinks = s;
+      },
+    });
+    const server = await start({ piHost });
+    const port = (server.address() as { port: number }).port;
+    const socket = await connect(port);
+    const r = reader(socket);
+    // Settle the connection so the server has registered this socket before
+    // a server-initiated broadcast (same pattern as approval.requested).
+    await request(socket, "ping", {});
+    await r.next("pong");
+    expect(captured.sinks?.onExecutionChanged).toBeDefined();
+    const execution = {
+      cwd: "/proj/a",
+      sessionFile: "/s/a1.jsonl",
+      sessionId: "session-a1",
+      state: "working" as const,
+      streaming: true,
+      generation: 7,
+    };
+    captured.sinks!.onExecutionChanged!(execution);
+    const ev = await r.next("pi.executionChanged");
+    expect(ev.payload).toEqual(execution);
+  });
+
   it("serves pi.executionDeactivate as { released }", async () => {
     const seen: Array<[string, string]> = [];
     const piHost = fakePiHost({

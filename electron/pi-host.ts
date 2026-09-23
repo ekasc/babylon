@@ -234,6 +234,9 @@ export interface HostOptions {
   stateDir?: string;
   /** Instance sessions root. Unset keeps the SDK default (shared legacy store). */
   sessionsRoot?: string;
+  /** Execution ownership changed for a project (activate only; the renderer
+   *  registry merges by generation and never navigates from this event). */
+  onExecutionChanged?: (execution: ProjectExecution) => void;
   /** Called for every agent event (mirrors RPC stdout events). */
   onEvent: (event: AgentEvent) => void;
   /** Called with status changes. */
@@ -498,7 +501,20 @@ export class PiHost implements LocalPiHost {
     this.executionByCwd.set(cwd, entry.sessionFile);
     this.executionGenerationByCwd.set(cwd, (this.executionGenerationByCwd.get(cwd) ?? 0) + 1);
     this.touchEntry(entry);
+    this.emitExecutionChanged(cwd);
     return entry;
+  }
+
+  /** Fire-and-forget ownership notification (activate path only): the
+   *  renderer merges into executionsByCwd by generation and must never
+   *  navigate from this event. Deactivation without a successor stays
+   *  renderer-initiated or reconciles on the next executionList(). */
+  private emitExecutionChanged(cwd: string): void {
+    void this.executionSnapshot(cwd)
+      .then((execution) => {
+        if (execution) this.opts.onExecutionChanged?.(execution);
+      })
+      .catch(() => undefined);
   }
 
   /** Give up execution ownership for a project. False when the expected
@@ -763,9 +779,14 @@ export class PiHost implements LocalPiHost {
   /** Rewire event/status sinks. The daemon attaches its broadcast here so
    *  thin clients receive live agent streaming (replaces direct opts
    *  mutation, which cannot cross the private boundary). */
-  attachSinks(sinks: { onEvent: (event: unknown) => void; onStatus: HostOptions["onStatus"] }): void {
+  attachSinks(sinks: {
+    onEvent: (event: unknown) => void;
+    onStatus: HostOptions["onStatus"];
+    onExecutionChanged?: (execution: ProjectExecution) => void;
+  }): void {
     this.opts.onEvent = sinks.onEvent;
     this.opts.onStatus = sinks.onStatus;
+    if (sinks.onExecutionChanged) this.opts.onExecutionChanged = sinks.onExecutionChanged;
   }
 
   /**
