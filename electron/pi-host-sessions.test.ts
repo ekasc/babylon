@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -210,6 +210,99 @@ describe("PiHost independent session execution", () => {
     }
   }, 60_000);
 
+  it("a release racing reactivation aborts instead of pulling a live runtime", async () => {
+    const a = await makeProject("race-a");
+    const b = await makeProject("race-b");
+    const { host } = makeHost(a.cwd, a.agentDir);
+    await host.start();
+    try {
+      const fileA = await makeSessionFile(a.cwd);
+      const fileB = await makeSessionFile(b.cwd);
+      await host.open({ path: fileA, cwd: a.cwd });
+      await host.open({ path: fileB, cwd: b.cwd });
+      expect(host.activeSessionFile).toBe(fileB);
+
+      // Gate the thread scan inside releaseSession(A) so reactivation lands
+      // mid-scan: without post-await revalidation the gated release would
+      // dispose A out from under the fresh foreground.
+      let releaseGate!: () => void;
+      const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+      let gated = false;
+      const scan = vi
+        .spyOn(host as unknown as { hasActiveThreadsForSession: (id: string) => Promise<boolean> }, "hasActiveThreadsForSession")
+        .mockImplementation(async () => {
+          if (!gated) {
+            gated = true;
+            await gate;
+          }
+          return false;
+        });
+      try {
+        const releasing = host.releaseSession(fileA);
+        await vi.waitFor(() => expect(gated).toBe(true));
+        await host.ensureForeground(fileA);
+        expect(host.activeSessionFile).toBe(fileA);
+        releaseGate();
+        // Reactivation touched lastUsedAt and the foreground pointer during
+        // the scan: the release must refuse, never dispose a live session.
+        expect(await releasing).toBe(false);
+        expect(host.testSessions().has(fileA)).toBe(true);
+        expect(host.activeSessionFile).toBe(fileA);
+      } finally {
+        scan.mockRestore();
+      }
+    } finally {
+      await host.dispose();
+    }
+  }, 60_000);
+
+  it("a release racing an addressed prompt aborts before streaming flips", async () => {
+    const a = await makeProject("race-prompt-a");
+    const b = await makeProject("race-prompt-b");
+    const { host } = makeHost(a.cwd, a.agentDir);
+    await host.start();
+    try {
+      const fileA = await makeSessionFile(a.cwd);
+      const fileB = await makeSessionFile(b.cwd);
+      await host.open({ path: fileA, cwd: a.cwd });
+      await host.open({ path: fileB, cwd: b.cwd });
+
+      let releaseGate!: () => void;
+      const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+      let gated = false;
+      const scan = vi
+        .spyOn(host as unknown as { hasActiveThreadsForSession: (id: string) => Promise<boolean> }, "hasActiveThreadsForSession")
+        .mockImplementation(async () => {
+          if (!gated) {
+            gated = true;
+            await gate;
+          }
+          return false;
+        });
+      const delivered: string[] = [];
+      const entryB = host.testSessions().get(fileB)!;
+      const promptSpy = vi.spyOn(entryB.runtime.session, "prompt").mockImplementation(async (message: string) => {
+        delivered.push(`${entryB.sessionFile}:${message}`);
+      });
+      try {
+        const releasing = host.releaseSession(fileB);
+        await vi.waitFor(() => expect(gated).toBe(true));
+        // resolveEntry touches lastUsedAt synchronously at prompt start —
+        // before isStreaming flips — so the gated release must still abort.
+        await host.prompt("hello B", undefined, undefined, fileB);
+        releaseGate();
+        expect(await releasing).toBe(false);
+        expect(delivered).toEqual([`${fileB}:hello B`]);
+        expect(host.testSessions().has(fileB)).toBe(true);
+      } finally {
+        scan.mockRestore();
+        promptSpy.mockRestore();
+      }
+    } finally {
+      await host.dispose();
+    }
+  }, 60_000);
+
   it("keeps per-project model runtimes isolated", async () => {
     const a = await makeProject("f");
     const b = await makeProject("g");
@@ -223,6 +316,63 @@ describe("PiHost independent session execution", () => {
       const projects = host.testProjectRuntimes();
       expect([...projects.keys()].sort()).toEqual([a.cwd, b.cwd].sort());
     } finally {
+      await host.dispose();
+    }
+  }, 60_000);
+
+  it("reactivation skips the reparse while the transcript is unchanged", async () => {
+    const a = await makeProject("fingerprint-a");
+    const b = await makeProject("fingerprint-b");
+    const { host } = makeHost(a.cwd, a.agentDir);
+    await host.start();
+    const openSpy = vi.spyOn(SessionManager, "open");
+    try {
+      const fileA = await makeSessionFile(a.cwd);
+      const fileB = await makeSessionFile(b.cwd);
+      await host.open({ path: fileA, cwd: a.cwd });
+      await host.open({ path: fileB, cwd: b.cwd });
+      // Force fileA onto disk (new sessions start as unflushed future
+      // paths). The SDK only persists once an assistant message exists
+      // (user-only prefixes wait for the turn), so append both and persist
+      // the assistant entry — this materializes a parseable transcript, and
+      // later activations have a real fingerprint to compare against.
+      const managerA = host.testSessions().get(fileA)!.runtime.session.sessionManager;
+      managerA.appendMessage({
+        role: "user",
+        content: [{ type: "text", text: "seed" }],
+        timestamp: Date.now(),
+      });
+      const seedAssistantId = managerA.appendMessage({
+        role: "assistant",
+        content: [{ type: "text", text: "seeded" }],
+        api: "test",
+        provider: "test",
+        model: "test",
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: "stop",
+        timestamp: Date.now(),
+      });
+      (managerA as unknown as { _persist: (entry: unknown) => void })._persist(managerA.getEntry(seedAssistantId));
+      // First reactivation seeds the fingerprint from the existing file.
+      await host.open({ path: fileA, cwd: a.cwd });
+      expect(host.activeSessionFile).toBe(fileA);
+      openSpy.mockClear();
+      // A → B → A with no disk change: the retained runtime is current, so
+      // activation must not reopen/reparse the transcript.
+      await host.open({ path: fileB, cwd: b.cwd });
+      await host.open({ path: fileA, cwd: a.cwd });
+      expect(host.activeSessionFile).toBe(fileA);
+      expect(openSpy).not.toHaveBeenCalled();
+      // A real change (mtime bump) re-arms the sync on the next activation.
+      await host.open({ path: fileB, cwd: b.cwd });
+      openSpy.mockClear();
+      const future = new Date(Date.now() + 30_000);
+      await utimes(fileA, future, future);
+      await host.open({ path: fileA, cwd: a.cwd });
+      expect(host.activeSessionFile).toBe(fileA);
+      expect(openSpy).toHaveBeenCalled();
+    } finally {
+      openSpy.mockRestore();
       await host.dispose();
     }
   }, 60_000);

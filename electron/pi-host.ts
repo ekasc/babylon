@@ -268,6 +268,21 @@ export interface SessionEntry {
   sessionFile: string;
   unsubscribe: (() => void) | null;
   lastUsedAt: number;
+  /**
+   * Last observed disk identity of the transcript (set on creation and
+   * after every sync). Activation skips the full SessionManager.open +
+   * context rebuild when the fingerprint is unchanged — retained runtimes
+   * stay cheap to switch back to. Null until the first successful stat
+   * (unflushed new sessions have no file yet: always sync).
+   */
+  diskFingerprint?: DiskFingerprint | null;
+}
+
+/** Cheap disk identity for change detection (stat, not parse). */
+export interface DiskFingerprint {
+  ino: number;
+  size: number;
+  mtimeMs: number;
 }
 
 /**
@@ -337,7 +352,7 @@ export class PiHost implements LocalPiHost {
     const file = this.foregroundSessionFile;
     const entry = file ? this.sessions.get(file) : undefined;
     if (!entry) throw new Error("pi host has no foreground session");
-    entry.lastUsedAt = Date.now();
+    this.touchEntry(entry);
     return entry;
   }
 
@@ -347,8 +362,19 @@ export class PiHost implements LocalPiHost {
     const file = sessionFile ?? this.foregroundSessionFile;
     const entry = file ? this.sessions.get(file) : undefined;
     if (!entry) throw new Error(file ? `session is not open: ${file}` : "pi host has no foreground session");
-    entry.lastUsedAt = Date.now();
+    this.touchEntry(entry);
     return entry;
+  }
+
+  /**
+   * Mark an entry used. Strictly increasing (never wall-clock-equal): the
+   * eviction TOCTOU guard snapshots recency across an await, and two
+   * touches within the same millisecond must still be distinguishable —
+   * otherwise a prompt starting mid-scan would compare equal and the
+   * release would wrongly proceed.
+   */
+  private touchEntry(entry: SessionEntry): void {
+    entry.lastUsedAt = Math.max(Date.now(), entry.lastUsedAt + 1);
   }
 
   /**
@@ -400,7 +426,7 @@ export class PiHost implements LocalPiHost {
     // with no await in between, so no interleaving can split them.
     this.foregroundSessionFile = entry.sessionFile;
     this._cwd = opts.cwd;
-    entry.lastUsedAt = Date.now();
+    this.touchEntry(entry);
     const state = await this.getStateFor(entry);
     if (!this.isLatestActivation(opts.seq)) return state;
     this.lastMessageAt.set(state.sessionFile ?? entry.sessionFile, Date.now());
@@ -828,7 +854,7 @@ export class PiHost implements LocalPiHost {
   private async ensureSessionRuntime(sessionFile: string, cwd: string, systemPrompt?: string | null): Promise<SessionEntry> {
     const existing = this.sessions.get(sessionFile);
     if (existing) {
-      existing.lastUsedAt = Date.now();
+      this.touchEntry(existing);
       return existing;
     }
     if (systemPrompt) this.pendingSystemPrompts.set(sessionFile, systemPrompt);
@@ -889,6 +915,9 @@ export class PiHost implements LocalPiHost {
     // tree, and `prompt()` cannot call the model until it finishes. Warming at
     // open overlaps that cost with the user reading and typing.
     this.warmSnapshots(cwd);
+    // Seed the disk fingerprint so the next activation can skip the reparse
+    // when nothing changed (null for unflushed new sessions: always sync).
+    entry.diskFingerprint = await this.fingerprintSessionFile(sessionFile);
     return entry;
   }
 
@@ -1481,12 +1510,19 @@ export class PiHost implements LocalPiHost {
       const existing = this.sessions.get(opts.path);
       if (existing) {
         if (!existing.runtime.session.isStreaming) {
-          try {
-            this.syncSessionFromDisk(existing, opts.cwd);
-          } catch (err) {
-            // Unflushed new session (canonical future path, nothing on disk
-            // yet): the live session already is the source of truth.
-            if (!isMissingFileError(err)) throw err;
+          // Retained runtime: skip the full SessionManager.open + context
+          // rebuild when the transcript is byte-identical to the last sync
+          // (one stat vs parsing a large JSONL on every tab click).
+          const fp = await this.fingerprintSessionFile(opts.path);
+          if (!this.sameFingerprint(fp, existing.diskFingerprint)) {
+            try {
+              this.syncSessionFromDisk(existing, opts.cwd);
+            } catch (err) {
+              // Unflushed new session (canonical future path, nothing on disk
+              // yet): the live session already is the source of truth.
+              if (!isMissingFileError(err)) throw err;
+            }
+            existing.diskFingerprint = await this.fingerprintSessionFile(opts.path);
           }
         }
         return this.activate(existing, { cwd: opts.cwd, requestId: opts.requestId, seq });
@@ -1552,22 +1588,51 @@ export class PiHost implements LocalPiHost {
   }
 
   /**
+   * Cheap disk identity of a transcript (one stat, no parse). Null when the
+   * file is missing or unreadable — callers treat that as "unknown, sync".
+   */
+  private async fingerprintSessionFile(file: string): Promise<DiskFingerprint | null> {
+    try {
+      const st = await fsp.stat(file);
+      if (!st.isFile()) return null;
+      return { ino: st.ino, size: st.size, mtimeMs: st.mtimeMs };
+    } catch {
+      return null;
+    }
+  }
+
+  private sameFingerprint(a: DiskFingerprint | null | undefined, b: DiskFingerprint | null | undefined): boolean {
+    // Both missing: still no file, so nothing could have appeared to pull.
+    // (A sync attempt would just throw the missing-file error that the
+    // caller already treats as "live session stands".)
+    if (!a && !b) return true;
+    return !!a && !!b && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs;
+  }
+
+  /**
    * Pull disk changes for one session WITHOUT foregrounding it. A disk sync
    * must never emit a global ready: a stale refresh completing after a tab
    * switch would otherwise rebind the UI to the old session (ready means
    * "this is now foreground", which sync is not). Callers hydrate the
-   * session they display explicitly from the boolean result.
+   * session they display explicitly from the boolean result. Skips the
+   * reparse when the disk fingerprint is unchanged (still returns true:
+   * the runtime trivially matches disk).
    */
   async refreshFromDisk(sessionPath: string): Promise<boolean> {
     return this.enqueueTransition(sessionPath, async () => {
       const entry = this.sessions.get(sessionPath);
       if (!entry || entry.runtime.session.isStreaming) return false;
+      const fp = await this.fingerprintSessionFile(sessionPath);
+      if (this.sameFingerprint(fp, entry.diskFingerprint)) return true;
       try {
         this.syncSessionFromDisk(entry, entry.cwd);
       } catch (err) {
         // Unflushed new session: nothing on disk to pull; live state stands.
         if (!isMissingFileError(err)) throw err;
       }
+      // Stat after the sync: an append racing the read is captured for (not
+      // lost to) the next comparison, which then re-syncs.
+      entry.diskFingerprint = await this.fingerprintSessionFile(sessionPath);
       await this.restoreRollbackLeafFor(entry.runtime.session);
       return true;
     });
@@ -2908,17 +2973,37 @@ export class PiHost implements LocalPiHost {
     if (session.isStreaming) return false;
     if ([...this.uiRequests.values()].some((p) => p.sessionFile === sessionFile)) return false;
     if (this.managedSubagents?.hasActiveForSession(session.sessionId)) return false;
+    // TOCTOU guard: the thread scan awaits, and the session may be
+    // reactivated (open/activate touches lastUsedAt via resolveEntry) or
+    // start streaming while it runs. Snapshot recency now, revalidate after.
+    const observedLastUsedAt = entry.lastUsedAt;
     if (await this.hasActiveThreadsForSession(session.sessionId).catch(() => false)) return false;
+    // Final synchronous revalidation: no await may follow these checks
+    // before disposal begins. Anything that touched the session during the
+    // scan (foregrounding, prompt preparation, new UI/subagent activity)
+    // aborts the release instead of pulling a live runtime out from under
+    // its user. Every foreground assignment also touches lastUsedAt, so the
+    // recency check subsumes a foreground comparison — and releasing the
+    // foreground session itself stays legal (tab-close cleanup depends on
+    // it; the pointer is cleared below as before).
+    if (this.sessions.get(sessionFile) !== entry) return false;
+    if (entry.lastUsedAt !== observedLastUsedAt) return false;
+    if (entry.runtime.session.isStreaming) return false;
+    if ([...this.uiRequests.values()].some((p) => p.sessionFile === sessionFile)) return false;
+    if (this.managedSubagents?.hasActiveForSession(entry.sessionId)) return false;
     entry.unsubscribe?.();
     entry.unsubscribe = null;
     this.rejectSessionUi(entry, new Error("session released"));
+    // Current session object (a rebind during the scan keeps the entry but
+    // swaps the SDK session; dispose exactly what is retained now).
+    const live = entry.runtime.session;
     try {
-      session.dispose();
+      live.dispose();
     } catch {
       /* ignore */
     }
     try {
-      this.opts.permission?.clearSessionRules(session.sessionId);
+      this.opts.permission?.clearSessionRules(live.sessionId);
     } catch {
       /* ignore */
     }

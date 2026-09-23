@@ -151,6 +151,15 @@ export default function App() {
   }, [setActiveSpace]);
 
   const [models, setModels] = useState<AgentModel[]>([]);
+  // Invariant-read caches for hydrate (every tab switch re-hydrates; these
+  // three do not change per switch): models are a global registry (refetch
+  // on mount + when settings are saved, which can edit context-window
+  // overrides), commands are cwd-bound via the owning session file (a new
+  // file means a new runtime with fresh registrations), thinking levels
+  // follow the session model id.
+  const modelsCacheRef = useRef<AgentModel[] | null>(null);
+  const commandsCacheRef = useRef<{ path: string; commands: CommandInfo[] } | null>(null);
+  const levelsCacheRef = useRef<{ key: string; levels: string[] } | null>(null);
 
   const { themePref, themeId, setThemePref, setThemeId } = useTheme();
   const [commands, setCommands] = useState<CommandInfo[]>([]);
@@ -924,11 +933,17 @@ export default function App() {
   );
 
   const hydrate = useCallback(async (expectedEpoch = epochRef.current) => {
+    // Commands key: the session on screen at entry (epoch-guarded below, so
+    // a switch mid-flight drops the whole result — the key cannot leak
+    // across sessions).
+    const hydratePath = activePathRef.current;
+    const commandsHit = hydratePath != null && commandsCacheRef.current?.path === hydratePath;
+    const modelsHit = modelsCacheRef.current != null;
     try {
       const [msgs, ms, commandData, st, statsData, nextHistory] = await Promise.all([
         bridge.getMessages(),
-        bridge.getModels(),
-        bridge.getCommands(),
+        modelsHit ? Promise.resolve(modelsCacheRef.current) : bridge.getModels().catch(() => null),
+        commandsHit ? Promise.resolve(commandsCacheRef.current!.commands) : bridge.getCommands().catch(() => null),
         bridge.getState(),
         bridge.getStats(),
         bridge.getHistory(),
@@ -940,10 +955,15 @@ export default function App() {
       loadedMessagesRef.current = mergeLiveMessages(loadedMessagesRef.current, msgs);
       dispatch({ type: "rebuild", messages: loadedMessagesRef.current });
       setCanLoadMore(earliestOffsetRef.current != null && earliestOffsetRef.current > 0);
-      setModels(ms ?? []);
-      setCommands(commandData ?? []);
+      if (ms != null && !modelsHit) modelsCacheRef.current = ms;
+      setModels(ms ?? modelsCacheRef.current ?? []);
+      if (commandData != null && !commandsHit && hydratePath != null) {
+        commandsCacheRef.current = { path: hydratePath, commands: commandData };
+      }
+      setCommands(commandData ?? (commandsHit ? commandsCacheRef.current!.commands : []));
       if (!commandData?.length) {
         const retryEpoch = expectedEpoch;
+        const retryPath = hydratePath;
         let attempts = 6;
         const retry = async () => {
           if (retryEpoch !== epochRef.current) return;
@@ -954,6 +974,7 @@ export default function App() {
             const refreshed = await bridge.getCommands();
             if (retryEpoch !== epochRef.current) return;
             if (refreshed?.length) {
+              if (retryPath != null) commandsCacheRef.current = { path: retryPath, commands: refreshed };
               setCommands(refreshed);
               return;
             }
@@ -976,7 +997,23 @@ export default function App() {
       } else if (!rollbackCreatedAt) {
         rollbackDraftRef.current = null;
       }
-      void bridge.getThinkingLevels().then(setThinkingLevels).catch(() => undefined);
+      // Thinking levels follow the session model: serve from cache while
+      // the model id matches, refetch (epoch-guarded) when it changes.
+      const modelKey = st?.model ? `${st.model.provider}/${st.model.id}` : null;
+      const levelsHit = modelKey != null && levelsCacheRef.current?.key === modelKey;
+      if (levelsHit) {
+        setThinkingLevels(levelsCacheRef.current!.levels);
+      } else {
+        const levelsEpoch = expectedEpoch;
+        void bridge
+          .getThinkingLevels()
+          .then((levels) => {
+            if (levelsEpoch !== epochRef.current) return;
+            if (modelKey != null && levels != null) levelsCacheRef.current = { key: modelKey, levels };
+            setThinkingLevels(levels ?? []);
+          })
+          .catch(() => undefined);
+      }
     } catch (e) {
       toast("error", errorMessage(e, "failed to load session"));
     }
@@ -1094,9 +1131,16 @@ export default function App() {
   // Landing: no active session (project context kept). The Hero takes over;
   // nothing is created and nothing is deleted. Defined up here so openSession
   // can land on a newly selected space when its remembered session is gone
-  // instead of restoring the previous view.
+  // instead of restoring the previous view. Landing is navigation: it
+  // invalidates the epoch, request id, and switch generation so an in-flight
+  // open's late ready cannot resurrect its session over the landing page.
   const showLanding = useCallback(() => {
+    ++epochRef.current;
+    ++latestRequestRef.current;
+    ++switchGenerationRef.current;
     switchingRef.current = false;
+    liveReadyRef.current = false;
+    activeSessionIdRef.current = null;
     activePathRef.current = null;
     setActiveSessionPath(null);
     setHasSession(false);
@@ -1592,8 +1636,21 @@ export default function App() {
                   reject(new Error("session changed before the message could be sent"));
                   return;
                 }
-                if (s.requestId !== undefined && s.requestId !== requestId) return;
                 if (s.status === "ready") {
+                  // Warmup waits for OUR open request only. A mismatched id
+                  // is a newer open (ours is superseded and, with backend
+                  // latest-wins, will never emit); an undefined id is a
+                  // foreign activation (extension/worktree foregrounding
+                  // emits requestId-less readies). Either way this is not
+                  // the session the send is warming up for — reject instead
+                  // of resolving against the wrong session (or hanging to
+                  // the 15s timeout waiting for a ready that never comes).
+                  if (s.requestId !== requestId) {
+                    clearTimeout(timeout);
+                    off?.();
+                    reject(new Error("session changed before the message could be sent"));
+                    return;
+                  }
                   clearTimeout(timeout);
                   off?.();
                   resolve();
@@ -2220,6 +2277,11 @@ export default function App() {
         onThemeIdChange={setThemeId}
         onThemeChange={setThemePref}
         onClose={() => setSettingsOpen(false)}
+        onSettingsSaved={() => {
+          // Context-window overrides remap the registry: drop the cached
+          // list so the next hydrate refetches it.
+          modelsCacheRef.current = null;
+        }}
         botsManager={{
           bots,
           activeBotId: activeBot?.id ?? null,

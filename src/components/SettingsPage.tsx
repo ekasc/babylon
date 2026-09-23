@@ -22,6 +22,9 @@ interface Props {
   themeId: ThemeId;
   onThemeIdChange(id: ThemeId): void;
   onClose(): void;
+  /** Fired after a settings save lands: lets App invalidate caches derived
+   *  from settings (model registry mapping with context-window overrides). */
+  onSettingsSaved?(): void;
   botsManager: BotsManagerProps;
 }
 
@@ -81,6 +84,7 @@ export default function SettingsPage(props: Props) {
     try {
       const next = await bridge.setSettings(patch);
       setSettings(next);
+      props.onSettingsSaved?.();
     } catch (e) {
       setSaveError(errorMessage(e, "Failed to save"));
     }
