@@ -18,6 +18,7 @@ import { projectHistory } from "./session-history";
 import { ActiveRollback, RollbackStore, entryDigest, missingCheckpointReason, type Ledger, type TurnCheckpoint } from "./rollback-store";
 import { validateSessionPath, contained } from "./session-path";
 import { errorMessage, isSessionNotFound, SessionNotFoundError } from "../src/lib/errors";
+import { ProjectExecutionBusyError, deriveExecutionState, type ProjectExecution } from "../src/execution";
 import { SnapshotStore, isBookkeepingPath, type RestoreChange, type SnapshotCapture } from "./snapshot-store";
 import { createGoalModeExtension, isExternalGoalModeExtension } from "./goal-mode/extension";
 import { createDesignModeExtension } from "./design-mode/extension";
@@ -376,6 +377,173 @@ export class PiHost implements LocalPiHost {
    */
   private touchEntry(entry: SessionEntry): void {
     entry.lastUsedAt = Math.max(Date.now(), entry.lastUsedAt + 1);
+  }
+
+  // ── Execution ownership (src/execution.ts) ──────────────────────────────
+  // I1: ONE top-level execution session per project. This map is the backend
+  // source of truth; `foregroundSessionFile` is only a compatibility pointer
+  // to the last execution activation and is NEVER an ownership fallback (I8).
+  // I3: view-side calls (open/navigation) never touch these maps.
+  private readonly executionByCwd = new Map<string, string>();
+  private readonly executionGenerationByCwd = new Map<string, number>();
+
+  /** Retained entry currently owning this project's execution. Clears stale
+   *  mappings (owner runtime gone) lazily and returns null. */
+  executionForCwd(cwd: string): SessionEntry | null {
+    const file = this.executionByCwd.get(cwd);
+    if (!file) return null;
+    const entry = this.sessions.get(file);
+    if (!entry) {
+      this.executionByCwd.delete(cwd);
+      return null;
+    }
+    return entry;
+  }
+
+  /** One definition of execution liveness (I4): everything that means the
+   *  project is still being worked on. The sync half is the same set
+   *  releaseSession() checks first (streaming, pending UI/approval,
+   *  subagents); the async half adds compaction, threads, and workflow
+   *  runs. isExecutionBusy ⊇ releaseSession, so deactivate can never
+   *  release past busy work. */
+  private syncExecutionBusy(entry: SessionEntry): boolean {
+    if (entry.runtime.session.isStreaming) return true;
+    if (entry.runtime.session.isCompacting) return true;
+    if ([...this.uiRequests.values()].some((p) => p.sessionFile === entry.sessionFile)) return true;
+    if (this.managedSubagents?.hasActiveForSession(entry.sessionId)) return true;
+    return false;
+  }
+
+  async isExecutionBusy(entry: SessionEntry): Promise<boolean> {
+    if (this.syncExecutionBusy(entry)) return true;
+    if (await this.hasActiveThreadsForSession(entry.sessionId).catch(() => false)) return true;
+    if (await this.hasActiveWorkflowRuns(entry.cwd, entry.sessionId)) return true;
+    return false;
+  }
+
+  /** Workflow runs persist under <cwd>/.pi/workflows/runs/*.json with an
+   *  owning sessionId (src/bridge.ts run-state contract). Any run the
+   *  session still owns in a non-terminal state means the project works. */
+  private async hasActiveWorkflowRuns(cwd: string, sessionId: string): Promise<boolean> {
+    try {
+      const dir = join(cwd, ".pi", "workflows", "runs");
+      const files = await fsp.readdir(dir);
+      for (const file of files) {
+        if (!file.endsWith(".json")) continue;
+        try {
+          const rec = wireOf(JSON.parse(await fsp.readFile(join(dir, file), "utf8")));
+          if (!rec || wireStr(rec, "sessionId") !== sessionId) continue;
+          const status = wireStr(rec, "status");
+          if (status === "pending" || status === "running" || status === "paused") return true;
+        } catch {
+          /* unparseable run file: not evidence of activity */
+        }
+      }
+    } catch {
+      /* no runs directory: nothing active */
+    }
+    return false;
+  }
+
+  /**
+   * Acquire (or transfer) this project's execution slot — the ONE top-level
+   * session allowed to execute (I1, I4):
+   *   no owner           → create/resume target (or a fresh session), own it
+   *   owner == target    → no-op, return the owner
+   *   owner idle         → release owner safely, then resume target
+   *   owner busy         → ProjectExecutionBusyError with the owner's identity
+   * Never aborts the owner, never queues the target, never switches on a tab
+   * click (navigation calls open(), not this), never infers from foreground.
+   * Cross-project calls are independent: activating B while A1 runs is legal.
+   */
+  async activateExecution(cwd: string, sessionFile?: string): Promise<SessionEntry> {
+    if (!cwd) throw new Error("execution activation requires a project cwd");
+    const owner = this.executionForCwd(cwd);
+    if (owner && sessionFile && owner.sessionFile === sessionFile) {
+      this.touchEntry(owner);
+      return owner;
+    }
+    if (owner && (await this.isExecutionBusy(owner))) {
+      throw new ProjectExecutionBusyError(owner.sessionFile, owner.sessionId);
+    }
+    let targetFile = sessionFile;
+    let newEntry: SessionEntry | undefined;
+    if (owner) {
+      // Idle transfer: release first. releaseSession has its own TOCTOU
+      // revalidation and refuses if the owner went busy mid-check — report
+      // that as typed busy rather than proceeding (the owner is never
+      // aborted silently, and the mapping keeps pointing at it).
+      const released = await this.releaseSession(owner.sessionFile);
+      if (!released) throw new ProjectExecutionBusyError(owner.sessionFile, owner.sessionId);
+      this.executionByCwd.delete(cwd);
+    }
+    if (targetFile) {
+      await this.open({ path: targetFile, cwd });
+    } else {
+      // Mirror open()'s fresh branch so the created file is known
+      // deterministically: AgentState.sessionFile is undefined for
+      // unflushed sessions, and reading foregroundSessionFile back would be
+      // an ownership fallback (I8) and racy under concurrent opens.
+      const seq = this.claimActivation();
+      const sm = SessionManager.create(cwd, this.opts.sessionsRoot);
+      const file = sm.getSessionFile()!;
+      await this.createSessionRuntimeWithManager(file, cwd, sm);
+      targetFile = file;
+      newEntry = this.sessions.get(file);
+      if (!newEntry) throw new Error("activation failed to materialize the session runtime");
+      await this.activate(newEntry, { cwd, seq });
+    }
+    const entry = newEntry ?? this.sessions.get(targetFile);
+    if (!entry) throw new Error("activation failed to materialize the session runtime");
+    this.executionByCwd.set(cwd, entry.sessionFile);
+    this.executionGenerationByCwd.set(cwd, (this.executionGenerationByCwd.get(cwd) ?? 0) + 1);
+    this.touchEntry(entry);
+    return entry;
+  }
+
+  /** Give up execution ownership for a project. False when the expected
+   *  owner is gone, someone else owns it, or it went busy — never releases
+   *  anything other than expectedSessionFile. */
+  async deactivateExecution(cwd: string, expectedSessionFile: string): Promise<boolean> {
+    const ownerFile = this.executionByCwd.get(cwd);
+    if (!ownerFile || ownerFile !== expectedSessionFile) return false;
+    const entry = this.sessions.get(ownerFile);
+    if (!entry) {
+      this.executionByCwd.delete(cwd);
+      return true;
+    }
+    if (await this.isExecutionBusy(entry)) return false;
+    const released = await this.releaseSession(ownerFile);
+    if (released) this.executionByCwd.delete(cwd);
+    return released;
+  }
+
+  /** Current execution record for one project (renderer rebuilds its
+   *  Record<cwd, ProjectExecution> from these + execution_changed events). */
+  private async buildProjectExecution(cwd: string, entry: SessionEntry): Promise<ProjectExecution> {
+    const streaming = entry.runtime.session.isStreaming;
+    const approvalPending = [...this.uiRequests.values()].some((p) => p.sessionFile === entry.sessionFile);
+    let state = deriveExecutionState({ streaming, approvalPending, waitingForInput: false, failed: false });
+    if (state === "idle" && (await this.isExecutionBusy(entry))) state = "working";
+    return {
+      cwd,
+      sessionFile: entry.sessionFile,
+      sessionId: entry.sessionId,
+      state,
+      streaming,
+      generation: this.executionGenerationByCwd.get(cwd) ?? 0,
+    };
+  }
+
+  /** Backend source of truth for renderer startup/reconnect (commit 2 wires
+   *  this through the transport). */
+  async listProjectExecutions(): Promise<ProjectExecution[]> {
+    const out: ProjectExecution[] = [];
+    for (const cwd of [...this.executionByCwd.keys()]) {
+      const entry = this.executionForCwd(cwd);
+      if (entry) out.push(await this.buildProjectExecution(cwd, entry));
+    }
+    return out;
   }
 
   /**
