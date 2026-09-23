@@ -69,10 +69,12 @@ interface Props {
 	onDialogDismiss?: (id: string) => void;
 	/** Bots offered for @-mention completion (room members in rooms). */
 	mentionBots?: Bot[];
-	/** True once a goal is set; hides the ghost Goal control in the row. */
-	goalSet?: boolean;
-	/** Open the goal strip's naming input. */
-	onStartGoal?: () => void;
+	/** Goal composer mode: off | armed (next send starts it) | active. */
+	goalMode?: "off" | "armed" | "active";
+	/** Active goal objective, for the pursuing tooltip. Null when none. */
+	goalObjective?: string | null;
+	/** Toggle: arm/disarm when idle, cancel when pursuing. */
+	onToggleGoal?: () => void;
 	/** True while design mode is on; the Design control stays visible as a toggle. */
 	designActive?: boolean;
 	/** Toggle design mode on/off. Receives the current composer draft so the
@@ -177,8 +179,9 @@ const Composer = memo(function Composer({
 	dialogs,
 	onDialogDismiss,
 	mentionBots = [],
-	goalSet = false,
-	onStartGoal,
+	goalMode = "off",
+	goalObjective = null,
+	onToggleGoal,
 	designActive = false,
 	onToggleDesign,
 	designApproval = null,
@@ -697,7 +700,7 @@ const Composer = memo(function Composer({
 					{!hasBlockingDialog && (
 						<div className="flex items-center gap-3 px-4 py-3">
 							<input ref={fileRef} type="file" multiple className="hidden" onChange={(e) => { void addFiles(e.target.files ?? []); e.target.value = ""; }} />
-							<button onClick={() => fileRef.current?.click()} title="Attach (paste / drag & drop)" aria-label="Attach file" disabled={hasBlockingDialog} className="grid h-8 w-8 shrink-0 place-items-center text-dim hover:text-fg disabled:opacity-40"><PaperclipIcon size={16} /></button>
+							<button onClick={() => fileRef.current?.click()} title="Attach (paste / drag & drop)" aria-label="Attach file" disabled={hasBlockingDialog} className="composer-pressable grid h-8 w-8 shrink-0 place-items-center text-dim hover:text-fg disabled:opacity-40"><PaperclipIcon size={16} /></button>
 						<span className="relative shrink-0">
 							<button
 								onClick={() => setStashOpen((o) => !o)}
@@ -705,7 +708,7 @@ const Composer = memo(function Composer({
 								aria-label={stash.length ? `Stashed drafts (${stash.length})` : "Stash draft"}
 								aria-expanded={stashOpen}
 								disabled={hasBlockingDialog}
-								className="grid h-8 w-8 place-items-center rounded-md text-dim hover:text-fg disabled:opacity-40"
+								className="composer-pressable grid h-8 w-8 place-items-center rounded-md text-dim hover:text-fg disabled:opacity-40"
 							>
 								<BookmarkIcon size={15} />
 								{stash.length > 0 ? (
@@ -744,9 +747,9 @@ const Composer = memo(function Composer({
 							<span className="shrink-0 select-none text-[length:var(--prompt-font)] leading-none text-dim" aria-hidden>&gt;</span>
 							<textarea ref={composerRef} value={text} onChange={(e) => { setText(e.target.value); if (historyCursor !== null) setHistoryCursor(null); }} onKeyDown={onKeyDown} onPaste={onPaste} rows={1} disabled={hasBlockingDialog} placeholder={streaming ? (mode === "steer" ? "Steer…" : "Queue…") : "Message Pi…"} role="textbox" aria-label="Message Pi" aria-autocomplete="list" aria-controls={ac.openMenu?.id} aria-activedescendant={ac.openMenu ? `${ac.openMenu.optionIdPrefix}-${ac.openMenu.selected}` : undefined} className="composer-input max-h-[140px] min-h-[20px] w-full flex-1 resize-none border-0 bg-transparent py-1 text-[length:var(--prompt-font)] leading-[1.5] outline-none placeholder:text-dim focus:outline-none focus-visible:outline-none" />
 							{streaming ? (
-								<div className="flex shrink-0 items-center gap-1.5" role="group" aria-label="Delivery mode"><button onClick={() => setMode("steer")} aria-pressed={mode === "steer"} title="Interrupt and redirect" className={`h-8 rounded-md px-3 text-[12px] ${mode === "steer" ? "bg-accent text-white" : "bg-inset text-dim hover:text-fg"}`}>steer</button><button onClick={() => setMode("followUp")} aria-pressed={mode === "followUp"} title="Queue after current run" className={`h-8 rounded-md px-3 text-[12px] ${mode === "followUp" ? "bg-accent text-white" : "bg-inset text-dim hover:text-fg"}`}>queue</button><button onClick={onAbort} title="Stop run" aria-label="Stop run" className="grid h-8 w-8 place-items-center rounded-md bg-err text-white hover:bg-err/90"><StopIcon size={14} /></button></div>
+								<div className="flex shrink-0 items-center gap-1.5" role="group" aria-label="Delivery mode"><button onClick={() => setMode("steer")} aria-pressed={mode === "steer"} title="Interrupt and redirect" className={`composer-pressable h-8 rounded-md px-3 text-[12px] ${mode === "steer" ? "bg-accent text-white" : "bg-inset text-dim hover:text-fg"}`}>steer</button><button onClick={() => setMode("followUp")} aria-pressed={mode === "followUp"} title="Queue after current run" className={`composer-pressable h-8 rounded-md px-3 text-[12px] ${mode === "followUp" ? "bg-accent text-white" : "bg-inset text-dim hover:text-fg"}`}>queue</button><button onClick={onAbort} title="Stop run" aria-label="Stop run" className="composer-pressable grid h-8 w-8 place-items-center rounded-md bg-err text-white hover:bg-err/90"><StopIcon size={14} /></button></div>
 							) : (
-								<button onClick={submit} disabled={sending || (!text.trim() && attachments.length === 0)} title={sending ? "Sending…" : "Send"} aria-label="Send message" className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-fg text-bg hover:bg-fg/90 disabled:cursor-not-allowed disabled:opacity-30"><SendIcon size={14} /></button>
+								<button onClick={submit} disabled={sending || (!text.trim() && attachments.length === 0)} title={sending ? "Sending…" : "Send"} aria-label="Send message" className="composer-pressable grid h-8 w-8 shrink-0 place-items-center rounded-full bg-fg text-bg hover:bg-fg/90 disabled:cursor-not-allowed disabled:opacity-30"><SendIcon size={14} /></button>
 							)}
 						</div>
 					)}
@@ -778,19 +781,33 @@ const Composer = memo(function Composer({
 							</span>
 							<div className="flex-1" />
 							<span aria-hidden="true" className="mx-1.5 h-4 w-px shrink-0 bg-line/60" />
-							{!goalSet && onStartGoal ? (
+							{onToggleGoal ? (
 								<span className="flex shrink-0 items-center">
-									<button type="button" onClick={onStartGoal} title="Set a durable goal the agent works toward (/goal)" className="operator-meta-control">Goal</button>
+									<button
+										type="button"
+										onClick={onToggleGoal}
+										aria-pressed={goalMode !== "off"}
+										title={
+											goalMode === "active"
+												? `Pursuing: ${trunc(goalObjective || "goal", 80)} (click to stop)`
+												: goalMode === "armed"
+													? "Goal mode on. Your next message becomes the goal. (Click to disarm)"
+													: "Goal mode: your next message becomes the goal"
+										}
+										className={`operator-meta-control composer-pressable ${goalMode !== "off" ? "text-fg underline underline-offset-2" : ""}`}
+									>
+										Goal{goalMode === "active" ? " ●" : ""}
+									</button>
 								</span>
 							) : null}
 						{onToggleDesign ? (
 							<span className="flex shrink-0 items-center">
-								<button type="button" onClick={() => onToggleDesign(text)} aria-pressed={designActive} title={designActive ? "Turn design mode off" : "Turn design mode on: interview, brief, brand approval, build"} className={`operator-meta-control ${designActive ? "text-fg underline underline-offset-2" : ""}`}>Design</button>
+								<button type="button" onClick={() => onToggleDesign(text)} aria-pressed={designActive} title={designActive ? "Turn design mode off" : "Turn design mode on: interview, brief, brand approval, build"} className={`operator-meta-control composer-pressable ${designActive ? "text-fg underline underline-offset-2" : ""}`}>Design</button>
 							</span>
 						) : null}
 						{designApproval ? (
 							<span className="flex shrink-0 items-center">
-								<button type="button" onClick={designApproval.onApprove} title="Approve and continue the design flow" className="rounded-md bg-accent px-2.5 py-1 text-[12px] font-semibold text-bg hover:bg-accent/90">{designApproval.label}</button>
+								<button type="button" onClick={designApproval.onApprove} title="Approve and continue the design flow" className="composer-pressable composer-approve-enter rounded-md bg-accent px-2.5 py-1 text-[12px] font-semibold text-bg hover:bg-accent/90">{designApproval.label}</button>
 							</span>
 						) : null}
 							{streaming && (

@@ -49,6 +49,7 @@ function fakePiHost(overrides: Partial<DaemonPiHost>): DaemonPiHost {
     setSettings: fail("setSettings"),
     setSessionName: fail("setSessionName"),
     renameSession: fail("renameSession"),
+    beginGoal: fail("beginGoal"),
     compact: fail("compact"),
     getTree: fail("getTree"),
     getHistory: fail("getHistory"),

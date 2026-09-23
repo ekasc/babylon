@@ -29,6 +29,7 @@ import {
 import { insertCommand } from "./commands";
 import { countRunningWork } from "./lib/activity";
 import { errorMessage, isSessionNotFound } from "./lib/errors";
+import { clampHard, clampWithRubberband } from "./lib/gesture-math";
 import { resolveSendTarget } from "./lib/send-target";
 import Sidebar from "./components/Sidebar";
 import { useTheme } from "./components/hooks/useTheme";
@@ -320,6 +321,20 @@ export default function App() {
   // Durable per-session goal (hardbaked goal-mode extension state): the
   // single source of truth the agent itself enforces.
   const { durableGoal, setDurableGoal, goalTargetRef, refreshDurableGoal, goalControl } = useDurableGoal(toast);
+  // Goal arming is renderer-only: clicking Goal arms the next send, which
+  // persists the message as the objective and starts the turn itself (no
+  // synthetic kickoff turn). Disarmed on send-consume, toggle, navigation.
+  const [goalArmed, setGoalArmed] = useState(false);
+  const toggleGoal = useCallback(async () => {
+    // Active (or paused) goal + click = cancel pursuit, never "mark done":
+    // only the model reaching the stopping condition completes a goal.
+    if (durableGoal?.active) {
+      setGoalArmed(false);
+      await goalControl("cancel");
+      return;
+    }
+    setGoalArmed((armed) => !armed);
+  }, [durableGoal, goalControl]);
   // Design mode (hardbaked design-mode extension state): the toggleable
   // phased design flow for this session, same strip pattern as the goal.
   const { designStatus, setDesignStatus, designTargetRef, refreshDesign, designControl } = useDesignMode(toast);
@@ -478,13 +493,14 @@ export default function App() {
       window.removeEventListener("blur", finish);
       document.documentElement.classList.remove("is-context-resizing");
       setContextWidth((width) => {
-        setWithFallback("context-width", String(width));
-        return width;
+        const clamped = clampHard(width, 360, maxWidth);
+        setWithFallback("context-width", String(clamped));
+        return clamped;
       });
     };
     const onMove = (move: PointerEvent) => {
       if (move.pointerId !== pointerId) return;
-      setContextWidth(Math.max(360, Math.min(maxWidth, startWidth + startX - move.clientX)));
+      setContextWidth(clampWithRubberband(startWidth + startX - move.clientX, 360, maxWidth, startWidth));
     };
     const onEnd = (end: PointerEvent) => {
       if (end.pointerId === pointerId) finish();
@@ -1113,6 +1129,8 @@ export default function App() {
     setActiveSessionPath(null);
     setHasSession(false);
     setLiveReady(false);
+    // Arming is per-composer-intent: leaving the session drops it.
+    setGoalArmed(false);
   }, []);
 
   // Clear the switch cover shortly after it fades (animation is 120ms; the
@@ -1121,6 +1139,9 @@ export default function App() {
     async (path: string | undefined, cwd: string, opts?: { quietMissing?: boolean }) => {
       const expectedEpoch = ++epochRef.current;
       const requestId = ++latestRequestRef.current;
+      // Arming never survives navigation: the objective belongs to the
+      // session it was armed in.
+      setGoalArmed(false);
       // Opening never changes lifecycle: a settled session renders normally
       // and stays under Settled until explicitly un-settled. Unread clears —
       // you are looking at it now.
@@ -1644,14 +1665,31 @@ export default function App() {
           if (history.activeRollback) await hydrate();
           return true;
         }
+        // Explicit identity resolved AFTER the warmup wait above (see
+        // resolveSendTarget): the render closure's paths may still point
+        // at the previous session, so the live ref is authoritative.
+        const target = resolveSendTarget(sendEpoch, epochRef.current, activePathRef.current);
+        if (goalArmed) {
+          // Armed Goal mode: this message IS the goal. Persist it as the
+          // objective first so before_agent_start injects goal context into
+          // this same turn — no synthetic kickoff turn. Abort (don't send)
+          // when persisting fails; a half-armed send would lie about intent.
+          setGoalArmed(false);
+          try {
+            const { goal } = await bridge.beginGoal(target, text);
+            if (goal) setDurableGoal(goal);
+          } catch (e) {
+            if (hasContent) dispatch({ type: "local-user-rollback", text });
+            toast("error", errorMessage(e, "could not start goal"));
+            if (history.activeRollback) void hydrate();
+            return false;
+          }
+        }
         await bridge.prompt(
           text,
           images?.map((a) => ({ type: "image", data: a.data, mimeType: a.mimeType })),
           streamingBehavior,
-          // Explicit identity resolved AFTER the warmup wait above (see
-          // resolveSendTarget): the render closure's paths may still point
-          // at the previous session, so the live ref is authoritative.
-          resolveSendTarget(sendEpoch, epochRef.current, activePathRef.current)
+          target
         );
         // Real transition: the host accepted the prompt. Ownership is the live
         // session's runtime id; no message id is fabricated when absent.
@@ -1666,7 +1704,7 @@ export default function App() {
     },
     // No session-path deps: the prompt target resolves from activePathRef
     // after the warmup wait, never from the render closure.
-    [history.activeRollback, hydrate, toast, activeGroup]
+    [history.activeRollback, hydrate, toast, activeGroup, goalArmed, setDurableGoal]
   );
 
   const abort = useCallback(async () => {
@@ -2491,22 +2529,9 @@ export default function App() {
                     ? bots.filter((b) => activeGroup.memberIds.includes(b.id))
                     : (sharedStaff ?? bots.filter((b) => !b.hidden))
                 }
-                goal={durableGoal}
-                onStartGoal={(objective) => {
-                  void goalControl(objective);
-                }}
-                onPauseGoal={() => {
-                  void goalControl("pause");
-                }}
-                onResumeGoal={() => {
-                  void goalControl("resume");
-                }}
-                onFinishGoal={() => {
-                  void goalControl("done");
-                }}
-                onClearGoal={() => {
-                  void goalControl("clear");
-                }}
+                goalMode={durableGoal?.active ? "active" : goalArmed ? "armed" : "off"}
+                goalObjective={durableGoal?.objective ?? null}
+                onToggleGoal={() => void toggleGoal()}
                 design={designStatus}
                 onToggleDesign={(draft) => {
                   // The toggle never invents a subject: on comes from the

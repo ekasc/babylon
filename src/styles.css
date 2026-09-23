@@ -518,6 +518,24 @@ html.dark .sidebar-footer::before{background:var(--line-deep)}
 .composer-stream-stop:hover{background:color-mix(in srgb,var(--err) 12%,transparent);color:var(--err)}
 .operator-meta-control{border:0;border-radius:7px;background:transparent;color:var(--dim)}
 .operator-meta-control:hover{background:var(--inset);color:var(--fg)}
+/* Ghost control press feedback (same response language as the composer
+ * buttons; covers picker triggers that share this class). */
+.operator-meta-control{transition:transform 100ms ease-out}
+.operator-meta-control:active{transform:scale(.94)}
+/* Composer press feedback (apple-design response): instant on pointer-down,
+ * 100ms ease-out release. One scale value everywhere, gated for reduced
+ * motion. Approve materializes (scale + fade together) anchored bottom-left
+ * where it arrives in the row. */
+.composer-pressable{transition:transform 100ms ease-out}
+.composer-pressable:active{transform:scale(.94)}
+.composer-approve-enter{transform-origin:bottom left;animation:materialize-popover 170ms cubic-bezier(.2,.8,.2,1) both}
+@media (prefers-reduced-motion: reduce){
+.composer-pressable{transition:none}
+.composer-pressable:active{transform:none}
+.operator-meta-control{transition:none}
+.operator-meta-control:active{transform:none}
+.composer-approve-enter{animation:none}
+}
 .operator-popover{border:1px solid var(--line);border-radius:12px;background:var(--bg);box-shadow:0 1px 2px rgba(0,0,0,.06),0 12px 32px -16px rgba(0,0,0,.22);transform-origin:bottom left;animation:materialize-popover 170ms cubic-bezier(.2,.8,.2,1) both}
 textarea.composer{field-sizing:content;min-height:24px;max-height:100px;font-size:16px;line-height:24px;overflow-y:auto;padding:2px 0}
 textarea.composer:focus-visible{outline:none;box-shadow:none}
@@ -686,6 +704,25 @@ html.dark .context-button.is-primary{color:var(--bg)}
 @keyframes reveal-group{from{opacity:.35;transform:translateY(-3px) scaleY(.98)}to{opacity:1;transform:none}}
 @keyframes materialize-popover{from{opacity:0;transform:translateY(5px) scale(.98)}to{opacity:1;transform:none}}
 .toast{animation:toast-in .2s cubic-bezier(.2,.8,.2,1)}.fade-in{animation:pideck-fade 150ms ease-out both}
+/* Reduced motion: travel/scale entrances appear instantly; status pulses
+ * and spinners go static (their presence still communicates state).
+ * Opacity-only fades (pideck-fade) are vestibular-safe and stay. */
+@media (prefers-reduced-motion: reduce){
+.operator-popover,.command-palette,.toast,.sidebar-session-group,.conversation-user-sent,.conversation-system-in{animation:none!important}
+.thinking-dot.is-pulse,.tool-dot.running,.status-dot-working{animation:none}
+.animate-spin{animation:none!important}
+}
+/* Reduced transparency: frosted surfaces go solid with defined borders.
+ * Nothing here stacks translucency, so this is a straight downgrade. */
+@media (prefers-reduced-transparency: reduce){
+.toast,.rollback-dock{background:var(--popover);backdrop-filter:none;-webkit-backdrop-filter:none}
+.execution-context,.context-button{background:var(--raised);backdrop-filter:none;-webkit-backdrop-filter:none}
+}
+/* Higher contrast: reinforce surface separation with explicit borders. */
+@media (prefers-contrast: more){
+.operator-popover,.command-palette,.modal-surface,.toast{border:1px solid var(--line-strong)}
+.composer-surface{border-color:var(--line-strong)}
+}
 .glass{background:var(--chrome);backdrop-filter:blur(20px) saturate(160%)}
 button:not(:disabled){transition:background-color 130ms ease,color 130ms ease,border-color 130ms ease,opacity 130ms ease,filter 90ms ease}
 @media(max-width:1050px){.app-sidebar{width:232px}.context-workspace{position:absolute;z-index:30;inset-block:0;right:0;max-width:calc(100% - 120px);box-shadow:-18px 0 48px rgba(0,0,0,.24)}}

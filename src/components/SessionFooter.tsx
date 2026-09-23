@@ -1,6 +1,4 @@
-import { useState } from "react";
 import Composer, { type Attachment } from "./Composer";
-import { GoalStrip } from "./GoalStrip";
 import type { AgentModel, AgentState, CommandInfo, SessionStats } from "../bridge";
 import type { Dialog } from "../store";
 
@@ -32,13 +30,11 @@ interface Props {
 	subagentCount?: number;
 	/** Bots offered for @-mention completion in the composer. */
 	mentionBots?: import("../bots").Bot[];
-	/** The session's durable goal (hardbaked goal-mode state), as a mini strip joined to the top of the composer. */
-	goal?: import("../lib/durable-goal").DurableGoalState | null;
-  onStartGoal?: (objective: string) => void;
-  onPauseGoal?: () => void;
-  onResumeGoal?: () => void;
-  onFinishGoal?: () => void;
-  onClearGoal?: () => void;
+	/** Goal composer mode: off | armed (next send starts it) | active.
+	    No strip, no timer, no turn counts — the button state is the UI. */
+	goalMode?: "off" | "armed" | "active";
+	goalObjective?: string | null;
+	onToggleGoal?: () => void;
   /** The session's design mode (hardbaked design-mode extension state). No
       strip is ever rendered — the composer border signals the mode and a
       pending approval surfaces as one button in the composer row. */
@@ -68,18 +64,14 @@ export default function SessionFooter({
 	dialogs,
 	onDialogDismiss,
 	mentionBots = [],
-  goal = null,
-  onStartGoal = () => {},
-  onPauseGoal = () => {},
-  onResumeGoal = () => {},
-  onFinishGoal = () => {},
-  onClearGoal = () => {},
+  goalMode = "off",
+  goalObjective = null,
+  onToggleGoal = () => {},
   design = null,
   onToggleDesign = (_draft: string) => {},
   onApproveDesignBrief = () => {},
   onApproveDesignBrand = () => {},
 }: Props) {
-  const [goalEditing, setGoalEditing] = useState(false);
 	// The session controls (permission, model, thinking, run state, usage)
 	// live in the composer surface itself. The footer is just the composer,
 	// not a permanent telemetry dashboard.
@@ -92,24 +84,8 @@ export default function SessionFooter({
 				    as one deliberate control surface aligned to the
 				    conversation, session controls included. */}
 				<div className="mx-auto w-full max-w-3xl">
-					{goal || goalEditing ? (
-						<GoalStrip
-							goal={goal}
-							editing={goalEditing}
-							onEditingChange={setGoalEditing}
-							onStart={(objective) => {
-								onStartGoal(objective);
-								setGoalEditing(false);
-							}}
-							onPause={onPauseGoal}
-							onResume={onResumeGoal}
-							onFinish={onFinishGoal}
-            onClear={onClearGoal}
-            />
-          ) : null}
-          {/* No design strip, ever. Design mode lives entirely in the
-              composer: accent border signals the mode, and a pending
-              approval surfaces as one button in the composer row. */}
+          {/* No goal strip, ever — same contract as design mode: the
+              composer button state is the entire UI. */}
           <Composer
 						streaming={streaming}
 						steering={steering}
@@ -130,8 +106,9 @@ export default function SessionFooter({
 						dialogs={dialogs}
 						onDialogDismiss={onDialogDismiss}
             mentionBots={mentionBots}
-            goalSet={goal !== null}
-            onStartGoal={() => setGoalEditing(true)}
+            goalMode={goalMode}
+            goalObjective={goalObjective}
+            onToggleGoal={onToggleGoal}
             designActive={design?.design !== null && design?.design !== undefined}
             onToggleDesign={onToggleDesign}
             designApproval={

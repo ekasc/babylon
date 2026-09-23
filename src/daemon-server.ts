@@ -104,6 +104,8 @@ export interface DaemonPiHost {
   prompt(message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp", sessionFile?: string | null): Promise<unknown>;
   /** Run a `/goal …` control invocation without opening a turn; returns the fresh durable goal. */
   execGoalCommand(args: string): Promise<DurableGoalState | null>;
+  /** Silently persist a goal objective for an addressed session (no follow-up turn). */
+  beginGoal(sessionFile: string, objective: string): Promise<DurableGoalState | null>;
   /** Run a `/design …` control invocation; returns the fresh design state. */
   execDesignCommand(args: string): Promise<import("../electron/design-mode/store").DesignStatus>;
   abort(sessionFile?: string): Promise<unknown>;
@@ -748,6 +750,15 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
               // Wrapped so a missing goal reads as null, never a bare
               // non-object payload.
               payload = { goal: await piHost.execGoalCommand(args) };
+              break;
+            }
+            case "pi.goalBegin": {
+              const { sessionFile, objective } = request.payload as { sessionFile?: unknown; objective?: unknown };
+              if (typeof sessionFile !== "string" || typeof objective !== "string") {
+                send(socket, createEnvelope("response", "error", { error: "pi.goalBegin requires { sessionFile, objective }" }, request.id));
+                return;
+              }
+              payload = { goal: await piHost.beginGoal(sessionFile, objective) };
               break;
             }
             case "pi.designControl": {

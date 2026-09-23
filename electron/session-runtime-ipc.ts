@@ -89,6 +89,20 @@ export function registerSessionRuntimeIpc(
     }
     return { goal: await getRuntime().goalControl(args) };
   });
+  handle("pideck:goal-begin", async (_e, sessionFile: string, objective: string) => {
+    if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) {
+      throw new Error("invalid session file");
+    }
+    if (typeof objective !== "string" || objective.trim().length < 1 || objective.length > 5000) {
+      throw new Error("invalid goal objective");
+    }
+    if (isDaemonOwned()) {
+      const client = requireDaemonClient();
+      const res = await client.request("pi.goalBegin", { sessionFile, objective });
+      return { goal: unwrapDurableGoalResult(res.payload, "pi.goalBegin") };
+    }
+    return { goal: await getRuntime().beginGoal(sessionFile, objective) };
+  });
   handle("pideck:design-get", async (_e, sessionId: string, cwd: string) => {
     // Same contract as pideck:goal-get: the state file is the shared
     // source of truth, read straight off disk in both modes.

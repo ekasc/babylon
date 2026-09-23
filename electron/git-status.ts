@@ -21,18 +21,20 @@ export interface GitInfo {
 
 export async function gitInfo(cwd: string): Promise<GitInfo> {
   try {
-    const inside = await git(["rev-parse", "--is-inside-work-tree"], cwd);
+    // One spawn instead of four: rev-parse prints one line per operand, in
+    // order. Spawning a git per operand turned every status poll into a
+    // fork storm (see gitStatus caching below).
+    const out = await git(
+      ["rev-parse", "--is-inside-work-tree", "--show-toplevel", "--abbrev-ref", "HEAD", "--git-dir"],
+      cwd
+    );
+    const [inside, root, branch, gitDir] = out.split("\n");
     if (inside !== "true") return { isRepo: false };
-    const [root, branch, gitDir] = await Promise.all([
-      git(["rev-parse", "--show-toplevel"], cwd),
-      git(["rev-parse", "--abbrev-ref", "HEAD"], cwd).catch(() => "HEAD"),
-      git(["rev-parse", "--git-dir"], cwd),
-    ]);
     return {
       isRepo: true,
       root,
-      branch,
-      isLinkedWorktree: gitDir.replace(/\\/g, "/").includes(".git/worktrees/"),
+      branch: branch || "HEAD",
+      isLinkedWorktree: (gitDir ?? "").replace(/\\/g, "/").includes(".git/worktrees/"),
     };
   } catch {
     return { isRepo: false };
@@ -54,8 +56,53 @@ export interface GitStatusResult {
   behind: number;
 }
 
-/** Computes the full working-tree git status for a directory. */
+// Per-cwd result cache + in-flight dedup for gitStatus. The renderer polls
+// on a timer and re-renders constantly while agents stream; without this,
+// every poll cycle spawned ~3 gits per project cwd (rev-parse, status,
+// rev-list), and overlapping cycles stacked further bursts that showed up as
+// sustained main-process CPU and zombie accumulation. The timer period
+// (30s) exceeds the positive TTL, so scheduled polls still read fresh data;
+// rapid refires in between are served from cache. Mutating git IPC handlers
+// must call invalidateGitStatus so post-commit/stage reads are fresh.
+const POSITIVE_TTL_MS = 15_000;
+const NEGATIVE_TTL_MS = 30_000;
+
+interface StatusCacheEntry {
+  at: number;
+  value: GitStatusResult;
+}
+
+const statusCache = new Map<string, StatusCacheEntry>();
+const statusInFlight = new Map<string, Promise<GitStatusResult>>();
+
+/** Drop the cached status for a cwd after a mutating git operation. */
+export function invalidateGitStatus(cwd: string): void {
+  statusCache.delete(cwd);
+}
+
 export async function gitStatus(cwd: string): Promise<GitStatusResult> {
+  const now = Date.now();
+  const cached = statusCache.get(cwd);
+  if (cached) {
+    const ttl = cached.value.isRepo ? POSITIVE_TTL_MS : NEGATIVE_TTL_MS;
+    if (now - cached.at < ttl) return cached.value;
+  }
+  // Concurrent callers (timer + hover + full refresh coinciding) share one
+  // computation instead of each spawning their own git burst.
+  const pending = statusInFlight.get(cwd);
+  if (pending) return pending;
+  const run = computeGitStatus(cwd).then((result) => {
+    statusCache.set(cwd, { at: Date.now(), value: result });
+    return result;
+  }).finally(() => {
+    if (statusInFlight.get(cwd) === run) statusInFlight.delete(cwd);
+  });
+  statusInFlight.set(cwd, run);
+  return run;
+}
+
+/** Computes the full working-tree git status for a directory. */
+async function computeGitStatus(cwd: string): Promise<GitStatusResult> {
   const base = await gitInfo(cwd);
   if (!base.isRepo) return { isRepo: false, dirty: [], ahead: 0, behind: 0 };
   const result: GitStatusResult = {

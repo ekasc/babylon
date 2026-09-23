@@ -1,16 +1,29 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { bridge, type GitStatusResult, type ProjectGroup } from "../../bridge";
 
 export function useGitStatus(projects: ProjectGroup[]) {
   const [gitStatuses, setGitStatuses] = useState<Record<string, GitStatusResult>>({});
 
-  // Git status keyed by project cwd, so every thread can show its
-  // branch (and full status on hover). Refreshed when the session list or
-  // active project changes, on a light timer, and on row hover.
-  const refreshGitStatuses = useCallback(() => {
+  // Stable key over the SET of cwds. `groups` gets a fresh array identity on
+  // every session-index emission (fs.watch fires constantly while an agent is
+  // streaming), so depending on `projects` directly re-ran a full
+  // one-git-per-project spawn burst per emission. The key only changes when
+  // projects actually come or go.
+  const cwdKey = useMemo(() => {
     const cwds = Array.from(new Set(projects.map((g) => g.cwd).filter(Boolean))) as string[];
-    if (!cwds.length) return;
-    Promise.all(
+    cwds.sort();
+    return cwds.join("\n");
+  }, [projects]);
+
+  // Guards overlapping full refreshes: a timer tick landing mid-refresh (or a
+  // cwd change racing one) shares the in-flight pass instead of stacking a
+  // second burst of spawns.
+  const refreshInFlight = useRef<Promise<void> | null>(null);
+  const refreshGitStatuses = useCallback((): Promise<void> => {
+    if (refreshInFlight.current) return refreshInFlight.current;
+    const cwds = cwdKey.length ? cwdKey.split("\n") : [];
+    if (!cwds.length) return Promise.resolve();
+    const run: Promise<void> = Promise.all(
       cwds.map((c) => bridge.gitStatus(c).then((s) => [c, s] as const).catch(() => [c, null] as const))
     )
       .then((results) => {
@@ -20,8 +33,13 @@ export function useGitStatus(projects: ProjectGroup[]) {
           return next;
         });
       })
-      .catch(() => undefined);
-  }, [projects]);
+      .catch(() => undefined)
+      .finally(() => {
+        if (refreshInFlight.current === run) refreshInFlight.current = null;
+      });
+    refreshInFlight.current = run;
+    return run;
+  }, [cwdKey]);
 
   const refreshGitStatusForCwd = useCallback((cwd: string) => {
     bridge.gitStatus(cwd).then((s) => { if (s) setGitStatuses((prev) => ({ ...prev, [cwd]: s })); }).catch(() => {});

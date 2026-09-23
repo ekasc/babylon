@@ -21,7 +21,8 @@ import { isSessionNotFound, SessionNotFoundError } from "../src/lib/errors";
 import { SnapshotStore, isBookkeepingPath, type RestoreChange, type SnapshotCapture } from "./snapshot-store";
 import { createGoalModeExtension, isExternalGoalModeExtension } from "./goal-mode/extension";
 import { createDesignModeExtension } from "./design-mode/extension";
-import { loadSessionGoal } from "./goal-mode/store";
+import { loadSessionGoal, saveSessionGoal, loadGoalModeConfig } from "./goal-mode/store";
+import { createDurableGoalState, defaultDurableGoalModeConfig } from "../src/lib/durable-goal";
 import { loadDesignState, stageOfState, type DesignStatus } from "./design-mode/store";
 import type { DurableGoalState } from "../src/lib/durable-goal";
 import { shouldRelayImagesThrough, toPiImages } from "./prompt-images";
@@ -1879,6 +1880,25 @@ export class PiHost implements LocalPiHost {
     const entry = this.activeEntry();
     await entry.runtime.session.prompt(text, {});
     return loadSessionGoal(entry.cwd, entry.sessionId);
+  }
+
+  /**
+   * Silently persist a goal objective for an explicitly addressed session —
+   * the GUI's arm-and-send path. Unlike the `/goal <objective>` command
+   * (which queues a synthetic [Goal Mode Start] follow-up turn), this only
+   * writes state: the caller's next prompt() is the turn itself, and
+   * before_agent_start injects the goal context into that same turn.
+   * Same 4000-char ceiling as the command path. CLI/manual /goal behavior
+   * is untouched.
+   */
+  async beginGoal(sessionFile: string, objective: string): Promise<DurableGoalState | null> {
+    const text = objective.trim();
+    if (!text || text.length > 4000) throw new Error("invalid goal objective");
+    const entry = this.resolveEntry(sessionFile);
+    const config = await loadGoalModeConfig(entry.cwd, defaultDurableGoalModeConfig(), this.trustByCwd.get(entry.cwd) ?? false);
+    const state = createDurableGoalState(text, config);
+    await saveSessionGoal(entry.cwd, entry.sessionId, state);
+    return state;
   }
   /**
    * Run a `/design …` control invocation through the foreground session

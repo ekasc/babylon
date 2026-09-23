@@ -110,6 +110,7 @@ export function createLocalRuntime(opts: {
     },
     async abort(sessionFile?: string) { return piHost.abort(sessionFile); },
     async goalControl(args: string) { return piHost.execGoalCommand(args); },
+    async beginGoal(f: string, o: string) { return piHost.beginGoal(f, o); },
     async designControl(args: string) { return piHost.execDesignCommand(args); },
     async releaseSession(path: string) {
       return { released: await piHost.releaseSession(path) };

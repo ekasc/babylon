@@ -96,6 +96,48 @@ describe("project pre-warming", () => {
 });
 
 describe("PiHost independent session execution", () => {
+  it("beginGoal persists silently with no follow-up turn", async () => {
+    const a = await makeProject("goal-silent");
+    const { host } = makeHost(a.cwd, a.agentDir);
+    await host.start();
+    try {
+      const fileA = await makeSessionFile(a.cwd);
+      await host.open({ path: fileA, cwd: a.cwd });
+      const entry = host.testSessions().get(fileA)!;
+      const promptSpy = vi.spyOn(entry.runtime.session, "prompt");
+      try {
+        const state = await host.beginGoal(fileA, "Fix the race");
+        expect(state?.active).toBe(true);
+        expect(state?.objective).toBe("Fix the race");
+        expect(state?.status).toBe("planning");
+        // Silent: the session never prompted, so no synthetic
+        // [Goal Mode Start] follow-up turn was queued.
+        expect(promptSpy).not.toHaveBeenCalled();
+        // Foreground untouched by the control-plane write.
+        expect(host.activeSessionFile).toBe(fileA);
+      } finally {
+        promptSpy.mockRestore();
+      }
+    } finally {
+      await host.dispose();
+    }
+  }, 60_000);
+
+  it("beginGoal validates objective and session identity", async () => {
+    const a = await makeProject("goal-invalid");
+    const { host } = makeHost(a.cwd, a.agentDir);
+    await host.start();
+    try {
+      const fileA = await makeSessionFile(a.cwd);
+      await host.open({ path: fileA, cwd: a.cwd });
+      await expect(host.beginGoal(fileA, "   ")).rejects.toThrow("invalid goal objective");
+      await expect(host.beginGoal(fileA, "x".repeat(4001))).rejects.toThrow("invalid goal objective");
+      await expect(host.beginGoal(join(a.cwd, "nope.jsonl"), "Fix X")).rejects.toThrow();
+    } finally {
+      await host.dispose();
+    }
+  }, 60_000);
+
   it("retains both runtimes across switches without teardown", async () => {
     const a = await makeProject("a");
     const b = await makeProject("b");

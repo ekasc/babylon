@@ -1,5 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { Menu } from "@base-ui/react/menu";
+import { clampHard, clampWithRubberband } from "../lib/gesture-math";
 import type { GitStatusResult, ProjectGroup, SessionMeta } from "../bridge";
 import {
 	ArrowDownIcon,
@@ -1089,26 +1090,51 @@ export default memo(function Sidebar(props: Props) {
 	});
 	const widthRef = useRef(width);
 	widthRef.current = width;
-	const startResize = (e: React.MouseEvent) => {
+	const startResize = (e: React.PointerEvent) => {
+		// Pointer Events (not mouse-only) + capture so tracking continues
+		// past the handle bounds on mouse, touch, and pen alike.
+		if (e.button !== 0) return;
 		e.preventDefault();
+		const handle = e.currentTarget;
+		handle.setPointerCapture?.(e.pointerId);
+		const pointerId = e.pointerId;
 		const startX = e.clientX;
 		const startW = widthRef.current;
 		document.body.classList.add("sidebar-resizing");
-		const onMove = (ev: MouseEvent) =>
-			setWidth(
-				Math.min(560, Math.max(220, startW + (ev.clientX - startX))),
-			);
-		const onUp = () => {
+		const finish = (persist: boolean) => {
 			document.body.classList.remove("sidebar-resizing");
-			localStorage.setItem(
-				"babylon:sidebar-width",
-				String(widthRef.current),
-			);
-			window.removeEventListener("mousemove", onMove);
-			window.removeEventListener("mouseup", onUp);
+			if (persist) {
+				// Snap back to the hard bound after rubber-band overshoot.
+				setWidth((w) => {
+					const clamped = clampHard(w, 220, 560);
+					localStorage.setItem("babylon:sidebar-width", String(clamped));
+					return clamped;
+				});
+			}
+			window.removeEventListener("pointermove", onMove);
+			window.removeEventListener("pointerup", onEnd);
+			window.removeEventListener("pointercancel", onCancel);
+			window.removeEventListener("blur", onBlur);
 		};
-		window.addEventListener("mousemove", onMove);
-		window.addEventListener("mouseup", onUp);
+		const onMove = (ev: PointerEvent) => {
+			if (ev.pointerId !== pointerId) return;
+			// 1:1 tracking inside the bounds, progressive resistance past
+			// them — a hard stop reads as frozen, resistance as responsive.
+			setWidth(clampWithRubberband(startW + (ev.clientX - startX), 220, 560, startW));
+		};
+		const onEnd = (ev: PointerEvent) => {
+			if (ev.pointerId === pointerId) finish(true);
+		};
+		// Interrupted gestures (touch cancel, window blur) must never leave
+		// the resizing class or listeners behind.
+		const onCancel = (ev: PointerEvent) => {
+			if (ev.pointerId === pointerId) finish(false);
+		};
+		const onBlur = () => finish(false);
+		window.addEventListener("pointermove", onMove);
+		window.addEventListener("pointerup", onEnd);
+		window.addEventListener("pointercancel", onCancel);
+		window.addEventListener("blur", onBlur);
 	};
 
 	const pinnedSet = useMemo(() => new Set(pinnedOrder), [pinnedOrder]);
@@ -1302,7 +1328,7 @@ export default memo(function Sidebar(props: Props) {
 						return next;
 					});
 				}}
-				onMouseDown={startResize}
+				onPointerDown={startResize}
 			/>
 			<div className="flex gap-2 items-center pr-3 h-11 titlebar shrink-0 pl-[88px]">
 				{spaces.length > 1 ? (
