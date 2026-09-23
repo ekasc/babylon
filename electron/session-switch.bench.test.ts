@@ -27,6 +27,8 @@ import { afterAll, describe, expect, it, vi } from "vitest";
 import { promises as fsp } from "node:fs";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { PiHost } from "./pi-host";
+import { projectHistory } from "./session-history";
+import type { SessionTreeRow } from "./session-tree";
 
 const roots: string[] = [];
 afterAll(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))));
@@ -154,7 +156,9 @@ describe("session-switch bench", () => {
         await host.open({ path: fileA, cwd });
         const warmCleanAgainReparses = openSpy.mock.calls.length;
 
-        // Hydration breakdown on the foreground session.
+        // Hydration breakdown on the foreground session, plus the
+        // projectHistory structural projection isolated from the rest of
+        // getHistory (flatten + ledger load + availability check).
         const hydrationMs: Record<string, number> = {};
         const timed = async (name: string, fn: () => Promise<unknown>) => {
           const t0 = performance.now();
@@ -167,6 +171,15 @@ describe("session-switch bench", () => {
         await timed("getHistory", () => host.getHistory());
         await timed("getCommands", () => host.getCommands());
         await timed("getModels", () => host.getModels());
+        const tree: { rows: SessionTreeRow[]; leafId: string | null } = { rows: [], leafId: null };
+        await timed("getTree", async () => {
+          const t = await host.getTree();
+          tree.rows = t.rows;
+          tree.leafId = t.leafId;
+        });
+        await timed("projectHistory", async () =>
+          projectHistory({ rows: tree.rows, leafId: tree.leafId, checkpoints: [], gitAvailable: true, streaming: false })
+        );
 
         scales.push({
           turns,
