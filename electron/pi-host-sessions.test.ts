@@ -9,7 +9,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { PiHost, defaultStateDir, type HostOptions, type SessionEntry } from "./pi-host";
 import { loadSessionGoal, saveSessionGoal } from "./goal-mode/store";
 import { createDurableGoalState, defaultDurableGoalModeConfig } from "../src/lib/durable-goal";
-import { loadDesignState } from "./design-mode/store";
+import { loadDesignState, saveDesignState, clearDesignState, createDesignState } from "./design-mode/store";
 import { RollbackStore } from "./rollback-store";
 import type { AgentEvent } from "../src/bridge";
 import { SnapshotStore } from "./snapshot-store";
@@ -338,6 +338,28 @@ describe("PiHost independent session execution", () => {
       await host.open({ path: fileA, cwd: a.cwd });
       await expect(host.beginDesignPrompt(fileA, "   ", "   ")).rejects.toThrow("invalid design subject");
       await expect(host.beginDesignPrompt(join(a.cwd, "nope.jsonl"), "Redesign", "Redesign")).rejects.toThrow();
+    } finally {
+      await host.dispose();
+    }
+  }, 60_000);
+
+  it("goal and design starts mutually exclude each other", async () => {
+    const a = await makeProject("excl-host");
+    const { host } = makeHost(a.cwd, a.agentDir);
+    await host.start();
+    try {
+      const fileA = await makeSessionFile(a.cwd);
+      await host.open({ path: fileA, cwd: a.cwd });
+      const entry = host.testSessions().get(fileA)!;
+      // Active design blocks goal starts (backend invariant, not just UI).
+      await saveDesignState(a.cwd, entry.sessionId, createDesignState("Redesign", "redesign"));
+      await expect(host.beginGoalPrompt(fileA, "Fix X", "Fix X")).rejects.toThrow(/design.*active/i);
+      expect(await loadSessionGoal(a.cwd, entry.sessionId)).toBeNull();
+      // Active goal blocks design starts.
+      await clearDesignState(a.cwd, entry.sessionId);
+      await saveSessionGoal(a.cwd, entry.sessionId, createDurableGoalState("Fix X", defaultDurableGoalModeConfig()));
+      await expect(host.beginDesignPrompt(fileA, "Redesign", "Redesign")).rejects.toThrow(/goal.*active/i);
+      expect(await loadDesignState(a.cwd, entry.sessionId)).toBeNull();
     } finally {
       await host.dispose();
     }

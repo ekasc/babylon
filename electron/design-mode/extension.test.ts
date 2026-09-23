@@ -124,3 +124,24 @@ describe("design_set_target tool", () => {
     expect((await loadDesignState(cwd, SESSION_ID))?.target).toBe("web");
   });
 });
+
+describe("/design start mutual exclusion", () => {
+  it("refuses to start or resume while a goal is active", async () => {
+    const { cwd } = await makeProject("excl");
+    const { saveSessionGoal } = await import("../goal-mode/store");
+    const { createDurableGoalState, defaultDurableGoalModeConfig } = await import("../../src/lib/durable-goal");
+    await saveSessionGoal(cwd, SESSION_ID, createDurableGoalState("Fix it", defaultDurableGoalModeConfig()));
+    const ext = createDesignModeExtension({
+      getCwd: () => cwd,
+      getSessionId: () => SESSION_ID,
+      sendFollowUp: () => undefined,
+    });
+    const ctx = mockCtx();
+    const handler = ext.commands?.get("design")?.handler;
+    await handler!("start Redesign settings", ctx);
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/goal.*active/i), "warning");
+    expect(await loadDesignState(cwd, SESSION_ID)).toBeNull();
+    await handler!("resume", ctx);
+    expect(await loadDesignState(cwd, SESSION_ID)).toBeNull();
+  });
+});

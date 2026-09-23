@@ -224,7 +224,9 @@ export interface DesignBeginResult {
   error: string | null;
 }
 
-/** Unwrap a `DesignBeginResult` wire envelope; all four keys required. */
+/** Unwrap a `DesignBeginResult` wire envelope. Strict: every key required,
+ *  and the stage must be a known value — no silent fallback (unlike
+ *  `unwrapDesignResult`, which keeps a legacy default for older senders). */
 export function unwrapDesignBeginResult(payload: unknown, type: string): DesignBeginResult {
   if (payload === null || typeof payload !== "object") throw new Error(`${type} returned a malformed payload`);
   const record = payload as Record<string, unknown>;
@@ -235,17 +237,21 @@ export function unwrapDesignBeginResult(payload: unknown, type: string): DesignB
   const design = rawDesign === null ? null : isDesignState(rawDesign) ? rawDesign : null;
   if (rawDesign !== null && design === null) throw new Error(`${type} returned a malformed payload`);
   const rawStage = record.stage;
-  const stage: DesignStage =
-    rawStage === "idle" || rawStage === "elicit" || rawStage === "brief-confirm" || rawStage === "brand" || rawStage === "build" || rawStage === "done"
-      ? rawStage
-      : design
-        ? "elicit"
-        : "idle";
+  if (
+    rawStage !== "idle" &&
+    rawStage !== "elicit" &&
+    rawStage !== "brief-confirm" &&
+    rawStage !== "brand" &&
+    rawStage !== "build" &&
+    rawStage !== "done"
+  ) {
+    throw new Error(`${type} returned a malformed payload`);
+  }
   if (typeof record.started !== "boolean") throw new Error(`${type} returned a malformed payload`);
   if (record.error !== null && typeof record.error !== "string") {
     throw new Error(`${type} returned a malformed payload`);
   }
-  return { design, stage, started: record.started, error: record.error };
+  return { design, stage: rawStage, started: record.started, error: record.error };
 }
 
 /** Prepend a timestamped entry to the design log (newest-first), creating

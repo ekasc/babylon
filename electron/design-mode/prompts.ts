@@ -53,15 +53,18 @@ export function renderDesignStatus(state: DesignState | null): string {
   return [`Design: ${state.subject} (${state.slug})`, ...flags].join("\n");
 }
 
-/** Fallback subject when the mode is toggled on with an empty composer
- *  (must match the App toggle fallback). The agent treats it as "the user
- *  hasn't named the subject yet" — it must never appear in chat. */
+/** Fallback subject for legacy states created before armed-send (which
+ *  guarantees a non-empty subject and rejects empties at the backend).
+ *  The agent treats it as "the user hasn't named the subject yet" — it must
+ *  never appear in chat. */
 export const DESIGN_UNTITLED_SUBJECT = "Untitled design";
 
 /** Silent per-turn injection: the stage playbook for GUI mode. Elicitation
  *  happens in plain chat via the composer — never via ask_question dialogs,
- *  never via pasted /design commands, never via injected follow-up blocks.
- *  Approvals arrive through the composer's Approve button. */
+ *  never via pasted /design commands. Starting is silent (the user's own
+ *  message opens the turn); stage advances after approvals arrive as
+ *  internal follow-up turns. Approvals arrive through the composer's
+ *  Approve button. */
 export function renderDesignSystemPrompt(state: DesignState, stage: DesignStage): string {
   const named = state.subject !== DESIGN_UNTITLED_SUBJECT;
   const base = named

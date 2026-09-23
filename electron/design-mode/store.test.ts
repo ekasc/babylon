@@ -15,6 +15,7 @@ import {
   stageFor,
   stageOfState,
   unwrapDesignResult,
+  unwrapDesignBeginResult,
 } from "./store";
 
 const SESSION = "01HXZ5Y3K8PQRS6T7UVWX9YZ12";
@@ -100,6 +101,43 @@ describe("unwrapDesignResult", () => {
   it("fails closed on malformed payloads", () => {
     expect(() => unwrapDesignResult(null, "t")).toThrow("malformed payload");
     expect(() => unwrapDesignResult({ design: { slug: 1 }, stage: "brand" }, "t")).toThrow("malformed payload");
+  });
+});
+
+describe("unwrapDesignBeginResult", () => {
+  it("passes the full envelope through", () => {
+    const state = createDesignState("Us screen", "us-screen");
+    expect(unwrapDesignBeginResult({ design: state, stage: "elicit", started: true, error: null }, "t")).toEqual({
+      design: state,
+      stage: "elicit",
+      started: true,
+      error: null,
+    });
+    expect(unwrapDesignBeginResult({ design: null, stage: "idle", started: false, error: "boom" }, "t")).toEqual({
+      design: null,
+      stage: "idle",
+      started: false,
+      error: "boom",
+    });
+  });
+
+  it("fails closed on missing keys and unknown stages (no silent fallback)", () => {
+    const state = createDesignState("Us screen", "us-screen");
+    expect(() => unwrapDesignBeginResult(null, "t")).toThrow("malformed payload");
+    expect(() => unwrapDesignBeginResult({ stage: "elicit", started: true, error: null }, "t")).toThrow("malformed payload");
+    expect(() => unwrapDesignBeginResult({ design: state, started: true, error: null }, "t")).toThrow("malformed payload");
+    expect(() => unwrapDesignBeginResult({ design: state, stage: "potato", started: true, error: null }, "t")).toThrow(
+      "malformed payload"
+    );
+    expect(() => unwrapDesignBeginResult({ design: state, stage: "elicit", started: "yes", error: null }, "t")).toThrow(
+      "malformed payload"
+    );
+    expect(() => unwrapDesignBeginResult({ design: state, stage: "elicit", started: true, error: 42 }, "t")).toThrow(
+      "malformed payload"
+    );
+    expect(() => unwrapDesignBeginResult({ design: { slug: 1 }, stage: "elicit", started: true, error: null }, "t")).toThrow(
+      "malformed payload"
+    );
   });
 });
 

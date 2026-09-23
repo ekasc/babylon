@@ -1910,6 +1910,14 @@ export class PiHost implements LocalPiHost {
     const text = objective.trim();
     if (!text || text.length > 4000) throw new Error("invalid goal objective");
     const entry = this.resolveEntry(sessionFile);
+    // Mutual exclusion (backend invariant, not just renderer gating): an
+    // active design owns this session's execution model (approval gates).
+    // Goal auto-continuation must never run under it — not from the GUI,
+    // not from stale state, not from a manual /goal command.
+    const blockingDesign = await loadDesignState(entry.cwd, entry.runtime.session.sessionId).catch(() => null);
+    if (blockingDesign && !blockingDesign.done) {
+      throw new Error("a design session is active — end it before starting a goal");
+    }
     const sid = entry.runtime.session.sessionId;
     const previous = await loadSessionGoal(entry.cwd, sid).catch(() => null);
     const digestAtStart = entryDigest(entry.runtime.session.sessionManager.getEntries());
@@ -1979,6 +1987,13 @@ export class PiHost implements LocalPiHost {
     const text = subject.trim().slice(0, 4000);
     if (!text) throw new Error("invalid design subject");
     const entry = this.resolveEntry(sessionFile);
+    // Mutual exclusion, mirrored: an active goal (paused or not) owns this
+    // session's execution model. Designing under it would interleave
+    // approval gates with autonomous continuation turns.
+    const blockingGoal = await loadSessionGoal(entry.cwd, entry.runtime.session.sessionId).catch(() => null);
+    if (blockingGoal?.active) {
+      throw new Error("a goal is active — stop it before starting a design");
+    }
     const sid = entry.runtime.session.sessionId;
     const previous = await loadDesignState(entry.cwd, sid).catch(() => null);
     const digestAtStart = entryDigest(entry.runtime.session.sessionManager.getEntries());

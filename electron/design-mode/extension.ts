@@ -25,6 +25,7 @@ import {
   stageFor,
   type DesignState,
 } from "./store";
+import { loadSessionGoal } from "../goal-mode/store";
 
 /**
  * Babylon's hardbaked design-mode extension: the phased design flow
@@ -34,12 +35,14 @@ import {
  * Registered inline in pi-host's `extensionsOverride` (same pattern as the
  * goal-mode extension) so `/design` exists in every Babylon session.
  *
- * GUI contract: the composer Design button toggles the mode. No follow-up
- * user message is ever injected — the transcript stays clean and all
- * elicitation happens in normal chat via the composer. Stage behavior
- * arrives silently through `before_agent_start` system-prompt injection.
- * Approvals arrive via GUI strip buttons (Approve brief / Approve brand),
- * never via pasted `/design` commands or ask_question dialogs.
+ * GUI contract: the composer Design button arms the mode; the next send
+ * persists the submitted message as the subject and starts the interview
+ * turn itself — no snapshot-at-click, no synthetic kickoff message. Stage
+ * behavior arrives silently through `before_agent_start` system-prompt
+ * injection. Approvals arrive via composer buttons (Approve brief / Approve
+ * brand) and each one dispatches an internal follow-up turn for the next
+ * stage (deliverAs followUp — never a synthetic user message, never pasted
+ * `/design` commands or ask_question dialogs).
  *
  * Stage derives from artifacts, not from a manual step counter: no brief →
  * elicit, unapproved brief → confirm, unapproved brand → brand gate,
@@ -150,6 +153,15 @@ export function createDesignModeExtension(deps: DesignModeExtensionDeps): Extens
     }
 
     if (sub === "start" || sub === "resume") {
+      // Mutual exclusion: (re)entering design pursuit while a goal is
+      // active would interleave approval gates with autonomous
+      // continuation. Stop/cancel the goal first; done/clear on either
+      // side always stay available.
+      const blockingGoal = await loadSessionGoal(at.cwd, at.sessionId).catch(() => null);
+      if (blockingGoal?.active) {
+        ctx.ui.notify("A goal is active — stop it before starting or resuming a design.", "warning");
+        return;
+      }
       let state = await loadDesignState(at.cwd, at.sessionId);
       if (!state) {
         const subject = sub === "start" ? parts.slice(1).join(" ").trim() : "";

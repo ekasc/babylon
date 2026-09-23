@@ -17,6 +17,7 @@ import {
   type DurableGoalStatus,
 } from "../../src/lib/durable-goal";
 import { clearSessionGoal, loadGoalModeConfig, loadSessionGoal, saveSessionGoal } from "./store";
+import { loadDesignState } from "../design-mode/store";
 import { goalChangedFiles } from "./git";
 
 /**
@@ -363,6 +364,14 @@ export function createGoalModeExtension(deps: GoalModeExtensionDeps): Extension 
         next.pausedAt = now;
       }
       if (sub === "resume") {
+        // Mutual exclusion: resuming pursuit while a design waits at an
+        // approval gate would interleave the two execution models. Pause,
+        // done, cancel, and clear stay available as the way out.
+        const design = await loadDesignState(at.cwd, at.sessionId).catch(() => null);
+        if (design && !design.done) {
+          ctx.ui.notify("A design session is active — end it before resuming this goal.", "warning");
+          return;
+        }
         next.paused = false;
         next.active = true;
         next.status = "executing";
@@ -403,6 +412,13 @@ export function createGoalModeExtension(deps: GoalModeExtensionDeps): Extension 
     const objective = raw;
     if (objective.length > MAX_GOAL_LENGTH) {
       ctx.ui.notify(`Goal is too long (${objective.length}/${MAX_GOAL_LENGTH}). Put detailed instructions in a file and reference it.`, "warning");
+      return;
+    }
+    // Mutual exclusion: a bare objective starts autonomous pursuit, which
+    // must not run under an active design's approval gates.
+    const blockingDesign = await loadDesignState(at.cwd, at.sessionId).catch(() => null);
+    if (blockingDesign && !blockingDesign.done) {
+      ctx.ui.notify("A design session is active — end it before starting a goal.", "warning");
       return;
     }
     await saveSessionGoal(at.cwd, at.sessionId, createDurableGoalState(objective, config));
