@@ -152,14 +152,19 @@ export default function App() {
 
   const [models, setModels] = useState<AgentModel[]>([]);
   // Invariant-read caches for hydrate (every tab switch re-hydrates; these
-  // three do not change per switch): models are a global registry (refetch
-  // on mount + when settings are saved, which can edit context-window
-  // overrides), commands are cwd-bound via the owning session file (a new
-  // file means a new runtime with fresh registrations), thinking levels
-  // follow the session model id.
-  const modelsCacheRef = useRef<AgentModel[] | null>(null);
-  const commandsCacheRef = useRef<{ path: string; commands: CommandInfo[] } | null>(null);
-  const levelsCacheRef = useRef<{ key: string; levels: string[] } | null>(null);
+  // do not change per switch): models are project-scoped (the active
+  // session's ModelRuntime is cwd-bound, so one global entry would leak
+  // project A's providers into project B), commands are cwd-bound via the
+  // owning session, thinking levels follow session + model id. Keyed by
+  // session file — a new file means a new runtime with fresh registrations,
+  // so the keys cannot go stale that way. Six retained sessions bounds the
+  // maps; settings saves clear the models map (context-window overrides
+  // remap the registry).
+  const modelsCacheRef = useRef(new Map<string, AgentModel[]>());
+  const commandsCacheRef = useRef(new Map<string, CommandInfo[]>());
+  const levelsCacheRef = useRef(new Map<string, string[]>());
+  const levelsKey = (path: string | null, model: AgentModel | null | undefined) =>
+    path != null && model ? `${path}${model.provider}/${model.id}` : null;
 
   const { themePref, themeId, setThemePref, setThemeId } = useTheme();
   const [commands, setCommands] = useState<CommandInfo[]>([]);
@@ -933,17 +938,17 @@ export default function App() {
   );
 
   const hydrate = useCallback(async (expectedEpoch = epochRef.current) => {
-    // Commands key: the session on screen at entry (epoch-guarded below, so
-    // a switch mid-flight drops the whole result — the key cannot leak
-    // across sessions).
+    // Cache keys: the session on screen at entry (epoch-guarded below, so
+    // a switch mid-flight drops the whole result — keys cannot leak across
+    // sessions). Null on landing: fetch without storing.
     const hydratePath = activePathRef.current;
-    const commandsHit = hydratePath != null && commandsCacheRef.current?.path === hydratePath;
-    const modelsHit = modelsCacheRef.current != null;
+    const cachedModels = hydratePath != null ? modelsCacheRef.current.get(hydratePath) : undefined;
+    const cachedCommands = hydratePath != null ? commandsCacheRef.current.get(hydratePath) : undefined;
     try {
       const [msgs, ms, commandData, st, statsData, nextHistory] = await Promise.all([
         bridge.getMessages(),
-        modelsHit ? Promise.resolve(modelsCacheRef.current) : bridge.getModels().catch(() => null),
-        commandsHit ? Promise.resolve(commandsCacheRef.current!.commands) : bridge.getCommands().catch(() => null),
+        cachedModels ?? bridge.getModels().catch(() => null),
+        cachedCommands ?? bridge.getCommands().catch(() => null),
         bridge.getState(),
         bridge.getStats(),
         bridge.getHistory(),
@@ -955,12 +960,14 @@ export default function App() {
       loadedMessagesRef.current = mergeLiveMessages(loadedMessagesRef.current, msgs);
       dispatch({ type: "rebuild", messages: loadedMessagesRef.current });
       setCanLoadMore(earliestOffsetRef.current != null && earliestOffsetRef.current > 0);
-      if (ms != null && !modelsHit) modelsCacheRef.current = ms;
-      setModels(ms ?? modelsCacheRef.current ?? []);
-      if (commandData != null && !commandsHit && hydratePath != null) {
-        commandsCacheRef.current = { path: hydratePath, commands: commandData };
+      if (ms != null && cachedModels === undefined && hydratePath != null) {
+        modelsCacheRef.current.set(hydratePath, ms);
       }
-      setCommands(commandData ?? (commandsHit ? commandsCacheRef.current!.commands : []));
+      setModels(ms ?? cachedModels ?? []);
+      if (commandData != null && cachedCommands === undefined && hydratePath != null) {
+        commandsCacheRef.current.set(hydratePath, commandData);
+      }
+      setCommands(commandData ?? cachedCommands ?? []);
       if (!commandData?.length) {
         const retryEpoch = expectedEpoch;
         const retryPath = hydratePath;
@@ -974,7 +981,7 @@ export default function App() {
             const refreshed = await bridge.getCommands();
             if (retryEpoch !== epochRef.current) return;
             if (refreshed?.length) {
-              if (retryPath != null) commandsCacheRef.current = { path: retryPath, commands: refreshed };
+              if (retryPath != null) commandsCacheRef.current.set(retryPath, refreshed);
               setCommands(refreshed);
               return;
             }
@@ -997,19 +1004,19 @@ export default function App() {
       } else if (!rollbackCreatedAt) {
         rollbackDraftRef.current = null;
       }
-      // Thinking levels follow the session model: serve from cache while
-      // the model id matches, refetch (epoch-guarded) when it changes.
-      const modelKey = st?.model ? `${st.model.provider}/${st.model.id}` : null;
-      const levelsHit = modelKey != null && levelsCacheRef.current?.key === modelKey;
-      if (levelsHit) {
-        setThinkingLevels(levelsCacheRef.current!.levels);
+      // Thinking levels follow session + model id: serve from cache while
+      // both match, refetch (epoch-guarded) when either changes.
+      const levelsKeyFor = levelsKey(hydratePath, st?.model);
+      const cachedLevels = levelsKeyFor != null ? levelsCacheRef.current.get(levelsKeyFor) : undefined;
+      if (cachedLevels !== undefined) {
+        setThinkingLevels(cachedLevels);
       } else {
         const levelsEpoch = expectedEpoch;
         void bridge
           .getThinkingLevels()
           .then((levels) => {
             if (levelsEpoch !== epochRef.current) return;
-            if (modelKey != null && levels != null) levelsCacheRef.current = { key: modelKey, levels };
+            if (levelsKeyFor != null && levels != null) levelsCacheRef.current.set(levelsKeyFor, levels);
             setThinkingLevels(levels ?? []);
           })
           .catch(() => undefined);
@@ -2278,9 +2285,9 @@ export default function App() {
         onThemeChange={setThemePref}
         onClose={() => setSettingsOpen(false)}
         onSettingsSaved={() => {
-          // Context-window overrides remap the registry: drop the cached
-          // list so the next hydrate refetches it.
-          modelsCacheRef.current = null;
+          // Context-window overrides remap the registry: drop cached lists
+          // so the next hydrate refetches them.
+          modelsCacheRef.current.clear();
         }}
         botsManager={{
           bots,

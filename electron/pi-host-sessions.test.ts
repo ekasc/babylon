@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
+import { utimesSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -368,6 +369,60 @@ describe("PiHost independent session execution", () => {
       openSpy.mockClear();
       const future = new Date(Date.now() + 30_000);
       await utimes(fileA, future, future);
+      await host.open({ path: fileA, cwd: a.cwd });
+      expect(host.activeSessionFile).toBe(fileA);
+      expect(openSpy).toHaveBeenCalled();
+    } finally {
+      openSpy.mockRestore();
+      await host.dispose();
+    }
+  }, 60_000);
+
+  it("an append racing the sync is not recorded as ingested", async () => {
+    const a = await makeProject("race-append-a");
+    const b = await makeProject("race-append-b");
+    const { host } = makeHost(a.cwd, a.agentDir);
+    await host.start();
+    const origOpen = SessionManager.open.bind(SessionManager);
+    const openSpy = vi.spyOn(SessionManager, "open");
+    try {
+      const fileA = await makeSessionFile(a.cwd);
+      const fileB = await makeSessionFile(b.cwd);
+      await host.open({ path: fileA, cwd: a.cwd });
+      await host.open({ path: fileB, cwd: b.cwd });
+      const managerA = host.testSessions().get(fileA)!.runtime.session.sessionManager;
+      managerA.appendMessage({
+        role: "user",
+        content: [{ type: "text", text: "seed" }],
+        timestamp: Date.now(),
+      });
+      const seedAssistantId = managerA.appendMessage({
+        role: "assistant",
+        content: [{ type: "text", text: "seeded" }],
+        api: "test",
+        provider: "test",
+        model: "test",
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: "stop",
+        timestamp: Date.now(),
+      });
+      (managerA as unknown as { _persist: (entry: unknown) => void })._persist(managerA.getEntry(seedAssistantId));
+      // Seed the fingerprint, then force a sync during which a second
+      // append lands mid-read (mtime bump inside SessionManager.open).
+      // The stored fingerprint must be the pre-read one, so the raced
+      // append mismatches on the following activation and re-syncs —
+      // never goes invisible.
+      await host.open({ path: fileA, cwd: a.cwd });
+      await utimes(fileA, new Date(Date.now() + 30_000), new Date(Date.now() + 30_000));
+      const raced = new Date(Date.now() + 60_000);
+      openSpy.mockImplementationOnce((...args: Parameters<typeof SessionManager.open>) => {
+        utimesSync(fileA, raced, raced);
+        return origOpen(...args);
+      });
+      await host.open({ path: fileB, cwd: b.cwd });
+      await host.open({ path: fileA, cwd: a.cwd });
+      openSpy.mockClear();
+      await host.open({ path: fileB, cwd: b.cwd });
       await host.open({ path: fileA, cwd: a.cwd });
       expect(host.activeSessionFile).toBe(fileA);
       expect(openSpy).toHaveBeenCalled();

@@ -782,7 +782,7 @@ describe("SnapshotStore", () => {
     expect(diff).toEqual(["f.txt"]);
   });
 
-  it("the same in-flight capture includes a file written during the capture (no stale return)", async () => {
+  it("the same in-flight capture includes a file written before verification discovery (no stale return)", async () => {
     const base = await mkdtemp(join(tmpdir(), "pideck-snapshot-reconverge-"));
     roots.push(base);
     const root = join(base, "project");
@@ -790,34 +790,27 @@ describe("SnapshotStore", () => {
     await git(root, ["init"]);
     await git(root, ["config", "user.email", "test@example.com"]);
     await git(root, ["config", "user.name", "Test"]);
-    // Use a non-trivial tracked set so the initial discovery takes long
-    // enough that a setTimeout fired shortly after the capture call
-    // reliably lands during the capture (rather than after it).
-    for (let i = 0; i < 2000; i++) {
-      await writeFile(join(root, `f${String(i).padStart(5, "0")}.txt`), `${i}\n`);
+    for (const name of ["a.txt", "b.txt", "c.txt"]) {
+      await writeFile(join(root, name), `${name}\n`);
     }
     await git(root, ["add", "-A"]);
     await git(root, ["commit", "-m", "init"]);
 
     const store = new SnapshotStore(join(base, "state"));
     await store.capture(root, { authoritative: true });
-    await settle();
     const pre = await store.capture(root, { authoritative: true });
     expect(pre).not.toBeNull();
 
-    // Start the in-flight capture, then write a new untracked file
-    // while it is running. The setTimeout fires from the event loop
-    // after the capture's first awaited git spawn, so the write lands
-    // during the capture (either the initial discovery sees it, or
-    // the verification discovery forces a reconciliation pass that
-    // picks it up). Either way, the returned in-flight tree must
-    // contain the file. A subsequent capture with no further writes
-    // must produce the same tree, proving the in-flight capture was
-    // the one that incorporated the write, not a follow-up.
-    const capturePromise = store.capture(root, { authoritative: true });
-    await new Promise<void>((resolve) => setTimeout(resolve, 10));
-    await writeFile(join(root, "late.txt"), "late\n");
-    const snap = await capturePromise;
+    // Deterministic mid-capture write: the seam fires after write-tree and
+    // before the verification discovery, so the verification MUST observe
+    // late.txt and the capture MUST take another pass to include it. The
+    // previous setTimeout-based version raced wall-clock time and flaked on
+    // fast hardware where the whole capture finishes before the timer.
+    store.onBeforeVerifyDiscovery = async () => {
+      store.onBeforeVerifyDiscovery = null;
+      await writeFile(join(root, "late.txt"), "late\n");
+    };
+    const snap = await store.capture(root, { authoritative: true });
     expect(snap).not.toBeNull();
 
     // The same in-flight capture's tree must contain the late file.

@@ -1512,7 +1512,9 @@ export class PiHost implements LocalPiHost {
         if (!existing.runtime.session.isStreaming) {
           // Retained runtime: skip the full SessionManager.open + context
           // rebuild when the transcript is byte-identical to the last sync
-          // (one stat vs parsing a large JSONL on every tab click).
+          // (one stat vs parsing a large JSONL on every tab click). Stores
+          // the pre-read fingerprint (see refreshFromDisk): a racing append
+          // forces another sync rather than going invisible.
           const fp = await this.fingerprintSessionFile(opts.path);
           if (!this.sameFingerprint(fp, existing.diskFingerprint)) {
             try {
@@ -1522,7 +1524,13 @@ export class PiHost implements LocalPiHost {
               // yet): the live session already is the source of truth.
               if (!isMissingFileError(err)) throw err;
             }
-            existing.diskFingerprint = await this.fingerprintSessionFile(opts.path);
+            // Store the fingerprint observed BEFORE the read, not after: an
+            // append racing the read must NOT be recorded as ingested. The
+            // next comparison then mismatches and forces another sync. A
+            // stale-read corner (append landed before open() and was actually
+            // included) costs one redundant reparse — toward extra work,
+            // never silent stale state.
+            existing.diskFingerprint = fp;
           }
         }
         return this.activate(existing, { cwd: opts.cwd, requestId: opts.requestId, seq });
@@ -1630,9 +1638,12 @@ export class PiHost implements LocalPiHost {
         // Unflushed new session: nothing on disk to pull; live state stands.
         if (!isMissingFileError(err)) throw err;
       }
-      // Stat after the sync: an append racing the read is captured for (not
-      // lost to) the next comparison, which then re-syncs.
-      entry.diskFingerprint = await this.fingerprintSessionFile(sessionPath);
+      // Store the fingerprint observed BEFORE the read, not after: an
+      // append racing the read must NOT be recorded as ingested. The next
+      // comparison then mismatches and forces another sync. A stale-read
+      // corner (append landed before open() and was actually included)
+      // costs one redundant reparse — toward extra work, never stale state.
+      entry.diskFingerprint = fp;
       await this.restoreRollbackLeafFor(entry.runtime.session);
       return true;
     });

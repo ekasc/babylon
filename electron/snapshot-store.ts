@@ -197,6 +197,14 @@ export class SnapshotStore {
    *  mutation deterministically. Not part of the public API. */
   onBeforeVerifyReconcile: (() => Promise<void>) | null = null;
 
+  /** Test-only seam: fired once per pass, after write-tree and before the
+   *  verification Git discovery. A test can write a file here so it lands
+   *  deterministically before the verification observation — exercising
+   *  the repass path without wall-clock racing (a setTimeout-based write
+   *  flakes on fast hardware where the whole capture finishes first).
+   *  Not part of the public API. */
+  onBeforeVerifyDiscovery: (() => Promise<void>) | null = null;
+
   /** Per-repo worktree watchers. The watcher is a concurrent-mutation
    *  detector only: it does not feed a fast path. Every capture runs the
    *  authoritative Git candidate discovery; the watcher exists to force an
@@ -635,6 +643,7 @@ export class SnapshotStore {
       //    before the Git calls, a mutation during those calls would
       //    leave stale exclusion metadata and the stability check
       //    could pass against it.
+      if (this.onBeforeVerifyDiscovery) await this.onBeforeVerifyDiscovery();
       const [vDirty, vUntracked] = await Promise.all([
         run("git", this.args(repo, ["diff-files", "-z", "--name-only"]), repo.root),
         run("git", this.args(repo, ["ls-files", "-z", "--others", "--exclude-standard"]), repo.root),
