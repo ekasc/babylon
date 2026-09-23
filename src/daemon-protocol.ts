@@ -90,6 +90,7 @@ export const KNOWN_MESSAGE_TYPES = [
   "pi.goalControl",
   "pi.goalBeginPrompt",
   "pi.designControl",
+  "pi.designBeginPrompt",
   "pi.openSession",
   "pi.notifyDiagnostics",
   "pi.event",

@@ -33,9 +33,9 @@ describe("useDesignMode", () => {
     try {
       const { result } = renderHook(() => useDesignMode(toast));
       await act(async () => {
-        await result.current.designControl("approve-brief");
+        await result.current.designControl("/s/session.jsonl", "approve-brief");
       });
-      expect(spy).toHaveBeenCalledWith("approve-brief");
+      expect(spy).toHaveBeenCalledWith("/s/session.jsonl", "approve-brief");
       expect(result.current.designStatus?.stage).toBe("brand");
       expect(toast).not.toHaveBeenCalled();
     } finally {
@@ -45,7 +45,7 @@ describe("useDesignMode", () => {
     try {
       const { result } = renderHook(() => useDesignMode(toast));
       await act(async () => {
-        await result.current.designControl("approve-brief");
+        await result.current.designControl("/s/session.jsonl", "approve-brief");
       });
       expect(toast).toHaveBeenCalledWith("error", "down");
     } finally {

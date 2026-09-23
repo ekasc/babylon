@@ -9,6 +9,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { PiHost, defaultStateDir, type HostOptions, type SessionEntry } from "./pi-host";
 import { loadSessionGoal, saveSessionGoal } from "./goal-mode/store";
 import { createDurableGoalState, defaultDurableGoalModeConfig } from "../src/lib/durable-goal";
+import { loadDesignState } from "./design-mode/store";
 import { RollbackStore } from "./rollback-store";
 import type { AgentEvent } from "../src/bridge";
 import { SnapshotStore } from "./snapshot-store";
@@ -244,6 +245,123 @@ describe("PiHost independent session execution", () => {
       // The cancel ran on A while B stayed foreground — no global
       // foreground coupling in GUI goal controls.
       expect(delivered).toEqual([`${fileA}:/goal cancel`]);
+      expect(host.activeSessionFile).toBe(fileB);
+    } finally {
+      await host.dispose();
+    }
+  }, 60_000);
+
+  it("beginDesignPrompt persists the subject and runs the message as the turn", async () => {
+    const a = await makeProject("design-silent");
+    const { host } = makeHost(a.cwd, a.agentDir);
+    await host.start();
+    try {
+      const fileA = await makeSessionFile(a.cwd);
+      await host.open({ path: fileA, cwd: a.cwd });
+      const entry = host.testSessions().get(fileA)!;
+      const delivered: string[] = [];
+      const promptSpy = vi.spyOn(entry.runtime.session, "prompt").mockImplementation(async (message: string) => {
+        delivered.push(`${entry.sessionFile}:${message}`);
+      });
+      try {
+        const result = await host.beginDesignPrompt(fileA, "Redesign settings", "Redesign settings");
+        expect(result.error).toBeNull();
+        expect(result.started).toBe(true);
+        expect(result.design?.subject).toBe("Redesign settings");
+        expect(result.stage).toBe("elicit");
+        // Exactly one turn — the message itself, never a synthetic kickoff.
+        expect(delivered).toEqual([`${fileA}:Redesign settings`]);
+        expect(host.activeSessionFile).toBe(fileA);
+      } finally {
+        promptSpy.mockRestore();
+      }
+    } finally {
+      await host.dispose();
+    }
+  }, 60_000);
+
+  it("beginDesignPrompt rolls back a subject whose turn never started", async () => {
+    const a = await makeProject("design-rollback");
+    const { host } = makeHost(a.cwd, a.agentDir);
+    await host.start();
+    try {
+      const fileA = await makeSessionFile(a.cwd);
+      await host.open({ path: fileA, cwd: a.cwd });
+      const entry = host.testSessions().get(fileA)!;
+      const promptSpy = vi.spyOn(entry.runtime.session, "prompt").mockRejectedValue(new Error("pre-start boom"));
+      try {
+        const result = await host.beginDesignPrompt(fileA, "Redesign settings", "Redesign settings");
+        expect(result.started).toBe(false);
+        expect(result.error).toMatch("pre-start boom");
+        expect(result.design).toBeNull();
+        expect(await loadDesignState(a.cwd, entry.sessionId)).toBeNull();
+      } finally {
+        promptSpy.mockRestore();
+      }
+    } finally {
+      await host.dispose();
+    }
+  }, 60_000);
+
+  it("beginDesignPrompt keeps the subject when the turn started then failed", async () => {
+    const a = await makeProject("design-started");
+    const { host } = makeHost(a.cwd, a.agentDir);
+    await host.start();
+    try {
+      const fileA = await makeSessionFile(a.cwd);
+      await host.open({ path: fileA, cwd: a.cwd });
+      const entry = host.testSessions().get(fileA)!;
+      const promptSpy = vi.spyOn(entry.runtime.session, "prompt").mockImplementation(async () => {
+        entry.runtime.session.sessionManager.appendMessage({ role: "user", content: [{ type: "text", text: "Redesign" }], timestamp: Date.now() });
+        throw new Error("mid-turn boom");
+      });
+      try {
+        const result = await host.beginDesignPrompt(fileA, "Redesign settings", "Redesign settings");
+        expect(result.started).toBe(true);
+        expect(result.error).toMatch("mid-turn boom");
+        expect(result.design?.subject).toBe("Redesign settings");
+        expect((await loadDesignState(a.cwd, entry.sessionId))?.subject).toBe("Redesign settings");
+      } finally {
+        promptSpy.mockRestore();
+      }
+    } finally {
+      await host.dispose();
+    }
+  }, 60_000);
+
+  it("beginDesignPrompt validates subject and session identity", async () => {
+    const a = await makeProject("design-invalid");
+    const { host } = makeHost(a.cwd, a.agentDir);
+    await host.start();
+    try {
+      const fileA = await makeSessionFile(a.cwd);
+      await host.open({ path: fileA, cwd: a.cwd });
+      await expect(host.beginDesignPrompt(fileA, "   ", "   ")).rejects.toThrow("invalid design subject");
+      await expect(host.beginDesignPrompt(join(a.cwd, "nope.jsonl"), "Redesign", "Redesign")).rejects.toThrow();
+    } finally {
+      await host.dispose();
+    }
+  }, 60_000);
+
+  it("execDesignCommand executes on the addressed session, not the foreground", async () => {
+    const a = await makeProject("design-route-a");
+    const b = await makeProject("design-route-b");
+    const { host } = makeHost(a.cwd, a.agentDir);
+    await host.start();
+    try {
+      const fileA = await makeSessionFile(a.cwd);
+      const fileB = await makeSessionFile(b.cwd);
+      await host.open({ path: fileA, cwd: a.cwd });
+      await host.open({ path: fileB, cwd: b.cwd });
+      expect(host.activeSessionFile).toBe(fileB);
+      const delivered: string[] = [];
+      for (const entry of host.testSessions().values()) {
+        vi.spyOn(entry.runtime.session, "prompt").mockImplementation(async (message: string) => {
+          delivered.push(`${entry.sessionFile}:${message}`);
+        });
+      }
+      await host.execDesignCommand(fileA, "done");
+      expect(delivered).toEqual([`${fileA}:/design done`]);
       expect(host.activeSessionFile).toBe(fileB);
     } finally {
       await host.dispose();

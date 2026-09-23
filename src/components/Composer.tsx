@@ -75,11 +75,19 @@ interface Props {
 	goalObjective?: string | null;
 	/** Toggle: arm/disarm when idle, cancel when pursuing. */
 	onToggleGoal?: () => void;
-	/** True while design mode is on; the Design control stays visible as a toggle. */
-	designActive?: boolean;
-	/** Toggle design mode on/off. Receives the current composer draft so the
-	    toggle-on subject comes from what the user typed — never invented. */
-	onToggleDesign?: (draft: string) => void;
+	/** Design composer mode: off | armed (next send starts it) | active. */
+	designMode?: "off" | "armed" | "active";
+	/** Active stage key for the indicator (elicit, brief-confirm, brand, build). */
+	designStage?: string;
+	/** Active design subject, for the indicator tooltip. Null when none. */
+	designSubject?: string | null;
+	/** Toggle: arm when off, disarm when armed. Active designs end/restart
+	    through the indicator menu, never by toggling off. */
+	onToggleDesign?: () => void;
+	/** End the active design (mark done). From the indicator menu. */
+	onEndDesign?: () => void;
+	/** Clear the design and arm the next send (fresh subject). From the menu. */
+	onRestartDesign?: () => void;
 	/** Pending design approval (brief/brand), if any: one button in the row, never a strip. */
 	designApproval?: { label: string; onApprove(): void } | null;
 }
@@ -87,6 +95,22 @@ interface Props {
 function trunc(s: string, n = 42): string {
 	const one = s.replace(/\s+/g, " ").trim();
 	return truncate(one, n);
+}
+
+/** Indicator labels for live design stages (idle/done never display). */
+function designStageLabel(stage: string): string {
+	switch (stage) {
+		case "elicit":
+			return "Interview";
+		case "brief-confirm":
+			return "Brief";
+		case "brand":
+			return "Brand";
+		case "build":
+			return "Build";
+		default:
+			return "Active";
+	}
 }
 
 function readAsBase64(file: Blob): Promise<string> {
@@ -182,11 +206,20 @@ const Composer = memo(function Composer({
 	goalMode = "off",
 	goalObjective = null,
 	onToggleGoal,
-	designActive = false,
+	designMode = "off",
+	designStage = "idle",
+	designSubject = null,
 	onToggleDesign,
+	onEndDesign,
+	onRestartDesign,
 	designApproval = null,
 }: Props) {
 	const [text, setText] = useState("");
+	const [designMenuOpen, setDesignMenuOpen] = useState(false);
+	// Transient menu state never survives a session switch.
+	useEffect(() => {
+		setDesignMenuOpen(false);
+	}, [sessionKey]);
 	const [mode, setMode] = useState<"steer" | "followUp">("followUp");
 	const [attachments, setAttachments] = useState<Attachment[]>([]);
 	const [dragOver, setDragOver] = useState(false);
@@ -596,7 +629,7 @@ const Composer = memo(function Composer({
 					</div>
 				)}
 				<div
-					className={`composer-surface group relative flex flex-col ${designActive ? "is-design-mode" : ""}`}
+					className={`composer-surface group relative flex flex-col ${designMode === "active" ? "is-design-mode" : ""}`}
 				>
 					{dialog !== undefined ? (
 						<div role="dialog" aria-modal="true" aria-labelledby="composer-dialog-title" className="border-b border-line px-4 py-3">
@@ -787,12 +820,15 @@ const Composer = memo(function Composer({
 										type="button"
 										onClick={onToggleGoal}
 										aria-pressed={goalMode !== "off"}
+										disabled={designMode !== "off"}
 										title={
-											goalMode === "active"
-												? `Pursuing: ${trunc(goalObjective || "goal", 80)} (click to stop)`
-												: goalMode === "armed"
-													? "Goal mode on. Your next message becomes the goal. (Click to disarm)"
-													: "Goal mode: your next message becomes the goal"
+											designMode !== "off"
+												? "Goal is unavailable while Design is armed or active"
+												: goalMode === "active"
+													? `Pursuing: ${trunc(goalObjective || "goal", 80)} (click to stop)`
+													: goalMode === "armed"
+														? "Goal mode on. Your next message becomes the goal. (Click to disarm)"
+														: "Goal mode: your next message becomes the goal"
 										}
 										className={`operator-meta-control composer-pressable ${goalMode !== "off" ? "text-fg underline underline-offset-2" : ""}`}
 									>
@@ -801,8 +837,63 @@ const Composer = memo(function Composer({
 								</span>
 							) : null}
 						{onToggleDesign ? (
-							<span className="flex shrink-0 items-center">
-								<button type="button" onClick={() => onToggleDesign(text)} aria-pressed={designActive} title={designActive ? "Turn design mode off" : "Turn design mode on: interview, brief, brand approval, build"} className={`operator-meta-control composer-pressable ${designActive ? "text-fg underline underline-offset-2" : ""}`}>Design</button>
+							<span className="relative flex shrink-0 items-center">
+								<button
+									type="button"
+									onClick={() => {
+										if (designMode === "active") setDesignMenuOpen((open) => !open);
+										else onToggleDesign();
+									}}
+									aria-pressed={designMode !== "off"}
+									aria-haspopup={designMode === "active" ? "menu" : undefined}
+									aria-expanded={designMode === "active" ? designMenuOpen : undefined}
+									disabled={goalMode !== "off"}
+									title={
+										goalMode !== "off"
+											? "Design is unavailable while a Goal is armed or active"
+											: designMode === "active"
+												? `Design · ${designStageLabel(designStage)}${designSubject ? `: ${trunc(designSubject, 80)}` : ""}`
+												: designMode === "armed"
+													? "Design armed. Your next message starts the interview. (Click to disarm)"
+													: "Design mode: your next message starts the design interview"
+									}
+									className={`operator-meta-control composer-pressable ${designMode !== "off" ? "text-fg underline underline-offset-2" : ""}`}
+								>
+									{designMode === "active" ? `Design · ${designStageLabel(designStage)}` : "Design"}
+								</button>
+								{designMode === "active" && designMenuOpen ? (
+									<div
+										role="menu"
+										aria-label="Design session"
+										className="operator-popover absolute bottom-full left-0 z-50 mb-1.5 w-52 p-1.5"
+										onKeyDown={(e) => {
+											if (e.key === "Escape") setDesignMenuOpen(false);
+										}}
+									>
+										<button
+											type="button"
+											role="menuitem"
+											onClick={() => {
+												setDesignMenuOpen(false);
+												onEndDesign?.();
+											}}
+											className="flex w-full items-center rounded-md px-2.5 py-1.5 text-left text-[13px] hover:bg-inset"
+										>
+											End design
+										</button>
+										<button
+											type="button"
+											role="menuitem"
+											onClick={() => {
+												setDesignMenuOpen(false);
+												onRestartDesign?.();
+											}}
+											className="flex w-full items-center rounded-md px-2.5 py-1.5 text-left text-[13px] hover:bg-inset"
+										>
+											Restart
+										</button>
+									</div>
+								) : null}
 							</span>
 						) : null}
 						{designApproval ? (

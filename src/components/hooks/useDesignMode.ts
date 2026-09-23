@@ -25,10 +25,13 @@ export function useDesignMode(toast: (type: "info" | "warning" | "error", text: 
     }
   }, []);
 
+  // GUI design controls are path-addressed (the CLI /design command stays
+  // foreground-oriented): a control issued for session A executes on A even
+  // if the UI moved to B mid-flight.
   const designControl = useCallback(
-    async (args: string) => {
+    async (sessionFile: string, args: string) => {
       try {
-        const status = await bridge.designControl(args);
+        const status = await bridge.designControl(sessionFile, args);
         setDesignStatus(status);
       } catch (e) {
         toast("error", errorMessage(e, "design control failed"));

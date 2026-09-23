@@ -187,15 +187,28 @@ describe("composer draft persistence", () => {
 });
 
 describe("composer design toggle", () => {
-  it("passes the composer draft to the toggle and marks the pressed mode", async () => {
+  it("arms without snapshotting the draft and marks the pressed mode", async () => {
+    // Armed model: the subject comes from the next send, never the click.
     const onToggleDesign = vi.fn();
-    render(<Composer {...baseProps({ onToggleDesign, designActive: true })} />);
+    render(<Composer {...baseProps({ onToggleDesign, designMode: "armed" })} />);
     const box = screen.getByRole("textbox", { name: "Message Pi" });
     await userEvent.type(box, "Rehaul the US screen");
     await userEvent.click(screen.getByRole("button", { name: "Design" }));
-    expect(onToggleDesign).toHaveBeenCalledWith("Rehaul the US screen");
+    expect(onToggleDesign).toHaveBeenCalledWith();
     expect(screen.getByRole("button", { name: "Design" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("shows the stage indicator while active", () => {
+    render(<Composer {...baseProps({ onToggleDesign: vi.fn(), designMode: "active", designStage: "brand" })} />);
+    expect(screen.getByRole("button", { name: /Design · Brand/ })).toBeTruthy();
     expect(document.querySelector(".composer-surface.is-design-mode")).toBeTruthy();
+  });
+
+  it("disables Design while a goal is armed or active", () => {
+    render(<Composer {...baseProps({ onToggleDesign: vi.fn(), designMode: "off", goalMode: "armed" })} />);
+    const button = screen.getByRole("button", { name: "Design" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(button.title).toMatch(/Goal/);
   });
 
   it("shows a pending approval as one row button, never a strip", async () => {
@@ -206,6 +219,33 @@ describe("composer design toggle", () => {
     await userEvent.click(screen.getByRole("button", { name: "Approve brief" }));
     expect(onApprove).toHaveBeenCalledTimes(1);
     expect(container.querySelector(".goal-strip")).toBeNull();
+  });
+
+  it("opens the design menu from the stage indicator, not a toggle-off", async () => {
+    const onEndDesign = vi.fn();
+    const onRestartDesign = vi.fn();
+    render(
+      <Composer
+        {...baseProps({
+          onToggleDesign: vi.fn(),
+          designMode: "active",
+          designStage: "brand",
+          onEndDesign,
+          onRestartDesign,
+        })}
+      />
+    );
+    await userEvent.click(screen.getByRole("button", { name: /Design · Brand/ }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "End design" }));
+    expect(onEndDesign).toHaveBeenCalledTimes(1);
+    expect(onRestartDesign).not.toHaveBeenCalled();
+  });
+
+  it("disables Goal while design is armed or active", () => {
+    render(<Composer {...baseProps({ onToggleGoal: vi.fn(), goalMode: "off", designMode: "active", designStage: "build" })} />);
+    const button = screen.getByRole("button", { name: "Goal" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(button.title).toMatch(/Design/);
   });
 });
 describe("composer attachments policy", () => {

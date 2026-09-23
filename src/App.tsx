@@ -329,7 +329,48 @@ export default function App() {
   // cleared when it settles. The backend confirms via setDurableGoal; until
   // then the sent text itself is the displayed objective.
   const [goalPendingObjective, setGoalPendingObjective] = useState<string | null>(null);
+  // Design arming mirrors Goal (declared here so toggleGoal below can read
+  // it): clicking Design arms the next send, which persists the submitted
+  // message as the subject and starts the interview turn itself.
+  const [designArmed, setDesignArmed] = useState(false);
+  const [designPendingSubject, setDesignPendingSubject] = useState<string | null>(null);
+
+  // Design mode (hardbaked design-mode extension state): the toggleable
+  // phased design flow for this session, same strip pattern as the goal.
+  const { designStatus, setDesignStatus, designTargetRef, refreshDesign, designControl } = useDesignMode(toast);
+  // (Design arming lives with the goal arming above, so toggleGoal can
+  // read it for mutual exclusion.)
+  const toggleDesign = useCallback(() => {
+    // Mutual exclusion: Goal armed or active blocks Design entirely (the
+    // button is disabled too; this guards programmatic callers).
+    if (goalArmed || goalPendingObjective != null || durableGoal?.active) {
+      toast("info", "Stop the active Goal first");
+      return;
+    }
+    // Active design is a stage indicator, not a toggle: use the menu
+    // (End/Restart) to finish it. Arming only toggles when idle/done.
+    const stage = designStatus?.stage;
+    if (designStatus?.design != null && stage !== "done") return;
+    setDesignArmed((armed) => !armed);
+  }, [designStatus, goalArmed, goalPendingObjective, durableGoal, toast]);
+  const endDesign = useCallback(async () => {
+    const target = activePathRef.current;
+    if (!target) return;
+    await designControl(target, "done");
+  }, [designControl]);
+  const restartDesign = useCallback(async () => {
+    const target = activePathRef.current;
+    if (!target) return;
+    setDesignArmed(true);
+    await designControl(target, "clear");
+  }, [designControl]);
   const toggleGoal = useCallback(async () => {
+    // Mutual exclusion: Design armed or active blocks Goal entirely (the
+    // button is disabled too; this guards programmatic callers).
+    if (designArmed || designPendingSubject != null || (designStatus?.design != null && designStatus.stage !== "done")) {
+      toast("info", "Finish or end the active Design first");
+      return;
+    }
     if (durableGoal?.active || goalPendingObjective != null) {
       // Cancel pursuit on the owning session, captured now: clicking ACTIVE
       // means "stop pursuing", never "mark done" (only the model reaching
@@ -343,10 +384,7 @@ export default function App() {
       return;
     }
     setGoalArmed((armed) => !armed);
-  }, [durableGoal, goalControl, goalPendingObjective]);
-  // Design mode (hardbaked design-mode extension state): the toggleable
-  // phased design flow for this session, same strip pattern as the goal.
-  const { designStatus, setDesignStatus, designTargetRef, refreshDesign, designControl } = useDesignMode(toast);
+  }, [durableGoal, goalControl, goalPendingObjective, designArmed, designPendingSubject, designStatus, toast]);
 
   // Failed-transition attention: a thread/subagent that newly reports
   // interrupted/failed marks its owning sessions unread. Only transitions
@@ -1139,10 +1177,12 @@ export default function App() {
     setHasSession(false);
     setLiveReady(false);
     // Arming (and optimistic pursuit display) is per-composer-intent:
-    // leaving the session drops both. The backend op still settles
+    // leaving the session drops all of it. Backend ops still settle
     // normally; only the display is session-bound.
     setGoalArmed(false);
     setGoalPendingObjective(null);
+    setDesignArmed(false);
+    setDesignPendingSubject(null);
   }, []);
 
   // Clear the switch cover shortly after it fades (animation is 120ms; the
@@ -1155,6 +1195,8 @@ export default function App() {
       // navigation: the objective belongs to the session it was armed in.
       setGoalArmed(false);
       setGoalPendingObjective(null);
+      setDesignArmed(false);
+      setDesignPendingSubject(null);
       // Opening never changes lifecycle: a settled session renders normally
       // and stays under Settled until explicitly un-settled. Unread clears —
       // you are looking at it now.
@@ -1704,7 +1746,9 @@ export default function App() {
             return false;
           }
           setGoalPendingObjective(null);
-          if (result.goal) setDurableGoal(result.goal);
+          // Session-bound: a switch mid-turn must not file A's goal into
+          // B's display (B refreshes on its own open).
+          if (result.goal && activePathRef.current === target) setDurableGoal(result.goal);
           if (result.error) {
             if (!result.started) {
               if (hasContent) dispatch({ type: "local-user-rollback", text });
@@ -1712,6 +1756,42 @@ export default function App() {
             }
             toast("error", result.error);
             return result.started;
+          }
+          if (history.activeRollback) await hydrate();
+          return true;
+        }
+        if (designArmed) {
+          // Armed Design mode: this message IS the subject. One transactional
+          // op persists it and runs the first interview turn itself — same
+          // envelope contract as goals (pre-start failures roll back with
+          // the subject OFF, started turns keep row and stage indicator).
+          // Goal and Design arming are mutually exclusive in the UI, so at
+          // most one branch can be armed here.
+          setDesignArmed(false);
+          setDesignPendingSubject(text);
+          let designResult;
+          try {
+            designResult = await bridge.beginDesignPrompt(target, text, text, mappedImages, streamingBehavior);
+          } catch (e) {
+            setDesignPendingSubject(null);
+            if (hasContent) dispatch({ type: "local-user-rollback", text });
+            toast("error", errorMessage(e, "could not start design"));
+            if (history.activeRollback) void hydrate();
+            return false;
+          }
+          setDesignPendingSubject(null);
+          // Same session binding as goals: never file a switched-away
+          // session's design into the visible one.
+          if (designResult.design && activePathRef.current === target) {
+            setDesignStatus({ design: designResult.design, stage: designResult.stage });
+          }
+          if (designResult.error) {
+            if (!designResult.started) {
+              if (hasContent) dispatch({ type: "local-user-rollback", text });
+              if (history.activeRollback) void hydrate();
+            }
+            toast("error", designResult.error);
+            return designResult.started;
           }
           if (history.activeRollback) await hydrate();
           return true;
@@ -1735,7 +1815,7 @@ export default function App() {
     },
     // No session-path deps: the prompt target resolves from activePathRef
     // after the warmup wait, never from the render closure.
-    [history.activeRollback, hydrate, toast, activeGroup, goalArmed, setDurableGoal]
+    [history.activeRollback, hydrate, toast, activeGroup, goalArmed, setDurableGoal, designArmed]
   );
 
   const abort = useCallback(async () => {
@@ -2563,25 +2643,27 @@ export default function App() {
                 goalMode={durableGoal?.active || goalPendingObjective != null ? "active" : goalArmed ? "armed" : "off"}
                 goalObjective={goalPendingObjective ?? durableGoal?.objective ?? null}
                 onToggleGoal={activeGroup ? undefined : () => void toggleGoal()}
-                design={designStatus}
-                onToggleDesign={(draft) => {
-                  // The toggle never invents a subject: on comes from the
-                  // composer draft, off finishes. The "Untitled design"
-                  // fallback below only fires on an empty composer — and the
-                  // system prompt treats it as "subject arrives with the first
-                  // message", so it never surfaces in chat (see prompts.ts).
-                  const subject = draft.trim().slice(0, 120) || "Untitled design";
-                  const d = designStatus;
-                  if (d?.design != null && d.stage !== "done") void designControl("done");
-                  else if (d?.stage === "done")
-                    void designControl("clear").then(() => designControl(`start ${subject}`));
-                  else void designControl(`start ${subject}`);
-                }}
+                designMode={
+                  designPendingSubject != null || (designStatus?.design != null && designStatus.stage !== "done")
+                    ? "active"
+                    : designArmed
+                      ? "armed"
+                      : "off"
+                }
+                designStage={designPendingSubject != null ? "elicit" : (designStatus?.stage ?? "idle")}
+                designSubject={designPendingSubject ?? designStatus?.design?.subject ?? null}
+                onToggleDesign={() => toggleDesign()}
+                onEndDesign={() => void endDesign()}
+                onRestartDesign={() => void restartDesign()}
                 onApproveDesignBrief={() => {
-                  void designControl("approve-brief");
+                  const target = activePathRef.current;
+                  if (!target) return;
+                  void designControl(target, "approve-brief");
                 }}
                 onApproveDesignBrand={() => {
-                  void designControl("approve-brand");
+                  const target = activePathRef.current;
+                  if (!target) return;
+                  void designControl(target, "approve-brand");
                 }}
               />
               </ErrorBoundary>

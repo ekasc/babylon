@@ -38,6 +38,9 @@ importers:
       shiki:
         specifier: ^4.4.3
         version: 4.4.3
+      typebox:
+        specifier: 1.3.7
+        version: 1.3.7
     devDependencies:
       '@tailwindcss/vite':
         specifier: ^4.1.11

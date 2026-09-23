@@ -35,11 +35,14 @@ interface Props {
 	goalMode?: "off" | "armed" | "active";
 	goalObjective?: string | null;
 	onToggleGoal?: () => void;
-  /** The session's design mode (hardbaked design-mode extension state). No
-      strip is ever rendered — the composer border signals the mode and a
-      pending approval surfaces as one button in the composer row. */
-  design?: import("../../electron/design-mode/store").DesignStatus | null;
-  onToggleDesign?: (draft: string) => void;
+  /** Design composer mode: off | armed (next send starts it) | active.
+      No strip is ever rendered — the button state is the entire UI. */
+  designMode?: "off" | "armed" | "active";
+  designStage?: string;
+  designSubject?: string | null;
+  onToggleDesign?: () => void;
+  onEndDesign?: () => void;
+  onRestartDesign?: () => void;
   onApproveDesignBrief?: () => void;
   onApproveDesignBrand?: () => void;
 }
@@ -67,8 +70,12 @@ export default function SessionFooter({
   goalMode = "off",
   goalObjective = null,
   onToggleGoal = () => {},
-  design = null,
-  onToggleDesign = (_draft: string) => {},
+  designMode = "off",
+  designStage = "idle",
+  designSubject = null,
+  onToggleDesign = () => {},
+  onEndDesign = () => {},
+  onRestartDesign = () => {},
   onApproveDesignBrief = () => {},
   onApproveDesignBrand = () => {},
 }: Props) {
@@ -109,12 +116,16 @@ export default function SessionFooter({
             goalMode={goalMode}
             goalObjective={goalObjective}
             onToggleGoal={onToggleGoal}
-            designActive={design?.design !== null && design?.design !== undefined}
+            designMode={designMode}
+            designStage={designStage}
+            designSubject={designSubject}
             onToggleDesign={onToggleDesign}
+            onEndDesign={onEndDesign}
+            onRestartDesign={onRestartDesign}
             designApproval={
-              design?.stage === "brief-confirm"
+              designMode === "active" && designStage === "brief-confirm"
                 ? { label: "Approve brief", onApprove: onApproveDesignBrief }
-                : design?.stage === "brand"
+                : designMode === "active" && designStage === "brand"
                   ? { label: "Approve brand", onApprove: onApproveDesignBrand }
                   : null
             }

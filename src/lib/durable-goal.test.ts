@@ -66,5 +66,8 @@ describe("unwrapGoalBeginResult", () => {
     expect(() => unwrapGoalBeginResult({ goal, started: "yes", error: null }, "t")).toThrow(/malformed/);
     expect(() => unwrapGoalBeginResult({ goal, started: true, error: 42 }, "t")).toThrow(/malformed/);
     expect(() => unwrapGoalBeginResult({ goal: { objective: 1 }, started: false, error: "x" }, "t")).toThrow(/malformed/);
+    expect(() => unwrapGoalBeginResult({ started: false, error: "boom" }, "t")).toThrow(/malformed/);
+    expect(() => unwrapGoalBeginResult({ goal: null, error: null }, "t")).toThrow(/malformed/);
+    expect(() => unwrapGoalBeginResult({ goal: null, started: false }, "t")).toThrow(/malformed/);
   });
 });

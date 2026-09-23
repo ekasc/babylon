@@ -72,6 +72,7 @@ function fakePiHost(overrides: Partial<DaemonPiHost>): DaemonPiHost {
     promoteSubagent: fail("promoteSubagent"),
     execGoalCommand: fail("execGoalCommand"),
     execDesignCommand: fail("execDesignCommand"),
+    beginDesignPrompt: fail("beginDesignPrompt"),
     getState: fail("getState"),
     getMessages: fail("getMessages"),
     getStats: fail("getStats"),
@@ -273,6 +274,50 @@ describe("babylon daemon server", () => {
     await request(socket, "pi.getCommands", {});
     const res = await r.next("pi.getCommands");
     expect(res.payload).toEqual({ commands: [{ name: "ls", description: "list", source: "prompt" }] });
+  });
+
+  it("serves pi.designControl addressed to a session", async () => {
+    const status = { design: null, stage: "idle" as const };
+    const seen: Array<[string, string]> = [];
+    const piHost = fakePiHost({
+      execDesignCommand: async (sessionFile: string, args: string) => {
+        seen.push([sessionFile, args]);
+        return status;
+      },
+    });
+    const server = await start({ piHost });
+    const port = (server.address() as { port: number }).port;
+    const socket = await connect(port);
+    const r = reader(socket);
+    await request(socket, "pi.designControl", { sessionFile: "/s/a.jsonl", args: "approve-brief" });
+    const res = await r.next("pi.designControl");
+    expect(res.payload).toEqual(status);
+    expect(seen).toEqual([["/s/a.jsonl", "approve-brief"]]);
+    await request(socket, "pi.designControl", { args: "approve-brief" });
+    const err = await r.next("error");
+    expect(String((err.payload as { error?: string }).error)).toMatch(/requires \{ sessionFile, args \}/);
+  });
+
+  it("serves pi.designBeginPrompt with the full turn payload", async () => {
+    const outcome = { design: null, stage: "elicit" as const, started: true, error: null };
+    const seen: Array<[string, string, string]> = [];
+    const piHost = fakePiHost({
+      beginDesignPrompt: async (sessionFile: string, subject: string, message: string) => {
+        seen.push([sessionFile, subject, message]);
+        return outcome;
+      },
+    });
+    const server = await start({ piHost });
+    const port = (server.address() as { port: number }).port;
+    const socket = await connect(port);
+    const r = reader(socket);
+    await request(socket, "pi.designBeginPrompt", { sessionFile: "/s/a.jsonl", subject: "Redesign", message: "Redesign" });
+    const res = await r.next("pi.designBeginPrompt");
+    expect(res.payload).toEqual(outcome);
+    expect(seen).toEqual([["/s/a.jsonl", "Redesign", "Redesign"]]);
+    await request(socket, "pi.designBeginPrompt", { sessionFile: "/s/a.jsonl" });
+    const err = await r.next("error");
+    expect(String((err.payload as { error?: string }).error)).toMatch(/requires \{ sessionFile, subject, message \}/);
   });
 
   it("wraps array results so the protocol envelope stays an object", async () => {

@@ -16,7 +16,7 @@ import type { HookDefinition } from "./hooks";
 import type { AttentionRegistry } from "./attention";
 import type { DaemonClient } from "./daemon-client";
 import { unwrapDurableGoalResult, unwrapGoalBeginResult } from "./lib/durable-goal";
-import { unwrapDesignResult } from "../electron/design-mode/store";
+import { unwrapDesignResult, unwrapDesignBeginResult } from "../electron/design-mode/store";
 
 /**
  * Socket-payload validators. The daemon speaks over a local socket, and a
@@ -294,9 +294,13 @@ export function createDaemonRuntime(client: DaemonClient): RuntimeFacade {
       const res = await client.request("pi.goalBeginPrompt", { sessionFile: f, objective: o, message: m, images: i, streamingBehavior: s });
       return unwrapGoalBeginResult(res.payload, "pi.goalBeginPrompt");
     },
-    async designControl(args) {
-      const res = await client.request("pi.designControl", { args });
+    async designControl(f, a) {
+      const res = await client.request("pi.designControl", { sessionFile: f, args: a });
       return unwrapDesignResult(res.payload, "pi.designControl");
+    },
+    async beginDesignPrompt(f, s, m, i, b) {
+      const res = await client.request("pi.designBeginPrompt", { sessionFile: f, subject: s, message: m, images: i, streamingBehavior: b });
+      return unwrapDesignBeginResult(res.payload, "pi.designBeginPrompt");
     },
     async getState() {
       const res = await client.request("pi.getState", {});

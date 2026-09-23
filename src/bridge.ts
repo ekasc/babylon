@@ -613,7 +613,9 @@ export interface Bridge {
   /** Read a session's design state (null when none is set). */
   designGet(sessionId: string, cwd: string): Promise<import("../electron/design-mode/store").DesignStatus>;
   /** Run a `/design …` control invocation; resolves with the fresh design state. */
-  designControl(args: string): Promise<import("../electron/design-mode/store").DesignStatus>;
+  designControl(sessionFile: string, args: string): Promise<import("../electron/design-mode/store").DesignStatus>;
+  /** Transactional design start + first interview turn for an addressed session. */
+  beginDesignPrompt(sessionFile: string, subject: string, message: string, images?: unknown[], streamingBehavior?: string): Promise<import("../electron/design-mode/store").DesignBeginResult>;
   /** Release an idle session runtime (tab closed). Live runtimes refuse. */
   releaseSession(path: string): Promise<{ released: boolean }>;
   refreshSession(path: string): Promise<boolean>;
@@ -883,6 +885,7 @@ export const bridge: Bridge = window.pideck ?? {
   beginGoalPrompt: () => Promise.resolve({ goal: null, started: true, error: null }),
   designGet: () => Promise.resolve({ design: null, stage: "idle" as const }),
   designControl: () => Promise.resolve({ design: null, stage: "idle" as const }),
+  beginDesignPrompt: () => Promise.resolve({ design: null, stage: "idle" as const, started: true, error: null }),
   releaseSession: () => Promise.resolve({ released: false }),
   refreshSession: () => Promise.resolve(false),
 

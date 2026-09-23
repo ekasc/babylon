@@ -69,7 +69,7 @@ export function renderDesignSystemPrompt(state: DesignState, stage: DesignStage)
     : `[Design mode] Stage: ${stage}. Brief: ${state.briefPath}. Brand: ${state.brandPath}. Log: ${state.logPath}. The user has not named the subject yet — their first message defines it. Never say, write, or echo "untitled".`;
   switch (stage) {
     case "elicit":
-      return `${base} Interview the user in plain chat, one question at a time (target first: web, mobile-web, or native). Do not use ask_question dialogs. Do not paste /design commands or template skeletons into chat. Record the target via the state tool call, then write the brief file and summarize it briefly in chat. Do not build anything yet.`;
+      return `${base} Interview the user in plain chat, one question at a time (target first: web, mobile-web, or native). Do not use ask_question dialogs. Do not paste /design commands or template skeletons into chat. Record the target with the design_set_target tool call, then write the brief file and summarize it briefly in chat. Do not build anything yet.`;
     case "brief-confirm":
       return `${base} The brief exists and awaits the user's approval (composer Approve brief button). Summarize it briefly in plain chat, answer questions, revise the file on request. Do not build yet. Never ask the user to type /design commands.`;
     case "brand":

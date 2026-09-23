@@ -124,7 +124,19 @@ export function createLocalRuntime(opts: {
         : undefined;
       return piHost.beginGoalPrompt(f, o, m, images, behavior);
     },
-    async designControl(args: string) { return piHost.execDesignCommand(args); },
+    async designControl(f: string, a: string) { return piHost.execDesignCommand(f, a); },
+    async beginDesignPrompt(f: string, s: string, m: string, i?: unknown[], b?: string) {
+      const behavior = b === "steer" || b === "followUp" ? b : undefined;
+      const images = Array.isArray(i)
+        ? i.flatMap((entry) => {
+            const data = wireStr(wireOf(entry), "data");
+            if (!data) return [];
+            const mimeType = wireStr(wireOf(entry), "mimeType");
+            return [{ data, ...(mimeType ? { mimeType } : {}) }];
+          })
+        : undefined;
+      return piHost.beginDesignPrompt(f, s, m, images, behavior);
+    },
     async releaseSession(path: string) {
       return { released: await piHost.releaseSession(path) };
     },

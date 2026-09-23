@@ -70,6 +70,8 @@ export interface LocalPiHost {
   /** Silently persist a goal objective for an addressed session (no follow-up turn). */
   beginGoalPrompt(sessionFile: string, objective: string, message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp"): Promise<import("./lib/durable-goal").GoalBeginResult>;
   /** Run a `/design …` control invocation; returns the fresh design state. */
-  execDesignCommand(args: string): Promise<import("../electron/design-mode/store").DesignStatus>;
+  execDesignCommand(sessionFile: string, args: string): Promise<import("../electron/design-mode/store").DesignStatus>;
+  /** Transactional design start + first interview turn for an addressed session. */
+  beginDesignPrompt(sessionFile: string, subject: string, message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp"): Promise<import("../electron/design-mode/store").DesignBeginResult>;
 }
 

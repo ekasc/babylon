@@ -1,10 +1,13 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { Type, type Static } from "typebox";
 import {
   createSyntheticSourceInfo,
+  type AgentToolResult,
   type Extension,
   type ExtensionCommandContext,
   type ExtensionContext,
+  type RegisteredTool,
 } from "@earendil-works/pi-coding-agent";
 import { isSessionId } from "../../src/lib/durable-goal";
 import {
@@ -203,7 +206,16 @@ export function createDesignModeExtension(deps: DesignModeExtensionDeps): Extens
       const approved = { ...state, briefApproved: true };
       await saveDesignState(at.cwd, at.sessionId, approved);
       await clearStatus();
-      // Silent: brand stage playbook arrives via system prompt injection.
+      // "Approve and continue" means continue: kick off the brand stage as
+      // an internal follow-up turn (deliverAs followUp — never a synthetic
+      // user message). Without this the agent sits idle until the user
+      // types again, which is exactly what the button promises not to do.
+      deps.sendFollowUp(
+        [
+          "[Design] The brief is approved.",
+          `Begin the brand stage for "${approved.subject}": read the approved brief at ${approved.briefPath}, develop the brand direction, and write ${approved.brandPath} per the design playbook.`,
+        ].join("\n")
+      );
       return;
     }
 
@@ -220,7 +232,14 @@ export function createDesignModeExtension(deps: DesignModeExtensionDeps): Extens
       const approved = { ...state, brandApproved: true };
       await saveDesignState(at.cwd, at.sessionId, approved);
       await clearStatus();
-      // Silent: build stage playbook arrives via system prompt injection.
+      // Same continuation contract as approve-brief: the build stage starts
+      // now, not on the user's next unrelated message.
+      deps.sendFollowUp(
+        [
+          "[Design] The brand direction is approved.",
+          `Begin the build stage for "${approved.subject}" per the design playbook (target: ${approved.target}).`,
+        ].join("\n")
+      );
       return;
     }
 
@@ -258,13 +277,52 @@ export function createDesignModeExtension(deps: DesignModeExtensionDeps): Extens
     ],
   ]);
 
+  // Model-facing target setter. The interview playbook tells the model to
+  // record web | mobile-web | native, and the model must never paste
+  // `/design` commands into chat — so the target needs a real tool call,
+  // not just the `set-target` subcommand (which stays for CLI/manual use).
+  const targetParams = Type.Object({
+    target: Type.Union([Type.Literal("web"), Type.Literal("mobile-web"), Type.Literal("native")], {
+      description: "App target for the design review path",
+    }),
+  });
+  const tools = new Map<string, RegisteredTool>([
+    [
+      "design_set_target",
+      {
+        definition: {
+          name: "design_set_target",
+          label: "Set design target",
+          description:
+            "Record the design session's app target (web, mobile-web, or native). Call once during the interview, before writing the brief.",
+          parameters: targetParams,
+          execute: async (_toolCallId: string, params: Static<typeof targetParams>): Promise<AgentToolResult<unknown>> => {
+            const at = context();
+            if (!at) throw new Error("No active session for design control.");
+            const state = await loadDesignState(at.cwd, at.sessionId);
+            if (!state) {
+              throw new Error("No design session. Start one before recording a target.");
+            }
+            const target = parseDesignTarget((params as { target?: unknown }).target);
+            if (!target) {
+              throw new Error("Unknown target. Use web, mobile-web, or native.");
+            }
+            await saveDesignState(at.cwd, at.sessionId, { ...state, target });
+            return { content: [{ type: "text", text: `Design target recorded: ${target}.` }], details: { target } };
+          },
+        },
+        sourceInfo,
+      },
+    ],
+  ]);
+
   return {
     path: DESIGN_INLINE_PATH,
     resolvedPath: DESIGN_INLINE_PATH,
     hidden: true,
     sourceInfo,
     handlers: handlers as Extension["handlers"],
-    tools: new Map(),
+    tools,
     messageRenderers: new Map(),
     entryRenderers: new Map(),
     commands: commands as Extension["commands"],

@@ -237,11 +237,16 @@ export interface GoalBeginResult {
   error: string | null;
 }
 
-/** Unwrap a `GoalBeginResult` wire envelope; malformed fails loud. */
+/** Unwrap a `GoalBeginResult` wire envelope; malformed fails loud. All three
+ *  keys are required: an absent `goal` must arrive as explicit null, never
+ *  by omission. */
 export function unwrapGoalBeginResult(payload: unknown, type: string): GoalBeginResult {
   if (payload === null || typeof payload !== "object") throw new Error(`${type} returned a malformed payload`);
   const record = payload as Record<string, unknown>;
-  const rawGoal = "goal" in record ? (record.goal ?? null) : null;
+  if (!("goal" in record) || !("started" in record) || !("error" in record)) {
+    throw new Error(`${type} returned a malformed payload`);
+  }
+  const rawGoal = record.goal ?? null;
   const goal = rawGoal === null ? null : parseDurableGoalState(rawGoal);
   if (rawGoal !== null && goal === null) throw new Error(`${type} returned a malformed payload`);
   if (typeof record.started !== "boolean") throw new Error(`${type} returned a malformed payload`);

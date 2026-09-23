@@ -107,7 +107,9 @@ export interface DaemonPiHost {
   /** Silently persist a goal objective for an addressed session (no follow-up turn). */
   beginGoalPrompt(sessionFile: string, objective: string, message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp"): Promise<import("../src/lib/durable-goal").GoalBeginResult>;
   /** Run a `/design …` control invocation; returns the fresh design state. */
-  execDesignCommand(args: string): Promise<import("../electron/design-mode/store").DesignStatus>;
+  execDesignCommand(sessionFile: string, args: string): Promise<import("../electron/design-mode/store").DesignStatus>;
+  /** Transactional design start + first interview turn for an addressed session. */
+  beginDesignPrompt(sessionFile: string, subject: string, message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp"): Promise<import("../electron/design-mode/store").DesignBeginResult>;
   abort(sessionFile?: string): Promise<unknown>;
   respondUi(id: string, resp: unknown): void;
   notifyDiagnostics(diagnostics: PiDiagnostic[]): Promise<void>;
@@ -767,13 +769,26 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
               break;
             }
             case "pi.designControl": {
-              const { args } = request.payload as { args?: unknown };
-              if (typeof args !== "string") {
-                send(socket, createEnvelope("response", "error", { error: "pi.designControl requires { args }" }, request.id));
+              const { sessionFile, args } = request.payload as { sessionFile?: unknown; args?: unknown };
+              if (typeof sessionFile !== "string" || typeof args !== "string") {
+                send(socket, createEnvelope("response", "error", { error: "pi.designControl requires { sessionFile, args }" }, request.id));
                 return;
               }
               // Same shape as the goal branch: missing design reads as null.
-              payload = await piHost.execDesignCommand(args);
+              payload = await piHost.execDesignCommand(sessionFile, args);
+              break;
+            }
+            case "pi.designBeginPrompt": {
+              const { sessionFile, subject, message, images, streamingBehavior } = request.payload as {
+                sessionFile?: unknown; subject?: unknown; message?: unknown; images?: unknown; streamingBehavior?: unknown;
+              };
+              if (typeof sessionFile !== "string" || typeof subject !== "string" || typeof message !== "string") {
+                send(socket, createEnvelope("response", "error", { error: "pi.designBeginPrompt requires { sessionFile, subject, message }" }, request.id));
+                return;
+              }
+              const designBehavior = streamingBehavior === "steer" || streamingBehavior === "followUp" ? streamingBehavior : undefined;
+              // The result already is the wire envelope; do not wrap it again.
+              payload = await piHost.beginDesignPrompt(sessionFile, subject, message, toPromptImages(images), designBehavior);
               break;
             }
             case "pi.ui.respond": {

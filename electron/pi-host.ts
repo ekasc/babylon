@@ -23,7 +23,7 @@ import { createGoalModeExtension, isExternalGoalModeExtension } from "./goal-mod
 import { createDesignModeExtension } from "./design-mode/extension";
 import { loadSessionGoal, saveSessionGoal, clearSessionGoal, loadGoalModeConfig } from "./goal-mode/store";
 import { createDurableGoalState, defaultDurableGoalModeConfig, type GoalBeginResult } from "../src/lib/durable-goal";
-import { loadDesignState, stageOfState, type DesignStatus } from "./design-mode/store";
+import { loadDesignState, saveDesignState, clearDesignState, createDesignState, slugFor, stageOfState, type DesignStatus, type DesignState, type DesignBeginResult } from "./design-mode/store";
 import type { DurableGoalState } from "../src/lib/durable-goal";
 import { shouldRelayImagesThrough, toPiImages } from "./prompt-images";
 import { clampToolOutput, readSessionTail, readToolOutput } from "./sessions";
@@ -1944,19 +1944,73 @@ export class PiHost implements LocalPiHost {
     return { goal: await loadSessionGoal(entry.cwd, entry.runtime.session.sessionId).catch(() => null), started: true, error: null };
   }
   /**
-   * Run a `/design …` control invocation through the foreground session
+   * Run a `/design …` control invocation on an explicitly addressed session
    * (same contract as `execGoalCommand`): the extension command runs,
    * follow-ups dispatch, and the fresh design state is read back. Bare
-   * `/design` only reports, so the strip calls `start`/`resume` explicitly.
+   * `/design` only reports. Path-addressed like every other GUI control —
+   * the foreground may move before the backend handles the click.
    */
-  async execDesignCommand(args: string): Promise<DesignStatus> {
+  async execDesignCommand(sessionFile: string, args: string): Promise<DesignStatus> {
     if (this.draining) throw new Error("daemon is draining for restart; please resend in a moment");
     const text = args ? `/design ${args}` : "/design";
     if (!/^\/design(\s|$)/.test(text)) throw new Error("design control must be a /design invocation");
-    const entry = this.activeEntry();
+    const entry = this.resolveEntry(sessionFile);
     await entry.runtime.session.prompt(text, {});
     const design = await loadDesignState(entry.cwd, entry.sessionId);
     return { design, stage: stageOfState(entry.cwd, design) };
+  }
+
+  /**
+   * Transactional design start for an explicitly addressed session: persist
+   * the subject, then run the message as the first interview turn itself
+   * (before_agent_start injects the elicit playbook into that same turn —
+   * no snapshot-at-click, no "Untitled design" state, no synthetic turn).
+   * Overwrites any previous state (including done); on pre-start failure
+   * the previous state is restored, on started-turn failure the design
+   * stands. Same digest-compensation contract as beginGoalPrompt.
+   */
+  async beginDesignPrompt(
+    sessionFile: string,
+    subject: string,
+    message: string,
+    images?: PromptImage[],
+    streamingBehavior?: "steer" | "followUp"
+  ): Promise<DesignBeginResult> {
+    const text = subject.trim().slice(0, 4000);
+    if (!text) throw new Error("invalid design subject");
+    const entry = this.resolveEntry(sessionFile);
+    const sid = entry.runtime.session.sessionId;
+    const previous = await loadDesignState(entry.cwd, sid).catch(() => null);
+    const digestAtStart = entryDigest(entry.runtime.session.sessionManager.getEntries());
+    await saveDesignState(entry.cwd, sid, createDesignState(text, slugFor(text)));
+    try {
+      await this.prompt(message, images, streamingBehavior, sessionFile);
+    } catch (e) {
+      let started = true;
+      try {
+        started = entryDigest(entry.runtime.session.sessionManager.getEntries()) !== digestAtStart;
+      } catch {
+        started = true;
+      }
+      let design: DesignState | null = null;
+      if (!started) {
+        try {
+          if (previous) {
+            await saveDesignState(entry.cwd, sid, previous);
+            design = previous;
+          } else {
+            await clearDesignState(entry.cwd, sid);
+          }
+        } catch {
+          /* restoration is best-effort; the outcome below still reports */
+        }
+      } else {
+        design = await loadDesignState(entry.cwd, entry.runtime.session.sessionId).catch(() => null);
+      }
+      return { design, stage: stageOfState(entry.cwd, design), started, error: errorMessage(e, "design turn failed") };
+    }
+    const design = await loadDesignState(entry.cwd, entry.runtime.session.sessionId).catch(() => null);
+    return { design, stage: stageOfState(entry.cwd, design), started: true, error: null };
   }
   async steer(message: string): Promise<void> {
     const entry = this.activeEntry();

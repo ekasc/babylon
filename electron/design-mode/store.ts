@@ -211,6 +211,43 @@ export function unwrapDesignResult(payload: unknown, type: string): DesignStatus
   return { design, stage };
 }
 
+/**
+ * Transactional design-start outcome. Same contract as GoalBeginResult:
+ * turn failures return normally (never throw) — `started: false` means the
+ * message never became a turn, `started: true` means it did. The stage
+ * travels with the state (the renderer cannot stat artifacts).
+ */
+export interface DesignBeginResult {
+  design: DesignState | null;
+  stage: DesignStage;
+  started: boolean;
+  error: string | null;
+}
+
+/** Unwrap a `DesignBeginResult` wire envelope; all four keys required. */
+export function unwrapDesignBeginResult(payload: unknown, type: string): DesignBeginResult {
+  if (payload === null || typeof payload !== "object") throw new Error(`${type} returned a malformed payload`);
+  const record = payload as Record<string, unknown>;
+  if (!("design" in record) || !("stage" in record) || !("started" in record) || !("error" in record)) {
+    throw new Error(`${type} returned a malformed payload`);
+  }
+  const rawDesign = record.design ?? null;
+  const design = rawDesign === null ? null : isDesignState(rawDesign) ? rawDesign : null;
+  if (rawDesign !== null && design === null) throw new Error(`${type} returned a malformed payload`);
+  const rawStage = record.stage;
+  const stage: DesignStage =
+    rawStage === "idle" || rawStage === "elicit" || rawStage === "brief-confirm" || rawStage === "brand" || rawStage === "build" || rawStage === "done"
+      ? rawStage
+      : design
+        ? "elicit"
+        : "idle";
+  if (typeof record.started !== "boolean") throw new Error(`${type} returned a malformed payload`);
+  if (record.error !== null && typeof record.error !== "string") {
+    throw new Error(`${type} returned a malformed payload`);
+  }
+  return { design, stage, started: record.started, error: record.error };
+}
+
 /** Prepend a timestamped entry to the design log (newest-first), creating
  *  the file with a title on first use. Every visual decision gets a
  *  picture answer: pi records capture paths + verdicts + punchlists here. */

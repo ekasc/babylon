@@ -7,7 +7,7 @@ import { wireOf, wireStr } from "../src/store";
 import type { DaemonClient } from "../src/daemon-client";
 import type { PiHost } from "./pi-host";
 import { loadSessionGoal } from "./goal-mode/store";
-import { loadDesignState, stageOfState, unwrapDesignResult } from "./design-mode/store";
+import { loadDesignState, stageOfState, unwrapDesignBeginResult, unwrapDesignResult } from "./design-mode/store";
 import { unwrapDurableGoalResult, unwrapGoalBeginResult } from "../src/lib/durable-goal";
 
 type Handle = IpcHandle;
@@ -142,15 +142,61 @@ export function registerSessionRuntimeIpc(
     const design = await loadDesignState(cwd, sessionId);
     return { design, stage: stageOfState(cwd, design) };
   });
-  handle("pideck:design-control", async (_e, args: string) => {
-    if (typeof args !== "string" || args.length > 5000) throw new Error("invalid design control");
+  handle("pideck:design-control", async (_e, opts: { sessionFile: string; args: string }) => {
+    if (!opts || typeof opts.sessionFile !== "string" || typeof opts.args !== "string" || opts.args.length > 5000) {
+      throw new Error("invalid design control");
+    }
     if (isDaemonOwned()) {
       const client = requireDaemonClient();
-      const res = await client.request("pi.designControl", { args });
+      const res = await client.request("pi.designControl", { sessionFile: opts.sessionFile, args: opts.args });
       return unwrapDesignResult(res.payload, "pi.designControl");
     }
-    return getRuntime().designControl(args);
+    return getRuntime().designControl(opts.sessionFile, opts.args);
   });
+  handle(
+    "pideck:design-begin-prompt",
+    async (_e, opts: { sessionFile: string; subject: string; message: string; images?: unknown[]; streamingBehavior?: string }) => {
+      if (!opts || typeof opts.sessionFile !== "string" || opts.sessionFile.length < 1 || opts.sessionFile.length > 4096) {
+        throw new Error("invalid session file");
+      }
+      if (typeof opts.subject !== "string" || opts.subject.trim().length < 1 || opts.subject.length > 5000) {
+        throw new Error("invalid design subject");
+      }
+      // Same payload contract as pideck:goal-begin-prompt (this op sends the turn).
+      if (typeof opts.message !== "string" || opts.message.length > 2_000_000) throw new Error("invalid prompt payload");
+      if (opts.streamingBehavior !== undefined && opts.streamingBehavior !== "steer" && opts.streamingBehavior !== "followUp") {
+        throw new Error("invalid streaming behavior");
+      }
+      let cleanImages: PromptImage[] | undefined;
+      if (opts.images !== undefined) {
+        if (!Array.isArray(opts.images) || opts.images.length > 20) throw new Error("invalid image payload");
+        cleanImages = opts.images.map((entry) => {
+          const img = wireOf(entry);
+          const data = wireStr(img, "data");
+          if (img?.type !== "image" || data === undefined || data.length > 15_000_000) {
+            throw new Error("invalid image payload");
+          }
+          const mimeType = wireStr(img, "mimeType");
+          if (mimeType === undefined || !mimeType.startsWith("image/")) {
+            throw new Error("invalid image MIME type");
+          }
+          return { data, mimeType };
+        });
+      }
+      if (isDaemonOwned()) {
+        const client = requireDaemonClient();
+        const res = await client.request("pi.designBeginPrompt", {
+          sessionFile: opts.sessionFile,
+          subject: opts.subject,
+          message: opts.message,
+          images: cleanImages,
+          streamingBehavior: opts.streamingBehavior,
+        });
+        return unwrapDesignBeginResult(res.payload, "pi.designBeginPrompt");
+      }
+      return getRuntime().beginDesignPrompt(opts.sessionFile, opts.subject, opts.message, cleanImages, opts.streamingBehavior);
+    }
+  );
   handle("pideck:session:release", async (_e, path: string) => {
     const target = await validateSessionPath(sessionsRoot, path);
     if (isDaemonOwned()) return { released: false };
