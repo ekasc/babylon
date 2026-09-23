@@ -15,7 +15,7 @@ import type { CompletionContract } from "./completion-contracts";
 import type { HookDefinition } from "./hooks";
 import type { AttentionRegistry } from "./attention";
 import type { DaemonClient } from "./daemon-client";
-import { unwrapDurableGoalResult } from "./lib/durable-goal";
+import { unwrapDurableGoalResult, unwrapGoalBeginResult } from "./lib/durable-goal";
 import { unwrapDesignResult } from "../electron/design-mode/store";
 
 /**
@@ -292,7 +292,7 @@ export function createDaemonRuntime(client: DaemonClient): RuntimeFacade {
     },
     async beginGoalPrompt(f, o, m, i, s) {
       const res = await client.request("pi.goalBeginPrompt", { sessionFile: f, objective: o, message: m, images: i, streamingBehavior: s });
-      return unwrapDurableGoalResult(res.payload, "pi.goalBeginPrompt");
+      return unwrapGoalBeginResult(res.payload, "pi.goalBeginPrompt");
     },
     async designControl(args) {
       const res = await client.request("pi.designControl", { args });

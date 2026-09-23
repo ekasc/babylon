@@ -8,7 +8,7 @@ import type { DaemonClient } from "../src/daemon-client";
 import type { PiHost } from "./pi-host";
 import { loadSessionGoal } from "./goal-mode/store";
 import { loadDesignState, stageOfState, unwrapDesignResult } from "./design-mode/store";
-import { unwrapDurableGoalResult } from "../src/lib/durable-goal";
+import { unwrapDurableGoalResult, unwrapGoalBeginResult } from "../src/lib/durable-goal";
 
 type Handle = IpcHandle;
 
@@ -130,11 +130,9 @@ export function registerSessionRuntimeIpc(
           images: cleanImages,
           streamingBehavior: opts.streamingBehavior,
         });
-        return { goal: unwrapDurableGoalResult(res.payload, "pi.goalBeginPrompt") };
+        return unwrapGoalBeginResult(res.payload, "pi.goalBeginPrompt");
       }
-      return {
-        goal: await getRuntime().beginGoalPrompt(opts.sessionFile, opts.objective, opts.message, cleanImages, opts.streamingBehavior),
-      };
+      return getRuntime().beginGoalPrompt(opts.sessionFile, opts.objective, opts.message, cleanImages, opts.streamingBehavior);
     }
   );
   handle("pideck:design-get", async (_e, sessionId: string, cwd: string) => {

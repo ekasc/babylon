@@ -246,7 +246,7 @@ describe("babylon daemon server", () => {
     const piHost = fakePiHost({
       beginGoalPrompt: async (sessionFile: string, objective: string, message: string) => {
         seen.push([sessionFile, objective, message]);
-        return goal;
+        return { goal, started: true, error: null };
       },
     });
     const server = await start({ piHost });
@@ -255,7 +255,7 @@ describe("babylon daemon server", () => {
     const r = reader(socket);
     await request(socket, "pi.goalBeginPrompt", { sessionFile: "/s/a.jsonl", objective: "Fix it", message: "Fix it" });
     const res = await r.next("pi.goalBeginPrompt");
-    expect(res.payload).toEqual({ goal });
+    expect(res.payload).toEqual({ goal, started: true, error: null });
     expect(seen).toEqual([["/s/a.jsonl", "Fix it", "Fix it"]]);
     await request(socket, "pi.goalBeginPrompt", { sessionFile: "/s/a.jsonl" });
     const err = await r.next("error");

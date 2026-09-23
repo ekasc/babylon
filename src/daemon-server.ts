@@ -105,7 +105,7 @@ export interface DaemonPiHost {
   /** Run a `/goal …` control invocation without opening a turn; returns the fresh durable goal. */
   execGoalCommand(sessionFile: string, args: string): Promise<DurableGoalState | null>;
   /** Silently persist a goal objective for an addressed session (no follow-up turn). */
-  beginGoalPrompt(sessionFile: string, objective: string, message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp"): Promise<DurableGoalState | null>;
+  beginGoalPrompt(sessionFile: string, objective: string, message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp"): Promise<import("../src/lib/durable-goal").GoalBeginResult>;
   /** Run a `/design …` control invocation; returns the fresh design state. */
   execDesignCommand(args: string): Promise<import("../electron/design-mode/store").DesignStatus>;
   abort(sessionFile?: string): Promise<unknown>;
@@ -761,7 +761,9 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
                 return;
               }
               const behavior = streamingBehavior === "steer" || streamingBehavior === "followUp" ? streamingBehavior : undefined;
-              payload = { goal: await piHost.beginGoalPrompt(sessionFile, objective, message, toPromptImages(images), behavior) };
+              // The result already is the wire envelope ({ goal, started,
+              // error }); do not wrap it again.
+              payload = await piHost.beginGoalPrompt(sessionFile, objective, message, toPromptImages(images), behavior);
               break;
             }
             case "pi.designControl": {

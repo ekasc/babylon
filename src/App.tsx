@@ -1685,24 +1685,33 @@ export default function App() {
         const mappedImages = images?.map((a) => ({ type: "image", data: a.data, mimeType: a.mimeType }));
         if (goalArmed) {
           // Armed Goal mode: this message IS the goal. One transactional op
-          // persists the objective and runs the turn itself, so a prompt
-          // failure can never strand a phantom ACTIVE goal: the backend
-          // restores the previous state when the turn never started, and
-          // keeps the goal when it did (abort, mid-turn model error).
-          // The pending objective drives the dot optimistically until the
-          // op settles; failures clear it back to OFF.
+          // persists the objective and runs the turn itself. The outcome
+          // envelope says whether the turn started: pre-start failures roll
+          // the optimistic row back with the goal OFF, while a started turn
+          // (abort, mid-turn model error) keeps row and dot with the run
+          // error surfaced — the backend kept the injected goal.
           setGoalArmed(false);
           setGoalPendingObjective(text);
+          let result;
           try {
-            const { goal } = await bridge.beginGoalPrompt(target, text, text, mappedImages, streamingBehavior);
-            setGoalPendingObjective(null);
-            if (goal) setDurableGoal(goal);
+            result = await bridge.beginGoalPrompt(target, text, text, mappedImages, streamingBehavior);
           } catch (e) {
+            // Transport/startup failure: nothing was sent, goal untouched.
             setGoalPendingObjective(null);
             if (hasContent) dispatch({ type: "local-user-rollback", text });
             toast("error", errorMessage(e, "could not start goal"));
             if (history.activeRollback) void hydrate();
             return false;
+          }
+          setGoalPendingObjective(null);
+          if (result.goal) setDurableGoal(result.goal);
+          if (result.error) {
+            if (!result.started) {
+              if (hasContent) dispatch({ type: "local-user-rollback", text });
+              if (history.activeRollback) void hydrate();
+            }
+            toast("error", result.error);
+            return result.started;
           }
           if (history.activeRollback) await hydrate();
           return true;

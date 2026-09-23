@@ -2,7 +2,7 @@ import type { Task } from "./tasks";
 import type { Bot, BotGroup, BotPatch, DefaultBot, DefaultBotPatch, NewBotInput, NewGroupInput } from "./bots";
 import type { Handoff } from "./handoff";
 import type { PiSettings } from "./lib/settings-shared";
-import type { DurableGoalState } from "./lib/durable-goal";
+import type { DurableGoalState, GoalBeginResult } from "./lib/durable-goal";
 import type { SimEmulation, SimViewport } from "./lib/simulator";
 
 export interface SimBounds {
@@ -609,7 +609,7 @@ export interface Bridge {
   /** Run a `/goal …` control invocation; resolves with the fresh durable goal. */
   goalControl(sessionFile: string, args: string): Promise<{ goal: DurableGoalState | null }>;
   /** Transactional goal start + first turn for an addressed session. */
-  beginGoalPrompt(sessionFile: string, objective: string, message: string, images?: unknown[], streamingBehavior?: string): Promise<{ goal: DurableGoalState | null }>;
+  beginGoalPrompt(sessionFile: string, objective: string, message: string, images?: unknown[], streamingBehavior?: string): Promise<GoalBeginResult>;
   /** Read a session's design state (null when none is set). */
   designGet(sessionId: string, cwd: string): Promise<import("../electron/design-mode/store").DesignStatus>;
   /** Run a `/design …` control invocation; resolves with the fresh design state. */
@@ -880,7 +880,7 @@ export const bridge: Bridge = window.pideck ?? {
   abort: () => Promise.resolve(),
   goalGet: () => Promise.resolve({ goal: null }),
   goalControl: () => Promise.resolve({ goal: null }),
-  beginGoalPrompt: () => Promise.resolve({ goal: null }),
+  beginGoalPrompt: () => Promise.resolve({ goal: null, started: true, error: null }),
   designGet: () => Promise.resolve({ design: null, stage: "idle" as const }),
   designControl: () => Promise.resolve({ design: null, stage: "idle" as const }),
   releaseSession: () => Promise.resolve({ released: false }),

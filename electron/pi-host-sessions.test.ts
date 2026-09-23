@@ -111,10 +111,12 @@ describe("PiHost independent session execution", () => {
         delivered.push(`${entry.sessionFile}:${message}`);
       });
       try {
-        const state = await host.beginGoalPrompt(fileA, "Fix the race", "Fix the race");
-        expect(state?.active).toBe(true);
-        expect(state?.objective).toBe("Fix the race");
-        expect(state?.status).toBe("planning");
+        const result = await host.beginGoalPrompt(fileA, "Fix the race", "Fix the race");
+        expect(result.error).toBeNull();
+        expect(result.started).toBe(true);
+        expect(result.goal?.active).toBe(true);
+        expect(result.goal?.objective).toBe("Fix the race");
+        expect(result.goal?.status).toBe("planning");
         // Exactly one turn — the message itself — never a synthetic
         // [Goal Mode Start] follow-up.
         expect(delivered).toEqual([`${fileA}:Fix the race`]);
@@ -137,7 +139,10 @@ describe("PiHost independent session execution", () => {
       const entry = host.testSessions().get(fileA)!;
       const promptSpy = vi.spyOn(entry.runtime.session, "prompt").mockRejectedValue(new Error("pre-start boom"));
       try {
-        await expect(host.beginGoalPrompt(fileA, "Fix X", "Fix X")).rejects.toThrow("pre-start boom");
+        const result = await host.beginGoalPrompt(fileA, "Fix X", "Fix X");
+        expect(result.started).toBe(false);
+        expect(result.error).toMatch("pre-start boom");
+        expect(result.goal).toBeNull();
         // Nothing persisted: no phantom ACTIVE goal for the next message.
         expect(await loadSessionGoal(a.cwd, entry.sessionId)).toBeNull();
       } finally {
@@ -163,7 +168,11 @@ describe("PiHost independent session execution", () => {
         throw new Error("mid-turn boom");
       });
       try {
-        await expect(host.beginGoalPrompt(fileA, "Fix X", "Fix X")).rejects.toThrow("mid-turn boom");
+        const result = await host.beginGoalPrompt(fileA, "Fix X", "Fix X");
+        expect(result.started).toBe(true);
+        expect(result.error).toMatch("mid-turn boom");
+        expect(result.goal?.active).toBe(true);
+        expect(result.goal?.objective).toBe("Fix X");
         const kept = await loadSessionGoal(a.cwd, entry.sessionId);
         expect(kept?.active).toBe(true);
         expect(kept?.objective).toBe("Fix X");
@@ -186,7 +195,10 @@ describe("PiHost independent session execution", () => {
       await saveSessionGoal(a.cwd, entry.sessionId, createDurableGoalState("Old goal", defaultDurableGoalModeConfig()));
       const promptSpy = vi.spyOn(entry.runtime.session, "prompt").mockRejectedValue(new Error("pre-start boom"));
       try {
-        await expect(host.beginGoalPrompt(fileA, "New goal", "New goal")).rejects.toThrow("pre-start boom");
+        const result = await host.beginGoalPrompt(fileA, "New goal", "New goal");
+        expect(result.started).toBe(false);
+        expect(result.error).toMatch("pre-start boom");
+        expect(result.goal?.objective).toBe("Old goal");
         expect((await loadSessionGoal(a.cwd, entry.sessionId))?.objective).toBe("Old goal");
       } finally {
         promptSpy.mockRestore();

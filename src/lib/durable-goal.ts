@@ -224,6 +224,33 @@ export function unwrapDurableGoalResult(payload: unknown, type: string): Durable
   return parsed;
 }
 
+/**
+ * Transactional goal-start outcome. Turn failures return normally (never
+ * throw) so the renderer can distinguish them: `started: false` means the
+ * message never became a turn (roll the optimistic row back, goal OFF),
+ * `started: true` means it did (keep the row, keep the dot, show the
+ * model/run error). Transport/validation failures still throw.
+ */
+export interface GoalBeginResult {
+  goal: DurableGoalState | null;
+  started: boolean;
+  error: string | null;
+}
+
+/** Unwrap a `GoalBeginResult` wire envelope; malformed fails loud. */
+export function unwrapGoalBeginResult(payload: unknown, type: string): GoalBeginResult {
+  if (payload === null || typeof payload !== "object") throw new Error(`${type} returned a malformed payload`);
+  const record = payload as Record<string, unknown>;
+  const rawGoal = "goal" in record ? (record.goal ?? null) : null;
+  const goal = rawGoal === null ? null : parseDurableGoalState(rawGoal);
+  if (rawGoal !== null && goal === null) throw new Error(`${type} returned a malformed payload`);
+  if (typeof record.started !== "boolean") throw new Error(`${type} returned a malformed payload`);
+  if (record.error !== null && typeof record.error !== "string") {
+    throw new Error(`${type} returned a malformed payload`);
+  }
+  return { goal, started: record.started, error: record.error };
+}
+
 /** The agent signals completion with the marker alone on the final line. */
 export function durableCompletedWithMarker(text: string, marker: string): boolean {
   const finalLine = text.trimEnd().split(/\r?\n/).at(-1)?.trim();

@@ -17,12 +17,12 @@ import { join, resolve } from "node:path";
 import { projectHistory } from "./session-history";
 import { ActiveRollback, RollbackStore, entryDigest, missingCheckpointReason, type Ledger, type TurnCheckpoint } from "./rollback-store";
 import { validateSessionPath, contained } from "./session-path";
-import { isSessionNotFound, SessionNotFoundError } from "../src/lib/errors";
+import { errorMessage, isSessionNotFound, SessionNotFoundError } from "../src/lib/errors";
 import { SnapshotStore, isBookkeepingPath, type RestoreChange, type SnapshotCapture } from "./snapshot-store";
 import { createGoalModeExtension, isExternalGoalModeExtension } from "./goal-mode/extension";
 import { createDesignModeExtension } from "./design-mode/extension";
 import { loadSessionGoal, saveSessionGoal, clearSessionGoal, loadGoalModeConfig } from "./goal-mode/store";
-import { createDurableGoalState, defaultDurableGoalModeConfig } from "../src/lib/durable-goal";
+import { createDurableGoalState, defaultDurableGoalModeConfig, type GoalBeginResult } from "../src/lib/durable-goal";
 import { loadDesignState, stageOfState, type DesignStatus } from "./design-mode/store";
 import type { DurableGoalState } from "../src/lib/durable-goal";
 import { shouldRelayImagesThrough, toPiImages } from "./prompt-images";
@@ -1891,12 +1891,14 @@ export class PiHost implements LocalPiHost {
    * [Goal Mode Start] follow-up, unlike the `/goal <objective>` command).
    * Same 4000-char ceiling as the command path.
    *
-   * Compensation, not blind cleanup: if prompt() fails, the persisted goal
-   * is rolled back ONLY when the turn never started (transcript digest
-   * unchanged — resolve failure, pre-start validation). An abort or
-   * mid-turn model error leaves the goal standing: the message became a
-   * turn and the goal context was already injected. Previous state (when
-   * any) is restored rather than deleted.
+   * Turn failures RETURN normally as `{ goal, started, error }` (never
+   * throw) so the renderer need not infer anything: `started: false` means
+   * the message never became a turn — the persisted goal is rolled back
+   * (previous state restored, fresh starts cleared) and the caller drops
+   * its optimistic row with the goal OFF. `started: true` (abort, mid-turn
+   * model error) means the turn exists with goal context already injected —
+   * the goal stands and the caller keeps row and dot. Only validation,
+   * unknown-session, and transport failures throw.
    */
   async beginGoalPrompt(
     sessionFile: string,
@@ -1904,7 +1906,7 @@ export class PiHost implements LocalPiHost {
     message: string,
     images?: PromptImage[],
     streamingBehavior?: "steer" | "followUp"
-  ): Promise<DurableGoalState | null> {
+  ): Promise<GoalBeginResult> {
     const text = objective.trim();
     if (!text || text.length > 4000) throw new Error("invalid goal objective");
     const entry = this.resolveEntry(sessionFile);
@@ -1916,26 +1918,30 @@ export class PiHost implements LocalPiHost {
     try {
       await this.prompt(message, images, streamingBehavior, sessionFile);
     } catch (e) {
-      // Compensate only when the turn never started: if the transcript grew,
-      // the message became a turn (abort, mid-turn model error) and the goal
-      // context was already injected — the goal stands.
       let started = true;
       try {
         started = entryDigest(entry.runtime.session.sessionManager.getEntries()) !== digestAtStart;
       } catch {
         started = true;
       }
+      let goal: DurableGoalState | null = null;
       if (!started) {
         try {
-          if (previous) await saveSessionGoal(entry.cwd, sid, previous);
-          else await clearSessionGoal(entry.cwd, sid);
+          if (previous) {
+            await saveSessionGoal(entry.cwd, sid, previous);
+            goal = previous;
+          } else {
+            await clearSessionGoal(entry.cwd, sid);
+          }
         } catch {
-          /* restoration is best-effort; the original error still surfaces */
+          /* restoration is best-effort; the outcome below still reports */
         }
+      } else {
+        goal = await loadSessionGoal(entry.cwd, entry.runtime.session.sessionId).catch(() => null);
       }
-      throw e;
+      return { goal, started, error: errorMessage(e, "goal turn failed") };
     }
-    return loadSessionGoal(entry.cwd, entry.runtime.session.sessionId).catch(() => null);
+    return { goal: await loadSessionGoal(entry.cwd, entry.runtime.session.sessionId).catch(() => null), started: true, error: null };
   }
   /**
    * Run a `/design …` control invocation through the foreground session

@@ -8,6 +8,7 @@ import {
   parseDurableGoalState,
   renderDurableGoalContext,
   slugify,
+  unwrapGoalBeginResult,
 } from "./durable-goal";
 
 describe("durable goal state", () => {
@@ -43,5 +44,27 @@ describe("durable goal state", () => {
     expect(renderDurableGoalContext({ ...state, paused: true })).toBe("");
     expect(durableCompletedWithMarker("done stuff\nGOAL_DONE", "GOAL_DONE")).toBe(true);
     expect(durableCompletedWithMarker("GOAL_DONE here", "GOAL_DONE")).toBe(false);
+  });
+});
+
+describe("unwrapGoalBeginResult", () => {
+  const goal = createDurableGoalState("Ship it", defaultDurableGoalModeConfig(), 1000);
+
+  it("passes success and both failure classes through", () => {
+    const parsed = parseDurableGoalState(goal);
+    expect(unwrapGoalBeginResult({ goal, started: true, error: null }, "t")).toEqual({ goal: parsed, started: true, error: null });
+    expect(unwrapGoalBeginResult({ goal: null, started: false, error: "boom" }, "t")).toEqual({
+      goal: null,
+      started: false,
+      error: "boom",
+    });
+    expect(unwrapGoalBeginResult({ goal, started: true, error: "boom" }, "t").started).toBe(true);
+  });
+
+  it("fails loud on malformed envelopes", () => {
+    expect(() => unwrapGoalBeginResult(null, "t")).toThrow(/malformed/);
+    expect(() => unwrapGoalBeginResult({ goal, started: "yes", error: null }, "t")).toThrow(/malformed/);
+    expect(() => unwrapGoalBeginResult({ goal, started: true, error: 42 }, "t")).toThrow(/malformed/);
+    expect(() => unwrapGoalBeginResult({ goal: { objective: 1 }, started: false, error: "x" }, "t")).toThrow(/malformed/);
   });
 });
