@@ -1,6 +1,5 @@
 import { useEffect, useRef } from "react";
 import type { AttentionState } from "../sessionRuntime";
-import { ProjectIcon } from "./ProjectIcon";
 
 const isMacTabHint = typeof navigator !== "undefined" && /mac/i.test(navigator.platform ?? "");
 
@@ -19,8 +18,8 @@ export interface TabItem {
 export function SessionTabs({
   tabs,
   activePath,
-  allCwds,
   attentionByPath,
+  preparingActive,
   onActivate,
   onClose,
   onNew,
@@ -28,8 +27,9 @@ export function SessionTabs({
 }: {
   tabs: TabItem[];
   activePath: string | null;
-  allCwds: string[];
   attentionByPath: Map<string, AttentionState>;
+  /** Host still warming the active session: tiny spinner on its tab. */
+  preparingActive?: boolean;
   onActivate(tab: TabItem): void;
   onClose(path: string): void;
   onNew(): void;
@@ -96,9 +96,10 @@ export function SessionTabs({
                   : "text-dim hover:bg-inset/50 hover:text-fg"
               }`}
             >
-              <ProjectIcon cwd={tab.cwd} allCwds={allCwds} size={12} />
               <span className="min-w-0 flex-1 truncate">{tab.title}</span>
-              {attention === "approval" ? (
+              {active && preparingActive ? (
+                <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-accent" aria-label="Preparing session" />
+              ) : attention === "approval" ? (
                 <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-warn" aria-label="Needs input" />
               ) : attention === "unread" ? (
                 <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" aria-label="Unread" />

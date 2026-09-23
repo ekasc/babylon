@@ -2,7 +2,6 @@ import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { Menu } from "@base-ui/react/menu";
 import type { GitStatusResult, ProjectGroup, SessionMeta } from "../bridge";
 import {
-	ArchiveIcon,
 	ArrowDownIcon,
 	ArrowUpIcon,
 	BlockedIcon,
@@ -1387,11 +1386,12 @@ export default memo(function Sidebar(props: Props) {
 							return (
 								<div key={sp.cwd}>
 									<div
-										className={`group/space relative flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 ${isActiveSpace ? "bg-accent/10" : "hover:bg-raised"}`}
+										className={`group/space relative flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 ${isActiveSpace ? "bg-inset" : "hover:bg-raised"}`}
 									>
 										<button
 											type="button"
 											onClick={() => openSpace(sp.cwd)}
+											title={sp.cwd}
 											onMouseEnter={() => {
 												onRefreshGitStatus?.(sp.cwd);
 												if (
@@ -1457,67 +1457,6 @@ export default memo(function Sidebar(props: Props) {
 												×
 											</button>
 										) : null}
-										<div
-											role="tooltip"
-											className="absolute top-0 left-full invisible z-50 p-3 ml-2 w-64 rounded-lg border shadow-xl opacity-0 transition-all pointer-events-none border-line bg-raised delay-0 group-hover/space:visible group-hover/space:opacity-100 group-hover/space:delay-500"
-										>
-											<p className="flex gap-2 items-center min-w-0">
-												<ProjectIcon
-													cwd={sp.cwd}
-													allCwds={allSpaceCwds}
-													size={14}
-												/>
-												<span className="font-semibold truncate text-[13px]">
-													{projectName(sp.cwd)}
-												</span>
-											</p>
-											<p className="mt-1 leading-4 break-all text-[11px] text-dim">
-												{sp.cwd}
-											</p>
-											<p className="flex gap-2 items-center mt-2 text-[12px] text-dim">
-												{branch ? (
-													<span className="truncate">
-														{branch}
-													</span>
-												) : (
-													<span>No branch</span>
-												)}
-												<span aria-hidden>·</span>
-												<span className="tabular-nums shrink-0">
-													{sp.usable.length} sessions
-												</span>
-												{sp.live > 0 ? (
-													<>
-														<span aria-hidden>
-															·
-														</span>
-														<span className="shrink-0 text-ok">
-															{sp.live} running
-														</span>
-													</>
-												) : null}
-												{sp.attention === "approval" ? (
-													<>
-														<span aria-hidden>
-															·
-														</span>
-														<span className="shrink-0 text-warn">
-															needs approval
-														</span>
-													</>
-												) : sp.attention ===
-												  "unread" ? (
-													<>
-														<span aria-hidden>
-															·
-														</span>
-														<span className="shrink-0">
-															unread
-														</span>
-													</>
-												) : null}
-											</p>
-										</div>
 									</div>
 								</div>
 							);
@@ -1606,15 +1545,29 @@ export default memo(function Sidebar(props: Props) {
 							</>
 						)}
 
-						{showArchived && archivedList.length > 0 && (
+						{archivedList.length > 0 && (
 							<>
-								<div className="my-2 mx-2.5 sidebar-section-divider" />
-								<div className="px-5 pt-3 pb-1 sidebar-section-label">
-									Archived
-								</div>
-								{archivedList.map((entry) =>
-									renderRow(entry, "archived"),
-								)}
+								<button
+									type="button"
+									onClick={onToggleShowArchived}
+									aria-expanded={showArchived}
+									className="sidebar-shelf-toggle"
+								>
+									<span className="shelf-label">
+										{showArchived
+											? "Archived"
+											: `Archived (${archivedList.length})`}
+									</span>
+									<span className="shelf-divider" />
+									<ChevronIcon
+										size={12}
+										className={`shelf-chevron transition-transform ${showArchived ? "rotate-180" : ""}`}
+									/>
+								</button>
+								{showArchived &&
+									archivedList.map((entry) =>
+										renderRow(entry, "archived"),
+									)}
 							</>
 						)}
 					</>
@@ -1626,26 +1579,10 @@ export default memo(function Sidebar(props: Props) {
 					<FolderIcon size={16} className="sidebar-action-icon" />
 					<span>Open folder…</span>
 				</button>
-				{archivedList.length > 0 && (
-					<button
-						onClick={onToggleShowArchived}
-						className="mt-0.5 sidebar-action"
-					>
-						<ArchiveIcon
-							size={16}
-							className="sidebar-action-icon"
-						/>
-						<span>
-							{showArchived
-								? "Hide archived"
-								: `Archived (${archivedList.length})`}
-						</span>
-					</button>
-				)}
 				<button
 					type="button"
 					onClick={onOpenSettings}
-					className="mt-0.5 sidebar-action"
+					className="sidebar-action"
 					aria-haspopup="dialog"
 				>
 					<GearIcon size={16} className="sidebar-action-icon" />

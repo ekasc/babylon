@@ -162,7 +162,7 @@ export default function SessionSidebar({
                   onClick={() => onFocus(tab.key)}
                   title={tab.label}
                   className={`flex min-w-0 max-w-[160px] shrink-0 cursor-pointer items-center gap-1.5 self-end rounded-t-md px-2 py-1.5 text-[12px] ${
-                    isActive ? "bg-inset text-fg" : "text-dim hover:bg-inset/60 hover:text-fg"
+                    isActive ? "bg-inset text-fg shadow-[inset_0_2px_0_var(--accent)]" : "text-dim hover:bg-inset/60 hover:text-fg"
                   }`}
                 >
                   {tab.loading ? <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-accent" /> : null}

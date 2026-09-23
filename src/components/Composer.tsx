@@ -751,9 +751,10 @@ const Composer = memo(function Composer({
 						</div>
 					)}
 					{/* Session control row, part of the composer surface (T3Code's
-					    in-composer controls): permission, model, thinking, run
-					    state, and usage stay one control surface with the input
-					    instead of a separate full-width telemetry strip. */}
+					    in-composer controls). Two groups: runtime config on the
+					    left (permission, model, thinking), session state on the
+					    right (Goal, Design, activity, usage). A pending Approve
+					    is the one emphasized element, never another ghost. */}
 					{!hasBlockingDialog && (
 						<div className="composer-controls-row flex items-center gap-0.5 border-t border-line/60 px-3 py-1">
 							<span className="flex shrink-0 items-center">
@@ -775,6 +776,8 @@ const Composer = memo(function Composer({
 									onSelect={onSetThinking}
 								/>
 							</span>
+							<div className="flex-1" />
+							<span aria-hidden="true" className="mx-1.5 h-4 w-px shrink-0 bg-line/60" />
 							{!goalSet && onStartGoal ? (
 								<span className="flex shrink-0 items-center">
 									<button type="button" onClick={onStartGoal} title="Set a durable goal the agent works toward (/goal)" className="operator-meta-control">Goal</button>
@@ -787,10 +790,9 @@ const Composer = memo(function Composer({
 						) : null}
 						{designApproval ? (
 							<span className="flex shrink-0 items-center">
-								<button type="button" onClick={designApproval.onApprove} title="Approve and continue the design flow" className="operator-meta-control text-fg underline underline-offset-2">{designApproval.label}</button>
+								<button type="button" onClick={designApproval.onApprove} title="Approve and continue the design flow" className="rounded-md bg-accent px-2.5 py-1 text-[12px] font-semibold text-bg hover:bg-accent/90">{designApproval.label}</button>
 							</span>
 						) : null}
-							<div className="flex-1" />
 							{streaming && (
 								<span className="flex shrink-0 items-center px-1">
 									<ThroughputBars active />

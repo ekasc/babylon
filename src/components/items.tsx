@@ -193,58 +193,43 @@ export const SystemLine = memo(function SystemLine({ text }: { text: string }) {
 /** Distinct launch card for a model-spawned subagent / thread / workflow.
  *  Card-style, not a text line, stands out in the transcript and invites click to Activity. */
 export const LaunchCard = memo(function LaunchCard({ item, onOpen, onControl }: { item: Extract<ChatItem, { kind: "launch" }>; onOpen?(runId: string, runKind: "subagent" | "thread" | "workflow"): void; onControl?(runId: string, runKind: "subagent" | "thread" | "workflow", action: "stop"): void }) {
-  const { runKind, label, status, runId, log } = item;
+  const { runKind, label, status, runId } = item;
   const isRunning = status === "running";
   const dot = isRunning ? "bg-accent animate-pulse" : status === "completed" ? "bg-ok" : status === "failed" ? "bg-err" : "bg-dim";
   const verb = isRunning ? "Running" : status === "completed" ? "Completed" : status === "failed" ? "Failed" : "Stopped";
-  const iconBg = isRunning ? "bg-fg text-bg" : status === "completed" ? "bg-ok/15 text-ok" : status === "failed" ? "bg-err/15 text-err" : "bg-inset text-dim";
-  const border = isRunning ? "border-accent/30" : status === "failed" ? "border-err/25" : "border-line";
+  const verbTone = isRunning ? "text-accent" : status === "completed" ? "text-ok" : status === "failed" ? "text-err" : "text-dim";
+  // Compact execution row (quiet metadata register): dot + kind + label +
+  // state, no bordered card. Detail lives in Activity; Stop/Open stay inline.
   return (
-    <div
-      className={`conversation-launch my-3 flex w-full items-center gap-3 rounded-lg border ${border} bg-inset/60 px-3.5 py-2.5 transition-colors duration-150 hover:bg-inset hover:border-line-strong ${isRunning ? "is-running" : ""}`}
-    >
+    <div className="conversation-launch my-1 flex w-full items-center gap-2 px-1 text-[12px] text-dim">
       <button
         type="button"
         onClick={() => onOpen?.(runId, runKind)}
-        title={`Open ${runKind} ${runId} in Activity, click to view`}
-        className="flex min-w-0 flex-1 items-center gap-3 text-left"
+        title={`Open ${runKind} ${runId} in Activity`}
+        className="flex min-w-0 flex-1 items-center gap-1.5 text-left hover:text-fg"
       >
-        <span className="grid h-7 w-7 shrink-0 place-items-center" aria-hidden="true">
-          <span className={`grid h-7 w-7 place-items-center rounded-full text-[length:var(--chat-r-11)] font-bold leading-none ${iconBg}`}>
-            {runKind === "subagent" ? "◈" : runKind === "thread" ? "⬢" : "⬣"}
-          </span>
-        </span>
-        <span className="flex min-w-0 flex-1 flex-col gap-0.5 text-left">
-          <span className="flex items-center gap-2">
-            <span className="text-[12px] font-semibold capitalize tracking-tight text-fg">{runKind}</span>
-            <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[length:var(--chat-r-11)] font-semibold tracking-wide ${isRunning ? "bg-accent-soft text-accent" : status === "completed" ? "bg-ok/10 text-ok" : status === "failed" ? "bg-err/10 text-err" : "bg-inset text-dim"}`}>
-              {isRunning ? <span className="h-3 w-3 animate-spin rounded-full border-2 border-accent border-t-transparent" aria-hidden="true" /> : <span className={`inline-block h-1.5 w-1.5 rounded-full ${dot}`} />}
-              {verb}
-            </span>
-          </span>
-          <span className="truncate text-[11px] leading-snug text-dim" title={label}>{label}</span>
-          {log ? (
-            <span className="truncate font-mono text-[length:var(--chat-r-11)] leading-snug text-dim" title={log}>{log}</span>
-          ) : null}
-        </span>
+        <span className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${dot}`} aria-hidden="true" />
+        <span className="shrink-0 font-medium capitalize">{runKind}</span>
+        <span className="min-w-0 flex-1 truncate" title={label}>{label}</span>
+        <span className={`shrink-0 ${verbTone}`}>{verb}</span>
       </button>
       {isRunning ? (
         <button
           type="button"
           onClick={(e) => { e.stopPropagation(); onControl?.(runId, runKind, "stop"); }}
           title={`Stop ${runKind}`}
-          className="flex shrink-0 items-center gap-1 rounded-md border border-err/30 bg-err/10 px-2 py-1 text-[length:var(--chat-r-11)] font-semibold text-err transition-colors hover:bg-err/20"
+          className="shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium text-err hover:bg-err/10"
         >
-          <span aria-hidden className="text-[length:var(--chat-r-10)] leading-none">■</span> Stop
+          Stop
         </button>
       ) : null}
       <button
         type="button"
         onClick={() => onOpen?.(runId, runKind)}
         title={`Open ${runKind} ${runId} in Activity`}
-        className="flex shrink-0 items-center gap-1 text-[11px] font-medium text-accent"
+        className="shrink-0 text-[11px] font-medium text-dim hover:text-accent"
       >
-        Open <span aria-hidden="true" className="text-[length:var(--chat-r-10)]">↗</span>
+        Open <span aria-hidden="true">↗</span>
       </button>
     </div>
   );

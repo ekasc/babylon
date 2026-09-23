@@ -59,13 +59,11 @@ import { PromptHost, confirmAction, promptText } from "./lib/prompts";
 import { createAttentionRegistry } from "./attention";
 import { stampOwnership } from "./ownership";
 import { addAttention, listAttention, removeAttention, type AttentionRegistry } from "./attention";
-import { ChevronIcon, GlobeIcon, LayersIcon, GaugeIcon, BranchIcon, ClockIcon, FolderIcon, TemplateIcon, ArrowUpIcon } from "./components/icons";
+import { ChevronIcon, GlobeIcon, LayersIcon, ListIcon, BranchIcon, ClockIcon, FolderIcon, TemplateIcon, ArrowUpIcon } from "./components/icons";
 import { SessionTabs } from "./components/SessionTabs";
 import { SessionHistoryMenu } from "./components/SessionHistoryMenu";
 import { CanvasProvider } from "./components/canvas-context";
 import SessionSidebar, { type SessionMenuItem } from "./components/SessionSidebar";
-import StatsCard, { defaultStatsCardPos, type StatsCardPos } from "./components/StatsCard";
-import { countCompactions, pushTurnSample, type TurnSample } from "./lib/session-stats";
 import {
   type DurableGoalState,
 } from "./lib/durable-goal";
@@ -195,21 +193,6 @@ export default function App() {
   // Non-streaming is the default: hold incremental text until the reply is
   // complete. (Reasoning always renders as one collapsed line.)
   const streamResponses = useBoolPref("streamResponses", false);
-  // Optional floating session-stats card, off by default. Its position is a
-  // shared pref (the card is an instrument, not a per-session artifact).
-  const statsCardOpen = useBoolPref("statsCard", false);
-  const statsCardPosPref = useStringPref("statsCardPos", "");
-  const statsCardPos = useMemo<StatsCardPos>(() => {
-    const parts = statsCardPosPref.split(",").map(Number);
-    const x = parts[0];
-    const y = parts[1];
-    return x !== undefined && y !== undefined && Number.isFinite(x) && Number.isFinite(y) ? { x, y } : defaultStatsCardPos();
-  }, [statsCardPosPref]);
-  const [turnSamples, setTurnSamples] = useState<{ path: string | null; samples: TurnSample[] }>({
-    path: null,
-    samples: [],
-  });
-  const turnStartRef = useRef<{ path: string; at: number } | null>(null);
   // Chat text size: three isolated knobs (message / composer input / code).
   // Applied to <html> so they cover portalled UI too.
   const chatFont = useStringPref("chatFont", "14");
@@ -859,35 +842,6 @@ export default function App() {
             // strip re-reads state + stage for this session on settle.
             const designTarget = designTargetRef.current;
             if (designTarget) void refreshDesign(designTarget.sessionId, designTarget.cwd);
-          }
-          // Session stats: bracket each assistant call (message_start ->
-          // message_end) and divide its reported output tokens by that wall
-          // time. Only the session on screen contributes, so TPS never leaks
-          // across a switch. message_end is the authoritative usage carrier:
-          // non-streaming suppresses the deltas but not the final message.
-          if (wireStr(wireOf(event.message), "role") === "assistant") {
-            const sid = wireStr(event, "sessionId");
-            const rp = resolveRuntimePath(sid ?? null, false);
-            if (rp && rp === activePathRef.current) {
-              if (event?.type === "message_start") {
-                turnStartRef.current = { path: rp, at: Date.now() };
-              } else if (event?.type === "message_end") {
-                const start = turnStartRef.current;
-                turnStartRef.current = null;
-                if (start?.path === rp) {
-                  const usage = wireOf(wireOf(event.message)?.usage);
-                  const rawOutput = usage?.output;
-                  const outputTokens = typeof rawOutput === "number" ? rawOutput : 0;
-                  const ms = Date.now() - start.at;
-                  if (outputTokens > 0 && ms > 0) {
-                    setTurnSamples((prev) => ({
-                      path: rp,
-                      samples: pushTurnSample(prev.path === rp ? prev.samples : [], { outputTokens, ms }),
-                    }));
-                  }
-                }
-              }
-            }
           }
           // Canonical runtime feed: every session, not just the open one.
           // Transcript filtering above stays untouched; this map is what the
@@ -1994,11 +1948,11 @@ export default function App() {
       },
       {
         id: "branches",
-        label: "Branches",
+        label: "History",
         icon: <BranchIcon size={16} />,
         hint: ready
-          ? "Conversation branches and the timeline of this session"
-          : "Conversation branches, needs the background daemon",
+          ? "Session history: branch tree and turn timeline"
+          : "Session history, needs the background daemon",
         disabled: !ready,
       },
       {
@@ -2279,7 +2233,6 @@ export default function App() {
   const chatOnOpenLaunch = useCallback(() => {
     openFeatureTab("activity");
   }, [openFeatureTab]);
-  const compactionCount = useMemo(() => countCompactions(state.items), [state.items]);
 
   // Preload/bridge missing (e.g. renderer opened outside Electron, or the
   // preload script failed to load). Previously `window.pideck` was accessed
@@ -2347,18 +2300,6 @@ export default function App() {
       />
       </Suspense>
     ) : null}
-      {statsCardOpen && hasSession ? (
-        <StatsCard
-          tokens={stats?.tokens ?? null}
-          totalMessages={stats?.totalMessages}
-          compactionCount={compactionCount}
-          samples={turnSamples.path === (activeSessionPath ?? status.sessionPath) ? turnSamples.samples : []}
-          streaming={activeStreaming}
-          initialPos={statsCardPos}
-          onMove={(pos) => writeStringPref("statsCardPos", `${Math.round(pos.x)},${Math.round(pos.y)}`)}
-          onClose={() => writeBoolPref("statsCard", false)}
-        />
-      ) : null}
       {showProject && projectSettings && status.cwd ? (
         <Suspense fallback={null}>
         <ProjectPanel
@@ -2444,8 +2385,8 @@ export default function App() {
             <SessionTabs
               tabs={visibleTabItems}
               activePath={activeSessionPath ?? status.sessionPath ?? null}
-              allCwds={allSpaceCwds}
               attentionByPath={attentionByPath}
+              preparingActive={preparingVisible}
               onActivate={(tab) => {
                 setPromotedParent(null);
                 void openSession(tab.path, tab.cwd);
@@ -2463,16 +2404,6 @@ export default function App() {
               }
             />
             <div className="ml-auto flex shrink-0 items-center gap-1.5">
-              {hasSession ? (
-                <button
-                  onClick={() => writeBoolPref("statsCard", !statsCardOpen)}
-                  title="Session stats: tokens, compactions, TPS, cache hit rate, messages"
-                  aria-pressed={statsCardOpen}
-                  className={`thread-action ${statsCardOpen ? "is-active" : ""}`}
-                >
-                  <GaugeIcon size={14} />
-                </button>
-              ) : null}
               {/* Way back into the session sidebar. It renders only while the
                   sidebar is closed, so open and close never share the row. */}
               {!sideOpen ? (
@@ -2480,9 +2411,9 @@ export default function App() {
                   onClick={() => setSideOpen(true)}
                   title="Session sidebar (⌘⌥B)"
                   aria-label="Show session sidebar"
-                  className="thread-action thread-action-text relative text-[12px]"
+                  className="thread-action relative"
                 >
-                  Sidebar
+                  <ListIcon size={14} />
                   {activityBadge > 0 ? (
                     <span className="absolute -right-0.5 -top-0.5 grid h-[16px] min-w-[16px] place-items-center rounded-full bg-accent px-1 text-[10px] font-bold leading-none text-white">
                       {activityBadge}
@@ -2491,7 +2422,6 @@ export default function App() {
                 </button>
               ) : null}
             </div>
-            {preparingVisible ? <span className="shrink-0 text-[13px] text-dim">Preparing…</span> : null}
           </header>
 
           <div className="flex flex-1 min-h-0 flex-col">

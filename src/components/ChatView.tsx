@@ -974,7 +974,7 @@ export default memo(function ChatView({
         </div>
         {foldForUser ? (
           <>
-            <div className="turn-fold my-0.5 flex w-full items-center gap-2 rounded-md border-b border-line/60 px-2 py-1 text-left text-[11px] text-dim">
+            <div className="group/fold my-0.5 flex items-center gap-1.5 px-1 py-0.5 text-[11px] text-dim">
               <button
                 type="button"
                 aria-expanded={isCollapsed ? "false" : "true"}
@@ -989,16 +989,26 @@ export default memo(function ChatView({
                     return n;
                   })
                 }
-                className="flex min-w-0 flex-1 items-center gap-2 text-left transition-colors hover:text-fg"
+                className="flex min-w-0 flex-1 items-center gap-1.5 text-left transition-colors hover:text-fg"
               >
-                <span className="truncate">{isCollapsed ? foldForUser.label : "Hide details"}</span>
-                <span className="ml-auto shrink-0 text-[length:var(--chat-r-11)]">{isCollapsed ? (foldForUser.hiddenCount > 0 ? `${foldForUser.hiddenCount} hidden` : "Show") : "Collapse"}</span>
+                <span aria-hidden="true" className="text-[10px] leading-none">{isCollapsed ? "▸" : "▾"}</span>
+                {isCollapsed ? (
+                  <span className="truncate">
+                    {foldForUser.label}
+                    {(() => {
+                      const filesChanged =
+                        entry.item.kind === "user" && entry.item.entryId
+                          ? (historyById.get(entry.item.entryId)?.changedCount ?? 0)
+                          : 0;
+                      return filesChanged > 0 ? ` · ${filesChanged} file${filesChanged === 1 ? "" : "s"} changed` : "";
+                    })()}
+                  </span>
+                ) : (
+                  <span>Hide details</span>
+                )}
               </button>
               {(() => {
-                // The turn's Rollback lives here, not on a floating
-                // chip: the absolutely-positioned message actions
-                // overlap this full-width row. Turns without a fold
-                // keep the floating chip in UserMessage.
+                // Rollback reveals on hover: the fold line is metadata, not chrome.
                 const userEntryId = entry.item.kind === "user" ? entry.item.entryId : undefined;
                 const turn = userEntryId ? historyById.get(userEntryId) : undefined;
                 if (!onRollback || !userEntryId || !turn) return null;
@@ -1009,7 +1019,7 @@ export default memo(function ChatView({
                     onClick={() => onRollback(userEntryId)}
                     disabled={disabled}
                     title={streaming ? "Finish or stop the active response before rolling back" : turn.rollbackReason ?? "Rollback conversation and files from this turn"}
-                    className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-dim hover:text-fg disabled:opacity-40"
+                    className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-dim opacity-0 transition-opacity hover:text-fg focus-visible:opacity-100 disabled:opacity-40 group-hover/fold:opacity-100"
                   >
                     Rollback
                   </button>

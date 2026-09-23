@@ -281,7 +281,8 @@ body.sidebar-resizing{user-select:none;cursor:col-resize}
 .sidebar-expand:hover{background:var(--inset);color:var(--fg)}
 .sidebar-expand:active{background:var(--pressed)}
 .sidebar-action{display:flex;width:100%;height:36px;align-items:center;gap:8px;border:0;border-radius:var(--radius);background:transparent;color:var(--fg);padding:0 10px;text-align:left;font-size:14px}
-.sidebar-action:hover{background:var(--inset)}.sidebar-action.is-active{background:var(--inset);font-weight:600;box-shadow:inset 0 0 0 1px var(--line)}
+.sidebar-action:hover{background:var(--inset)}.sidebar-action.is-active{color:var(--fg);font-weight:600}
+.sidebar-action.is-active .sidebar-action-icon{color:var(--accent)}
 .sidebar-action:active,.sidebar-project:active,.sidebar-session:active{background:var(--pressed)}
 .sidebar-action-icon{width:18px;display:grid;place-items:center;color:var(--dim)}
 .sidebar-input{display:flex;width:100%;height:34px;align-items:center;justify-content:space-between;gap:8px;border:1px solid var(--line);border-radius:8px;background:var(--raised);padding:0 10px;font-size:13px;font-weight:500;color:var(--fg);text-align:left}
@@ -307,7 +308,8 @@ html.dark .sidebar-input:hover{background:var(--active-deep);border-color:var(--
 .session-status.needs-input{color:var(--git)}
 .session-status.done{color:var(--ok)}
 .sidebar-session:hover{background:var(--inset);color:var(--fg)}
-.sidebar-session.is-active{background:var(--inset);color:var(--fg);box-shadow:inset 0 0 0 1px var(--line)}
+/* List rows: subtle fill only (no inset border — edges belong to tabs). */
+.sidebar-session.is-active{background:var(--inset);color:var(--fg)}
 .sidebar-session{position:relative}
 .sidebar-session.is-slim{min-height:32px;padding-top:4px;padding-bottom:4px;font-size:13px;margin-bottom:1px}
 .sidebar-session{transition:background-color 100ms ease}
@@ -320,16 +322,18 @@ html.dark .sidebar-input:hover{background:var(--active-deep);border-color:var(--
 .sidebar-shelf-toggle .shelf-divider{flex:1;height:1px;background:var(--line);opacity:.55}
 .sidebar-shelf-toggle .shelf-chevron{color:var(--dim)}
 .sidebar-footer{border-top:1px solid var(--line);padding:8px 10px;display:flex;flex-direction:column;gap:2px}
-.sidebar-footer .sidebar-action{height:34px}
+/* Footer utilities sit a tier below workspace actions: smaller, dimmer. */
+.sidebar-footer .sidebar-action{height:32px;font-size:13px;color:var(--dim)}
+.sidebar-footer .sidebar-action:hover{color:var(--fg)}
+.sidebar-footer .sidebar-action-icon{width:16px}
 /* t3code-style near-black dark sidebar */
 html.dark .app-sidebar{background:var(--nav-deep);border-right-color:var(--line-deep);backdrop-filter:none;-webkit-backdrop-filter:none}
 html.dark .sidebar-session:not(.is-slim){color:var(--session-fg)}
 html.dark .sidebar-session:not(.is-slim):hover{background:var(--input-deep)}
-html.dark .sidebar-session.is-active:not(.is-slim){background:var(--active-deep);box-shadow:inset 0 0 0 1px rgba(255,255,255,.06)}
+html.dark .sidebar-session.is-active:not(.is-slim){background:var(--active-deep)}
 html.dark .sidebar-session.is-slim{color:var(--session-fg-slim)}
 html.dark .sidebar-session.is-slim:hover{background:var(--hover-deep)}
 html.dark .sidebar-action:hover{background:var(--hover-deep)}
-html.dark .sidebar-action.is-active{background:var(--active-deep)}
 html.dark .sidebar-section-divider{background:var(--line-deep);opacity:1}
 html.dark .sidebar-footer::before{background:var(--line-deep)}
 /* Per-project accent: the project name carries the color; the git UI uses git's own color */

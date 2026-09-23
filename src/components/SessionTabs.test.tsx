@@ -15,7 +15,6 @@ function baseProps(overrides: Record<string, unknown> = {}) {
   return {
     tabs: TABS,
     activePath: "/s/a",
-    allCwds: ["/proj"],
     attentionByPath: new Map(),
     onActivate: vi.fn(),
     onClose: vi.fn(),
@@ -45,5 +44,20 @@ describe("SessionTabs quick-switch", () => {
     render(<SessionTabs {...baseProps({})} />);
     const tab = screen.getByRole("tab", { name: "Beta" });
     expect(tab.getAttribute("title")).toMatch(/Beta \(.+2\)/);
+  });
+
+  it("shows a readiness spinner on the active tab while preparing", () => {
+    const { rerender } = render(<SessionTabs {...baseProps({})} />);
+    expect(screen.queryByLabelText("Preparing session")).toBeNull();
+    rerender(<SessionTabs {...baseProps({ preparingActive: true })} />);
+    const tab = screen.getByRole("tab", { name: "Alpha" });
+    expect(tab.querySelector('[aria-label="Preparing session"]')).not.toBeNull();
+  });
+
+  it("renders no per-tab project icons (strip is project-scoped)", () => {
+    const { container } = render(<SessionTabs {...baseProps({})} />);
+    // Tabs are title + attention dot + close × only; any svg would be a
+    // project icon (this fails if ProjectIcon returns to the strip).
+    expect(container.querySelectorAll("svg").length).toBe(0);
   });
 });

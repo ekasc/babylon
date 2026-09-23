@@ -18,7 +18,6 @@ function strip(props?: Partial<Parameters<typeof SessionTabs>[0]>) {
     <SessionTabs
       tabs={tabs}
       activePath="/s/a"
-      allCwds={["/x", "/y"]}
       attentionByPath={new Map([["/s/b", "unread"]])}
       onActivate={() => {}}
       onClose={() => {}}

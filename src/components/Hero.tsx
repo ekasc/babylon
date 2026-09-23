@@ -24,11 +24,15 @@ function timeAgo(ms: number): string {
 }
 
 export default function Hero({ status, groups, onOpen, onNew, spaceCwd = null }: Props) {
+  // Project-scoped recents: under a "What are we doing in X?" heading only
+  // X's sessions make sense. Global recents belong to the no-project state.
   const recent = useMemo(() => {
     const all: SessionMeta[] = [];
-    for (const g of groups) for (const s of g.sessions) all.push(s);
+    const source = spaceCwd ? groups.filter((g) => g.cwd === spaceCwd) : groups;
+    for (const g of source) for (const s of g.sessions) all.push(s);
     return all.sort((a, b) => b.mtime - a.mtime).slice(0, 6);
-  }, [groups]);
+  }, [groups, spaceCwd]);
+  const recentLabel = spaceCwd ? `Recent in ${projectName(spaceCwd)}` : "Recent";
 
   return (
     <div className="flex h-full flex-1 items-center justify-center overflow-y-auto px-8">
@@ -51,7 +55,7 @@ export default function Hero({ status, groups, onOpen, onNew, spaceCwd = null }:
         ) : null}
         {recent.length > 0 ? (
           <div className="mt-6">
-            <p className="sidebar-section-label px-[10px]">Recent</p>
+            <p className="sidebar-section-label px-[10px]">{recentLabel}</p>
             <div className="mt-1">
               {recent.map((s) => {
                 const title = s.name ?? s.firstUserText ?? s.id.slice(0, 8);
