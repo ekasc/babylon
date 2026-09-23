@@ -226,9 +226,6 @@ export default function App() {
   // highlights instantly; the host's status confirm later keeps it exact.
   const [activeSessionPath, setActiveSessionPath] = useState<string | null>(null);
 
-  // Optimistic header title: shown instantly from the clicked row, replaced by
-  // the host's sessionName when it hydrates.
-  const [headerName, setHeaderName] = useState<string | null>(null);
   // "Preparing…" only appears if the host stays not-ready past a beat, fast
   // switches (now <100ms) never flash it; cold first-opens still get the hint.
   const [preparingVisible, setPreparingVisible] = useState(false);
@@ -416,9 +413,10 @@ export default function App() {
   // Stable identity so the memoized Sidebar does not re-render every frame.
   // Path-addressed: renames foreground, retained-idle, and never-opened
   // sessions alike — the backend resolves ownership, no need to open first.
+  // Prefill comes from the rename target, never the visible header.
   const renameSession = useCallback(
-    async (path: string) => {
-      const name = await promptText({ title: "Rename chat", prefill: headerName ?? undefined, placeholder: "Session name" });
+    async (path: string, currentName?: string) => {
+      const name = await promptText({ title: "Rename chat", prefill: currentName, placeholder: "Session name" });
       if (!name) return;
       try {
         await bridge.renameSession(path, name);
@@ -427,7 +425,7 @@ export default function App() {
         toast("error", errorMessage(e, "could not rename chat"));
       }
     },
-    [headerName, promptText, refreshSessions, toast]
+    [promptText, refreshSessions, toast]
   );
 
   const togglePalette = useCallback((next: boolean | ((v: boolean) => boolean)) => {
@@ -1120,7 +1118,7 @@ export default function App() {
   // Clear the switch cover shortly after it fades (animation is 120ms; the
   // timeout also covers the reduced-motion path where no animation fires). The
   const openSession = useCallback(
-    async (path: string | undefined, cwd: string, displayName?: string, opts?: { quietMissing?: boolean }) => {
+    async (path: string | undefined, cwd: string, opts?: { quietMissing?: boolean }) => {
       const expectedEpoch = ++epochRef.current;
       const requestId = ++latestRequestRef.current;
       // Opening never changes lifecycle: a settled session renders normally
@@ -1144,7 +1142,6 @@ export default function App() {
       // the new transcript is ready, then swaps in one frame (tail fetch is
       // ~30ms even for the largest sessions).
       setActiveSessionPath(path ?? null);
-      setHeaderName(displayName ?? null);
       // Transcript cache (opencode's SESSION_CACHE pattern): switching back to
       // a recently-viewed session renders from memory, no fetch, no re-read ,
       // and the host re-warms in the background. The cache is populated by the
@@ -1317,7 +1314,7 @@ export default function App() {
   const selectSpace = useCallback((cwd: string) => {
     setActiveSpace(cwd);
     const tab = pickSpaceTab(navTabs.tabs, navTabs.activeBySpace, cwd);
-    if (tab) void openSession(tab.path, tab.cwd, undefined, { quietMissing: true });
+    if (tab) void openSession(tab.path, tab.cwd, { quietMissing: true });
     else showLanding();
   }, [navTabs, openSession, setActiveSpace, showLanding]);
 
@@ -1424,12 +1421,11 @@ export default function App() {
         }
         cwd = picked;
       }
-      await openSession(result.sessionFile ?? undefined, cwd, bot.name);
+      await openSession(result.sessionFile ?? undefined, cwd);
     } catch (e) {
       // Drop the optimistic row/header so a failed open can't strand the UI
       // on a session that never displayed (header falls back to live status).
       setActiveSessionPath(null);
-      setHeaderName(null);
       toast("error", errorMessage(e, "could not open bot chat"));
     }
   }, [openSession, projectFilter, status.cwd, toast]);
@@ -1488,10 +1484,9 @@ export default function App() {
         }
         cwd = picked;
       }
-      await openSession(result.sessionFile ?? undefined, cwd, group.name);
+      await openSession(result.sessionFile ?? undefined, cwd);
     } catch (e) {
       setActiveSessionPath(null);
-      setHeaderName(null);
       toast("error", errorMessage(e, "could not open group room"));
     }
   }, [openSession, projectFilter, status.cwd, toast, bots]);
@@ -1859,9 +1854,9 @@ export default function App() {
     setSidebarMinimized((minimized) => !minimized);
   }, [setSidebarMinimized]);
   const onOpenSidebarSession = useCallback(
-    (path: string | undefined, cwd: string, name?: string) => {
+    (path: string | undefined, cwd: string) => {
       setPromotedParent(null);
-      void openSession(path, cwd, name);
+      void openSession(path, cwd);
     },
     [openSession]
   );

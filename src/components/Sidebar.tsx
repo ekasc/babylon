@@ -146,7 +146,7 @@ export function ThreadMenu(props: {
 	onToggleArchive(path: string): void;
 	onSettle(path: string): void;
 	onUnsettle(path: string): void;
-	onRename(path: string): void;
+	onRename(path: string, currentName?: string): void;
 	onCopy(kind: "path" | "id" | "branch", session: SessionMeta): void;
 	onDelete(path: string, name: string): void;
 	onCreateHandoff?(path: string): void;
@@ -407,7 +407,7 @@ export function ThreadMenu(props: {
 									closeOnClick={false}
 									className="thread-menu-item"
 									onClick={() => {
-										props.onRename(session.path);
+										props.onRename(session.path, session.name ?? session.firstUserText ?? undefined);
 										onClose();
 									}}
 								>
@@ -601,7 +601,7 @@ interface RowProps {
 	onToggleArchive(path: string): void;
 	onSettle(path: string): void;
 	onUnsettle(path: string): void;
-	onRename(path: string): void;
+	onRename(path: string, currentName?: string): void;
 	onCopy(kind: "path" | "id" | "branch", session: SessionMeta): void;
 	onCreateHandoff?(path: string): void;
 	onConsumeHandoff?(path: string): void;
@@ -1002,7 +1002,7 @@ interface Props {
 	onToggleSnooze(path: string, until?: number): void;
 	onToggleUnread(path: string): void;
 	onToggleArchive(path: string): void;
-	onRename(path: string): void;
+	onRename(path: string, currentName?: string): void;
 	onCopy(kind: "path" | "id" | "branch", session: SessionMeta): void;
 	onCreateHandoff?(path: string): void;
 	onConsumeHandoff?(path: string): void;
