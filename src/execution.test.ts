@@ -55,3 +55,69 @@ describe("ProjectExecutionBusyError", () => {
     expect(isProjectExecutionBusy(null)).toBe(false);
   });
 });
+
+describe("execution wire envelopes", () => {
+  const execution = {
+    cwd: "/proj/a",
+    sessionFile: "/s/a1.jsonl",
+    sessionId: "session-a1",
+    state: "working" as const,
+    streaming: true,
+    generation: 3,
+  };
+
+  it("unwraps the list, activate, and deactivate payloads", async () => {
+    const mod = await import("./execution");
+    expect(mod.unwrapExecutionListResult({ executions: [execution] }, "t")).toEqual([execution]);
+    expect(mod.unwrapExecutionListResult({ executions: [] }, "t")).toEqual([]);
+    expect(mod.unwrapExecutionActivateResult({ ok: true, execution }, "t")).toEqual({ ok: true, execution });
+    expect(
+      mod.unwrapExecutionActivateResult(
+        { ok: false, code: "PROJECT_EXECUTION_BUSY", busySessionFile: "/s/a0.jsonl", busySessionId: "s0" },
+        "t"
+      )
+    ).toEqual({ ok: false, code: "PROJECT_EXECUTION_BUSY", busySessionFile: "/s/a0.jsonl", busySessionId: "s0" });
+    expect(mod.unwrapExecutionDeactivateResult({ released: true }, "t")).toBe(true);
+    expect(mod.unwrapExecutionDeactivateResult({ released: false }, "t")).toBe(false);
+  });
+
+  it("converts only busy errors to the activation envelope", async () => {
+    const mod = await import("./execution");
+    const busy = new ProjectExecutionBusyError("/s/a1.jsonl", "session-a1");
+    expect(mod.toExecutionActivateResult(busy)).toEqual({
+      ok: false,
+      code: "PROJECT_EXECUTION_BUSY",
+      busySessionFile: "/s/a1.jsonl",
+      busySessionId: "session-a1",
+    });
+    expect(mod.toExecutionActivateResult(new Error("other"))).toBeNull();
+  });
+
+  it("fails loud on malformed envelopes (no silent fallbacks)", async () => {
+    const mod = await import("./execution");
+    const badList = [
+      null,
+      {},
+      { executions: "nope" },
+      { executions: [{ ...execution, state: "potato" }] },
+      { executions: [{ ...execution, generation: "3" }] },
+    ];
+    for (const payload of badList) {
+      expect(() => mod.unwrapExecutionListResult(payload, "t")).toThrow(/malformed/);
+    }
+    const badActivate = [
+      null,
+      { ok: "yes", execution },
+      { ok: true },
+      { ok: true, execution: { ...execution, streaming: "yes" } },
+      { ok: false, code: "PROJECT_EXECUTION_BUSY", busySessionFile: "/s/a0.jsonl" }, // missing busySessionId
+      { ok: false, code: "OTHER" },
+      { execution }, // missing ok
+    ];
+    for (const payload of badActivate) {
+      expect(() => mod.unwrapExecutionActivateResult(payload, "t")).toThrow(/malformed/);
+    }
+    expect(() => mod.unwrapExecutionDeactivateResult({}, "t")).toThrow(/malformed/);
+    expect(() => mod.unwrapExecutionDeactivateResult({ released: "yes" }, "t")).toThrow(/malformed/);
+  });
+});

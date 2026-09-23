@@ -12,6 +12,7 @@ import { createTask } from "./tasks";
 import { PermissionEngine } from "../electron/permissions";
 import { HookManager } from "../electron/hook-manager";
 import type { HookDefinition } from "./hooks";
+import { ProjectExecutionBusyError } from "./execution";
 
 const servers: DaemonServer[] = [];
 const tempDirs: string[] = [];
@@ -71,6 +72,10 @@ function fakePiHost(overrides: Partial<DaemonPiHost>): DaemonPiHost {
     controlSubagent: fail("controlSubagent"),
     promoteSubagent: fail("promoteSubagent"),
     execGoalCommand: fail("execGoalCommand"),
+    listProjectExecutions: fail("listProjectExecutions"),
+    executionSnapshot: fail("executionSnapshot"),
+    activateExecution: fail("activateExecution"),
+    deactivateExecution: fail("deactivateExecution"),
     execDesignCommand: fail("execDesignCommand"),
     beginDesignPrompt: fail("beginDesignPrompt"),
     getState: fail("getState"),
@@ -318,6 +323,89 @@ describe("babylon daemon server", () => {
     await request(socket, "pi.designBeginPrompt", { sessionFile: "/s/a.jsonl" });
     const err = await r.next("error");
     expect(String((err.payload as { error?: string }).error)).toMatch(/requires \{ sessionFile, subject, message \}/);
+  });
+
+  it("serves pi.executionList as { executions }", async () => {
+    const execution = {
+      cwd: "/proj/a",
+      sessionFile: "/s/a1.jsonl",
+      sessionId: "session-a1",
+      state: "working" as const,
+      streaming: true,
+      generation: 3,
+    };
+    const piHost = fakePiHost({ listProjectExecutions: async () => [execution] });
+    const server = await start({ piHost });
+    const port = (server.address() as { port: number }).port;
+    const socket = await connect(port);
+    const r = reader(socket);
+    await request(socket, "pi.executionList", {});
+    const res = await r.next("pi.executionList");
+    expect(res.payload).toEqual({ executions: [execution] });
+  });
+
+  it("serves pi.executionActivate with ok envelope and busy envelope", async () => {
+    const execution = {
+      cwd: "/proj/a",
+      sessionFile: "/s/a2.jsonl",
+      sessionId: "session-a2",
+      state: "idle" as const,
+      streaming: false,
+      generation: 2,
+    };
+    const seen: Array<[string, string | undefined]> = [];
+    let busy = false;
+    const piHost = fakePiHost({
+      activateExecution: async (cwd: string, sessionFile?: string) => {
+        seen.push([cwd, sessionFile]);
+        if (busy) throw new ProjectExecutionBusyError("/s/a1.jsonl", "session-a1");
+        return { sessionFile: sessionFile ?? "/s/a2.jsonl", sessionId: "session-a2" };
+      },
+      executionSnapshot: async () => execution,
+    });
+    const server = await start({ piHost });
+    const port = (server.address() as { port: number }).port;
+    const socket = await connect(port);
+    const r = reader(socket);
+    await request(socket, "pi.executionActivate", { cwd: "/proj/a", sessionFile: "/s/a2.jsonl" });
+    const ok = await r.next("pi.executionActivate");
+    expect(ok.payload).toEqual({ ok: true, execution });
+    expect(seen).toEqual([["/proj/a", "/s/a2.jsonl"]]);
+    // Busy owners cross the wire as a structured envelope, not an error —
+    // error classes do not survive message-only serialization.
+    busy = true;
+    await request(socket, "pi.executionActivate", { cwd: "/proj/a" });
+    const busyRes = await r.next("pi.executionActivate");
+    expect(busyRes.payload).toEqual({
+      ok: false,
+      code: "PROJECT_EXECUTION_BUSY",
+      busySessionFile: "/s/a1.jsonl",
+      busySessionId: "session-a1",
+    });
+    await request(socket, "pi.executionActivate", { sessionFile: 42 });
+    const err = await r.next("error");
+    expect(String((err.payload as { error?: string }).error)).toMatch(/requires \{ cwd \}/);
+  });
+
+  it("serves pi.executionDeactivate as { released }", async () => {
+    const seen: Array<[string, string]> = [];
+    const piHost = fakePiHost({
+      deactivateExecution: async (cwd: string, expected: string) => {
+        seen.push([cwd, expected]);
+        return expected === "/s/a1.jsonl";
+      },
+    });
+    const server = await start({ piHost });
+    const port = (server.address() as { port: number }).port;
+    const socket = await connect(port);
+    const r = reader(socket);
+    await request(socket, "pi.executionDeactivate", { cwd: "/proj/a", expectedSessionFile: "/s/a1.jsonl" });
+    const res = await r.next("pi.executionDeactivate");
+    expect(res.payload).toEqual({ released: true });
+    expect(seen).toEqual([["/proj/a", "/s/a1.jsonl"]]);
+    await request(socket, "pi.executionDeactivate", { cwd: "/proj/a" });
+    const err = await r.next("error");
+    expect(String((err.payload as { error?: string }).error)).toMatch(/requires \{ cwd, expectedSessionFile \}/);
   });
 
   it("wraps array results so the protocol envelope stays an object", async () => {

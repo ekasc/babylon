@@ -28,6 +28,7 @@ import type { HookManager } from "../electron/hook-manager";
 import { createFrameDecoder, encodeFrame, DEFAULT_MAX_FRAME_BYTES, type FrameDecoder } from "./daemon-transport";
 import { verifyToken } from "./remote-auth";
 import { isPlainObject } from "./lib/wire";
+import { toExecutionActivateResult, type ProjectExecution } from "./execution";
 import { dispatchRequest } from "./daemon-host";
 import {
   restoreRuntime,
@@ -104,6 +105,11 @@ export interface DaemonPiHost {
   prompt(message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp", sessionFile?: string | null): Promise<unknown>;
   /** Run a `/goal …` control invocation without opening a turn; returns the fresh durable goal. */
   execGoalCommand(sessionFile: string, args: string): Promise<DurableGoalState | null>;
+  listProjectExecutions(): Promise<ProjectExecution[]>;
+  executionSnapshot(cwd: string): Promise<ProjectExecution | null>;
+  /** Narrow structural view of SessionEntry: the server only needs identity. */
+  activateExecution(cwd: string, sessionFile?: string): Promise<{ sessionFile: string; sessionId: string }>;
+  deactivateExecution(cwd: string, expectedSessionFile: string): Promise<boolean>;
   /** Silently persist a goal objective for an addressed session (no follow-up turn). */
   beginGoalPrompt(sessionFile: string, objective: string, message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp"): Promise<import("../src/lib/durable-goal").GoalBeginResult>;
   /** Run a `/design …` control invocation; returns the fresh design state. */
@@ -766,6 +772,39 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
               // The result already is the wire envelope ({ goal, started,
               // error }); do not wrap it again.
               payload = await piHost.beginGoalPrompt(sessionFile, objective, message, toPromptImages(images), behavior);
+              break;
+            }
+            case "pi.executionList":
+              payload = { executions: await piHost.listProjectExecutions() };
+              break;
+            case "pi.executionActivate": {
+              const { cwd, sessionFile } = request.payload as { cwd?: unknown; sessionFile?: unknown };
+              if (typeof cwd !== "string" || cwd.length < 1 || (sessionFile != null && typeof sessionFile !== "string")) {
+                send(socket, createEnvelope("response", "error", { error: "pi.executionActivate requires { cwd }" }, request.id));
+                return;
+              }
+              try {
+                await piHost.activateExecution(cwd, typeof sessionFile === "string" ? sessionFile : undefined);
+                const execution = await piHost.executionSnapshot(cwd);
+                if (!execution) throw new Error("activation produced no execution record");
+                payload = { ok: true, execution };
+              } catch (e) {
+                // Busy owners travel as a structured envelope (error classes
+                // do not survive message-only serialization); anything else
+                // falls through to the outer error sender.
+                const busy = toExecutionActivateResult(e);
+                if (!busy) throw e;
+                payload = busy;
+              }
+              break;
+            }
+            case "pi.executionDeactivate": {
+              const { cwd, expectedSessionFile } = request.payload as { cwd?: unknown; expectedSessionFile?: unknown };
+              if (typeof cwd !== "string" || cwd.length < 1 || typeof expectedSessionFile !== "string" || expectedSessionFile.length < 1) {
+                send(socket, createEnvelope("response", "error", { error: "pi.executionDeactivate requires { cwd, expectedSessionFile }" }, request.id));
+                return;
+              }
+              payload = { released: await piHost.deactivateExecution(cwd, expectedSessionFile) };
               break;
             }
             case "pi.designControl": {

@@ -116,3 +116,75 @@ export function deriveExecutionState(input: {
 export function isExecutionBusyState(state: ExecutionState): boolean {
   return state === "working" || state === "waiting" || state === "approval";
 }
+
+// ── Wire results (IPC + daemon socket) ────────────────────────────────────
+// Error classes do not survive message-only serializations, so activation
+// reports busy as a structured envelope — same contract as GoalBeginResult.
+// In-process callers still get the thrown ProjectExecutionBusyError from
+// PiHost.activateExecution; local/daemon boundaries convert with
+// toExecutionActivateResult.
+
+export type ExecutionActivateResult =
+  | { ok: true; execution: ProjectExecution }
+  | { ok: false; code: "PROJECT_EXECUTION_BUSY"; busySessionFile: string; busySessionId: string };
+
+function malformed(type: string): Error {
+  return new Error(`${type} returned a malformed payload`);
+}
+
+function isExecutionState(v: unknown): v is ExecutionState {
+  return v === "idle" || v === "working" || v === "waiting" || v === "approval" || v === "failed";
+}
+
+function isProjectExecution(v: unknown): v is ProjectExecution {
+  if (v === null || typeof v !== "object") return false;
+  const r = v as Record<string, unknown>;
+  return (
+    typeof r.cwd === "string" &&
+    typeof r.sessionFile === "string" &&
+    typeof r.sessionId === "string" &&
+    isExecutionState(r.state) &&
+    typeof r.streaming === "boolean" &&
+    typeof r.generation === "number"
+  );
+}
+
+/** Convert a caught activation error to the busy envelope, or null when the
+ *  error is something else (rethrow it). */
+export function toExecutionActivateResult(err: unknown): ExecutionActivateResult | null {
+  if (!isProjectExecutionBusy(err)) return null;
+  return { ok: false, code: "PROJECT_EXECUTION_BUSY", busySessionFile: err.busySessionFile, busySessionId: err.busySessionId };
+}
+
+/** Unwrap `{ executions: [...] }` from the wire; every entry must parse. */
+export function unwrapExecutionListResult(payload: unknown, type: string): ProjectExecution[] {
+  if (payload === null || typeof payload !== "object" || !("executions" in payload)) throw malformed(type);
+  const list = (payload as { executions?: unknown }).executions;
+  if (!Array.isArray(list) || !list.every(isProjectExecution)) throw malformed(type);
+  return list;
+}
+
+/** Unwrap the activation envelope: ok must exist; busy carries all three
+ *  identity keys; success carries a full execution record. */
+export function unwrapExecutionActivateResult(payload: unknown, type: string): ExecutionActivateResult {
+  if (payload === null || typeof payload !== "object") throw malformed(type);
+  const r = payload as Record<string, unknown>;
+  if (r.ok === true) {
+    if (!isProjectExecution(r.execution)) throw malformed(type);
+    return { ok: true, execution: r.execution };
+  }
+  if (r.ok === false) {
+    if (r.code !== "PROJECT_EXECUTION_BUSY") throw malformed(type);
+    if (typeof r.busySessionFile !== "string" || typeof r.busySessionId !== "string") throw malformed(type);
+    return { ok: false, code: "PROJECT_EXECUTION_BUSY", busySessionFile: r.busySessionFile, busySessionId: r.busySessionId };
+  }
+  throw malformed(type);
+}
+
+/** Unwrap `{ released: boolean }` from the wire. */
+export function unwrapExecutionDeactivateResult(payload: unknown, type: string): boolean {
+  if (payload === null || typeof payload !== "object" || typeof (payload as { released?: unknown }).released !== "boolean") {
+    throw malformed(type);
+  }
+  return (payload as { released: boolean }).released;
+}

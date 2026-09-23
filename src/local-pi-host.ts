@@ -67,6 +67,10 @@ export interface LocalPiHost {
   releaseSession(sessionFile: string): Promise<boolean>;
   /** Run a `/goal …` control invocation without opening a turn; returns the fresh durable goal. */
   execGoalCommand(sessionFile: string, args: string): Promise<DurableGoalState | null>;
+  listProjectExecutions(): Promise<import("./execution").ProjectExecution[]>;
+  executionSnapshot(cwd: string): Promise<import("./execution").ProjectExecution | null>;
+  activateExecution(cwd: string, sessionFile?: string): Promise<import("../electron/pi-host").SessionEntry>;
+  deactivateExecution(cwd: string, expectedSessionFile: string): Promise<boolean>;
   /** Silently persist a goal objective for an addressed session (no follow-up turn). */
   beginGoalPrompt(sessionFile: string, objective: string, message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp"): Promise<import("./lib/durable-goal").GoalBeginResult>;
   /** Run a `/design …` control invocation; returns the fresh design state. */

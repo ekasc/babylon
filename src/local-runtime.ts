@@ -24,6 +24,7 @@ import type { ThreadState } from "../electron/threads";
 import type { PiSettings } from "./lib/settings-shared";
 import { toSettingsPatch } from "./lib/settings-patch";
 import type { Task } from "./tasks";
+import { toExecutionActivateResult } from "./execution";
 import {
   evaluateContract,
   type CheckResult,
@@ -110,6 +111,20 @@ export function createLocalRuntime(opts: {
     },
     async abort(sessionFile?: string) { return piHost.abort(sessionFile); },
     async goalControl(f: string, a: string) { return piHost.execGoalCommand(f, a); },
+    async executionList() { return piHost.listProjectExecutions(); },
+    async executionActivate(cwd, sessionFile) {
+      try {
+        await piHost.activateExecution(cwd, sessionFile);
+        const execution = await piHost.executionSnapshot(cwd);
+        if (!execution) throw new Error("activation produced no execution record");
+        return { ok: true as const, execution };
+      } catch (e) {
+        const busy = toExecutionActivateResult(e);
+        if (busy) return busy;
+        throw e;
+      }
+    },
+    async executionDeactivate(cwd, expected) { return piHost.deactivateExecution(cwd, expected); },
     async beginGoalPrompt(f: string, o: string, m: string, i?: unknown[], s?: string) {
       const behavior = s === "steer" || s === "followUp" ? s : undefined;
       // Same image sanitization as prompt(): malformed entries are dropped

@@ -546,6 +546,13 @@ export class PiHost implements LocalPiHost {
     return out;
   }
 
+  /** Current record for one project's execution slot (post-activation
+   *  snapshots over the transport), or null when nothing owns it. */
+  async executionSnapshot(cwd: string): Promise<ProjectExecution | null> {
+    const entry = this.executionForCwd(cwd);
+    return entry ? this.buildProjectExecution(cwd, entry) : null;
+  }
+
   /**
    * Latest-wins activation ordering. Opens serialize per target file, so a
    * slow open A and a fast open B run concurrently; the foreground must

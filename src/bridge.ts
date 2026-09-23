@@ -3,6 +3,7 @@ import type { Bot, BotGroup, BotPatch, DefaultBot, DefaultBotPatch, NewBotInput,
 import type { Handoff } from "./handoff";
 import type { PiSettings } from "./lib/settings-shared";
 import type { DurableGoalState, GoalBeginResult } from "./lib/durable-goal";
+import type { ExecutionActivateResult, ProjectExecution } from "./execution";
 import type { SimEmulation, SimViewport } from "./lib/simulator";
 
 export interface SimBounds {
@@ -610,6 +611,13 @@ export interface Bridge {
   goalControl(sessionFile: string, args: string): Promise<{ goal: DurableGoalState | null }>;
   /** Transactional goal start + first turn for an addressed session. */
   beginGoalPrompt(sessionFile: string, objective: string, message: string, images?: unknown[], streamingBehavior?: string): Promise<GoalBeginResult>;
+  /** Execution records for every project slot (renderer rebuilds its
+   *  Record<cwd, ProjectExecution> on startup/reconnect). */
+  executionList(): Promise<ProjectExecution[]>;
+  /** Acquire/transfer a project's execution slot; busy owners come back as
+   *  a structured envelope (I4). */
+  executionActivate(cwd: string, sessionFile?: string): Promise<ExecutionActivateResult>;
+  executionDeactivate(cwd: string, expectedSessionFile: string): Promise<boolean>;
   /** Read a session's design state (null when none is set). */
   designGet(sessionId: string, cwd: string): Promise<import("../electron/design-mode/store").DesignStatus>;
   /** Run a `/design …` control invocation; resolves with the fresh design state. */
@@ -883,6 +891,9 @@ export const bridge: Bridge = window.pideck ?? {
   goalGet: () => Promise.resolve({ goal: null }),
   goalControl: () => Promise.resolve({ goal: null }),
   beginGoalPrompt: () => Promise.resolve({ goal: null, started: true, error: null }),
+  executionList: () => Promise.resolve([]),
+  executionActivate: () => Promise.reject(new Error("bridge unavailable")),
+  executionDeactivate: () => Promise.resolve(false),
   designGet: () => Promise.resolve({ design: null, stage: "idle" as const }),
   designControl: () => Promise.resolve({ design: null, stage: "idle" as const }),
   beginDesignPrompt: () => Promise.resolve({ design: null, stage: "idle" as const, started: true, error: null }),

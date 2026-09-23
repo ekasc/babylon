@@ -9,6 +9,7 @@ import type { PiHost } from "./pi-host";
 import { loadSessionGoal } from "./goal-mode/store";
 import { loadDesignState, stageOfState, unwrapDesignBeginResult, unwrapDesignResult } from "./design-mode/store";
 import { unwrapDurableGoalResult, unwrapGoalBeginResult } from "../src/lib/durable-goal";
+import { unwrapExecutionActivateResult, unwrapExecutionDeactivateResult, unwrapExecutionListResult } from "../src/execution";
 
 type Handle = IpcHandle;
 
@@ -90,6 +91,43 @@ export function registerSessionRuntimeIpc(
       return { goal: unwrapDurableGoalResult(res.payload, "pi.goalControl") };
     }
     return { goal: await getRuntime().goalControl(opts.sessionFile, opts.args) };
+  });
+  handle("pideck:execution-list", async () => {
+    if (isDaemonOwned()) {
+      const client = requireDaemonClient();
+      const res = await client.request("pi.executionList", {});
+      return unwrapExecutionListResult(res.payload, "pi.executionList");
+    }
+    return getRuntime().executionList();
+  });
+  handle("pideck:execution-activate", async (_e, opts: { cwd: string; sessionFile?: string }) => {
+    if (!opts || typeof opts.cwd !== "string" || opts.cwd.length < 1 || opts.cwd.length > 4096) {
+      throw new Error("invalid execution activation");
+    }
+    if (opts.sessionFile !== undefined && typeof opts.sessionFile !== "string") throw new Error("invalid session file");
+    if (isDaemonOwned()) {
+      const client = requireDaemonClient();
+      const res = await client.request("pi.executionActivate", { cwd: opts.cwd, sessionFile: opts.sessionFile });
+      return unwrapExecutionActivateResult(res.payload, "pi.executionActivate");
+    }
+    return getRuntime().executionActivate(opts.cwd, opts.sessionFile);
+  });
+  handle("pideck:execution-deactivate", async (_e, opts: { cwd: string; expectedSessionFile: string }) => {
+    if (
+      !opts ||
+      typeof opts.cwd !== "string" ||
+      opts.cwd.length < 1 ||
+      typeof opts.expectedSessionFile !== "string" ||
+      opts.expectedSessionFile.length < 1
+    ) {
+      throw new Error("invalid execution deactivation");
+    }
+    if (isDaemonOwned()) {
+      const client = requireDaemonClient();
+      const res = await client.request("pi.executionDeactivate", { cwd: opts.cwd, expectedSessionFile: opts.expectedSessionFile });
+      return unwrapExecutionDeactivateResult(res.payload, "pi.executionDeactivate");
+    }
+    return getRuntime().executionDeactivate(opts.cwd, opts.expectedSessionFile);
   });
   handle(
     "pideck:goal-begin-prompt",

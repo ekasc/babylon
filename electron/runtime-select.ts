@@ -85,6 +85,10 @@ function unstartedHost(): LocalPiHost {
     releaseSession: notReady("releaseSession"),
     respondUi: notReady("respondUi"),
     execGoalCommand: notReady("execGoalCommand"),
+    listProjectExecutions: notReady("listProjectExecutions"),
+    executionSnapshot: notReady("executionSnapshot"),
+    activateExecution: notReady("activateExecution"),
+    deactivateExecution: notReady("deactivateExecution"),
     execDesignCommand: notReady("execDesignCommand"),
     beginDesignPrompt: notReady("beginDesignPrompt"),
   };
