@@ -803,22 +803,35 @@ export default memo(function ChatView({
     const ro = new ResizeObserver((records) => {
       const el = ref.current;
       const session = sessionKeyRef.current;
-      let changed = false;
+      // Phase 1 (order-independent): column width decision first, wherever
+      // the column record sits in the batch. A width change clears stale
+      // measurements BEFORE any turn record is stored — a turn entry
+      // processed before the column entry must not be wiped by the clear
+      // that follows it.
+      let widthChanged = false;
       for (const record of records) {
         const target = record.target as HTMLElement;
-        // Column entry (no turn id): width invalidation only.
-        if (!target.dataset.turnId) {
-          if (target !== innerRef.current) continue;
-          const width = target.clientWidth;
-          if (widthInvalidatesCache({ prevWidth: columnWidthRef.current, nextWidth: width })) {
-            measureCacheRef.current.clear();
-            changed = true;
-          }
-          columnWidthRef.current = width;
-          continue;
+        if (target !== innerRef.current) continue;
+        const width = target.clientWidth;
+        if (widthInvalidatesCache({ prevWidth: columnWidthRef.current, nextWidth: width })) {
+          widthChanged = true;
         }
-        if (!el) continue;
+        columnWidthRef.current = width;
+      }
+      if (widthChanged) measureCacheRef.current.clear();
+      // Phase 2: turn measurements. On a width change, measure every
+      // mounted turn directly instead of trusting the batch: a turn whose
+      // height happened not to change produces no useful resize entry, and
+      // anything recorded pre-clear would already be gone. (~5–11 turns.)
+      const turnTargets: HTMLElement[] = widthChanged
+        ? [...turnEls.current.values()]
+        : records
+            .map((record) => record.target as HTMLElement)
+            .filter((target) => target.dataset.turnId);
+      let changed = widthChanged;
+      for (const target of turnTargets) {
         const id = target.dataset.turnId;
+        if (!id || !el) continue;
         const idx = turnsRef.current.findIndex((t) => t.id === id);
         if (idx < 0) continue;
         const height = target.offsetHeight;

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi, afterEach, beforeEach } from "vitest";
-import { render } from "@testing-library/react";
+import { act, render } from "@testing-library/react";
 import ChatView from "./ChatView";
 import type { ChatItem } from "../store";
 
@@ -70,5 +70,57 @@ describe("ChatView turn windowing", () => {
     const { container } = render(<ChatView items={items} streaming={false} sessionKey="s1" />);
     expect(mountedTurnIds(container)).toEqual(["e0", "e1", "e2"]);
     expect(container.querySelectorAll(".chat-item").length).toBe(6);
+  });
+
+  it("keeps turn measurements taken before a column width-change record", () => {
+    // Bad ordering regression: records [turn, turn, column-change] must
+    // leave the turns' fresh measurements in the cache, not an emptied one.
+    // jsdom has no layout (offsetHeight 0), so reseeding collapses the
+    // session mean to 0 and the top spacer drops to "0px"; the buggy
+    // store-then-clear order leaves estimates and "13120px" behind.
+    let captured: ((records: Array<{ target: Element }>) => void) | null = null;
+    class CapturingRO {
+      constructor(cb: (records: Array<{ target: Element }>) => void) {
+        captured = cb;
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    vi.stubGlobal("ResizeObserver", CapturingRO);
+    try {
+      const { container } = render(<ChatView items={fiftyTurns()} streaming={false} sessionKey="s1" />);
+      expect(mountedTurnIds(container)).toHaveLength(9);
+      const column = container.querySelector(".conversation-column") as HTMLElement;
+      // Spacer divs are direct column children (icons elsewhere also carry
+      // aria-hidden, so a document-wide query is imprecise).
+      const topSpacer = () =>
+        [...column.children].find((el) => el.getAttribute("aria-hidden") === "true") as HTMLElement | undefined;
+      expect(topSpacer()?.style.height).toBe(`${41 * 320}px`);
+      Object.defineProperty(column, "clientWidth", { value: 810, configurable: true });
+      const turns = [...container.querySelectorAll("[data-turn-id]")] as HTMLElement[];
+      // Baseline: establishes 810px without invalidating.
+      act(() => {
+        captured!([{ target: column }] as unknown as ResizeObserverEntry[]);
+      });
+      expect(topSpacer()?.style.height).toBe(`${41 * 320}px`);
+      // Bad order: turn records first, column width-change last.
+      Object.defineProperty(column, "clientWidth", { value: 600 });
+      act(() => {
+        captured!([
+          { target: turns[turns.length - 1]! },
+          { target: turns[turns.length - 2]! },
+          { target: column },
+        ] as unknown as ResizeObserverEntry[]);
+      });
+      // Fixed: the width change clears first, then all nine mounted turns
+      // reseed at the new width (offsetHeight 0 in jsdom) — the session
+      // mean drops to 0 and no spacer is needed at all. Buggy
+      // store-then-clear order leaves estimates behind and the top spacer
+      // stays at 41 × 320px.
+      expect(topSpacer()).toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
