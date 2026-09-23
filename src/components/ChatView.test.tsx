@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import ChatView, { findTranscriptMatches, formatBlockquote } from "./ChatView";
+import ChatView, { findTranscriptMatches, formatBlockquote, resolveLongChat } from "./ChatView";
 import type { ChatItem } from "../store";
 
 // jsdom has no ResizeObserver; ChatView's follow-scroll effect needs one.
@@ -260,5 +260,31 @@ describe("virtualization latch", () => {
     // Short -> long turns on.
     rerender(<ChatView items={many(61)} streaming={false} sessionKey="s4" />);
     await waitFor(() => expect(longOn()).toBe(true));
+  });
+
+  it("session switch is correct on the very first render, before effects run", () => {
+    const { rerender } = render(<ChatView items={many(61)} streaming={false} sessionKey="s1" />);
+    expect(longOn()).toBe(true);
+    // No waitFor: the new transcript must not inherit the old latch for
+    // even one render (that one frame yanks scrollHeight under the follow
+    // logic — the reason this latch exists at all).
+    rerender(<ChatView items={many(5)} streaming={false} sessionKey="s2" />);
+    expect(longOn()).toBe(false);
+  });
+});
+
+describe("resolveLongChat", () => {
+  // Pure decision table: the render-boundary contract that DOM tests cannot
+  // observe (act() flushes effects before assertions run).
+  it("a switch reads the new transcript, never the old latch", () => {
+    expect(resolveLongChat({ sessionKey: "s1", latched: true }, "s2", 5)).toBe(false);
+    expect(resolveLongChat({ sessionKey: "s1", latched: true }, "s2", 61)).toBe(true);
+    expect(resolveLongChat({ sessionKey: "s1", latched: false }, "s2", 61)).toBe(true);
+  });
+
+  it("same session keeps the latch", () => {
+    expect(resolveLongChat({ sessionKey: "s1", latched: true }, "s1", 5)).toBe(true);
+    expect(resolveLongChat({ sessionKey: "s1", latched: false }, "s1", 5)).toBe(false);
+    expect(resolveLongChat({ sessionKey: null, latched: false }, null, 0)).toBe(false);
   });
 });

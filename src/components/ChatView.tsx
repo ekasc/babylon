@@ -209,6 +209,25 @@ interface Props {
   sessionKey?: string | null;
 }
 
+/** Stored virtualization latch. */
+export interface ChatVirtualization {
+  sessionKey: string | null;
+  latched: boolean;
+}
+
+/** Render-time virtualization decision (pure, unit-tested). A session
+ *  switch reads the NEW transcript immediately — never the old latch —
+ *  so the first render after a switch is already correct, before the
+ *  effect below synchronizes the stored latch. */
+export function resolveLongChat(
+  stored: ChatVirtualization,
+  sessionKey: string | null,
+  itemCount: number,
+): boolean {
+  if (stored.sessionKey !== sessionKey) return itemCount > 60;
+  return stored.latched;
+}
+
 
 export default memo(function ChatView({
   items,
@@ -521,9 +540,11 @@ export default memo(function ChatView({
   // yanks scrollHeight under the follow logic (one flaky stranded-above-
   // bottom per crossing). Explicit state, not useMemo: memo values may be
   // discarded at any time, and the old first-item-key changed whenever
-  // earlier history loaded. One state object so the reset is atomic with
-  // the session identity: a switch re-evaluates from the NEW transcript
-  // (never the old latch), growth latches on, emptying unlatches.
+  // earlier history loaded. One state object so the reset follows the
+  // session identity: a switch re-evaluates from the NEW transcript
+  // (never the old latch), growth latches on, emptying unlatches. The
+  // render reads through the session check so a switch is correct on its
+  // very first render, before the effect synchronizes the stored latch.
   const [virtualization, setVirtualization] = useState({ sessionKey, latched: items.length > 60 });
   useEffect(() => {
     setVirtualization((prev) => {
@@ -535,7 +556,7 @@ export default memo(function ChatView({
       return prev;
     });
   }, [sessionKey, items.length]);
-  const longChat = virtualization.latched;
+  const longChat = resolveLongChat(virtualization, sessionKey, items.length);
 
   // t3-style turn folding: each user message starts a turn. Settled turns
   // (not the live one) collapse behind a single "Worked for" row.

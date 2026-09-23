@@ -129,7 +129,8 @@ describe("ActivityRegistry", () => {
     registry.disposeAll();
   });
 
-  it("routes events by owning session, not UI focus, and revives pruned bridges", async () => {    const a = await makeProject("route-a");
+  it("routes events by owning session, not UI focus, and revives pruned bridges", async () => {
+    const a = await makeProject("route-a");
     const b = await makeProject("route-b");
     const sessionFileB = join(b, "session-b.jsonl");
     const registry = new ActivityRegistry({
