@@ -65,33 +65,35 @@ export function readStore<T>(def: StoreDef<T>): T {
   // NOTE: isStamped returns a boolean — the payload fields below are read
   // off `parsed` (narrowed in each branch), never off the guard result.
   if (isStamped(parsed)) {
-    if (parsed.version === def.version) {
+    // Downgrade (stored newer than code): load as-is when structurally
+    // current, else fall back. Never migrate or restamp — a migrator is
+    // written for older shapes, and rewriting would destroy future data.
+    if (parsed.version > def.version) {
       if (def.validate(parsed.value)) return parsed.value;
-      devWarn(def.key, "current version but unrecognised shape, falling back");
+      devWarn(def.key, `version skew (stored v${parsed.version}, code v${def.version}), falling back`);
       return def.fallback();
     }
-    if (def.validate(parsed.value)) {
-      // Downgrade guard: a newer-than-code payload must never run through a
-      // migrator written for older shapes, and must never be rewritten
-      // stamped as the current version — either would destroy future data.
-      if (parsed.version > def.version) {
-        devWarn(def.key, `version skew (stored v${parsed.version}, code v${def.version}), loading as-is`);
-        return parsed.value;
+    // Upgrade (stored older than code): migrate BEFORE current-shape
+    // validation, because converting shapes the validator rejects is the
+    // whole point. A missing migrator leaves validation as the only gate.
+    if (parsed.version < def.version) {
+      if (!def.migrate) {
+        if (def.validate(parsed.value)) return parsed.value;
+        devWarn(def.key, `unrecognised shape (v${parsed.version}), falling back`);
+        return def.fallback();
       }
-      if (parsed.version < def.version && def.migrate) {
-        try {
-          const migrated = def.migrate(parsed.value, parsed.version);
-          if (!def.validate(migrated)) throw new Error("migrate produced an invalid value");
-          writeStore(def, migrated);
-          return migrated;
-        } catch {
-          devWarn(def.key, "migration failed, falling back");
-          return def.fallback();
-        }
+      try {
+        const migrated = def.migrate(parsed.value, parsed.version);
+        if (!def.validate(migrated)) throw new Error("migrate produced an invalid value");
+        writeStore(def, migrated);
+        return migrated;
+      } catch {
+        devWarn(def.key, "migration failed, falling back");
+        return def.fallback();
       }
-      return parsed.value;
     }
-    devWarn(def.key, `unrecognised shape (v${parsed.version}), falling back`);
+    if (def.validate(parsed.value)) return parsed.value;
+    devWarn(def.key, "current version but unrecognised shape, falling back");
     return def.fallback();
   }
   // Legacy unstamped payload: a migrator may still rescue it, otherwise

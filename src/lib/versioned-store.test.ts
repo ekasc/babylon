@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 import { clearStorageCache, setWithFallback } from "./storage";
 import { defineStore, readStore, useVersionedState, writeStore } from "./versioned-store";
+import { tabsStore } from "./nav-model";
 
 const stringArray = defineStore<string[]>({
   key: "test-list",
@@ -63,6 +64,15 @@ describe("versioned persisted state", () => {
     expect(readStore(upper)).toEqual(["kept"]);
     // Untouched on disk: still stamped v99, not rewritten as v2.
     expect(JSON.parse(localStorage.getItem("babylon:test-downgrade") ?? "")).toEqual({ version: 99, value: ["kept"] });
+  });
+
+  it("migrates stamped older payloads whose shape the validator rejects", () => {
+    // Real case: tabs v1 per-space records stamped v1 must reach the v2
+    // migrator instead of falling back (which would wipe the tab strip).
+    setWithFallback("tabs", JSON.stringify({ version: 1, value: { "/a": ["p1"] } }));
+    expect(readStore(tabsStore)).toEqual({ tabs: [{ path: "p1", cwd: "/a" }], activeBySpace: {} });
+    // Migrated and restamped as current.
+    expect(readStore(tabsStore)).toEqual({ tabs: [{ path: "p1", cwd: "/a" }], activeBySpace: {} });
   });
 
   it("exposes a hook that persists on change", () => {

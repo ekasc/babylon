@@ -87,6 +87,13 @@ const TERMINAL_THREAD_STATUSES = new Set(["completed", "failed", "stopped", "int
  *  `unknown`) are settled outcomes, not live work. */
 const LIVE_SUBAGENT_STATUSES = new Set(["starting", "running", "idle"]);
 
+/** Max frozen project snapshots retained. Retired entries are terminal
+ *  history, not live state: past this cap the oldest projects drop out of
+ *  the aggregate (their disk state is untouched; foregrounding re-adds
+ *  them). Without a cap, every project ever opened would ride every
+ *  activity publication for the life of the process. */
+const RETIRED_PROJECT_CAP = 50;
+
 export class ActivityBridge {
   readonly cwd: string;
   private timer: NodeJS.Timeout | null = null;
@@ -497,10 +504,27 @@ export class ActivityRegistry {
     const ttl = this.options.idleTtlMs ?? 5 * 60_000;
     for (const [cwd, bridge] of this.bridges) {
       if (bridge.hasLiveWork() || bridge.idleMs(now) < ttl) continue;
-      this.retired.set(cwd, bridge.snapshot());
+      this.retire(cwd, bridge.snapshot());
       bridge.dispose();
       this.bridges.delete(cwd);
     }
+  }
+
+  /** Freeze a snapshot with LRU eviction (insertion-ordered Map: re-set
+   *  refreshes recency, overflow drops the oldest project). */
+  private retire(cwd: string, snapshot: ActivityUpdate): void {
+    this.retired.delete(cwd);
+    this.retired.set(cwd, snapshot);
+    while (this.retired.size > RETIRED_PROJECT_CAP) {
+      const oldest = this.retired.keys().next();
+      if (oldest.done) break;
+      this.retired.delete(oldest.value);
+    }
+  }
+
+  /** Frozen-project count, for tests. */
+  retiredCount(): number {
+    return this.retired.size;
   }
 
   tracked(): string[] {

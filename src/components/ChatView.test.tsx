@@ -248,10 +248,17 @@ describe("virtualization latch", () => {
     expect(longOn()).toBe(false);
   });
 
-  it("session switch unlatches even without emptying", async () => {
+  it("session switch re-evaluates from the new transcript, never the old latch", async () => {
+    // Long -> long stays on (the new session is itself long).
     const { rerender } = render(<ChatView items={many(61)} streaming={false} sessionKey="s1" />);
     await waitFor(() => expect(longOn()).toBe(true));
     rerender(<ChatView items={many(61)} streaming={false} sessionKey="s2" />);
+    await waitFor(() => expect(longOn()).toBe(true));
+    // Long -> short turns off (the new session is short).
+    rerender(<ChatView items={many(5)} streaming={false} sessionKey="s3" />);
     await waitFor(() => expect(longOn()).toBe(false));
+    // Short -> long turns on.
+    rerender(<ChatView items={many(61)} streaming={false} sessionKey="s4" />);
+    await waitFor(() => expect(longOn()).toBe(true));
   });
 });

@@ -556,6 +556,20 @@ const agentEvents = new AgentEventBuffer((events) => {
   win?.webContents.send("pideck:agent-events", events);
 });
 
+/** Single ingestion point for live agent events, both runtimes. The buffer
+ *  feeds the renderer; the registry routes ownership (and revives pruned
+ *  idle bridges — without this, daemon-owned background work would never
+ *  reappear in activity after pruning). Async by design: never block an
+ *  event pump on ownership resolution. */
+function ingestAgentEvent(ev: AgentEvent): void {
+  agentEvents.push(ev);
+  try {
+    void activityRegistry?.observeAgentEvent(ev);
+  } catch {
+    /* best effort */
+  }
+}
+
 // Task and attention broadcasts arrive in flurries, and each one used to cost
 // a full state.get round-trip plus a full-list send. Latest wins per view:
 // a burst collapses to the fewest refreshes possible.
@@ -780,16 +794,10 @@ async function startHost(): Promise<void> {
       getBotIdForSessionFile: (file) => botStore.findBySessionFile(file)?.id,
       getSimController: () => simController,
       onEvent: (ev: AgentEvent) => {
-        agentEvents.push(ev);
         // Transient subagent rows (tool start/end) ride the same event flow
         // the renderer already consumes; the registry routes each event to
-        // its owning project by session file. Async by design: never block
-        // the host event pump on ownership resolution.
-        try {
-          void activityRegistry?.observeAgentEvent(ev);
-        } catch {
-          /* best effort */
-        }
+        // its owning project by session file.
+        ingestAgentEvent(ev);
         if (ev?.type === "message_end" || ev?.type === "agent_settled" || ev?.type === "session_info_changed") {
           sessionIndex.touch();
         }
@@ -1125,9 +1133,11 @@ async function ensureDaemon(): Promise<boolean> {
       if (envelope.type === "pi.event") {
         // The daemon forwards host agent events; only typed payloads enter
         // the local event buffer (anything else is a protocol violation).
+        // Same ingestion as the local host: buffer + registry routing, so
+        // daemon-owned background work revives pruned bridges too.
         const payload = envelope.payload;
         if (typeof payload === "object" && payload !== null && typeof (payload as { type?: unknown }).type === "string") {
-          agentEvents.push(payload as AgentEvent);
+          ingestAgentEvent(payload as AgentEvent);
         }
       }
       if (envelope.type === "pi.session.status") {

@@ -521,16 +521,21 @@ export default memo(function ChatView({
   // yanks scrollHeight under the follow logic (one flaky stranded-above-
   // bottom per crossing). Explicit state, not useMemo: memo values may be
   // discarded at any time, and the old first-item-key changed whenever
-  // earlier history loaded. The latch resets on session switch (or when the
-  // transcript empties mid-switch) and engages once the transcript is long.
-  const [longChat, setLongChat] = useState(false);
+  // earlier history loaded. One state object so the reset is atomic with
+  // the session identity: a switch re-evaluates from the NEW transcript
+  // (never the old latch), growth latches on, emptying unlatches.
+  const [virtualization, setVirtualization] = useState({ sessionKey, latched: items.length > 60 });
   useEffect(() => {
-    setLongChat(false);
-  }, [sessionKey]);
-  useEffect(() => {
-    if (items.length === 0) setLongChat(false);
-    else if (items.length > 60) setLongChat(true);
-  }, [items.length]);
+    setVirtualization((prev) => {
+      if (prev.sessionKey !== sessionKey) {
+        return { sessionKey, latched: items.length > 60 };
+      }
+      if (!prev.latched && items.length > 60) return { ...prev, latched: true };
+      if (items.length === 0) return { ...prev, latched: false };
+      return prev;
+    });
+  }, [sessionKey, items.length]);
+  const longChat = virtualization.latched;
 
   // t3-style turn folding: each user message starts a turn. Settled turns
   // (not the live one) collapse behind a single "Worked for" row.

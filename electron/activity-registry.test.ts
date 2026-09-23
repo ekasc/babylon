@@ -129,8 +129,7 @@ describe("ActivityRegistry", () => {
     registry.disposeAll();
   });
 
-  it("routes events by owning session, not UI focus, and revives pruned bridges", async () => {
-    const a = await makeProject("route-a");
+  it("routes events by owning session, not UI focus, and revives pruned bridges", async () => {    const a = await makeProject("route-a");
     const b = await makeProject("route-b");
     const sessionFileB = join(b, "session-b.jsonl");
     const registry = new ActivityRegistry({
@@ -162,6 +161,27 @@ describe("ActivityRegistry", () => {
       toolCallId: "t2", sessionFile: sessionFileB, args: {},
     });
     expect(registry.tracked()).toEqual([b]);
+    registry.disposeAll();
+  });
+
+  it("caps frozen history: oldest retired projects drop out past the cap", async () => {
+    const registry = new ActivityRegistry({ pollIntervalMs: 60_000, idleTtlMs: 60_000, onUpdate: () => undefined });
+    const cwds: string[] = [];
+    for (let i = 0; i < 55; i++) {
+      const cwd = await makeProject(`cap-${i}`);
+      cwds.push(cwd);
+      await writeThread(cwd, `thread-${i}`, "completed");
+      registry.ensure(cwd);
+    }
+    await registry.listAll();
+    registry.pruneIdle(Date.now() + 10 * 60_000);
+    expect(registry.tracked()).toEqual([]);
+    expect(registry.retiredCount()).toBe(50);
+    // Newest 50 survive; the first 5 pruned projects are gone from the aggregate.
+    const ids = registry.snapshot().threads.map((t) => t.threadId).sort();
+    expect(ids).toHaveLength(50);
+    expect(ids).not.toContain("thread-0");
+    expect(ids).toContain("thread-54");
     registry.disposeAll();
   });
 });
