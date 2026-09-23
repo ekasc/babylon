@@ -205,10 +205,13 @@ export class SnapshotStore {
    *  Not part of the public API. */
   onBeforeVerifyDiscovery: (() => Promise<void>) | null = null;
 
-  /** Per-repo worktree watchers. The watcher is a concurrent-mutation
-   *  detector only: it does not feed a fast path. Every capture runs the
-   *  authoritative Git candidate discovery; the watcher exists to force an
-   *  additional reconciliation pass if a write lands during the capture. */
+  /** Per-repo worktree watchers. The watcher is informational only: it
+   *  buffers fs events into the per-repo dirty/pending sets, but nothing
+   *  consults those sets in the stability decision. Every capture runs the
+   *  authoritative Git candidate discovery, and the verification discovery
+   *  is the linearization point — a write before it is detected and
+   *  reconciled, a write after it legitimately belongs to the next
+   *  capture. */
   private watches = new Map<string, RepoWatch>();
 
   private async sourceRoot(cwd: string): Promise<string | null> {
@@ -509,9 +512,8 @@ export class SnapshotStore {
    *    3. A second authoritative discovery. If empty, the checkpoint is
    *       stable and we return. If non-empty, a concurrent write
    *       happened during the pass — reconcile again.
-   *  Bounded by `MAX_RECONCILE_PASSES`. The watcher may force an early
-   *  retry, but it is never proof of stability. The only proof is the
-   *  second discovery coming back empty. */
+    *  Bounded by `MAX_RECONCILE_PASSES`. The only stability proof is the
+    *  second discovery coming back empty. */
   private async captureInner(repo: Repository, w: RepoWatch): Promise<SnapshotCapture | null> {
     const stateRoot = resolve(this.stateDir);
     const isInternal = (candidate: string) => {
@@ -533,14 +535,11 @@ export class SnapshotStore {
     await this.reconcileExclusions(repo, exclusions);
 
     for (let pass = 0; pass < MAX_RECONCILE_PASSES; pass++) {
-      // At pass start, merge any events the watcher buffered (w.pending)
-      // into the dirty set, then clear both. This guarantees the next
-      // pass's discovery sees them, and prevents the pass from
-      // returning "stable" while a mutation is still queued in
-      // pending.
-      for (const pending of w.pending) w.dirty.add(pending);
+      // Drain the watcher's buffered events. Informational only: the
+      // stability decision below consults the verification discovery, not
+      // these sets — a write before verification is detected there, and a
+      // write after it belongs to the next capture by definition.
       w.pending.clear();
-      const dirtySeen = new Set(w.dirty);
       w.dirty.clear();
 
       // 1. Authoritative candidate discovery against the SHADOW index.

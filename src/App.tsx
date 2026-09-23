@@ -151,20 +151,21 @@ export default function App() {
   }, [setActiveSpace]);
 
   const [models, setModels] = useState<AgentModel[]>([]);
-  // Invariant-read caches for hydrate (every tab switch re-hydrates; these
-  // do not change per switch): models are project-scoped (the active
-  // session's ModelRuntime is cwd-bound, so one global entry would leak
-  // project A's providers into project B), commands are cwd-bound via the
-  // owning session, thinking levels follow session + model id. Keyed by
-  // session file — a new file means a new runtime with fresh registrations,
-  // so the keys cannot go stale that way. Six retained sessions bounds the
-  // maps; settings saves clear the models map (context-window overrides
-  // remap the registry).
+  // Invariant-read caches for hydrate (every tab switch re-hydrates).
+  // Lifecycle rule: caches must not outlive the runtimes they describe.
+  // Backend eviction is invisible to the renderer (no runtime-eviction
+  // event) and a reopened session reuses its file, so session-file keys
+  // would serve stale registrations after an evict+reopen cycle. Instead:
+  // models are project-scoped (the ModelRuntime is cwd-owned and retained
+  // alongside the project), thinking levels are model-defined, and commands
+  // stay uncached — extension registrations belong to the runtime instance,
+  // and getCommands is not expensive enough to justify the staleness risk.
+  // Settings saves clear the models map (context-window overrides remap it).
   const modelsCacheRef = useRef(new Map<string, AgentModel[]>());
-  const commandsCacheRef = useRef(new Map<string, CommandInfo[]>());
   const levelsCacheRef = useRef(new Map<string, string[]>());
-  const levelsKey = (path: string | null, model: AgentModel | null | undefined) =>
-    path != null && model ? `${path}${model.provider}/${model.id}` : null;
+  // Project of the session on screen, tracked alongside activePathRef
+  // (openSession targets it explicitly; ready statuses carry it).
+  const activeCwdRef = useRef<string | null>(null);
 
   const { themePref, themeId, setThemePref, setThemeId } = useTheme();
   const [commands, setCommands] = useState<CommandInfo[]>([]);
@@ -938,50 +939,51 @@ export default function App() {
   );
 
   const hydrate = useCallback(async (expectedEpoch = epochRef.current) => {
-    // Cache keys: the session on screen at entry (epoch-guarded below, so
-    // a switch mid-flight drops the whole result — keys cannot leak across
-    // sessions). Null on landing: fetch without storing.
+    // Cache keys captured at entry (epoch+path guarded below, so a switch
+    // mid-flight drops the whole result — keys cannot leak across sessions).
     const hydratePath = activePathRef.current;
-    const cachedModels = hydratePath != null ? modelsCacheRef.current.get(hydratePath) : undefined;
-    const cachedCommands = hydratePath != null ? commandsCacheRef.current.get(hydratePath) : undefined;
+    const hydrateCwd = activeCwdRef.current;
+    const cachedModels = hydrateCwd != null ? modelsCacheRef.current.get(hydrateCwd) : undefined;
     try {
       const [msgs, ms, commandData, st, statsData, nextHistory] = await Promise.all([
         bridge.getMessages(),
         cachedModels ?? bridge.getModels().catch(() => null),
-        cachedCommands ?? bridge.getCommands().catch(() => null),
+        bridge.getCommands().catch(() => null),
         bridge.getState(),
         bridge.getStats(),
         bridge.getHistory(),
       ]);
-      if (expectedEpoch !== epochRef.current) return;
+      // Ownership: epoch alone does not exclude requestId-less activations
+      // (extension/worktree foregrounding emits ready without bumping it),
+      // so the session path must match too — otherwise a stale hydrate
+      // writes another session's messages/state/history over the screen.
+      if (expectedEpoch !== epochRef.current || hydratePath !== activePathRef.current) return;
       // Never wipe the on-screen transcript: append only live messages newer
       // than the last loaded one. This is what keeps big-session opens stable
       // (the live compacted view no longer replaces the file tail).
       loadedMessagesRef.current = mergeLiveMessages(loadedMessagesRef.current, msgs);
       dispatch({ type: "rebuild", messages: loadedMessagesRef.current });
       setCanLoadMore(earliestOffsetRef.current != null && earliestOffsetRef.current > 0);
-      if (ms != null && cachedModels === undefined && hydratePath != null) {
-        modelsCacheRef.current.set(hydratePath, ms);
+      if (ms != null && cachedModels === undefined && hydrateCwd != null) {
+        modelsCacheRef.current.set(hydrateCwd, ms);
       }
       setModels(ms ?? cachedModels ?? []);
-      if (commandData != null && cachedCommands === undefined && hydratePath != null) {
-        commandsCacheRef.current.set(hydratePath, commandData);
-      }
-      setCommands(commandData ?? cachedCommands ?? []);
+      // Commands are intentionally uncached: registrations belong to the
+      // runtime instance, and backend eviction/recreation is invisible here.
+      setCommands(commandData ?? []);
       if (!commandData?.length) {
         const retryEpoch = expectedEpoch;
         const retryPath = hydratePath;
         let attempts = 6;
         const retry = async () => {
-          if (retryEpoch !== epochRef.current) return;
+          if (retryEpoch !== epochRef.current || retryPath !== activePathRef.current) return;
           if (attempts-- <= 0) return;
           await new Promise<void>((r) => setTimeout(r, 400));
-          if (retryEpoch !== epochRef.current) return;
+          if (retryEpoch !== epochRef.current || retryPath !== activePathRef.current) return;
           try {
             const refreshed = await bridge.getCommands();
-            if (retryEpoch !== epochRef.current) return;
+            if (retryEpoch !== epochRef.current || retryPath !== activePathRef.current) return;
             if (refreshed?.length) {
-              if (retryPath != null) commandsCacheRef.current.set(retryPath, refreshed);
               setCommands(refreshed);
               return;
             }
@@ -1004,18 +1006,22 @@ export default function App() {
       } else if (!rollbackCreatedAt) {
         rollbackDraftRef.current = null;
       }
-      // Thinking levels follow session + model id: serve from cache while
-      // both match, refetch (epoch-guarded) when either changes.
-      const levelsKeyFor = levelsKey(hydratePath, st?.model);
+      // Thinking levels are model-defined: serve from cache while the model
+      // id matches, refetch (epoch+path guarded) when it changes. Keyed by
+      // model alone so evict+reopen cycles with the same model stay cached.
+      // JSON-encoded tuple, not string concatenation (provider/ids are
+      // matched exactly, never split ambiguously).
+      const levelsKeyFor = st?.model ? JSON.stringify([st.model.provider, st.model.id]) : null;
       const cachedLevels = levelsKeyFor != null ? levelsCacheRef.current.get(levelsKeyFor) : undefined;
       if (cachedLevels !== undefined) {
         setThinkingLevels(cachedLevels);
       } else {
         const levelsEpoch = expectedEpoch;
+        const levelsPath = hydratePath;
         void bridge
           .getThinkingLevels()
           .then((levels) => {
-            if (levelsEpoch !== epochRef.current) return;
+            if (levelsEpoch !== epochRef.current || levelsPath !== activePathRef.current) return;
             if (levelsKeyFor != null && levels != null) levelsCacheRef.current.set(levelsKeyFor, levels);
             setThinkingLevels(levels ?? []);
           })
@@ -1044,6 +1050,7 @@ export default function App() {
           liveReadyRef.current = true;
           activeSessionIdRef.current = s.state?.sessionId ?? null;
           activePathRef.current = s.sessionPath ?? s.state?.sessionFile ?? activePathRef.current;
+          if (s.cwd) activeCwdRef.current = s.cwd;
           setActiveSessionPath(activePathRef.current);
           setLiveReady(true);
           if (s.sessionPath && s.cwd) registerOpenSession(s.cwd, s.sessionPath);
@@ -1175,6 +1182,7 @@ export default function App() {
       liveReadyRef.current = false;
       activeSessionIdRef.current = null;
       activePathRef.current = path ?? null;
+      activeCwdRef.current = cwd;
       // Optimistic: the sidebar row highlights and the active identity flips
       // immediately, before any data loads. The old chat stays visible until
       // the new transcript is ready, then swaps in one frame (tail fetch is

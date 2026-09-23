@@ -869,11 +869,16 @@ export class PiHost implements LocalPiHost {
   }
 
   private async createSessionRuntime(sessionFile: string, cwd: string): Promise<SessionEntry> {
+    // Fingerprint BEFORE the read: an external append landing during the
+    // async runtime build must not be recorded as ingested (same race as
+    // the retained-sync path — fail toward a redundant reparse, never a
+    // permanently skipped append).
+    const preRead = await this.fingerprintSessionFile(sessionFile);
     const sessionManager = SessionManager.open(sessionFile, undefined, cwd);
-    return this.createSessionRuntimeWithManager(sessionFile, cwd, sessionManager);
+    return this.createSessionRuntimeWithManager(sessionFile, cwd, sessionManager, preRead);
   }
 
-  private async createSessionRuntimeWithManager(sessionFile: string, cwd: string, sessionManager: SessionManager): Promise<SessionEntry> {
+  private async createSessionRuntimeWithManager(sessionFile: string, cwd: string, sessionManager: SessionManager, preReadFingerprint?: DiskFingerprint | null): Promise<SessionEntry> {
     const factory = this.createRuntimeFactory;
     if (!factory) throw new Error("pi host not started");
     let runtime: Awaited<ReturnType<typeof createAgentSessionRuntime>>;
@@ -915,9 +920,11 @@ export class PiHost implements LocalPiHost {
     // tree, and `prompt()` cannot call the model until it finishes. Warming at
     // open overlaps that cost with the user reading and typing.
     this.warmSnapshots(cwd);
-    // Seed the disk fingerprint so the next activation can skip the reparse
-    // when nothing changed (null for unflushed new sessions: always sync).
-    entry.diskFingerprint = await this.fingerprintSessionFile(sessionFile);
+    // Seed from the pre-read fingerprint (or null for fresh sessions whose
+    // file does not exist yet): the first activation with a present file
+    // syncs once and seeds then. Never stat here — a post-build stat would
+    // record an append that raced the build as ingested.
+    entry.diskFingerprint = preReadFingerprint ?? null;
     return entry;
   }
 

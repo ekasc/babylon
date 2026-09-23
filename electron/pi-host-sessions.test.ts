@@ -378,6 +378,59 @@ describe("PiHost independent session execution", () => {
     }
   }, 60_000);
 
+  it("a cold build racing an append does not record it as ingested", async () => {
+    const a = await makeProject("race-build-a");
+    const b = await makeProject("race-build-b");
+    const { host } = makeHost(a.cwd, a.agentDir);
+    await host.start();
+    const origOpen = SessionManager.open.bind(SessionManager);
+    const openSpy = vi.spyOn(SessionManager, "open");
+    try {
+      const fileA = await makeSessionFile(a.cwd);
+      const fileB = await makeSessionFile(b.cwd);
+      await host.open({ path: fileA, cwd: a.cwd });
+      await host.open({ path: fileB, cwd: b.cwd });
+      const managerA = host.testSessions().get(fileA)!.runtime.session.sessionManager;
+      managerA.appendMessage({
+        role: "user",
+        content: [{ type: "text", text: "seed" }],
+        timestamp: Date.now(),
+      });
+      const seedAssistantId = managerA.appendMessage({
+        role: "assistant",
+        content: [{ type: "text", text: "seeded" }],
+        api: "test",
+        provider: "test",
+        model: "test",
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: "stop",
+        timestamp: Date.now(),
+      });
+      (managerA as unknown as { _persist: (entry: unknown) => void })._persist(managerA.getEntry(seedAssistantId));
+      // Evict so the next open takes the cold creation path, then land an
+      // append DURING the async build (after SessionManager.open read it).
+      // The seed must be the pre-read fingerprint: the raced append then
+      // mismatches on the following activation and re-syncs.
+      expect(await host.releaseSession(fileA)).toBe(true);
+      const raced = new Date(Date.now() + 60_000);
+      openSpy.mockImplementationOnce((...args: Parameters<typeof SessionManager.open>) => {
+        const manager = origOpen(...args);
+        utimesSync(fileA, raced, raced);
+        return manager;
+      });
+      await host.open({ path: fileA, cwd: a.cwd });
+      expect(host.activeSessionFile).toBe(fileA);
+      openSpy.mockClear();
+      await host.open({ path: fileB, cwd: b.cwd });
+      await host.open({ path: fileA, cwd: a.cwd });
+      expect(host.activeSessionFile).toBe(fileA);
+      expect(openSpy).toHaveBeenCalled();
+    } finally {
+      openSpy.mockRestore();
+      await host.dispose();
+    }
+  }, 60_000);
+
   it("an append racing the sync is not recorded as ingested", async () => {
     const a = await makeProject("race-append-a");
     const b = await makeProject("race-append-b");
