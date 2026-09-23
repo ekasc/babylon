@@ -29,6 +29,7 @@ import {
 import { insertCommand } from "./commands";
 import { countRunningWork } from "./lib/activity";
 import { errorMessage, isSessionNotFound } from "./lib/errors";
+import { resolveSendTarget } from "./lib/send-target";
 import Sidebar from "./components/Sidebar";
 import { useTheme } from "./components/hooks/useTheme";
 import { useRollback } from "./components/hooks/useRollback";
@@ -271,6 +272,18 @@ export default function App() {
   const latestRequestRef = useRef(0);
   const activeSessionIdRef = useRef<string | null>(null);
   const switchingRef = useRef(false);
+  // Ownership generation for the switching flag: overlapping async
+  // operations (tab switch vs stale disk refresh) each claim a token, and
+  // only the latest token holder may clear the flag. A boolean alone lets
+  // a stale refresh clear a newer tab switch's in-flight state.
+  const switchGenerationRef = useRef(0);
+  const claimSwitch = () => {
+    switchingRef.current = true;
+    return ++switchGenerationRef.current;
+  };
+  const releaseSwitch = (token: number) => {
+    if (token === switchGenerationRef.current) switchingRef.current = false;
+  };
   const liveReadyRef = useRef(false);
   const activePathRef = useRef<string | null>(null);
   // Event-driven execution per session path (all sessions, not just the open
@@ -690,18 +703,25 @@ export default function App() {
   // user prompt. Disk sync never emits a foreground ready (see
   // PiHost.refreshFromDisk), so a successful refresh falls through to the
   // explicit hydrate below instead of returning early.
-  const resyncFromSource = useCallback(async (opts?: { skipRefresh?: boolean }) => {
-    const expectedEpoch = epochRef.current;
+  const resyncFromSource = useCallback(async (opts?: { skipRefresh?: boolean; forEpoch?: number; forPath?: string | null }) => {
+    // Ownership captured by the caller BEFORE its own awaits (a refresh
+    // handler's epoch/path from before the disk sync). Defaults to entry
+    // time for direct callers (settle handler, compaction resync).
+    const expectedEpoch = opts?.forEpoch ?? epochRef.current;
+    const expectedPath = opts?.forPath !== undefined ? opts.forPath : activePathRef.current;
     try {
       const activePath = activePathRef.current;
       if (!opts?.skipRefresh && activePath) await bridge.refreshSession(activePath).catch(() => false);
+      // A newer switch started while syncing, or the foreground moved on:
+      // the data below belongs to the old session — drop it, never bind.
+      if (expectedEpoch !== epochRef.current || expectedPath !== activePathRef.current) return;
       const [msgs, st, statsData, nextHistory] = await Promise.all([
         bridge.getMessages(),
         bridge.getState(),
         bridge.getStats(),
         bridge.getHistory(),
       ]);
-      if (expectedEpoch !== epochRef.current) return;
+      if (expectedEpoch !== epochRef.current || expectedPath !== activePathRef.current) return;
       dispatch({ type: "rebuild", messages: msgs });
       setAgentState(st);
       setStats(statsData);
@@ -738,16 +758,26 @@ export default function App() {
         // Never clear the active session id here. A refresh that returns
         // false emits no status, so a cleared id would blackhole the whole
         // turn's events (every agent event carries sessionId) until the next
-        // explicit open.
-        switchingRef.current = true;
+        // explicit open. Ownership is captured BEFORE the await: a tab
+        // switch that starts mid-refresh must not have its switch flag
+        // cleared by this stale operation, nor receive this refresh's data.
+        const refreshEpoch = epochRef.current;
+        const refreshPath = activePath;
+        const switchToken = claimSwitch();
         void bridge
           .refreshSession(activePath)
           .then((refreshed) => {
-            if (refreshed) void resyncFromSource({ skipRefresh: true });
+            if (
+              refreshed &&
+              refreshEpoch === epochRef.current &&
+              refreshPath === activePathRef.current
+            ) {
+              void resyncFromSource({ skipRefresh: true, forEpoch: refreshEpoch, forPath: refreshPath });
+            }
           })
           .catch(() => undefined)
           .finally(() => {
-            switchingRef.current = false;
+            releaseSwitch(switchToken);
           });
       }
     });
@@ -1090,7 +1120,7 @@ export default function App() {
       const prevPath = activePathRef.current;
       const prevMessages = loadedMessagesRef.current;
       const prevOffset = earliestOffsetRef.current;
-      switchingRef.current = true;
+      const switchToken = claimSwitch();
       liveReadyRef.current = false;
       activeSessionIdRef.current = null;
       activePathRef.current = path ?? null;
@@ -1157,7 +1187,7 @@ export default function App() {
         await bridge.openSession({ path, cwd, requestId });
       } catch (e) {
         if (expectedEpoch !== epochRef.current) return;
-        switchingRef.current = false;
+        releaseSwitch(switchToken);
         const missingFile = path != null && isSessionNotFound(e);
         if (missingFile) {
           // Stale sidebar index or persisted tab: the transcript file is
@@ -1538,6 +1568,10 @@ export default function App() {
         if (history.activeRollback) {
           setHistory((current) => ({ ...current, activeRollback: undefined }));
         }
+        // Epoch at send start: the prompt target below resolves from the
+        // live ref AFTER the warmup wait, and this guard rejects the send
+        // if a newer switch started in between.
+        const sendEpoch = epochRef.current;
         // If the agent is still warming, wait only for the matching open request.
         // A ready/error from an older serialized switch must not release this send.
         if (!liveReadyRef.current) {
@@ -1591,9 +1625,10 @@ export default function App() {
           text,
           images?.map((a) => ({ type: "image", data: a.data, mimeType: a.mimeType })),
           streamingBehavior,
-          // Explicit identity: the send belongs to the session on screen,
-          // even if a concurrent open has since moved the backend foreground.
-          activeSessionPath ?? status.sessionPath ?? undefined
+          // Explicit identity resolved AFTER the warmup wait above (see
+          // resolveSendTarget): the render closure's paths may still point
+          // at the previous session, so the live ref is authoritative.
+          resolveSendTarget(sendEpoch, epochRef.current, activePathRef.current)
         );
         // Real transition: the host accepted the prompt. Ownership is the live
         // session's runtime id; no message id is fabricated when absent.
@@ -1606,7 +1641,9 @@ export default function App() {
         return false;
       }
     },
-    [history.activeRollback, hydrate, toast, activeGroup, activeSessionPath, status.sessionPath]
+    // No session-path deps: the prompt target resolves from activePathRef
+    // after the warmup wait, never from the render closure.
+    [history.activeRollback, hydrate, toast, activeGroup]
   );
 
   const abort = useCallback(async () => {

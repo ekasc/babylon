@@ -383,18 +383,26 @@ export class PiHost implements LocalPiHost {
    * The single foreground-mutation point: pointer, cwd, rollback leaf,
    * ready emission. A superseded invocation warms its runtime but leaves
    * the foreground alone and emits nothing (the renderer already moved
-   * on; a stale ready would be ignored anyway).
+   * on; a stale ready would be ignored anyway). Latest-wins is rechecked
+   * AFTER the awaited preparation: checking only at entry leaves a hole
+   * where a slow activation publishes a stale foreground (and a stale
+   * requestId-less ready, which the renderer cannot reject) after a newer
+   * activation already committed.
    */
   private async activate(
     entry: SessionEntry,
     opts: { cwd: string; requestId?: number; seq: number },
   ): Promise<AgentState> {
     if (!this.isLatestActivation(opts.seq)) return this.getStateFor(entry);
+    await this.restoreRollbackLeafFor(entry.runtime.session);
+    if (!this.isLatestActivation(opts.seq)) return this.getStateFor(entry);
+    // Synchronous commit section: pointer, cwd, and recency flip together
+    // with no await in between, so no interleaving can split them.
     this.foregroundSessionFile = entry.sessionFile;
     this._cwd = opts.cwd;
     entry.lastUsedAt = Date.now();
-    await this.restoreRollbackLeafFor(entry.runtime.session);
     const state = await this.getStateFor(entry);
+    if (!this.isLatestActivation(opts.seq)) return state;
     this.lastMessageAt.set(state.sessionFile ?? entry.sessionFile, Date.now());
     this.opts.onStatus({ status: "ready", cwd: opts.cwd, sessionPath: state.sessionFile ?? entry.sessionFile, requestId: opts.requestId, state });
     // Never block activation on disposal.
@@ -415,18 +423,35 @@ export class PiHost implements LocalPiHost {
 
   /**
    * Evict oldest idle runtimes past the cap. Live runtimes are unlimited;
-   * only idle ones count. releaseSession rechecks liveness (including
-   * threads) and refuses, so a false positive here is a no-op, never a
-   * kill. Public for tests.
+   * only idle ones count. Serialized across overlapping sweeps (activations
+   * fire-and-forget this, so two sweeps can overlap and must not release
+   * the same entry twice). Public for tests.
    */
   async evictIdleSessions(): Promise<void> {
+    const run = this.evictChain.then(
+      () => this.evictIdleSessionsInner(),
+      () => this.evictIdleSessionsInner(),
+    );
+    this.evictChain = run.catch(() => undefined);
+    return run;
+  }
+
+  private evictChain: Promise<unknown> = Promise.resolve();
+
+  private async evictIdleSessionsInner(): Promise<void> {
     const idle = [...this.sessions.values()]
       .filter((entry) => this.isEvictable(entry))
       .sort((a, b) => a.lastUsedAt - b.lastUsedAt);
     const overflow = idle.length - PiHost.MAX_IDLE_SESSIONS;
     if (overflow <= 0) return;
-    for (const entry of idle.slice(0, overflow)) {
-      await this.releaseSession(entry.sessionFile);
+    // Walk the whole candidate list until overflow releases succeed:
+    // releaseSession refuses thread-live runtimes, so stopping at the
+    // first refusal would strand genuinely idle sessions behind them.
+    // A refusal is a no-op, never a kill.
+    let released = 0;
+    for (const entry of idle) {
+      if (released >= overflow) break;
+      if (await this.releaseSession(entry.sessionFile)) released++;
     }
   }
 
@@ -1959,8 +1984,10 @@ export class PiHost implements LocalPiHost {
     beforeLeafId: string | null;
     beforeEntryIds: Set<string>;
     before: SnapshotCapture;
-  }): Promise<void> {
-    return this.captureTurnEnd(start, this.activeEntry());
+  }, sessionFile?: string): Promise<void> {
+    // Explicit identity (like prompt(sessionFile)): the turn belongs to its
+    // owning session even if the foreground moved while it ran.
+    return this.captureTurnEnd(start, this.resolveEntry(sessionFile ?? null));
   }
 
   private async captureTurnEnd(start: {
@@ -2004,7 +2031,9 @@ export class PiHost implements LocalPiHost {
     // from this snapshot; a watcher-backed capture that missed the agent's
     // edit would yield an incomplete diff and leave the change in place after
     // a rollback. Reading Git/FS directly guarantees a complete diff.
-    const after = await this.snapshots.capture(this.cwd, { authoritative: true }).catch(() => null);
+    // Entry-scoped like the pre-turn capture: the turn belongs to this
+    // session's project even if the foreground moved while it ran.
+    const after = await this.snapshots.capture(entry.cwd, { authoritative: true }).catch(() => null);
     if (!after || after.root !== start.before.root) {
       await this.recordTurnFailed(
         start,
@@ -2016,7 +2045,7 @@ export class PiHost implements LocalPiHost {
     // Bookkeeping (the engine's own `.pi/state` logs) mutates as a side
     // effect of running tools, so without this filter every tool-using turn
     // — even a purely read-only one — would report "files changed".
-    const changedPaths = (await this.snapshots.changedFiles(this.cwd, start.before.tree, after.tree)).filter(
+    const changedPaths = (await this.snapshots.changedFiles(entry.cwd, start.before.tree, after.tree)).filter(
       (path) => !isBookkeepingPath(path)
     );
     const exclusions = changedExclusions(start.before.excluded, after.excluded);

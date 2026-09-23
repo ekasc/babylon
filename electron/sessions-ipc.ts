@@ -109,7 +109,8 @@ export function registerSessionsIpc(
 
   handle(
     "pideck:open-session",
-    async (_e, opts: { path?: string; cwd: string; requestId?: number; botId?: string }) => {      if (!opts || typeof opts.cwd !== "string" || opts.cwd.length > 4096) throw new Error("invalid session options");
+    async (_e, opts: { path?: string; cwd: string; requestId?: number; botId?: string }) => {
+      if (!opts || typeof opts.cwd !== "string" || opts.cwd.length > 4096) throw new Error("invalid session options");
       if (getHostReady()) await getHostReady();
       let path: string | undefined;
       if (opts.path !== undefined) {

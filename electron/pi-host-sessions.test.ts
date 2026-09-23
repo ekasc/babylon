@@ -1,11 +1,16 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { PiHost, defaultStateDir, type HostOptions, type SessionEntry } from "./pi-host";
+import { RollbackStore } from "./rollback-store";
 import type { AgentEvent } from "../src/bridge";
 import { SnapshotStore } from "./snapshot-store";
+
+const exec = promisify(execFile);
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -190,7 +195,8 @@ describe("PiHost independent session execution", () => {
     }
   }, 60_000);
 
-  it("releases idle runtimes and refuses live ones", async () => {    const a = await makeProject("e");
+  it("releases idle runtimes and refuses live ones", async () => {
+    const a = await makeProject("e");
     const { host } = makeHost(a.cwd, a.agentDir);
     await host.start();
     try {
@@ -221,6 +227,56 @@ describe("PiHost independent session execution", () => {
     }
   }, 60_000);
 
+  it("a superseded activation never commits or emits after newer work", async () => {
+    const a = await makeProject("act-a");
+    const b = await makeProject("act-b");
+    const { host, statuses } = makeHost(a.cwd, a.agentDir);
+    await host.start();
+    try {
+      const fileA = await makeSessionFile(a.cwd);
+      const fileB = await makeSessionFile(b.cwd);
+      await host.open({ path: fileA, cwd: a.cwd });
+      await host.open({ path: fileB, cwd: b.cwd });
+      statuses.length = 0;
+
+      // Gate the FIRST rollback-leaf restore (A's activation prep) so B's
+      // activation fully completes while A is still awaiting preparation.
+      // ensureForeground/newSession carry no requestId, so a stale ready
+      // from A would be accepted by the renderer — it must never be sent.
+      const origLoad = RollbackStore.prototype.load;
+      let releaseGate!: () => void;
+      const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+      let gated = false;
+      const load = vi.spyOn(RollbackStore.prototype, "load").mockImplementation(async function (
+        this: RollbackStore,
+        ...args: Parameters<RollbackStore["load"]>
+      ) {
+        if (!gated) {
+          gated = true;
+          await gate;
+        }
+        return origLoad.apply(this, args);
+      });
+      try {
+        const slowA = host.ensureForeground(fileA);
+        // Let A's activation reach the gated restore before B starts.
+        await vi.waitFor(() => expect(gated).toBe(true));
+        await host.ensureForeground(fileB);
+        expect(host.activeSessionFile).toBe(fileB);
+        releaseGate();
+        await slowA;
+        // B's foreground stands; A emitted nothing (no stale ready).
+        expect(host.activeSessionFile).toBe(fileB);
+        const readies = statuses.filter((s) => s.status === "ready").map((s) => s.sessionPath);
+        expect(readies).toEqual([fileB]);
+      } finally {
+        load.mockRestore();
+      }
+    } finally {
+      await host.dispose();
+    }
+  }, 60_000);
+
   it("evicts oldest idle runtimes past the cap, never the foreground", async () => {
     const { cwd, agentDir } = await makeProject("evict");
     const { host } = makeHost(cwd, agentDir);
@@ -240,6 +296,115 @@ describe("PiHost independent session execution", () => {
       // Oldest idle runtimes evicted first.
       expect(sessions.has(files[0]!)).toBe(false);
       expect(sessions.has(files[1]!)).toBe(false);
+    } finally {
+      await host.dispose();
+    }
+  }, 120_000);
+
+  it("eviction walks past thread-live candidates to reach idle ones", async () => {
+    const { cwd, agentDir } = await makeProject("evict-threads");
+    const { host } = makeHost(cwd, agentDir);
+    await host.start();
+    try {
+      // Nine opens: 8 idle + foreground, no overflow, so nothing evicts yet.
+      const files: string[] = [];
+      for (let i = 0; i < 9; i++) {
+        const file = await makeSessionFile(cwd);
+        files.push(file);
+        await host.open({ path: file, cwd });
+      }
+      // Pin live threads onto the two OLDEST sessions: releaseSession must
+      // refuse them, and the sweep must skip over them to evict idle ones
+      // behind them instead of stopping. Directory names use the loop index:
+      // session ids share a time-based prefix, so an id-derived name would
+      // collide and the second pin would overwrite the first.
+      const toPin = files.slice(0, 2);
+      for (const [i, file] of toPin.entries()) {
+        const sessionId = host.testSessions().get(file!)!.sessionId;
+        const dir = join(cwd, ".pi", "state", "threads", `thread-pinned-${i}`);
+        await mkdir(dir, { recursive: true });
+        await writeFile(join(dir, "thread.json"), JSON.stringify({
+          threadId: `thread-pinned-${i}`, status: "running", parentSessionId: sessionId,
+        }));
+      }
+      // Two more opens force overflow; the per-open sweeps and the explicit
+      // one below all see the blocked oldest pair.
+      for (let i = 0; i < 2; i++) {
+        const file = await makeSessionFile(cwd);
+        files.push(file);
+        await host.open({ path: file, cwd });
+      }
+      // Serializes behind any in-flight per-open sweep: deterministic.
+      await host.evictIdleSessions();
+      const after = host.testSessions();
+      expect(after.size).toBe(9); // 8 idle + foreground
+      expect(after.has(files[files.length - 1]!)).toBe(true);
+      // Thread-live oldest survive…
+      expect(after.has(files[0]!)).toBe(true);
+      expect(after.has(files[1]!)).toBe(true);
+      // …so the two next-oldest idle runtimes go instead.
+      expect(after.has(files[2]!)).toBe(false);
+      expect(after.has(files[3]!)).toBe(false);
+    } finally {
+      await host.dispose();
+    }
+  }, 120_000);
+
+  it("checkpoints a background turn against its own project, not the foreground", async () => {
+    const a = await makeProject("turn-a");
+    const b = await makeProject("turn-b");
+    for (const p of [a, b]) {
+      await exec("git", ["init"], { cwd: p.cwd });
+      await writeFile(join(p.cwd, "file.txt"), "before\n");
+      await exec("git", ["add", "file.txt"], { cwd: p.cwd });
+    }
+    const { host } = makeHost(a.cwd, a.agentDir);
+    await host.start();
+    try {
+      const fileA = await makeSessionFile(a.cwd);
+      const fileB = await makeSessionFile(b.cwd);
+      await host.open({ path: fileA, cwd: a.cwd });
+      await host.open({ path: fileB, cwd: b.cwd });
+      expect(host.activeSessionFile).toBe(fileB);
+
+      // Both projects warmed by their opens: no warm captures can leak into
+      // the assertion below. Call-through spy; filter authoritative
+      // checkpoint captures after the fact.
+      const capture = vi.spyOn(SnapshotStore.prototype, "capture");
+      try {
+        const start = await host.testCaptureTurnStart();
+        if (!start || "skipped" in start) throw new Error("expected a turn checkpoint");
+        // The turn's own messages land in B's transcript while it runs.
+        const managerB = host.testSessions().get(fileB)!.runtime.session.sessionManager;
+        managerB.appendMessage({
+          role: "user",
+          content: [{ type: "text", text: "change b" }],
+          timestamp: Date.now(),
+        });
+        managerB.appendMessage({
+          role: "assistant",
+          content: [{ type: "text", text: "changed" }],
+          api: "test",
+          provider: "test",
+          model: "test",
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          stopReason: "stop",
+          timestamp: Date.now(),
+        });
+        // Foreground moves mid-turn; the checkpoint must still finish
+        // against B's project.
+        await host.open({ path: fileA, cwd: a.cwd });
+        expect(host.activeSessionFile).toBe(fileA);
+        await host.testCaptureTurnEnd(start, fileB);
+        // Pre-turn + post-turn captures, both B's cwd — never the
+        // foreground's. (Failing shape: [cwdB, cwdA].)
+        const authoritative = capture.mock.calls
+          .filter((call) => (call[1] as { authoritative?: boolean } | undefined)?.authoritative === true)
+          .map((call) => call[0]);
+        expect(authoritative).toEqual([b.cwd, b.cwd]);
+      } finally {
+        capture.mockRestore();
+      }
     } finally {
       await host.dispose();
     }
