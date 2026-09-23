@@ -135,8 +135,62 @@ describe("PiHost independent session execution", () => {
     }
   }, 60_000);
 
-  it("releases idle runtimes and refuses live ones", async () => {
-    const a = await makeProject("e");
+  it("routes an explicitly addressed prompt away from the foreground", async () => {
+    const a = await makeProject("prompt-a");
+    const b = await makeProject("prompt-b");
+    const { host } = makeHost(a.cwd, a.agentDir);
+    await host.start();
+    try {
+      const fileA = await makeSessionFile(a.cwd);
+      const fileB = await makeSessionFile(b.cwd);
+      await host.open({ path: fileA, cwd: a.cwd });
+      await host.open({ path: fileB, cwd: b.cwd });
+      expect(host.activeSessionFile).toBe(fileB);
+      const delivered: string[] = [];
+      for (const entry of host.testSessions().values()) {
+        vi.spyOn(entry.runtime.session, "prompt").mockImplementation(async (message: string) => {
+          delivered.push(`${entry.sessionFile}:${message}`);
+        });
+      }
+      await host.prompt("hello A", undefined, undefined, fileA);
+      expect(delivered).toEqual([`${fileA}:hello A`]);
+      // Explicit identity never moves the foreground pointer.
+      expect(host.activeSessionFile).toBe(fileB);
+    } finally {
+      await host.dispose();
+    }
+  }, 60_000);
+
+  it("a slow open never foregrounds over a faster later open", async () => {
+    const a = await makeProject("slow-a");
+    const b = await makeProject("fast-b");
+    const { host, statuses } = makeHost(a.cwd, a.agentDir);
+    await host.start();
+    try {
+      const fileA = await makeSessionFile(a.cwd);
+      const fileB = await makeSessionFile(b.cwd);
+      await host.open({ path: fileB, cwd: b.cwd }); // warm B: its re-open is the fast path.
+      const slow = host.open({ path: fileA, cwd: a.cwd, requestId: 1 });
+      const fast = host.open({ path: fileB, cwd: b.cwd, requestId: 2 });
+      const [stateA, stateB] = await Promise.all([slow, fast]);
+      // The slow runtime still builds (its state resolves), but the
+      // foreground follows the last invocation, not the last completion.
+      expect(stateA.sessionFile).toBe(fileA);
+      expect(stateB.sessionFile).toBe(fileB);
+      expect(host.activeSessionFile).toBe(fileB);
+      // No ready emission for the superseded open: the renderer never sees
+      // a foreground claim for A.
+      const readyFor = statuses
+        .filter((s) => s.status === "ready")
+        .map((s) => s.sessionPath);
+      expect(readyFor[readyFor.length - 1]).toBe(fileB);
+      expect(readyFor).not.toContain(fileA);
+    } finally {
+      await host.dispose();
+    }
+  }, 60_000);
+
+  it("releases idle runtimes and refuses live ones", async () => {    const a = await makeProject("e");
     const { host } = makeHost(a.cwd, a.agentDir);
     await host.start();
     try {
@@ -166,6 +220,30 @@ describe("PiHost independent session execution", () => {
       await host.dispose();
     }
   }, 60_000);
+
+  it("evicts oldest idle runtimes past the cap, never the foreground", async () => {
+    const { cwd, agentDir } = await makeProject("evict");
+    const { host } = makeHost(cwd, agentDir);
+    await host.start();
+    try {
+      const files: string[] = [];
+      for (let i = 0; i < 11; i++) {
+        const file = await makeSessionFile(cwd);
+        files.push(file);
+        await host.open({ path: file, cwd });
+      }
+      // 11 opens, foreground is the last: 10 idle, cap is 8.
+      await host.evictIdleSessions();
+      const sessions = host.testSessions();
+      expect(sessions.size).toBe(9); // 8 idle + foreground
+      expect(sessions.has(files[files.length - 1]!)).toBe(true);
+      // Oldest idle runtimes evicted first.
+      expect(sessions.has(files[0]!)).toBe(false);
+      expect(sessions.has(files[1]!)).toBe(false);
+    } finally {
+      await host.dispose();
+    }
+  }, 120_000);
 });
 
 describe("drain for restart", () => {

@@ -56,8 +56,8 @@ const api: Bridge = {
   handoffConsume: (handoffId: string, liveFile: string) =>
     ipcRenderer.invoke("pideck:handoff-consume", handoffId, liveFile),
 
-  prompt: (message: string, images?, streamingBehavior?: "steer" | "followUp") =>
-    ipcRenderer.invoke("pideck:prompt", message, images, streamingBehavior),
+  prompt: (message: string, images?, streamingBehavior?: "steer" | "followUp", sessionFile?: string | null) =>
+    ipcRenderer.invoke("pideck:prompt", message, images, streamingBehavior, sessionFile ?? undefined),
   abort: (sessionFile?: string) => ipcRenderer.invoke("pideck:abort", { sessionFile }),
   goalGet: (sessionId: string, cwd: string) => ipcRenderer.invoke("pideck:goal-get", sessionId, cwd),
   goalControl: (args: string) => ipcRenderer.invoke("pideck:goal-control", args),

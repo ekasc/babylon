@@ -94,7 +94,7 @@ export function createLocalRuntime(opts: {
     async attentionRaise(item) { attentionManager.add(item); },
     async attentionResolve(id) { attentionManager.resolve(id); },
     async openSession(o) { return piHost.open(o); },
-    async prompt(m, i, s) {
+    async prompt(m, i, s, f) {
       const behavior = s === "steer" || s === "followUp" ? s : undefined;
       // The facade loosens images to unknown[]; the host needs image
       // payloads, so malformed entries are dropped at this boundary.
@@ -106,7 +106,7 @@ export function createLocalRuntime(opts: {
             return [{ data, ...(mimeType ? { mimeType } : {}) }];
           })
         : undefined;
-      return piHost.prompt(m, images, behavior);
+      return piHost.prompt(m, images, behavior, f);
     },
     async abort(sessionFile?: string) { return piHost.abort(sessionFile); },
     async goalControl(args: string) { return piHost.execGoalCommand(args); },

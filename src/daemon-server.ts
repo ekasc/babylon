@@ -100,8 +100,8 @@ export type DaemonListenOptions =
  * the wire through toPayload, which rejects non-objects.
  */
 export interface DaemonPiHost {
-  open(opts: { path?: string; cwd: string; requestId?: number }): Promise<unknown>;
-  prompt(message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp"): Promise<unknown>;
+  open(opts: { path?: string; cwd: string; requestId?: number; systemPrompt?: string | null }): Promise<unknown>;
+  prompt(message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp", sessionFile?: string | null): Promise<unknown>;
   /** Run a `/goal …` control invocation without opening a turn; returns the fresh durable goal. */
   execGoalCommand(args: string): Promise<DurableGoalState | null>;
   /** Run a `/design …` control invocation; returns the fresh design state. */
@@ -713,28 +713,31 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
               payload = { commands: await piHost.getCommands() };
               break;
             case "pi.openSession": {
-              const { path, cwd, requestId } = request.payload as { path?: string; cwd: string; requestId?: number };
-              payload = await piHost.open({ path, cwd, requestId });
+              const { path, cwd, requestId, systemPrompt } = request.payload as { path?: string; cwd: string; requestId?: number; systemPrompt?: string | null };
+              payload = await piHost.open({ path, cwd, requestId, systemPrompt });
               break;
             }
             case "pi.prompt": {
-              const { message, images, streamingBehavior } = request.payload as { message: string; images?: unknown; streamingBehavior?: string };
+              const { message, images, streamingBehavior, sessionFile } = request.payload as { message: string; images?: unknown; streamingBehavior?: string; sessionFile?: unknown };
               // Narrow the wire string to the union the host accepts rather than
               // asserting it; an unknown value simply means "no streaming mode".
               const behavior = streamingBehavior === "steer" || streamingBehavior === "followUp" ? streamingBehavior : undefined;
+              const target = typeof sessionFile === "string" ? sessionFile : undefined;
               // PiHost.prompt resolves void on success. The envelope payload
               // must stay an object, so ack explicitly instead of forwarding
               // undefined through toPayload (which rejects non-objects).
-              await piHost.prompt(message, toPromptImages(images), behavior);
+              await piHost.prompt(message, toPromptImages(images), behavior, target);
               payload = { ok: true };
               break;
             }
-            case "pi.abort":
+            case "pi.abort": {
+              const { sessionFile } = request.payload as { sessionFile?: unknown };
               // Same void-to-object wrap as pi.prompt: PiHost.abort resolves
               // undefined, which toPayload would reject below.
-              await piHost.abort();
+              await piHost.abort(typeof sessionFile === "string" ? sessionFile : undefined);
               payload = { ok: true };
               break;
+            }
             case "pi.goalControl": {
               const { args } = request.payload as { args?: unknown };
               if (typeof args !== "string") {

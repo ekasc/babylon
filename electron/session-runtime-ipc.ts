@@ -24,10 +24,13 @@ export function registerSessionRuntimeIpc(
   },
 ): void {
   const { sessionsRoot, getRuntime, getHost, isDaemonOwned, requireDaemonClient, driveSharedChatExtras } = deps;
-  handle("pideck:prompt", async (_e, message: string, images?: unknown[], streamingBehavior?: string) => {
+  handle("pideck:prompt", async (_e, message: string, images?: unknown[], streamingBehavior?: string, sessionFile?: string | null) => {
     if (typeof message !== "string" || message.length > 2_000_000) throw new Error("invalid prompt payload");
     if (streamingBehavior !== undefined && streamingBehavior !== "steer" && streamingBehavior !== "followUp") {
       throw new Error("invalid streaming behavior");
+    }
+    if (sessionFile !== undefined && sessionFile !== null && typeof sessionFile !== "string") {
+      throw new Error("invalid session file");
     }
     let cleanImages: PromptImage[] | undefined;
     if (images !== undefined) {
@@ -47,10 +50,10 @@ export function registerSessionRuntimeIpc(
     }
     if (isDaemonOwned()) {
       const client = requireDaemonClient();
-      const res = await client.request("pi.prompt", { message, images: cleanImages, streamingBehavior });
+      const res = await client.request("pi.prompt", { message, images: cleanImages, streamingBehavior, sessionFile: sessionFile ?? undefined });
       return res.payload;
     }
-    const result = await getRuntime().prompt(message, cleanImages, streamingBehavior);
+    const result = await getRuntime().prompt(message, cleanImages, streamingBehavior, sessionFile ?? undefined);
     // Shared project chats: after the default bot's turn settles, staffed
     // extras speak when asked (or freely when the project opted in). Never on
     // mid-stream steer/follow-up turns, and never loudly, a skipped driver is
@@ -65,7 +68,7 @@ export function registerSessionRuntimeIpc(
   handle("pideck:abort", async (_e, opts?: { sessionFile?: string }) => {
     if (isDaemonOwned()) {
       const client = requireDaemonClient();
-      const res = await client.request("pi.abort", {});
+      const res = await client.request("pi.abort", { sessionFile: opts?.sessionFile });
       return res.payload;
     }
     return getRuntime().abort(opts?.sessionFile);

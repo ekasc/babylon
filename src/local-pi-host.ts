@@ -27,8 +27,8 @@ import type { DurableGoalState } from "./lib/durable-goal";
  */
 export interface LocalPiHost {
   readonly activeSessionFile: string | null;
-  open(opts: { path?: string; cwd: string; requestId?: number }): Promise<AgentState>;
-  prompt(message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp"): Promise<void>;
+  open(opts: { path?: string; cwd: string; requestId?: number; systemPrompt?: string | null }): Promise<AgentState>;
+  prompt(message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp", sessionFile?: string | null): Promise<void>;
   abort(sessionFile?: string | null): Promise<void>;
   getState(): Promise<AgentState>;
   getMessages(): Promise<unknown[]>;

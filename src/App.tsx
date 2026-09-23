@@ -684,69 +684,17 @@ export default function App() {
       .catch(() => undefined);
   }, [status.status, status.cwd]);
 
-  useEffect(() => {
-    void refreshSessions();
-    return bridge.onSessionsUpdate((update) => {
-      setGroups(update.groups);
-      const activePath = activePathRef.current;
-      if (
-        update.source !== "host" &&
-        activePath &&
-        update.changedPaths.includes(activePath) &&
-        !streamingRef.current &&
-        !switchingRef.current
-      ) {
-        // Background refresh must never clear the active session id: the
-        // false path (turn running, nothing to pull) emits no status, so a
-        // cleared id would blackhole the whole turn's events (every agent
-        // event carries sessionId) until the next explicit open.
-        switchingRef.current = true;
-        void bridge
-          .refreshSession(activePath)
-          .then((refreshed) => {
-            if (!refreshed) switchingRef.current = false;
-          })
-          .catch(() => {
-            switchingRef.current = false;
-          });
-      }
-    });
-  }, [refreshSessions]);
-
-  // Poll the active session file when it's being driven by the CLI (GUI not streaming).
-  // The SessionIndex watch (300ms) + safety scan (2s) should catch most changes, but
-  // a direct poll ensures sub-second live updates when the CLI is streaming.
-  useEffect(() => {
-    const activePath = activeSessionPath ?? status.sessionPath;
-    if (!activePath || streamingRef.current || switchingRef.current) return;
-    const id = window.setInterval(() => {
-      const current = activePathRef.current;
-      if (!current || streamingRef.current || switchingRef.current) return;
-      // See above: never clear the active session id here. A refresh that
-      // returns false emits no status, so clearing would drop every later
-      // agent event for the live session (blackholed turn, no indicator).
-      switchingRef.current = true;
-      void bridge
-        .refreshSession(current)
-        .then((refreshed) => {
-          if (!refreshed) switchingRef.current = false;
-        })
-        .catch(() => {
-          switchingRef.current = false;
-        });
-    }, 1000);
-    return () => window.clearInterval(id);
-  }, [activeSessionPath, status.sessionPath, hasSession]);
-
   // Resync from the source of truth. Manual compaction doesn't fire
   // a run-end event, so without this the StatsPopover context % and the
   // transcript would stay at the pre-compaction values until the next
-  // user prompt.
+  // user prompt. Disk sync never emits a foreground ready (see
+  // PiHost.refreshFromDisk), so a successful refresh falls through to the
+  // explicit hydrate below instead of returning early.
   const resyncFromSource = useCallback(async (opts?: { skipRefresh?: boolean }) => {
     const expectedEpoch = epochRef.current;
     try {
       const activePath = activePathRef.current;
-      if (!opts?.skipRefresh && activePath && (await bridge.refreshSession(activePath))) return;
+      if (!opts?.skipRefresh && activePath) await bridge.refreshSession(activePath).catch(() => false);
       const [msgs, st, statsData, nextHistory] = await Promise.all([
         bridge.getMessages(),
         bridge.getState(),
@@ -772,6 +720,44 @@ export default function App() {
       /* session may have closed */
     }
   }, [refreshSessions]);
+
+  useEffect(() => {
+    void refreshSessions();
+    return bridge.onSessionsUpdate((update) => {
+      setGroups(update.groups);
+      const activePath = activePathRef.current;
+      if (
+        update.source !== "host" &&
+        activePath &&
+        update.changedPaths.includes(activePath) &&
+        !streamingRef.current &&
+        !switchingRef.current
+      ) {
+        // Disk sync never emits a foreground ready (see PiHost.refreshFromDisk):
+        // hydrate the session we display explicitly from the boolean result.
+        // Never clear the active session id here. A refresh that returns
+        // false emits no status, so a cleared id would blackhole the whole
+        // turn's events (every agent event carries sessionId) until the next
+        // explicit open.
+        switchingRef.current = true;
+        void bridge
+          .refreshSession(activePath)
+          .then((refreshed) => {
+            if (refreshed) void resyncFromSource({ skipRefresh: true });
+          })
+          .catch(() => undefined)
+          .finally(() => {
+            switchingRef.current = false;
+          });
+      }
+    });
+  }, [refreshSessions, resyncFromSource]);
+
+  // No unconditional 1-second full reparse/hydrate loop: the SessionIndex
+  // watch (300ms) + safety scan drive refreshes event-first, and every
+  // refresh reparses the session file and fans out to messages/models/
+  // commands/state/stats/history. An idle session must not pay that every
+  // second (plus socket round trips in daemon mode).
 
   // When a run settles, resync from the source of truth.
   useEffect(() => {
@@ -1604,7 +1590,10 @@ export default function App() {
         await bridge.prompt(
           text,
           images?.map((a) => ({ type: "image", data: a.data, mimeType: a.mimeType })),
-          streamingBehavior
+          streamingBehavior,
+          // Explicit identity: the send belongs to the session on screen,
+          // even if a concurrent open has since moved the backend foreground.
+          activeSessionPath ?? status.sessionPath ?? undefined
         );
         // Real transition: the host accepted the prompt. Ownership is the live
         // session's runtime id; no message id is fabricated when absent.
@@ -1617,16 +1606,16 @@ export default function App() {
         return false;
       }
     },
-    [history.activeRollback, hydrate, toast, activeGroup]
+    [history.activeRollback, hydrate, toast, activeGroup, activeSessionPath, status.sessionPath]
   );
 
   const abort = useCallback(async () => {
     try {
-      await bridge.abort();
+      await bridge.abort(activeSessionPath ?? status.sessionPath ?? undefined);
     } catch {
       /* ignore */
     }
-  }, []);
+  }, [activeSessionPath, status.sessionPath]);
 
   // Stop a live subagent/thread/workflow from its LaunchCard. Routes to the
   // correct bridge control by run kind; the store flips the card to "stopped"

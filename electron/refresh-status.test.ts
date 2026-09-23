@@ -8,13 +8,14 @@ const roots: string[] = [];
 afterAll(async () => Promise.all(roots.map((root) => rm(root, { recursive: true, force: true }))));
 
 /**
- * Contract the renderer's background refresh depends on: the true path must
- * rebind the live session (ready with state) because the false path emits
- * nothing, so the renderer must restore its own switching flag and must
- * never clear its active session id around the call.
+ * Contract the renderer's background refresh depends on: refreshFromDisk is
+ * a pure disk sync that NEVER emits a foreground ready (a stale refresh
+ * completing after a tab switch must not rebind the UI to the old session).
+ * Both paths stay silent; the caller hydrates the session it displays
+ * explicitly from the boolean result.
  */
 describe("PiHost refreshFromDisk status contract", () => {
-  it("emits ready with state on success, nothing on miss", async () => {
+  it("syncs silently on success, nothing on miss, never a foreground ready", async () => {
     const root = await mkdtemp(join(tmpdir(), "pideck-refresh-"));
     roots.push(root);
     const agentDir = join(root, "agent");
@@ -36,12 +37,15 @@ describe("PiHost refreshFromDisk status contract", () => {
       expect(missed).toBe(false);
       expect(statuses).toHaveLength(0);
 
-      // Hit (live file): returns true and rebinds via ready with live state.
+      // Hit (live file): returns true and stays silent — no ready, so a
+      // refresh racing a tab switch can never hijack the foreground. The
+      // sync itself still happened (state readable, foreground untouched).
+      const foregroundBefore = host.activeSessionFile;
       const hit = await host.refreshFromDisk(file!);
       expect(hit).toBe(true);
-      const ready = statuses.filter((s) => s?.status === "ready").pop();
-      expect(ready).toBeDefined();
-      expect(ready?.state?.sessionId).toBeTruthy();
+      expect(statuses).toHaveLength(0);
+      expect(host.activeSessionFile).toBe(foregroundBefore);
+      expect((await host.getState()).sessionFile).toBe(file);
     } finally {
       await host.dispose();
     }

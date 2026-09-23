@@ -600,7 +600,7 @@ export interface Bridge {
   handoffList(sourceFile: string): Promise<Handoff[]>;
   handoffConsume(handoffId: string, liveFile: string): Promise<{ consumedInto: string }>;
 
-  prompt(message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp"): Promise<unknown>;
+  prompt(message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp", sessionFile?: string | null): Promise<unknown>;
   /** Abort one session's run (defaults to the foreground session). Other
    *  sessions keep running untouched. */
   abort(sessionFile?: string): Promise<unknown>;

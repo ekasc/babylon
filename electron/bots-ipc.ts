@@ -105,12 +105,12 @@ export function registerBotsIpc(
     if (getHostReady()) await getHostReady();
     const bot = botStore.get(id);
     if (!bot) throw new Error("Bot not found");
-    getHost().setBotSystemPrompt(buildBotSystemPrompt(bot, botStore.list()));
+    const botPrompt = buildBotSystemPrompt(bot, botStore.list());
     const cwd = bot.cwd && bot.cwd.length > 0 ? bot.cwd : getActiveCwd() || homedir();
     const projectHash = projectHashForCwd(cwd);
     // Per-project chat first, legacy canonical second (owned-or-on-disk).
     const path = await resolveCanonicalSessionFile(botChatForProject(bot, projectHash));
-    const state = (await getRuntime().openSession({ path, cwd, ...(requestId !== undefined ? { requestId } : {}) })) as {
+    const state = (await getRuntime().openSession({ path, cwd, systemPrompt: botPrompt, ...(requestId !== undefined ? { requestId } : {}) })) as {
       sessionFile?: string;
     } | null | undefined;
     const sessionFile = state?.sessionFile ?? null;
@@ -185,10 +185,10 @@ export function registerBotsIpc(
         // Anchor persists on the next open instead.
       }
     }
-    getHost().setBotSystemPrompt(buildGroupSystemPrompt(group, members));
     const cwd = group.cwd && group.cwd.length > 0 ? group.cwd : members[0]?.cwd && members[0].cwd.length > 0 ? members[0].cwd! : getActiveCwd() || homedir();
     const path = await resolveCanonicalSessionFile(group.mainSessionFile);
-    const state = (await getRuntime().openSession({ path, cwd })) as { sessionFile?: string } | null | undefined;
+    const state = (await getRuntime().openSession({ path, cwd, systemPrompt: buildGroupSystemPrompt(group, members) })) as { sessionFile?: string } | null | undefined;
+    // Per-open creation argument above replaces the old host-global staging.
     const sessionFile = state?.sessionFile ?? null;
     if (!sessionFile) throw new Error("could not open group room");
     if (sessionFile !== group.mainSessionFile) {
@@ -214,10 +214,10 @@ export function registerBotsIpc(
     if (isDaemonOwned()) throw new Error("Group rooms need the local runtime (turn off the daemon to use Bots)");
     if (getHostReady()) await getHostReady();
     if (getHost().isStreaming) throw new Error("The agent is busy, wait for this turn to finish");
-    const { group, members } = await ensureGroupRoom(groupId);
+    const { group, members, sessionFile } = await ensureGroupRoom(groupId);
     const runtime = getRuntime();
     // The user's message streams like any normal turn.
-    await runtime.prompt(text);
+    await runtime.prompt(text, undefined, undefined, sessionFile);
     // Mention-only by default: extras speak only when asked. Projects that opt
     // into free-speak keep the legacy full rotation. Caps + quiet-settle live
     // in the driver; abort (or any turn failure) stops.
@@ -362,11 +362,10 @@ export function registerBotsIpc(
     if (!origin) throw new Error("Open a chat first, replies need a home");
     const originCwd = getHost().cwd;
     // Run the target turn in the target's canonical chat.
-    getHost().setBotSystemPrompt(buildBotSystemPrompt(target, botStore.list()));
     const targetCwd = target.cwd && target.cwd.length > 0 ? target.cwd : getActiveCwd() || homedir();
     const targetHash = projectHashForCwd(targetCwd);
     const targetPath = await resolveCanonicalSessionFile(botChatForProject(target, targetHash));
-    const targetState = (await getRuntime().openSession({ path: targetPath, cwd: targetCwd })) as {
+    const targetState = (await getRuntime().openSession({ path: targetPath, cwd: targetCwd, systemPrompt: buildBotSystemPrompt(target, botStore.list()) })) as {
       sessionFile?: string;
     } | null | undefined;
     const targetFile = targetState?.sessionFile ?? null;
@@ -382,12 +381,11 @@ export function registerBotsIpc(
       }
     }
     const sender = from ? `@${botHandle(from)} (${from.name})` : "you (the human)";
-    await getRuntime().prompt(`[DM from ${sender}, reply briefly in your voice, or PASS if nothing to add]\n\n${text}`);
+    await getRuntime().prompt(`[DM from ${sender}, reply briefly in your voice, or PASS if nothing to add]\n\n${text}`, undefined, undefined, targetFile);
     const reply = lastAssistantText(await getRuntime().getMessages());
     const pass = isPassReply(reply);
     // Switch home and relay the reply as an attributed activity line.
-    getHost().setBotSystemPrompt(overlayForSessionFile(origin, originCwd));
-    await getRuntime().openSession({ path: origin, cwd: originCwd });
+    await getRuntime().openSession({ path: origin, cwd: originCwd, systemPrompt: overlayForSessionFile(origin, originCwd) });
     if (!pass) {
       const clipped = reply.length > 6000 ? `${reply.slice(0, 6000)}\n… (truncated, full reply lives in @${botHandle(target)}'s chat)` : reply;
       await getHost().postBotMessage(

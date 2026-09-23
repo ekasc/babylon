@@ -278,12 +278,12 @@ export function createDaemonRuntime(client: DaemonClient): RuntimeFacade {
       const res = await client.request("pi.openSession", opts);
       return res.payload;
     },
-    async prompt(m, i, s) {
-      const res = await client.request("pi.prompt", { message: m, images: i, streamingBehavior: s });
+    async prompt(m, i, s, f) {
+      const res = await client.request("pi.prompt", { message: m, images: i, streamingBehavior: s, sessionFile: f ?? undefined });
       return res.payload;
     },
-    async abort() {
-      const res = await client.request("pi.abort", {});
+    async abort(sessionFile?: string) {
+      const res = await client.request("pi.abort", { sessionFile });
       return res.payload;
     },
     async goalControl(args) {

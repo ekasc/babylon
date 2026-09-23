@@ -109,8 +109,7 @@ export function registerSessionsIpc(
 
   handle(
     "pideck:open-session",
-    async (_e, opts: { path?: string; cwd: string; requestId?: number; botId?: string }) => {
-      if (!opts || typeof opts.cwd !== "string" || opts.cwd.length > 4096) throw new Error("invalid session options");
+    async (_e, opts: { path?: string; cwd: string; requestId?: number; botId?: string }) => {      if (!opts || typeof opts.cwd !== "string" || opts.cwd.length > 4096) throw new Error("invalid session options");
       if (getHostReady()) await getHostReady();
       let path: string | undefined;
       if (opts.path !== undefined) {
@@ -152,16 +151,17 @@ export function registerSessionsIpc(
       // lookup so every entry point (sidebar rows, history, prefetch) agrees.
       // Any other file in a project gets the project default (rule 3); files
       // with no project context resolve null so prompts never leak across bots.
+      // Passed as an immutable creation argument (never a host global), so
+      // concurrent opens each build with exactly their own prompt.
+      let systemPrompt: string | null = null;
       if (opts.botId !== undefined) {
         const bot = botStore.get(opts.botId);
         if (!bot) throw new Error("Bot not found");
-        getHost().setBotSystemPrompt(buildBotSystemPrompt(bot, botStore.list()));
+        systemPrompt = buildBotSystemPrompt(bot, botStore.list());
       } else if (path !== undefined) {
-        getHost().setBotSystemPrompt(overlayForSessionFile(path, opts.cwd));
-      } else {
-        getHost().setBotSystemPrompt(null);
+        systemPrompt = overlayForSessionFile(path, opts.cwd);
       }
-      const state = (await getRuntime().openSession({ ...opts, path })) as { sessionFile?: string } | null | undefined;
+      const state = (await getRuntime().openSession({ ...opts, path, systemPrompt })) as { sessionFile?: string } | null | undefined;
       taskManager.resumeForSession((state as { sessionFile?: string } | null | undefined)?.sessionFile);
       return state;
     }

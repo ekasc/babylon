@@ -40,8 +40,9 @@ export interface RuntimeFacade {
   attentionRaise(item: import("./attention").AttentionItem): Promise<void>;
   attentionResolve(id: string): Promise<void>;
   // Pi
-  openSession(opts: { path?: string; cwd: string; requestId?: number }): Promise<unknown>;
-  prompt(message: string, images?: unknown[], streamingBehavior?: string): Promise<unknown>;
+  openSession(opts: { path?: string; cwd: string; requestId?: number; systemPrompt?: string | null }): Promise<unknown>;
+  /** Explicit sessionFile wins over the foreground pointer (send-while-switching). */
+  prompt(message: string, images?: unknown[], streamingBehavior?: string, sessionFile?: string | null): Promise<unknown>;
   abort(sessionFile?: string): Promise<unknown>;
   releaseSession?(path: string): Promise<{ released: boolean }>;
   getState(): Promise<AgentState | null>;
