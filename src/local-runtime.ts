@@ -109,8 +109,21 @@ export function createLocalRuntime(opts: {
       return piHost.prompt(m, images, behavior, f);
     },
     async abort(sessionFile?: string) { return piHost.abort(sessionFile); },
-    async goalControl(args: string) { return piHost.execGoalCommand(args); },
-    async beginGoal(f: string, o: string) { return piHost.beginGoal(f, o); },
+    async goalControl(f: string, a: string) { return piHost.execGoalCommand(f, a); },
+    async beginGoalPrompt(f: string, o: string, m: string, i?: unknown[], s?: string) {
+      const behavior = s === "steer" || s === "followUp" ? s : undefined;
+      // Same image sanitization as prompt(): malformed entries are dropped
+      // at this boundary, never forwarded to the host.
+      const images = Array.isArray(i)
+        ? i.flatMap((entry) => {
+            const data = wireStr(wireOf(entry), "data");
+            if (!data) return [];
+            const mimeType = wireStr(wireOf(entry), "mimeType");
+            return [{ data, ...(mimeType ? { mimeType } : {}) }];
+          })
+        : undefined;
+      return piHost.beginGoalPrompt(f, o, m, images, behavior);
+    },
     async designControl(args: string) { return piHost.execDesignCommand(args); },
     async releaseSession(path: string) {
       return { released: await piHost.releaseSession(path) };

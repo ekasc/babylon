@@ -25,10 +25,13 @@ export function useDurableGoal(toast: (type: "info" | "warning" | "error", text:
     }
   }, []);
 
+  // GUI goal controls are path-addressed (the CLI /goal command stays
+  // foreground-oriented): a cancel issued for session A executes on A even
+  // if the UI moved to B mid-flight.
   const goalControl = useCallback(
-    async (args: string) => {
+    async (sessionFile: string, args: string) => {
       try {
-        const { goal } = await bridge.goalControl(args);
+        const { goal } = await bridge.goalControl(sessionFile, args);
         setDurableGoal(goal);
       } catch (e) {
         toast("error", errorMessage(e, "goal control failed"));

@@ -7,6 +7,8 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { PiHost, defaultStateDir, type HostOptions, type SessionEntry } from "./pi-host";
+import { loadSessionGoal, saveSessionGoal } from "./goal-mode/store";
+import { createDurableGoalState, defaultDurableGoalModeConfig } from "../src/lib/durable-goal";
 import { RollbackStore } from "./rollback-store";
 import type { AgentEvent } from "../src/bridge";
 import { SnapshotStore } from "./snapshot-store";
@@ -96,7 +98,7 @@ describe("project pre-warming", () => {
 });
 
 describe("PiHost independent session execution", () => {
-  it("beginGoal persists silently with no follow-up turn", async () => {
+  it("beginGoalPrompt persists the goal and runs the message as the turn", async () => {
     const a = await makeProject("goal-silent");
     const { host } = makeHost(a.cwd, a.agentDir);
     await host.start();
@@ -104,16 +106,18 @@ describe("PiHost independent session execution", () => {
       const fileA = await makeSessionFile(a.cwd);
       await host.open({ path: fileA, cwd: a.cwd });
       const entry = host.testSessions().get(fileA)!;
-      const promptSpy = vi.spyOn(entry.runtime.session, "prompt");
+      const delivered: string[] = [];
+      const promptSpy = vi.spyOn(entry.runtime.session, "prompt").mockImplementation(async (message: string) => {
+        delivered.push(`${entry.sessionFile}:${message}`);
+      });
       try {
-        const state = await host.beginGoal(fileA, "Fix the race");
+        const state = await host.beginGoalPrompt(fileA, "Fix the race", "Fix the race");
         expect(state?.active).toBe(true);
         expect(state?.objective).toBe("Fix the race");
         expect(state?.status).toBe("planning");
-        // Silent: the session never prompted, so no synthetic
-        // [Goal Mode Start] follow-up turn was queued.
-        expect(promptSpy).not.toHaveBeenCalled();
-        // Foreground untouched by the control-plane write.
+        // Exactly one turn — the message itself — never a synthetic
+        // [Goal Mode Start] follow-up.
+        expect(delivered).toEqual([`${fileA}:Fix the race`]);
         expect(host.activeSessionFile).toBe(fileA);
       } finally {
         promptSpy.mockRestore();
@@ -123,16 +127,112 @@ describe("PiHost independent session execution", () => {
     }
   }, 60_000);
 
-  it("beginGoal validates objective and session identity", async () => {
+  it("beginGoalPrompt rolls back a goal whose turn never started", async () => {
+    const a = await makeProject("goal-rollback");
+    const { host } = makeHost(a.cwd, a.agentDir);
+    await host.start();
+    try {
+      const fileA = await makeSessionFile(a.cwd);
+      await host.open({ path: fileA, cwd: a.cwd });
+      const entry = host.testSessions().get(fileA)!;
+      const promptSpy = vi.spyOn(entry.runtime.session, "prompt").mockRejectedValue(new Error("pre-start boom"));
+      try {
+        await expect(host.beginGoalPrompt(fileA, "Fix X", "Fix X")).rejects.toThrow("pre-start boom");
+        // Nothing persisted: no phantom ACTIVE goal for the next message.
+        expect(await loadSessionGoal(a.cwd, entry.sessionId)).toBeNull();
+      } finally {
+        promptSpy.mockRestore();
+      }
+    } finally {
+      await host.dispose();
+    }
+  }, 60_000);
+
+  it("beginGoalPrompt keeps the goal when the turn started then failed", async () => {
+    const a = await makeProject("goal-started");
+    const { host } = makeHost(a.cwd, a.agentDir);
+    await host.start();
+    try {
+      const fileA = await makeSessionFile(a.cwd);
+      await host.open({ path: fileA, cwd: a.cwd });
+      const entry = host.testSessions().get(fileA)!;
+      // The turn started (user message landed) and then died mid-flight —
+      // abort, mid-turn model error. Goal context was already injected.
+      const promptSpy = vi.spyOn(entry.runtime.session, "prompt").mockImplementation(async () => {
+        entry.runtime.session.sessionManager.appendMessage({ role: "user", content: [{ type: "text", text: "Fix X" }], timestamp: Date.now() });
+        throw new Error("mid-turn boom");
+      });
+      try {
+        await expect(host.beginGoalPrompt(fileA, "Fix X", "Fix X")).rejects.toThrow("mid-turn boom");
+        const kept = await loadSessionGoal(a.cwd, entry.sessionId);
+        expect(kept?.active).toBe(true);
+        expect(kept?.objective).toBe("Fix X");
+      } finally {
+        promptSpy.mockRestore();
+      }
+    } finally {
+      await host.dispose();
+    }
+  }, 60_000);
+
+  it("beginGoalPrompt restores the previous goal on pre-start failure", async () => {
+    const a = await makeProject("goal-restore");
+    const { host } = makeHost(a.cwd, a.agentDir);
+    await host.start();
+    try {
+      const fileA = await makeSessionFile(a.cwd);
+      await host.open({ path: fileA, cwd: a.cwd });
+      const entry = host.testSessions().get(fileA)!;
+      await saveSessionGoal(a.cwd, entry.sessionId, createDurableGoalState("Old goal", defaultDurableGoalModeConfig()));
+      const promptSpy = vi.spyOn(entry.runtime.session, "prompt").mockRejectedValue(new Error("pre-start boom"));
+      try {
+        await expect(host.beginGoalPrompt(fileA, "New goal", "New goal")).rejects.toThrow("pre-start boom");
+        expect((await loadSessionGoal(a.cwd, entry.sessionId))?.objective).toBe("Old goal");
+      } finally {
+        promptSpy.mockRestore();
+      }
+    } finally {
+      await host.dispose();
+    }
+  }, 60_000);
+
+  it("beginGoalPrompt validates objective and session identity", async () => {
     const a = await makeProject("goal-invalid");
     const { host } = makeHost(a.cwd, a.agentDir);
     await host.start();
     try {
       const fileA = await makeSessionFile(a.cwd);
       await host.open({ path: fileA, cwd: a.cwd });
-      await expect(host.beginGoal(fileA, "   ")).rejects.toThrow("invalid goal objective");
-      await expect(host.beginGoal(fileA, "x".repeat(4001))).rejects.toThrow("invalid goal objective");
-      await expect(host.beginGoal(join(a.cwd, "nope.jsonl"), "Fix X")).rejects.toThrow();
+      await expect(host.beginGoalPrompt(fileA, "   ", "   ")).rejects.toThrow("invalid goal objective");
+      await expect(host.beginGoalPrompt(fileA, "x".repeat(4001), "x")).rejects.toThrow("invalid goal objective");
+      await expect(host.beginGoalPrompt(join(a.cwd, "nope.jsonl"), "Fix X", "Fix X")).rejects.toThrow();
+    } finally {
+      await host.dispose();
+    }
+  }, 60_000);
+
+  it("execGoalCommand executes on the addressed session, not the foreground", async () => {
+    const a = await makeProject("goal-route-a");
+    const b = await makeProject("goal-route-b");
+    const { host } = makeHost(a.cwd, a.agentDir);
+    await host.start();
+    try {
+      const fileA = await makeSessionFile(a.cwd);
+      const fileB = await makeSessionFile(b.cwd);
+      await host.open({ path: fileA, cwd: a.cwd });
+      await host.open({ path: fileB, cwd: b.cwd });
+      expect(host.activeSessionFile).toBe(fileB);
+      const delivered: string[] = [];
+      for (const entry of host.testSessions().values()) {
+        vi.spyOn(entry.runtime.session, "prompt").mockImplementation(async (message: string) => {
+          delivered.push(`${entry.sessionFile}:${message}`);
+        });
+      }
+      await host.execGoalCommand(fileA, "cancel");
+      // The cancel ran on A while B stayed foreground — no global
+      // foreground coupling in GUI goal controls.
+      expect(delivered).toEqual([`${fileA}:/goal cancel`]);
+      expect(host.activeSessionFile).toBe(fileB);
     } finally {
       await host.dispose();
     }

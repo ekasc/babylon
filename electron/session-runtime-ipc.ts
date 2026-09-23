@@ -80,29 +80,63 @@ export function registerSessionRuntimeIpc(
     if (typeof sessionId !== "string" || typeof cwd !== "string") throw new Error("invalid goal request");
     return { goal: await loadSessionGoal(cwd, sessionId) };
   });
-  handle("pideck:goal-control", async (_e, args: string) => {
-    if (typeof args !== "string" || args.length > 5000) throw new Error("invalid goal control");
+  handle("pideck:goal-control", async (_e, opts: { sessionFile: string; args: string }) => {
+    if (!opts || typeof opts.sessionFile !== "string" || typeof opts.args !== "string" || opts.args.length > 5000) {
+      throw new Error("invalid goal control");
+    }
     if (isDaemonOwned()) {
       const client = requireDaemonClient();
-      const res = await client.request("pi.goalControl", { args });
+      const res = await client.request("pi.goalControl", { sessionFile: opts.sessionFile, args: opts.args });
       return { goal: unwrapDurableGoalResult(res.payload, "pi.goalControl") };
     }
-    return { goal: await getRuntime().goalControl(args) };
+    return { goal: await getRuntime().goalControl(opts.sessionFile, opts.args) };
   });
-  handle("pideck:goal-begin", async (_e, sessionFile: string, objective: string) => {
-    if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) {
-      throw new Error("invalid session file");
+  handle(
+    "pideck:goal-begin-prompt",
+    async (_e, opts: { sessionFile: string; objective: string; message: string; images?: unknown[]; streamingBehavior?: string }) => {
+      if (!opts || typeof opts.sessionFile !== "string" || opts.sessionFile.length < 1 || opts.sessionFile.length > 4096) {
+        throw new Error("invalid session file");
+      }
+      if (typeof opts.objective !== "string" || opts.objective.trim().length < 1 || opts.objective.length > 5000) {
+        throw new Error("invalid goal objective");
+      }
+      // Same payload contract as pideck:prompt (this op sends the turn).
+      if (typeof opts.message !== "string" || opts.message.length > 2_000_000) throw new Error("invalid prompt payload");
+      if (opts.streamingBehavior !== undefined && opts.streamingBehavior !== "steer" && opts.streamingBehavior !== "followUp") {
+        throw new Error("invalid streaming behavior");
+      }
+      let cleanImages: PromptImage[] | undefined;
+      if (opts.images !== undefined) {
+        if (!Array.isArray(opts.images) || opts.images.length > 20) throw new Error("invalid image payload");
+        cleanImages = opts.images.map((entry) => {
+          const img = wireOf(entry);
+          const data = wireStr(img, "data");
+          if (img?.type !== "image" || data === undefined || data.length > 15_000_000) {
+            throw new Error("invalid image payload");
+          }
+          const mimeType = wireStr(img, "mimeType");
+          if (mimeType === undefined || !mimeType.startsWith("image/")) {
+            throw new Error("invalid image MIME type");
+          }
+          return { data, mimeType };
+        });
+      }
+      if (isDaemonOwned()) {
+        const client = requireDaemonClient();
+        const res = await client.request("pi.goalBeginPrompt", {
+          sessionFile: opts.sessionFile,
+          objective: opts.objective,
+          message: opts.message,
+          images: cleanImages,
+          streamingBehavior: opts.streamingBehavior,
+        });
+        return { goal: unwrapDurableGoalResult(res.payload, "pi.goalBeginPrompt") };
+      }
+      return {
+        goal: await getRuntime().beginGoalPrompt(opts.sessionFile, opts.objective, opts.message, cleanImages, opts.streamingBehavior),
+      };
     }
-    if (typeof objective !== "string" || objective.trim().length < 1 || objective.length > 5000) {
-      throw new Error("invalid goal objective");
-    }
-    if (isDaemonOwned()) {
-      const client = requireDaemonClient();
-      const res = await client.request("pi.goalBegin", { sessionFile, objective });
-      return { goal: unwrapDurableGoalResult(res.payload, "pi.goalBegin") };
-    }
-    return { goal: await getRuntime().beginGoal(sessionFile, objective) };
-  });
+  );
   handle("pideck:design-get", async (_e, sessionId: string, cwd: string) => {
     // Same contract as pideck:goal-get: the state file is the shared
     // source of truth, read straight off disk in both modes.

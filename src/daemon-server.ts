@@ -103,9 +103,9 @@ export interface DaemonPiHost {
   open(opts: { path?: string; cwd: string; requestId?: number; systemPrompt?: string | null }): Promise<unknown>;
   prompt(message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp", sessionFile?: string | null): Promise<unknown>;
   /** Run a `/goal …` control invocation without opening a turn; returns the fresh durable goal. */
-  execGoalCommand(args: string): Promise<DurableGoalState | null>;
+  execGoalCommand(sessionFile: string, args: string): Promise<DurableGoalState | null>;
   /** Silently persist a goal objective for an addressed session (no follow-up turn). */
-  beginGoal(sessionFile: string, objective: string): Promise<DurableGoalState | null>;
+  beginGoalPrompt(sessionFile: string, objective: string, message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp"): Promise<DurableGoalState | null>;
   /** Run a `/design …` control invocation; returns the fresh design state. */
   execDesignCommand(args: string): Promise<import("../electron/design-mode/store").DesignStatus>;
   abort(sessionFile?: string): Promise<unknown>;
@@ -742,23 +742,26 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
               break;
             }
             case "pi.goalControl": {
-              const { args } = request.payload as { args?: unknown };
-              if (typeof args !== "string") {
-                send(socket, createEnvelope("response", "error", { error: "pi.goalControl requires { args }" }, request.id));
+              const { sessionFile, args } = request.payload as { sessionFile?: unknown; args?: unknown };
+              if (typeof sessionFile !== "string" || typeof args !== "string") {
+                send(socket, createEnvelope("response", "error", { error: "pi.goalControl requires { sessionFile, args }" }, request.id));
                 return;
               }
               // Wrapped so a missing goal reads as null, never a bare
               // non-object payload.
-              payload = { goal: await piHost.execGoalCommand(args) };
+              payload = { goal: await piHost.execGoalCommand(sessionFile, args) };
               break;
             }
-            case "pi.goalBegin": {
-              const { sessionFile, objective } = request.payload as { sessionFile?: unknown; objective?: unknown };
-              if (typeof sessionFile !== "string" || typeof objective !== "string") {
-                send(socket, createEnvelope("response", "error", { error: "pi.goalBegin requires { sessionFile, objective }" }, request.id));
+            case "pi.goalBeginPrompt": {
+              const { sessionFile, objective, message, images, streamingBehavior } = request.payload as {
+                sessionFile?: unknown; objective?: unknown; message?: unknown; images?: unknown; streamingBehavior?: unknown;
+              };
+              if (typeof sessionFile !== "string" || typeof objective !== "string" || typeof message !== "string") {
+                send(socket, createEnvelope("response", "error", { error: "pi.goalBeginPrompt requires { sessionFile, objective, message }" }, request.id));
                 return;
               }
-              payload = { goal: await piHost.beginGoal(sessionFile, objective) };
+              const behavior = streamingBehavior === "steer" || streamingBehavior === "followUp" ? streamingBehavior : undefined;
+              payload = { goal: await piHost.beginGoalPrompt(sessionFile, objective, message, toPromptImages(images), behavior) };
               break;
             }
             case "pi.designControl": {

@@ -84,9 +84,9 @@ export interface RuntimeFacade {
   promoteSubagent(runId: string): Promise<unknown>;
   getStats(): Promise<unknown>;
   /** Run a `/goal …` control invocation without opening a turn; returns the fresh durable goal. */
-  goalControl(args: string): Promise<DurableGoalState | null>;
+  goalControl(sessionFile: string, args: string): Promise<DurableGoalState | null>;
   /** Silently persist a goal objective for an addressed session (no follow-up turn). */
-  beginGoal(sessionFile: string, objective: string): Promise<DurableGoalState | null>;
+  beginGoalPrompt(sessionFile: string, objective: string, message: string, images?: unknown[], streamingBehavior?: string): Promise<DurableGoalState | null>;
   /** Run a `/design …` control invocation; returns the fresh design state. */
   designControl(args: string): Promise<import("../electron/design-mode/store").DesignStatus>;
   // Lifecycle

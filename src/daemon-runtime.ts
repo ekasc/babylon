@@ -286,13 +286,13 @@ export function createDaemonRuntime(client: DaemonClient): RuntimeFacade {
       const res = await client.request("pi.abort", { sessionFile });
       return res.payload;
     },
-    async goalControl(args) {
-      const res = await client.request("pi.goalControl", { args });
+    async goalControl(f, a) {
+      const res = await client.request("pi.goalControl", { sessionFile: f, args: a });
       return unwrapDurableGoalResult(res.payload, "pi.goalControl");
     },
-    async beginGoal(f, o) {
-      const res = await client.request("pi.goalBegin", { sessionFile: f, objective: o });
-      return unwrapDurableGoalResult(res.payload, "pi.goalBegin");
+    async beginGoalPrompt(f, o, m, i, s) {
+      const res = await client.request("pi.goalBeginPrompt", { sessionFile: f, objective: o, message: m, images: i, streamingBehavior: s });
+      return unwrapDurableGoalResult(res.payload, "pi.goalBeginPrompt");
     },
     async designControl(args) {
       const res = await client.request("pi.designControl", { args });

@@ -325,16 +325,25 @@ export default function App() {
   // persists the message as the objective and starts the turn itself (no
   // synthetic kickoff turn). Disarmed on send-consume, toggle, navigation.
   const [goalArmed, setGoalArmed] = useState(false);
+  // Optimistic pursuit: set when an armed send starts its combined op,
+  // cleared when it settles. The backend confirms via setDurableGoal; until
+  // then the sent text itself is the displayed objective.
+  const [goalPendingObjective, setGoalPendingObjective] = useState<string | null>(null);
   const toggleGoal = useCallback(async () => {
-    // Active (or paused) goal + click = cancel pursuit, never "mark done":
-    // only the model reaching the stopping condition completes a goal.
-    if (durableGoal?.active) {
+    if (durableGoal?.active || goalPendingObjective != null) {
+      // Cancel pursuit on the owning session, captured now: clicking ACTIVE
+      // means "stop pursuing", never "mark done" (only the model reaching
+      // the stopping condition completes). Path-addressed — the foreground
+      // may move before the backend handles it.
+      const target = activePathRef.current;
       setGoalArmed(false);
-      await goalControl("cancel");
+      setGoalPendingObjective(null);
+      if (!target) return;
+      await goalControl(target, "cancel");
       return;
     }
     setGoalArmed((armed) => !armed);
-  }, [durableGoal, goalControl]);
+  }, [durableGoal, goalControl, goalPendingObjective]);
   // Design mode (hardbaked design-mode extension state): the toggleable
   // phased design flow for this session, same strip pattern as the goal.
   const { designStatus, setDesignStatus, designTargetRef, refreshDesign, designControl } = useDesignMode(toast);
@@ -1129,8 +1138,11 @@ export default function App() {
     setActiveSessionPath(null);
     setHasSession(false);
     setLiveReady(false);
-    // Arming is per-composer-intent: leaving the session drops it.
+    // Arming (and optimistic pursuit display) is per-composer-intent:
+    // leaving the session drops both. The backend op still settles
+    // normally; only the display is session-bound.
     setGoalArmed(false);
+    setGoalPendingObjective(null);
   }, []);
 
   // Clear the switch cover shortly after it fades (animation is 120ms; the
@@ -1139,9 +1151,10 @@ export default function App() {
     async (path: string | undefined, cwd: string, opts?: { quietMissing?: boolean }) => {
       const expectedEpoch = ++epochRef.current;
       const requestId = ++latestRequestRef.current;
-      // Arming never survives navigation: the objective belongs to the
-      // session it was armed in.
+      // Arming (and optimistic pursuit display) never survives
+      // navigation: the objective belongs to the session it was armed in.
       setGoalArmed(false);
+      setGoalPendingObjective(null);
       // Opening never changes lifecycle: a settled session renders normally
       // and stays under Settled until explicitly un-settled. Unread clears —
       // you are looking at it now.
@@ -1669,25 +1682,34 @@ export default function App() {
         // resolveSendTarget): the render closure's paths may still point
         // at the previous session, so the live ref is authoritative.
         const target = resolveSendTarget(sendEpoch, epochRef.current, activePathRef.current);
+        const mappedImages = images?.map((a) => ({ type: "image", data: a.data, mimeType: a.mimeType }));
         if (goalArmed) {
-          // Armed Goal mode: this message IS the goal. Persist it as the
-          // objective first so before_agent_start injects goal context into
-          // this same turn — no synthetic kickoff turn. Abort (don't send)
-          // when persisting fails; a half-armed send would lie about intent.
+          // Armed Goal mode: this message IS the goal. One transactional op
+          // persists the objective and runs the turn itself, so a prompt
+          // failure can never strand a phantom ACTIVE goal: the backend
+          // restores the previous state when the turn never started, and
+          // keeps the goal when it did (abort, mid-turn model error).
+          // The pending objective drives the dot optimistically until the
+          // op settles; failures clear it back to OFF.
           setGoalArmed(false);
+          setGoalPendingObjective(text);
           try {
-            const { goal } = await bridge.beginGoal(target, text);
+            const { goal } = await bridge.beginGoalPrompt(target, text, text, mappedImages, streamingBehavior);
+            setGoalPendingObjective(null);
             if (goal) setDurableGoal(goal);
           } catch (e) {
+            setGoalPendingObjective(null);
             if (hasContent) dispatch({ type: "local-user-rollback", text });
             toast("error", errorMessage(e, "could not start goal"));
             if (history.activeRollback) void hydrate();
             return false;
           }
+          if (history.activeRollback) await hydrate();
+          return true;
         }
         await bridge.prompt(
           text,
-          images?.map((a) => ({ type: "image", data: a.data, mimeType: a.mimeType })),
+          mappedImages,
           streamingBehavior,
           target
         );
@@ -2529,9 +2551,9 @@ export default function App() {
                     ? bots.filter((b) => activeGroup.memberIds.includes(b.id))
                     : (sharedStaff ?? bots.filter((b) => !b.hidden))
                 }
-                goalMode={durableGoal?.active ? "active" : goalArmed ? "armed" : "off"}
-                goalObjective={durableGoal?.objective ?? null}
-                onToggleGoal={() => void toggleGoal()}
+                goalMode={durableGoal?.active || goalPendingObjective != null ? "active" : goalArmed ? "armed" : "off"}
+                goalObjective={goalPendingObjective ?? durableGoal?.objective ?? null}
+                onToggleGoal={activeGroup ? undefined : () => void toggleGoal()}
                 design={designStatus}
                 onToggleDesign={(draft) => {
                   // The toggle never invents a subject: on comes from the

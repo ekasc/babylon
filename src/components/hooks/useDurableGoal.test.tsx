@@ -71,7 +71,7 @@ describe("useDurableGoal", () => {
     try {
       const { result } = renderHook(() => useDurableGoal(toast));
       await act(async () => {
-        await result.current.goalControl("pause");
+        await result.current.goalControl("/s/session.jsonl", "pause");
       });
       expect(result.current.durableGoal?.objective).toBe("Paused");
       expect(toast).not.toHaveBeenCalled();
@@ -82,7 +82,7 @@ describe("useDurableGoal", () => {
     try {
       const { result } = renderHook(() => useDurableGoal(toast));
       await act(async () => {
-        await result.current.goalControl("pause");
+        await result.current.goalControl("/s/session.jsonl", "pause");
       });
       expect(toast).toHaveBeenCalledWith("error", "down");
     } finally {

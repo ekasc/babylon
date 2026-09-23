@@ -21,7 +21,7 @@ import { isSessionNotFound, SessionNotFoundError } from "../src/lib/errors";
 import { SnapshotStore, isBookkeepingPath, type RestoreChange, type SnapshotCapture } from "./snapshot-store";
 import { createGoalModeExtension, isExternalGoalModeExtension } from "./goal-mode/extension";
 import { createDesignModeExtension } from "./design-mode/extension";
-import { loadSessionGoal, saveSessionGoal, loadGoalModeConfig } from "./goal-mode/store";
+import { loadSessionGoal, saveSessionGoal, clearSessionGoal, loadGoalModeConfig } from "./goal-mode/store";
 import { createDurableGoalState, defaultDurableGoalModeConfig } from "../src/lib/durable-goal";
 import { loadDesignState, stageOfState, type DesignStatus } from "./design-mode/store";
 import type { DurableGoalState } from "../src/lib/durable-goal";
@@ -1873,32 +1873,69 @@ export class PiHost implements LocalPiHost {
    *  execute immediately inside `session.prompt` and never append a user
    *  message, so unlike `prompt()` this takes no checkpoint, records no
    *  rollback receipt, and wakes no shared-chat extras. */
-  async execGoalCommand(args: string): Promise<DurableGoalState | null> {
+  async execGoalCommand(sessionFile: string, args: string): Promise<DurableGoalState | null> {
     if (this.draining) throw new Error("daemon is draining for restart; please resend in a moment");
     const text = args ? `/goal ${args}` : "/goal";
     if (!/^\/goal(\s|$)/.test(text)) throw new Error("goal control must be a /goal invocation");
-    const entry = this.activeEntry();
+    // Explicit identity, never the foreground pointer: a cancel issued for
+    // session A must execute on A even if the UI moved to B mid-flight.
+    const entry = this.resolveEntry(sessionFile);
     await entry.runtime.session.prompt(text, {});
     return loadSessionGoal(entry.cwd, entry.sessionId);
   }
 
   /**
-   * Silently persist a goal objective for an explicitly addressed session —
-   * the GUI's arm-and-send path. Unlike the `/goal <objective>` command
-   * (which queues a synthetic [Goal Mode Start] follow-up turn), this only
-   * writes state: the caller's next prompt() is the turn itself, and
-   * before_agent_start injects the goal context into that same turn.
-   * Same 4000-char ceiling as the command path. CLI/manual /goal behavior
-   * is untouched.
+   * Transactional goal start for an explicitly addressed session: persist
+   * the objective, then run the message as the turn itself (before_agent_
+   * start injects the goal context into that same turn — no synthetic
+   * [Goal Mode Start] follow-up, unlike the `/goal <objective>` command).
+   * Same 4000-char ceiling as the command path.
+   *
+   * Compensation, not blind cleanup: if prompt() fails, the persisted goal
+   * is rolled back ONLY when the turn never started (transcript digest
+   * unchanged — resolve failure, pre-start validation). An abort or
+   * mid-turn model error leaves the goal standing: the message became a
+   * turn and the goal context was already injected. Previous state (when
+   * any) is restored rather than deleted.
    */
-  async beginGoal(sessionFile: string, objective: string): Promise<DurableGoalState | null> {
+  async beginGoalPrompt(
+    sessionFile: string,
+    objective: string,
+    message: string,
+    images?: PromptImage[],
+    streamingBehavior?: "steer" | "followUp"
+  ): Promise<DurableGoalState | null> {
     const text = objective.trim();
     if (!text || text.length > 4000) throw new Error("invalid goal objective");
     const entry = this.resolveEntry(sessionFile);
+    const sid = entry.runtime.session.sessionId;
+    const previous = await loadSessionGoal(entry.cwd, sid).catch(() => null);
+    const digestAtStart = entryDigest(entry.runtime.session.sessionManager.getEntries());
     const config = await loadGoalModeConfig(entry.cwd, defaultDurableGoalModeConfig(), this.trustByCwd.get(entry.cwd) ?? false);
-    const state = createDurableGoalState(text, config);
-    await saveSessionGoal(entry.cwd, entry.sessionId, state);
-    return state;
+    await saveSessionGoal(entry.cwd, sid, createDurableGoalState(text, config));
+    try {
+      await this.prompt(message, images, streamingBehavior, sessionFile);
+    } catch (e) {
+      // Compensate only when the turn never started: if the transcript grew,
+      // the message became a turn (abort, mid-turn model error) and the goal
+      // context was already injected — the goal stands.
+      let started = true;
+      try {
+        started = entryDigest(entry.runtime.session.sessionManager.getEntries()) !== digestAtStart;
+      } catch {
+        started = true;
+      }
+      if (!started) {
+        try {
+          if (previous) await saveSessionGoal(entry.cwd, sid, previous);
+          else await clearSessionGoal(entry.cwd, sid);
+        } catch {
+          /* restoration is best-effort; the original error still surfaces */
+        }
+      }
+      throw e;
+    }
+    return loadSessionGoal(entry.cwd, entry.runtime.session.sessionId).catch(() => null);
   }
   /**
    * Run a `/design …` control invocation through the foreground session

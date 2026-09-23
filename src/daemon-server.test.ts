@@ -49,7 +49,7 @@ function fakePiHost(overrides: Partial<DaemonPiHost>): DaemonPiHost {
     setSettings: fail("setSettings"),
     setSessionName: fail("setSessionName"),
     renameSession: fail("renameSession"),
-    beginGoal: fail("beginGoal"),
+    beginGoalPrompt: fail("beginGoalPrompt"),
     compact: fail("compact"),
     getTree: fail("getTree"),
     getHistory: fail("getHistory"),
@@ -207,10 +207,10 @@ describe("babylon daemon server", () => {
       evidence: [],
       log: [],
     };
-    const seen: string[] = [];
+    const seen: Array<[string, string]> = [];
     const piHost = fakePiHost({
-      execGoalCommand: async (args: string) => {
-        seen.push(args);
+      execGoalCommand: async (sessionFile: string, args: string) => {
+        seen.push([sessionFile, args]);
         return goal;
       },
     });
@@ -218,13 +218,48 @@ describe("babylon daemon server", () => {
     const port = (server.address() as { port: number }).port;
     const socket = await connect(port);
     const r = reader(socket);
-    await request(socket, "pi.goalControl", { args: "pause" });
+    await request(socket, "pi.goalControl", { sessionFile: "/s/a.jsonl", args: "pause" });
     const res = await r.next("pi.goalControl");
     expect(res.payload).toEqual({ goal });
-    expect(seen).toEqual(["pause"]);
+    expect(seen).toEqual([["/s/a.jsonl", "pause"]]);
     await request(socket, "pi.goalControl", { args: 42 });
     const err = await r.next("error");
-    expect(String((err.payload as { error?: string }).error)).toMatch(/requires \{ args \}/);
+    expect(String((err.payload as { error?: string }).error)).toMatch(/requires \{ sessionFile, args \}/);
+  });
+
+  it("serves pi.goalBeginPrompt with the full turn payload", async () => {
+    const goal = {
+      active: true,
+      paused: false,
+      objective: "Fix it",
+      slug: "fix-it",
+      status: "planning" as const,
+      currentStep: "step",
+      startedAt: new Date(0).toISOString(),
+      acceptanceCriteria: [],
+      nonGoals: [],
+      completedSteps: [],
+      evidence: [],
+      log: [],
+    };
+    const seen: Array<[string, string, string]> = [];
+    const piHost = fakePiHost({
+      beginGoalPrompt: async (sessionFile: string, objective: string, message: string) => {
+        seen.push([sessionFile, objective, message]);
+        return goal;
+      },
+    });
+    const server = await start({ piHost });
+    const port = (server.address() as { port: number }).port;
+    const socket = await connect(port);
+    const r = reader(socket);
+    await request(socket, "pi.goalBeginPrompt", { sessionFile: "/s/a.jsonl", objective: "Fix it", message: "Fix it" });
+    const res = await r.next("pi.goalBeginPrompt");
+    expect(res.payload).toEqual({ goal });
+    expect(seen).toEqual([["/s/a.jsonl", "Fix it", "Fix it"]]);
+    await request(socket, "pi.goalBeginPrompt", { sessionFile: "/s/a.jsonl" });
+    const err = await r.next("error");
+    expect(String((err.payload as { error?: string }).error)).toMatch(/requires \{ sessionFile, objective, message \}/);
   });
 
   it("wraps pi.getCommands in { commands } for the thin client", async () => {

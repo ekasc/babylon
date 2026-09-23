@@ -68,7 +68,7 @@ function unstartedHost(): LocalPiHost {
     setSettings: notReady("setSettings"),
     setSessionName: notReady("setSessionName"),
     renameSession: notReady("renameSession"),
-    beginGoal: notReady("beginGoal"),    getHistory: notReady("getHistory"),
+    beginGoalPrompt: notReady("beginGoalPrompt"),    getHistory: notReady("getHistory"),
     getTurnChanges: notReady("getTurnChanges"),
     getTurnFileDiff: notReady("getTurnFileDiff"),
     prepareRollback: notReady("prepareRollback"),

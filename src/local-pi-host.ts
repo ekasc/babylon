@@ -66,9 +66,9 @@ export interface LocalPiHost {
   warmProject(cwd: string): { warmed: boolean };
   releaseSession(sessionFile: string): Promise<boolean>;
   /** Run a `/goal …` control invocation without opening a turn; returns the fresh durable goal. */
-  execGoalCommand(args: string): Promise<DurableGoalState | null>;
+  execGoalCommand(sessionFile: string, args: string): Promise<DurableGoalState | null>;
   /** Silently persist a goal objective for an addressed session (no follow-up turn). */
-  beginGoal(sessionFile: string, objective: string): Promise<DurableGoalState | null>;
+  beginGoalPrompt(sessionFile: string, objective: string, message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp"): Promise<DurableGoalState | null>;
   /** Run a `/design …` control invocation; returns the fresh design state. */
   execDesignCommand(args: string): Promise<import("../electron/design-mode/store").DesignStatus>;
 }

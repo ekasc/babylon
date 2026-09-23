@@ -60,8 +60,9 @@ const api: Bridge = {
     ipcRenderer.invoke("pideck:prompt", message, images, streamingBehavior, sessionFile ?? undefined),
   abort: (sessionFile?: string) => ipcRenderer.invoke("pideck:abort", { sessionFile }),
   goalGet: (sessionId: string, cwd: string) => ipcRenderer.invoke("pideck:goal-get", sessionId, cwd),
-  goalControl: (args: string) => ipcRenderer.invoke("pideck:goal-control", args),
-  beginGoal: (sessionFile: string, objective: string) => ipcRenderer.invoke("pideck:goal-begin", sessionFile, objective),
+  goalControl: (sessionFile: string, args: string) => ipcRenderer.invoke("pideck:goal-control", { sessionFile, args }),
+  beginGoalPrompt: (sessionFile: string, objective: string, message: string, images?: unknown[], streamingBehavior?: string) =>
+    ipcRenderer.invoke("pideck:goal-begin-prompt", { sessionFile, objective, message, images, streamingBehavior }),
   designGet: (sessionId: string, cwd: string) => ipcRenderer.invoke("pideck:design-get", sessionId, cwd),
   designControl: (args: string) => ipcRenderer.invoke("pideck:design-control", args),
   releaseSession: (path: string): Promise<{ released: boolean }> =>
