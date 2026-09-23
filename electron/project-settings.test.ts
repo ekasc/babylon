@@ -16,6 +16,19 @@ describe("projectHashForCwd", () => {
     expect(projectHashForCwd("/repo")).toMatch(/^[0-9a-f]{24}$/);
     expect(projectHashForCwd("/repo")).not.toBe(projectHashForCwd("/other"));
   });
+
+  it("is path-scoped: a renamed folder keys a fresh entry, never a migration", () => {
+    // No rekeying exists by design (see module header): a rename orphans
+    // the old entry and the new path starts from the app default.
+    const store = tempStore();
+    const before = store.getOrCreate("/repo", APP_DEFAULT);
+    expect(before.created).toBe(true);
+    store.setFreeSpeak(before.hash, true);
+    const after = store.getOrCreate("/repo-renamed", APP_DEFAULT);
+    expect(after.created).toBe(true);
+    expect(after.hash).not.toBe(before.hash);
+    expect(after.settings.freeSpeak).toBe(false);
+  });
 });
 
 describe("project settings store", () => {

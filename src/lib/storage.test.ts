@@ -32,6 +32,14 @@ describe("storage cache", () => {
     expect(getWithFallback("theme")).toBeNull();
   });
 
+  it("removeWithFallback does not resurrect legacy pideck values", () => {
+    localStorage.setItem("pideck:theme", "dark");
+    setWithFallback("theme", "light");
+    expect(getWithFallback("theme")).toBe("light");
+    removeWithFallback("theme");
+    expect(getWithFallback("theme")).toBeNull();
+  });
+
   it("parses numbers with fallback", () => {
     setWithFallback("context-width", "520");
     expect(getNumberWithFallback("context-width", 999)).toBe(520);

@@ -52,6 +52,19 @@ describe("versioned persisted state", () => {
     expect(readStore(stringArray)).toEqual(["kept"]);
   });
 
+  it("never migrates or restamps newer-than-code payloads, even with a migrator", () => {
+    const upper = defineStore<string[]>({
+      ...stringArray,
+      key: "test-downgrade",
+      version: 2,
+      migrate: (v) => (Array.isArray(v) ? v : []).map((s) => String(s).toUpperCase()),
+    });
+    setWithFallback("test-downgrade", JSON.stringify({ version: 99, value: ["kept"] }));
+    expect(readStore(upper)).toEqual(["kept"]);
+    // Untouched on disk: still stamped v99, not rewritten as v2.
+    expect(JSON.parse(localStorage.getItem("babylon:test-downgrade") ?? "")).toEqual({ version: 99, value: ["kept"] });
+  });
+
   it("exposes a hook that persists on change", () => {
     const { result } = renderHook(() => useVersionedState(stringArray));
     expect(result.current[0]).toEqual([]);

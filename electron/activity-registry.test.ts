@@ -109,4 +109,59 @@ describe("ActivityRegistry", () => {
     expect(registry.tracked()).toEqual([]);
     expect(registry.snapshot()).toEqual({ threads: [], subagents: [] });
   });
+
+  it("prunes idle bridges with no live work but keeps their terminal rows frozen", async () => {
+    const a = await makeProject("prune-idle");
+    const b = await makeProject("prune-live");
+    await writeThread(a, "thread-a1", "completed");
+    await writeThread(b, "thread-b1", "running");
+    const registry = new ActivityRegistry({ pollIntervalMs: 60_000, idleTtlMs: 60_000, onUpdate: () => undefined });
+    registry.ensure(a);
+    registry.ensure(b);
+    await registry.listAll();
+    expect(registry.tracked().sort()).toEqual([a, b].sort());
+    // Far-future sweep: b has live work -> survives; a is terminal+idle -> pruned.
+    registry.pruneIdle(Date.now() + 10 * 60_000);
+    expect(registry.tracked()).toEqual([b]);
+    const snap = registry.snapshot();
+    expect(snap.threads.map((t) => `${t.threadId}:${t.status}`).sort())
+      .toEqual(["thread-a1:completed", "thread-b1:running"]);
+    registry.disposeAll();
+  });
+
+  it("routes events by owning session, not UI focus, and revives pruned bridges", async () => {
+    const a = await makeProject("route-a");
+    const b = await makeProject("route-b");
+    const sessionFileB = join(b, "session-b.jsonl");
+    const registry = new ActivityRegistry({
+      pollIntervalMs: 60_000,
+      idleTtlMs: 60_000,
+      onUpdate: () => undefined,
+      resolveEventCwd: (file) => (file === sessionFileB ? b : null),
+    });
+    registry.ensure(a); // a is foregrounded; b has never been visited.
+    await registry.observeAgentEvent({
+      type: "tool_execution_start", toolName: "subagent",
+      toolCallId: "t1", sessionFile: sessionFileB, args: {},
+    });
+    // b got its own bridge from ownership; nothing leaked into a's view.
+    expect(registry.tracked().sort()).toEqual([a, b].sort());
+    expect(registry.snapshot().subagents.map((s) => s.runId)).toEqual(["pending-t1"]);
+    // End the call (terminal), then sweep everything idle away.
+    await registry.observeAgentEvent({
+      type: "tool_execution_end", toolName: "subagent",
+      toolCallId: "t1", sessionFile: sessionFileB,
+      result: { details: { runId: "run-1", status: "completed" }, content: [] },
+    });
+    registry.pruneIdle(Date.now() + 10 * 60_000);
+    expect(registry.tracked()).toEqual([]);
+    expect(registry.snapshot().subagents.map((s) => `${s.runId}:${s.status}`)).toEqual(["run-1:completed"]);
+    // A new event for b's session revives b — without foregrounding it.
+    await registry.observeAgentEvent({
+      type: "tool_execution_start", toolName: "subagent",
+      toolCallId: "t2", sessionFile: sessionFileB, args: {},
+    });
+    expect(registry.tracked()).toEqual([b]);
+    registry.disposeAll();
+  });
 });

@@ -1,5 +1,6 @@
 import { promises as fsp } from "node:fs";
 import { relative, resolve } from "node:path";
+import { SessionNotFoundError } from "../src/lib/errors";
 
 export function contained(root: string, target: string): boolean {
   const rel = relative(root, target);
@@ -13,7 +14,7 @@ export async function validateSessionPath(root: string, path: unknown): Promise<
     fsp.realpath(resolve(root)),
     fsp.realpath(resolve(path)),
   ]).catch(() => {
-    throw new Error("session path does not exist");
+    throw new SessionNotFoundError(typeof path === "string" ? path : undefined);
   });
   if (!contained(canonicalRoot, canonicalTarget)) {
     throw new Error("session path is outside the pi sessions directory");

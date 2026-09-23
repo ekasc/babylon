@@ -234,9 +234,9 @@ function resolveApproval(id: string, choice: "allow_once" | "allow_session" | "a
   win?.webContents.send("pideck:approval-resolved", { id, choice, sessionId });
 }
 let workflowsBridge: WorkflowsBridgeLike | null = null;
-/** Process-wide activity observation: one bridge per project ever opened,
- *  aggregated to the renderer. Navigation only foregrounds; it never
- *  destroys tracking (see ActivityRegistry). */
+/** Process-wide activity observation: live projects keep their own bridge,
+ *  idle ones are pruned with frozen snapshots. Navigation only foregrounds;
+ *  it never destroys tracking (see ActivityRegistry). */
 let activityRegistry: ActivityRegistry | null = null;
 const sessionIndex = new SessionIndex(sessionsRoot());
 const processManager = new ProcessManager();
@@ -589,9 +589,10 @@ function applyCwd(cwd: string): void {
 }
 
 function updateActivityBridge(cwd: string): void {
-  // Foreground a project for tracking, creating its bridge on first sight.
-  // Bridges for other projects keep polling: switching projects changes what
-  // Babylon displays, never what it believes is still running.
+  // Foreground a project for tracking. Projects with live work keep polling
+  // regardless of focus; idle ones are pruned (see ActivityRegistry) — either
+  // way, switching projects changes what Babylon displays, never what it
+  // believes is still running.
   if (!cwd) return;
   try {
     if (!activityRegistry) {
@@ -606,6 +607,13 @@ function updateActivityBridge(cwd: string): void {
           }
         },
         resolveParentSessionFile: (sessionId) => resolveParentSessionFile(sessionId, sessionsRoot()),
+        // Session file -> owning project so live events route by ownership,
+        // not UI focus. Index first (sync, cached), then task registries.
+        resolveEventCwd: async (sessionFile) =>
+          sessionIndex.cwdForSessionFile(sessionFile) ??
+          taskManager.findBySessionFile(sessionFile)?.cwd ??
+          (await daemonTaskBySessionFile(sessionFile).catch(() => undefined))?.cwd ??
+          null,
       });
     }
     activityRegistry.ensure(cwd);
@@ -774,9 +782,11 @@ async function startHost(): Promise<void> {
       onEvent: (ev: AgentEvent) => {
         agentEvents.push(ev);
         // Transient subagent rows (tool start/end) ride the same event flow
-        // the renderer already consumes; each project's poll picks up the rest.
+        // the renderer already consumes; the registry routes each event to
+        // its owning project by session file. Async by design: never block
+        // the host event pump on ownership resolution.
         try {
-          activityRegistry?.observeAgentEvent(ev);
+          void activityRegistry?.observeAgentEvent(ev);
         } catch {
           /* best effort */
         }

@@ -71,21 +71,25 @@ export function readStore<T>(def: StoreDef<T>): T {
       return def.fallback();
     }
     if (def.validate(parsed.value)) {
-      if (!def.migrate) {
-        // Newer-than-code payload (downgrade): load as-is when valid
-        // rather than wiping user data.
+      // Downgrade guard: a newer-than-code payload must never run through a
+      // migrator written for older shapes, and must never be rewritten
+      // stamped as the current version — either would destroy future data.
+      if (parsed.version > def.version) {
         devWarn(def.key, `version skew (stored v${parsed.version}, code v${def.version}), loading as-is`);
         return parsed.value;
       }
-      try {
-        const migrated = def.migrate(parsed.value, parsed.version);
-        if (!def.validate(migrated)) throw new Error("migrate produced an invalid value");
-        writeStore(def, migrated);
-        return migrated;
-      } catch {
-        devWarn(def.key, "migration failed, falling back");
-        return def.fallback();
+      if (parsed.version < def.version && def.migrate) {
+        try {
+          const migrated = def.migrate(parsed.value, parsed.version);
+          if (!def.validate(migrated)) throw new Error("migrate produced an invalid value");
+          writeStore(def, migrated);
+          return migrated;
+        } catch {
+          devWarn(def.key, "migration failed, falling back");
+          return def.fallback();
+        }
       }
+      return parsed.value;
     }
     devWarn(def.key, `unrecognised shape (v${parsed.version}), falling back`);
     return def.fallback();

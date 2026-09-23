@@ -1107,30 +1107,33 @@ export default memo(function Sidebar(props: Props) {
 			),
 		[groups],
 	);
-	const now = Date.now();
+	// Snooze expirations are time-based: without a tick, an expiry while the
+	// app sits idle never re-renders and the session sticks in its shelf.
+	const [now, setNow] = useState(() => Date.now());
+	useEffect(() => {
+		const t = setInterval(() => setNow(Date.now()), 30_000);
+		return () => clearInterval(t);
+	}, []);
 	const isSettledPath = (path: string) => settled[path] != null;
-	const classify = (path: string): Section => {
-		if (archivedSet.has(path)) return "archived";
-		if (isSettledPath(path)) return "settled";
-		if (pinnedSet.has(path)) return "pinned";
-		const su = snoozed[path];
-		if (su != null && su > now) return "snoozed";
-		return "active";
-	};
-
-	const isSnoozedPath = (path: string) =>
-		snoozed[path] != null && snoozed[path] > now;
 	const snoozedList = useMemo(
 		() =>
 			flat
-				.filter(({ session }) => classify(session.path) === "snoozed")
+				.filter(({ session }) => {
+					// Shelf precedence (archived > settled > pinned > snoozed),
+					// inlined on reactive values so the memo tracks
+					// settled/expiry instead of a function identity.
+					if (archivedSet.has(session.path)) return false;
+					if (settled[session.path] != null) return false;
+					if (pinnedSet.has(session.path)) return false;
+					const su = snoozed[session.path];
+					return su != null && su > now;
+				})
 				.sort(
 					(a, b) =>
 						(snoozed[a.session.path] ?? 0) -
 						(snoozed[b.session.path] ?? 0),
 				),
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-		[flat, pinnedSet, snoozed, archivedSet],
+		[flat, pinnedSet, snoozed, archivedSet, settled, now],
 	);
 	const archivedList = useMemo(
 		() =>
@@ -1146,7 +1149,7 @@ export default memo(function Sidebar(props: Props) {
 			flat
 				.filter(
 					({ session }) =>
-						isSettledPath(session.path) &&
+						settled[session.path] != null &&
 						!archivedSet.has(session.path),
 				)
 				.map((e) => ({ ...e, settledAt: settled[e.session.path] ?? 0 }))
@@ -1156,7 +1159,6 @@ export default memo(function Sidebar(props: Props) {
 						{ path: b.session.path, at: b.settledAt },
 					),
 				),
-		// eslint-disable-next-line react-hooks/exhaustive-deps
 		[flat, settled, archivedSet],
 	);
 	// Spaces (herdr): user-curated only, never auto-imported from the session
@@ -1171,12 +1173,12 @@ export default memo(function Sidebar(props: Props) {
 			const sessions = [...(byCwd.get(cwd) ?? [])].sort(
 				(a, b) => b.mtime - a.mtime,
 			);
-			const usable = sessions.filter(
-				(s) =>
-					!archivedSet.has(s.path) &&
-					!isSnoozedPath(s.path) &&
-					!isSettledPath(s.path),
-			);
+			const usable = sessions.filter((s) => {
+				if (archivedSet.has(s.path)) return false;
+				if (settled[s.path] != null) return false;
+				const su = snoozed[s.path];
+				return !(su != null && su > now);
+			});
 			const live = usable.filter((s) =>
 				isLiveExecution(runtime?.[s.path]?.execution ?? "idle"),
 			).length;
@@ -1198,8 +1200,7 @@ export default memo(function Sidebar(props: Props) {
 			if (b.cwd === activeCwd) return 1;
 			return b.latest - a.latest;
 		});
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [groups, archivedSet, snoozed, settled, runtime, activeCwd, spaceCwds]);
+	}, [groups, archivedSet, snoozed, settled, runtime, activeCwd, spaceCwds, now]);
 	// Space selection is owned by App (global tabs + active project context).
 	// Spaces carry no nested sessions: navigation lives in the tab strip.
 	const openSpace = (cwd: string) => {

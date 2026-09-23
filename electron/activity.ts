@@ -77,6 +77,16 @@ interface Options {
  *  blocked events always pass). Keeps the parent conversation uncluttered. */
 const MILESTONE_NOTIFY_GAP_MS = 45_000;
 
+/** Thread states after which no further transitions are expected. `interrupted`
+ *  counts: the run was killed by request, and anything still moving will
+ *  re-announce itself through events (which revive the bridge). */
+const TERMINAL_THREAD_STATUSES = new Set(["completed", "failed", "stopped", "interrupted"]);
+
+/** Subagent states that mean a worker is still alive. End states
+ *  (`completed`, `failed`, `stopped`, `interrupted`, `routing_mismatch`,
+ *  `unknown`) are settled outcomes, not live work. */
+const LIVE_SUBAGENT_STATUSES = new Set(["starting", "running", "idle"]);
+
 export class ActivityBridge {
   readonly cwd: string;
   private timer: NodeJS.Timeout | null = null;
@@ -85,9 +95,41 @@ export class ActivityBridge {
   private transientSubagents = new Map<string, SubagentActivity>();
   private prevThreads = new Map<string, { status?: string; blocker?: string | null; milestones?: ThreadActivity["milestones"] }>();
   private lastThreadNotify = new Map<string, number>();
+  /** Last foreground visit or routed agent event. Pure reads (list/refresh)
+   *  never touch this: looking at a project is not evidence of live work. */
+  private lastUsedAt = Date.now();
 
   constructor(private readonly options: Options) {
     this.cwd = options.cwd;
+  }
+
+  /** Mark the bridge as recently interesting (foreground visit, agent event). */
+  touch(): void {
+    this.lastUsedAt = Date.now();
+  }
+
+  /** True while anything owned by this project may still transition: a live
+   *  transient (pre-persistence) row, a non-terminal thread, or a live
+   *  subagent worker. Settled transients awaiting their cleanup timer do
+   *  NOT count — otherwise every completion would pin the bridge. Drives
+   *  idle pruning — see ActivityRegistry. */
+  hasLiveWork(): boolean {
+    for (const s of this.transientSubagents.values()) {
+      if (LIVE_SUBAGENT_STATUSES.has(s.status)) return true;
+    }
+    if (this.last.threads.some((t) => !TERMINAL_THREAD_STATUSES.has(t.status))) return true;
+    return this.last.subagents.some((s) => LIVE_SUBAGENT_STATUSES.has(s.status));
+  }
+
+  /** Milliseconds since the last foreground visit or routed event. */
+  idleMs(now = Date.now()): number {
+    return now - this.lastUsedAt;
+  }
+
+  /** Last published snapshot without forcing a rescan. The registry reads
+   *  this so aggregate pushes never flap on bridges that haven't polled. */
+  snapshot(): ActivityUpdate {
+    return this.last;
   }
 
   start(): void {
@@ -147,12 +189,6 @@ export class ActivityBridge {
 
   async list(): Promise<ActivityUpdate> {
     await this.refresh(false);
-    return this.last;
-  }
-
-  /** Last published snapshot without forcing a rescan. The registry reads
-   *  this so aggregate pushes never flap on bridges that haven't polled. */
-  snapshot(): ActivityUpdate {
     return this.last;
   }
 
@@ -381,31 +417,58 @@ async function readTail(path: string, maxBytes: number): Promise<string> {
 /**
  * Process-wide activity observation, keyed by project.
  *
- * Foreground navigation must never stop, hide, or re-scope tracking: one
- * ActivityBridge lives per project ever opened, keeps its own poll rhythm
- * (the disk scan IS the authoritative lifecycle signal for file-backed
+ * Foreground navigation must never stop, hide, or re-scope tracking of LIVE
+ * work: every project with running threads/subagents keeps its own poll
+ * rhythm (the disk scan IS the authoritative lifecycle signal for file-backed
  * thread/subagent state — there is no push channel for their completion),
  * and the renderer always receives the aggregate across every tracked
  * project. Entries disappear only when a bridge's own snapshot drops them
  * (completion, abort, deletion) — never because another project was opened.
+ *
+ * Idle projects do NOT poll forever: a bridge with no live work that has
+ * seen neither a foreground visit nor an agent event for `idleTtlMs` is
+ * disposed, keeping its last snapshot frozen in the aggregate (pruned
+ * entries are always terminal, so the frozen rows are stable). Any new
+ * event or foreground visit revives the bridge. One registry-level sweep
+ * timer replaces N per-project idle checks.
  */
 export class ActivityRegistry {
   private readonly bridges = new Map<string, ActivityBridge>();
+  /** Frozen last snapshots of pruned idle projects (terminal entries only). */
+  private readonly retired = new Map<string, ActivityUpdate>();
   private activeCwd: string | null = null;
+  private sweepTimer: NodeJS.Timeout | null = null;
 
   constructor(
     private readonly options: {
       pollIntervalMs?: number;
       resolveParentSessionFile?: (sessionId: string) => Promise<string | null>;
+      /** Session file -> owning project cwd (tasks, daemon tasks, session index). */
+      resolveEventCwd?: (sessionFile: string) => Promise<string | null> | string | null;
+      /** Idle time with no live work before a bridge is disposed (default 5 min). */
+      idleTtlMs?: number;
+      /** How often the idle sweep runs (default 60 s). */
+      sweepIntervalMs?: number;
       onUpdate: (update: ActivityUpdate) => void;
     }
   ) {}
 
-  /** Foreground a project for tracking. Creates its bridge on first sight;
-   *  never destroys or resets any other project's bridge. */
+  /** Foreground a project for tracking. Creates (or revives) its bridge;
+   *  never disturbs any other project's bridge. */
   ensure(cwd: string): ActivityBridge | null {
     if (!cwd) return null;
     this.activeCwd = cwd;
+    this.startSweep();
+    this.pruneIdle();
+    const bridge = this.getOrCreate(cwd);
+    bridge?.touch();
+    return bridge;
+  }
+
+  /** Get-or-create WITHOUT foregrounding: event routing and revives use
+   *  this so background work never steals `activeCwd`. */
+  private getOrCreate(cwd: string): ActivityBridge | null {
+    if (!cwd) return null;
     let bridge = this.bridges.get(cwd);
     if (!bridge) {
       bridge = new ActivityBridge({
@@ -416,21 +479,46 @@ export class ActivityRegistry {
       });
       this.bridges.set(cwd, bridge);
       bridge.start();
+      // Fresh live data supersedes any frozen snapshot for this project.
+      this.retired.delete(cwd);
     }
     return bridge;
+  }
+
+  private startSweep(): void {
+    if (this.sweepTimer) return;
+    this.sweepTimer = setInterval(() => this.pruneIdle(), this.options.sweepIntervalMs ?? 60_000);
+    this.sweepTimer.unref();
+  }
+
+  /** Dispose bridges with no live work idle past the TTL, freezing their
+   *  terminal entries in the aggregate. Public for tests. */
+  pruneIdle(now = Date.now()): void {
+    const ttl = this.options.idleTtlMs ?? 5 * 60_000;
+    for (const [cwd, bridge] of this.bridges) {
+      if (bridge.hasLiveWork() || bridge.idleMs(now) < ttl) continue;
+      this.retired.set(cwd, bridge.snapshot());
+      bridge.dispose();
+      this.bridges.delete(cwd);
+    }
   }
 
   tracked(): string[] {
     return [...this.bridges.keys()];
   }
 
-  /** Aggregate snapshot across every tracked project (stable entry identity:
-   *  thread ids and subagent run ids are globally unique). */
+  /** Aggregate snapshot across every tracked project plus frozen snapshots
+   *  of pruned idle ones (stable entry identity: thread ids and subagent
+   *  run ids are globally unique). */
   snapshot(): ActivityUpdate {
     const threads: ThreadActivity[] = [];
     const subagents: SubagentActivity[] = [];
     for (const bridge of this.bridges.values()) {
       const snap = bridge.snapshot();
+      threads.push(...snap.threads);
+      subagents.push(...snap.subagents);
+    }
+    for (const snap of this.retired.values()) {
       threads.push(...snap.threads);
       subagents.push(...snap.subagents);
     }
@@ -441,16 +529,32 @@ export class ActivityRegistry {
     this.options.onUpdate(this.snapshot());
   }
 
-  /** Sub-second transient rows (subagent tool start/end) belong to the live
-   *  stream, which always runs under the foregrounded project; the persisted
-   *  records surface through each project's own poll. Routing them everywhere
-   *  would duplicate the same pending entry once per tracked project. */
-  observeAgentEvent(event: AgentEvent): void {
-    if (!this.activeCwd) return;
-    this.bridges.get(this.activeCwd)?.observeAgentEvent(event);
+  /** Route a live event to its owning project, resolved from the stamped
+   *  session file — NOT from UI focus. Background sessions keep their own
+   *  transient rows. Events with no attributable session (e.g. aggregate
+   *  notifications) fall back to the foregrounded project, the previous
+   *  behavior. Routing revives a pruned bridge and marks it live. */
+  async observeAgentEvent(event: AgentEvent): Promise<void> {
+    const sessionFile = wireStr(event, "sessionFile");
+    let cwd: string | null = null;
+    if (sessionFile) {
+      try {
+        cwd = (await this.options.resolveEventCwd?.(sessionFile)) ?? null;
+      } catch {
+        cwd = null;
+      }
+    }
+    const target = cwd ?? this.activeCwd;
+    if (!target) return;
+    const bridge = cwd != null ? this.getOrCreate(target) : this.bridges.get(target);
+    if (!bridge) return;
+    bridge.touch();
+    bridge.observeAgentEvent(event);
   }
 
-  /** Force every tracked project to rescan (after control actions). */
+  /** Force every tracked project to rescan (after control actions). Pruned
+   *  projects stay pruned: the control's own events revive their bridge if
+   *  work actually resumed. */
   async refreshAll(): Promise<void> {
     await Promise.all([...this.bridges.values()].map((bridge) => bridge.refresh()));
   }
@@ -463,6 +567,9 @@ export class ActivityRegistry {
   disposeAll(): void {
     for (const bridge of this.bridges.values()) bridge.dispose();
     this.bridges.clear();
+    this.retired.clear();
     this.activeCwd = null;
+    if (this.sweepTimer) clearInterval(this.sweepTimer);
+    this.sweepTimer = null;
   }
 }

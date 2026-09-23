@@ -1,8 +1,10 @@
 // Per-project settings: default-bot copy, staffed roster, free-speak flag.
 // Storage: userData/projects/<hash>/settings.json (override dir with
 // BABYLON_PROJECTS_DIR for tests). Project folders on disk are never touched.
-// Identity key is the project hash (see projectHashForCwd); exact folder path
-// means renames read as new projects (fresh snapshot, old state orphaned).
+// Identity is path-scoped and disposable by design: the key is the hash of
+// the exact folder path, so renaming a project starts it fresh (the old
+// entry is orphaned, never migrated). The stored projectPath is informational
+// only — it is never used for lookup.
 
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
@@ -26,7 +28,9 @@ export function projectHashForCwd(cwd: string): string {
   try {
     resolved = normalizeProjectPathForComparison(realpathSync(normalized));
   } catch {
-    // Missing/unreadable path: hash the spelling; first successful open rekeys.
+    // Missing/unreadable path: hash the spelling as-is. There is no
+    // migration: if the path later resolves differently it keys a different
+    // (fresh) entry — see the module header.
   }
   return createHash("sha256").update(resolved).digest("hex").slice(0, 24);
 }

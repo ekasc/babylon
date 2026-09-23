@@ -6,6 +6,7 @@ import { readSessionRange, readSessionTail, type SessionIndex } from "./sessions
 import { mergeRecaps, mergeRecapsIntoWindow, type Recap } from "./recap";
 import { wireOf, wireStr } from "../src/store";
 import { validateSessionPath } from "./session-path";
+import { isSessionNotFound } from "../src/lib/errors";
 import { buildBotSystemPrompt } from "../src/bots";
 import type { BotStore } from "./bots";
 import type { TaskManager } from "./task-manager";
@@ -122,7 +123,7 @@ export function registerSessionsIpc(
           // lexically (still containment-checked) and let PiHost sync from
           // the in-memory session instead of rejecting a session we own.
           const missing =
-            err instanceof Error && err.message === "session path does not exist" &&
+            isSessionNotFound(err) &&
             typeof opts.path === "string" && opts.path.endsWith(".jsonl");
           const lexical = missing ? resolve(opts.path) : null;
           const rel = lexical ? relative(resolve(sessionsRoot), lexical) : "";

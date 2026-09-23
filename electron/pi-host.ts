@@ -17,6 +17,7 @@ import { join, resolve } from "node:path";
 import { projectHistory } from "./session-history";
 import { ActiveRollback, RollbackStore, entryDigest, missingCheckpointReason, type Ledger, type TurnCheckpoint } from "./rollback-store";
 import { validateSessionPath, contained } from "./session-path";
+import { isSessionNotFound } from "../src/lib/errors";
 import { SnapshotStore, isBookkeepingPath, type RestoreChange, type SnapshotCapture } from "./snapshot-store";
 import { createGoalModeExtension, isExternalGoalModeExtension } from "./goal-mode/extension";
 import { createDesignModeExtension } from "./design-mode/extension";
@@ -1351,7 +1352,7 @@ export class PiHost implements LocalPiHost {
       try {
         await validateSessionPath(this.opts.sessionsRoot, opts.path);
       } catch (error: unknown) {
-        if (error instanceof Error && error.message === "session path does not exist") {
+        if (isSessionNotFound(error)) {
           if (!contained(this.opts.sessionsRoot, resolve(opts.path))) {
             throw new Error("session path is outside this instance's sessions root");
           }

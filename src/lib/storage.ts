@@ -26,8 +26,12 @@ export function setWithFallback(key: string, value: string): void {
 }
 
 export function removeWithFallback(key: string): void {
-  localStorage.removeItem(`babylon:${key}`);
-  cache.delete(`babylon:${key}`);
+  // Both namespaces: removing only `babylon:` would let a legacy `pideck:`
+  // value resurrect on the next read.
+  for (const fullKey of [`babylon:${key}`, `pideck:${key}`]) {
+    localStorage.removeItem(fullKey);
+    cache.delete(fullKey);
+  }
 }
 
 /** Drop all cached reads (cross-document edits, tests). */

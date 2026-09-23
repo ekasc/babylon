@@ -204,6 +204,9 @@ interface Props {
   /** Project display name for the empty-conversation heading. When omitted
    *  the generic heading is used. */
   projectName?: string | null;
+  /** Owning session identity (path). The virtualization latch resets when
+   *  this changes — same contract as Composer's draft key. */
+  sessionKey?: string | null;
 }
 
 
@@ -224,6 +227,7 @@ export default memo(function ChatView({
   roomName = "",
   showSpeakers = false,
   projectName = null,
+  sessionKey = null,
   streamResponses = false,
   pinNonce = 0,
 }: Props) {
@@ -512,16 +516,21 @@ export default memo(function ChatView({
     return nextCards;
   }, [shown, historyById]);
   const latestChanged = useMemo(() => [...historyTurns].reverse().find((turn) => turn.changedCount > 0), [historyTurns]);
-  // Virtualization decision, latched per transcript load: flipping
+  // Virtualization decision, latched per session: flipping
   // content-visibility mid-stream collapses offscreen size estimates and
   // yanks scrollHeight under the follow logic (one flaky stranded-above-
-  // bottom per crossing). Keyed on the transcript identity (first item key),
-  // so it re-evaluates only when the transcript empties (new chat / session
-  // switch), never while a session grows. A render-phase ref mutation used
-  // to do this; a memo is safe under concurrent rendering.
-  const loadId = items.length === 0 ? "" : (items[0]?.key ?? "");
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const longChat = useMemo(() => items.length > 60, [loadId]);
+  // bottom per crossing). Explicit state, not useMemo: memo values may be
+  // discarded at any time, and the old first-item-key changed whenever
+  // earlier history loaded. The latch resets on session switch (or when the
+  // transcript empties mid-switch) and engages once the transcript is long.
+  const [longChat, setLongChat] = useState(false);
+  useEffect(() => {
+    setLongChat(false);
+  }, [sessionKey]);
+  useEffect(() => {
+    if (items.length === 0) setLongChat(false);
+    else if (items.length > 60) setLongChat(true);
+  }, [items.length]);
 
   // t3-style turn folding: each user message starts a turn. Settled turns
   // (not the live one) collapse behind a single "Worked for" row.

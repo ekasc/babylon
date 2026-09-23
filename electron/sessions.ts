@@ -91,6 +91,13 @@ export class SessionIndex {
     this.listeners.clear();
   }
 
+  /** Owning project cwd for a session file from the index cache (sync).
+   *  Null when the file hasn't been indexed yet — callers fall back to
+   *  task/daemon lookups, never to a disk scan on the event path. */
+  cwdForSessionFile(path: string): string | null {
+    return this.cache.get(path)?.info.cwd ?? null;
+  }
+
   /** Re-index immediately after an in-process write instead of waiting for fs.watch. */
   touch(): void {
     this.scheduleRescan(40, "host");

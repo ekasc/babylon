@@ -231,3 +231,27 @@ describe("in-transcript find bar", () => {
     expect(input.isConnected).toBe(false);
   });
 });
+
+describe("virtualization latch", () => {
+  const many = (n: number): ChatItem[] =>
+    Array.from({ length: n }, (_, i) => ({ kind: "user", key: `u${i}`, text: `msg ${i}`, entryId: `e${i}` }));
+  const longOn = () => document.querySelector(".chat-item-long") != null;
+
+  it("latches on past 60 items, stays on while shrinking, resets on session switch", async () => {
+    const { rerender } = render(<ChatView items={many(61)} streaming={false} sessionKey="s1" />);
+    await waitFor(() => expect(longOn()).toBe(true));
+    // Shrinking below the threshold does not unlatch mid-session.
+    rerender(<ChatView items={many(5)} streaming={false} sessionKey="s1" />);
+    expect(longOn()).toBe(true);
+    // Emptying (new chat) unlatches.
+    rerender(<ChatView items={[]} streaming={false} sessionKey="s1" />);
+    expect(longOn()).toBe(false);
+  });
+
+  it("session switch unlatches even without emptying", async () => {
+    const { rerender } = render(<ChatView items={many(61)} streaming={false} sessionKey="s1" />);
+    await waitFor(() => expect(longOn()).toBe(true));
+    rerender(<ChatView items={many(61)} streaming={false} sessionKey="s2" />);
+    await waitFor(() => expect(longOn()).toBe(false));
+  });
+});

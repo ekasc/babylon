@@ -156,33 +156,45 @@ export function SimSidebar() {
     return rows.sort((a, b) => a.port - b.port);
   }, [procs]);
 
-  // Liveness probes: refresh ports whose result is missing or stale.
+  // Liveness probes: refresh ports whose result is missing or stale, then
+  // schedule the next expiration. Staleness is time-driven (self-scheduling
+  // timeout, live only while the sidebar is mounted), never dependent on
+  // the server list changing.
+  const serversRef = useRef(servers);
+  serversRef.current = servers;
+  const probesRef = useRef(probes);
+  probesRef.current = probes;
   useEffect(() => {
-    const now = Date.now();
-    const stale = [...new Set(servers.map((s) => s.port))].filter((port) => {
-      const prev = probes[port];
-      return !prev || now - prev.at > PROBE_TTL_MS;
-    });
-    if (!stale.length) return;
     let cancelled = false;
-    void (async () => {
-      const next: Record<number, { open: boolean; at: number }> = {};
-      await Promise.all(
-        stale.map(async (port) => {
-          try {
-            const r = await bridge.simProbe(port);
-            next[port] = { open: r.open, at: Date.now() };
-          } catch {
-            /* probe failed: leave stale */
-          }
-        })
-      );
-      if (!cancelled && Object.keys(next).length) setProbes((p) => ({ ...p, ...next }));
-    })();
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const run = async () => {
+      timer = null;
+      const now = Date.now();
+      const stale = [...new Set(serversRef.current.map((s) => s.port))].filter((port) => {
+        const prev = probesRef.current[port];
+        return !prev || now - prev.at > PROBE_TTL_MS;
+      });
+      if (!cancelled && stale.length) {
+        const next: Record<number, { open: boolean; at: number }> = {};
+        await Promise.all(
+          stale.map(async (port) => {
+            try {
+              const r = await bridge.simProbe(port);
+              next[port] = { open: r.open, at: Date.now() };
+            } catch {
+              /* probe failed: leave stale */
+            }
+          })
+        );
+        if (!cancelled && Object.keys(next).length) setProbes((p) => ({ ...p, ...next }));
+      }
+      if (!cancelled) timer = setTimeout(run, PROBE_TTL_MS);
+    };
+    void run();
     return () => {
       cancelled = true;
+      if (timer) clearTimeout(timer);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [servers]);
 
   const activeTab = tabs.find((t) => t.id === activeId) ?? null;

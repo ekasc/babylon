@@ -28,7 +28,7 @@ import {
 } from "./app-selectors";
 import { insertCommand } from "./commands";
 import { countRunningWork } from "./lib/activity";
-import { errorMessage } from "./lib/errors";
+import { errorMessage, isSessionNotFound } from "./lib/errors";
 import Sidebar from "./components/Sidebar";
 import { useTheme } from "./components/hooks/useTheme";
 import { useRollback } from "./components/hooks/useRollback";
@@ -1172,8 +1172,7 @@ export default function App() {
       } catch (e) {
         if (expectedEpoch !== epochRef.current) return;
         switchingRef.current = false;
-        const missingFile =
-          path != null && errorMessage(e, "").includes("session path does not exist");
+        const missingFile = path != null && isSessionNotFound(e);
         if (missingFile) {
           // Stale sidebar index or persisted tab: the transcript file is
           // gone. Evict every tab pointing at it, forget it per space,
@@ -2386,6 +2385,7 @@ export default function App() {
                   roomName={activeGroup?.name ?? ""}
                   showSpeakers={sharedSpeakers}
                   projectName={chatProjectName}
+                  sessionKey={activeSessionPath ?? status.sessionPath ?? null}
                   streamResponses={streamResponses}
                   historyTurns={history.turns}
                   pinNonce={pinNonce}
