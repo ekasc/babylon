@@ -344,21 +344,6 @@ export default function App() {
   // phased design flow for this session, same strip pattern as the goal.
   const { designStatus, setDesignStatus, designTargetRef, refreshDesign, designControl } = useDesignMode(toast);
 
-  // Stable identity so the memoized Sidebar does not re-render every frame.
-  const renameSession = useCallback(
-    async (path: string) => {
-      const name = await promptText({ title: "Rename chat", prefill: headerName ?? undefined, placeholder: "Session name" });
-      if (!name) return;
-      if (path === activeSessionPath) {
-        void bridge.setSessionName(name);
-        return;
-      }
-      toast("info", "Open the chat to rename it");
-    },
-    [headerName, activeSessionPath, toast]
-  );
-
-
   // Failed-transition attention: a thread/subagent that newly reports
   // interrupted/failed marks its owning sessions unread. Only transitions
   // observed while running count (seeded silently), so restarts and old
@@ -444,6 +429,23 @@ export default function App() {
       if (groups.length === 0) toast("error", errorMessage(e, "couldn't load sessions"));
     }
   });
+
+  // Stable identity so the memoized Sidebar does not re-render every frame.
+  // Path-addressed: renames foreground, retained-idle, and never-opened
+  // sessions alike — the backend resolves ownership, no need to open first.
+  const renameSession = useCallback(
+    async (path: string) => {
+      const name = await promptText({ title: "Rename chat", prefill: headerName ?? undefined, placeholder: "Session name" });
+      if (!name) return;
+      try {
+        await bridge.renameSession(path, name);
+        void refreshSessions();
+      } catch (e) {
+        toast("error", errorMessage(e, "could not rename chat"));
+      }
+    },
+    [headerName, promptText, refreshSessions, toast]
+  );
 
   const togglePalette = useCallback((next: boolean | ((v: boolean) => boolean)) => {
     const apply = () => setShowCommandPalette(next);
@@ -2021,7 +2023,8 @@ export default function App() {
 
   // Tabs for the one right sidebar. Browser tabs mirror the backend tab list:
   // the backend stays the tab manager, the strip is only its UI. The other
-  // features open a fresh pane per tab. A grid tile always opens a new tab.
+  // features are singletons: selecting one focuses its tab when open,
+  // creates it when not (never duplicates).
   type SideFeature = "browser" | "branches" | "activity" | "canvas";
   type SideTab = { key: string; feature: SideFeature; backendTabId?: string; mermaid?: string | null };
 
@@ -2088,6 +2091,21 @@ export default function App() {
       }
     },
     [sideTabs, toast]
+  );
+
+  // Singleton select for branches/activity/canvas: focus the open tab, else
+  // create it. (Browser keeps always-new tabs; it has its own backend list.)
+  const selectFeatureTab = useCallback(
+    (feature: SideFeature) => {
+      if (feature === "browser") {
+        openFeatureTab(feature);
+        return;
+      }
+      const existing = [...sideTabs].reverse().find((t) => t.feature === feature)?.key;
+      if (existing) focusSideTab(existing);
+      else openFeatureTab(feature);
+    },
+    [sideTabs, focusSideTab, openFeatureTab]
   );
 
   const closeSideTab = useCallback(
@@ -2187,6 +2205,7 @@ export default function App() {
     const live = tab.feature === "browser" ? browserTabs.find((t) => t.id === tab.backendTabId) : undefined;
     return {
       key: tab.key,
+      feature: tab.feature,
       label: live ? browserTabLabel(live) : (item?.label ?? tab.feature),
       icon: item?.icon ?? null,
       loading: live?.loading ?? false,
@@ -2238,11 +2257,19 @@ export default function App() {
         event.preventDefault();
         toggleFeatureTab("activity");
         setSideOpen(true);
+      } else if (command && event.shiftKey && event.key.toLowerCase() === "c") {
+        // Copy the active session path (mirrors the session menu item).
+        // Never hijacks typing: inputs keep their native behavior.
+        const ae = document.activeElement;
+        if (ae instanceof HTMLInputElement || ae instanceof HTMLTextAreaElement || (ae instanceof HTMLElement && ae.isContentEditable)) return;
+        if (!activeSessionPath) return;
+        event.preventDefault();
+        copySession("path", { id: activeSessionPath, path: activeSessionPath, cwd: status.cwd ?? "", mtime: Date.now() });
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [toggleFeatureTab]);
+  }, [toggleFeatureTab, copySession, activeSessionPath, status.cwd]);
 
   const onOpenTree = useCallback(() => {
     if (!ready || !hasSession) return;
@@ -2591,7 +2618,7 @@ export default function App() {
             tabs={stripTabs}
             activeKey={activeSideTab}
             onOpen={(id) => {
-              if (id === "browser" || id === "branches" || id === "activity" || id === "canvas") openFeatureTab(id);
+              if (id === "browser" || id === "branches" || id === "activity" || id === "canvas") selectFeatureTab(id);
             }}
             onFocus={focusSideTab}
             onCloseTab={closeSideTab}

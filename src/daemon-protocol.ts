@@ -103,6 +103,7 @@ export const KNOWN_MESSAGE_TYPES = [
   "pi.getSettings",
   "pi.setSettings",
   "pi.setSessionName",
+  "pi.renameSession",
   "pi.compact",
   "pi.getTree",
   "pi.getHistory",

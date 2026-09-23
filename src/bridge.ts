@@ -656,6 +656,8 @@ export interface Bridge {
   getThinkingLevels(): Promise<string[]>;
   listFonts(): Promise<string[]>;
   setSessionName(name: string): Promise<unknown>;
+  /** Path-addressed rename (any session, no need to open it first). */
+  renameSession(path: string, name: string): Promise<unknown>;
   compact(): Promise<unknown>;
 
   getTree(): Promise<{ rows: SessionTreeRow[]; leafId: string | null }>;
@@ -911,6 +913,7 @@ export const bridge: Bridge = window.pideck ?? {
   getThinkingLevels: () => Promise.resolve([]),
   listFonts: () => Promise.resolve([]),
   setSessionName: () => Promise.resolve(),
+  renameSession: () => Promise.resolve(),
   compact: () => Promise.resolve(),
 
   getTree: () => Promise.resolve({ rows: [], leafId: null }),

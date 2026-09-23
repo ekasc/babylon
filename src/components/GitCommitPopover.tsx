@@ -14,7 +14,6 @@ export default function GitCommitPopover({ cwd, onClose, toast, onChanged }: Pro
   const [busy, setBusy] = useState(false);
   const [preview, setPreview] = useState<{ subject: string; body: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [confirming, setConfirming] = useState(false);
   const [fileCount, setFileCount] = useState<number | null>(null);
 
   useEffect(() => {
@@ -66,30 +65,17 @@ export default function GitCommitPopover({ cwd, onClose, toast, onChanged }: Pro
             {preview.body && <p className="mt-1.5 whitespace-pre-wrap text-[13px] leading-relaxed text-dim">{preview.body}</p>}
           </div>
         )}
-        <div className="relative mt-4 flex items-center gap-2">
+        <div className="mt-4 flex items-center gap-2">
           <button onClick={onClose} className="rounded-md px-3 py-1.5 text-[13px] text-dim hover:bg-inset">
             Cancel
           </button>
           <button
-            onClick={() => {
-              if (!confirming) setConfirming(true);
-              else void onCommitPush();
-            }}
+            onClick={() => void onCommitPush()}
             disabled={busy}
             className="ml-auto rounded-lg bg-accent px-5 py-2 text-[13px] font-semibold text-bg shadow-sm hover:bg-accent/90 disabled:opacity-40"
           >
-            {busy ? "Committing…" : confirming ? "Confirm?" : "Commit & push"}
+            {busy ? "Committing…" : fileCount !== null ? `Commit & push ${fileCount} file${fileCount === 1 ? "" : "s"}` : "Commit & push"}
           </button>
-          {confirming && !busy && (
-            <div className="absolute bottom-full right-0 mb-2 w-64 rounded-lg border border-line bg-popover p-3 shadow-xl" role="dialog" aria-label="Confirm commit">
-              <p className="text-[13px] font-medium">{fileCount !== null ? `Push ${fileCount} file${fileCount === 1 ? "" : "s"}?` : "Push?"}</p>
-              <p className="mt-1 text-[12px] text-dim">Stage all, commit, and push.</p>
-              <div className="mt-2 flex justify-end gap-1.5">
-                <button onClick={() => setConfirming(false)} className="rounded-md px-2.5 py-1 text-[12px] text-dim hover:bg-inset hover:text-fg">Cancel</button>
-                <button onClick={() => void onCommitPush()} className="rounded-md bg-accent px-3 py-1 text-[12px] font-semibold text-bg hover:bg-accent/90">Confirm</button>
-              </div>
-            </div>
-          )}
         </div>
     </ModalDialog>
   );

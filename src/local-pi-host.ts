@@ -42,6 +42,7 @@ export interface LocalPiHost {
   getSettings(): Promise<PiSettings>;
   setSettings(patch: Partial<PiSettings>): Promise<PiSettings>;
   setSessionName(name: string): Promise<unknown>;
+  renameSession(sessionFile: string, name: string): Promise<unknown>;
   compact(customInstructions?: string): Promise<unknown>;
   getTree(): Promise<{ rows: SessionTreeRow[]; leafId: string | null }>;
   getHistory(): Promise<HistoryProjection>;

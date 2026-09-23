@@ -130,6 +130,7 @@ export function createLocalRuntime(opts: {
       return piHost.setSettings(toSettingsPatch(p));
     },
     async setSessionName(n) { return piHost.setSessionName(n); },
+    async renameSession(f, n) { return piHost.renameSession(f, n); },
     async compact() { return piHost.compact(); },
     async getTree() { return piHost.getTree(); },
     async getHistory() { return piHost.getHistory(); },

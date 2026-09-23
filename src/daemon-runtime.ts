@@ -338,6 +338,10 @@ export function createDaemonRuntime(client: DaemonClient): RuntimeFacade {
       const res = await client.request("pi.setSessionName", { name: n });
       return res.payload;
     },
+    async renameSession(f, n) {
+      const res = await client.request("pi.renameSession", { sessionFile: f, name: n });
+      return res.payload;
+    },
     async compact() {
       const res = await client.request("pi.compact", {});
       return res.payload;

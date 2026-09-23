@@ -17,7 +17,7 @@ import { join, resolve } from "node:path";
 import { projectHistory } from "./session-history";
 import { ActiveRollback, RollbackStore, entryDigest, missingCheckpointReason, type Ledger, type TurnCheckpoint } from "./rollback-store";
 import { validateSessionPath, contained } from "./session-path";
-import { isSessionNotFound } from "../src/lib/errors";
+import { isSessionNotFound, SessionNotFoundError } from "../src/lib/errors";
 import { SnapshotStore, isBookkeepingPath, type RestoreChange, type SnapshotCapture } from "./snapshot-store";
 import { createGoalModeExtension, isExternalGoalModeExtension } from "./goal-mode/extension";
 import { createDesignModeExtension } from "./design-mode/extension";
@@ -2326,6 +2326,70 @@ export class PiHost implements LocalPiHost {
       await this.commitActiveRollback(entry.runtime.session.sessionId);
       return {};
     });
+  }
+
+  /** Retained entry by file, tolerant of spelling (canonical vs lexical). */
+  private findEntry(sessionFile: string): SessionEntry | undefined {
+    return (
+      this.sessions.get(sessionFile) ??
+      [...this.sessions.values()].find((entry) => resolve(entry.sessionFile) === resolve(sessionFile))
+    );
+  }
+
+  /**
+   * Rename any session by file — foreground, retained-idle, or never-opened.
+   * Retained sessions go through the live runtime (same append + rollback
+   * commit as setSessionName, entry-scoped so the live manager stays
+   * coherent). Never-opened sessions get a session_info entry appended via
+   * a short-lived manager: no runtime is created and the foreground never
+   * moves. Throws for unknown (not on disk, not owned) paths.
+   */
+  async renameSession(sessionFile: string, name: string): Promise<unknown> {
+    if (typeof name !== "string" || name.length < 1 || name.length > 500) throw new Error("invalid session name");
+    const retained = this.findEntry(sessionFile);
+    if (retained) {
+      const file = retained.sessionFile;
+      return this.enqueueTransition(file, async () => {
+        await this.ensureSession();
+        const live = this.sessions.get(file) ?? retained;
+        live.runtime.session.setSessionName(name);
+        await this.commitActiveRollback(live.runtime.session.sessionId);
+        return {};
+      });
+    }
+    let target = sessionFile;
+    if (this.opts.sessionsRoot) {
+      try {
+        target = await validateSessionPath(this.opts.sessionsRoot, sessionFile);
+      } catch (error: unknown) {
+        if (!isSessionNotFound(error)) throw error;
+        // Owned but unflushed (canonical future path): resolve lexically,
+        // still containment-checked — same fallback as open().
+        const lexical = resolve(sessionFile);
+        if (!contained(this.opts.sessionsRoot, lexical) || !this.findEntry(lexical)) throw error;
+        target = lexical;
+      }
+    }
+    const raced = this.findEntry(target);
+    if (raced) {
+      const file = raced.sessionFile;
+      return this.enqueueTransition(file, async () => {
+        await this.ensureSession();
+        const live = this.sessions.get(file) ?? raced;
+        live.runtime.session.setSessionName(name);
+        await this.commitActiveRollback(live.runtime.session.sessionId);
+        return {};
+      });
+    }
+    // SessionManager.open tolerates missing files (in-memory manager), so
+    // verify existence here: renaming a path with nothing behind it must
+    // fail loudly, not resolve vacuously.
+    if ((await this.fingerprintSessionFile(target)) === null) {
+      throw new SessionNotFoundError(target);
+    }
+    const manager = SessionManager.open(target, undefined, undefined);
+    manager.appendSessionInfo(name);
+    return {};
   }
 
   // -------------------------------------------------------------------------

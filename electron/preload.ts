@@ -101,6 +101,7 @@ const api: Bridge = {
   getThinkingLevels: (): Promise<string[]> => ipcRenderer.invoke("pideck:get-thinking-levels"),
   listFonts: (): Promise<string[]> => ipcRenderer.invoke("pideck:list-fonts"),
   setSessionName: (name: string) => ipcRenderer.invoke("pideck:set-session-name", name),
+  renameSession: (path: string, name: string) => ipcRenderer.invoke("pideck:rename-session", { path, name }),
   compact: () => ipcRenderer.invoke("pideck:compact"),
   getSettings: () => ipcRenderer.invoke("pideck:get-settings"),
   setSettings: (patch) => ipcRenderer.invoke("pideck:set-settings", patch),

@@ -61,6 +61,21 @@ export function registerSessionsIpc(
     });
   };
   handle("pideck:list-sessions", () => sessionIndex.list());
+
+  handle("pideck:rename-session", async (_e, opts: { path: string; name: string }) => {
+    if (!opts || typeof opts.path !== "string" || opts.path.length < 1 || opts.path.length > 4096) {
+      throw new Error("invalid session path");
+    }
+    if (typeof opts.name !== "string" || opts.name.length < 1 || opts.name.length > 500) {
+      throw new Error("invalid session name");
+    }
+    // Path-addressed: works for foreground, retained-idle, and never-opened
+    // sessions alike — no need to open the chat first. PiHost resolves and
+    // validates; the index touch republishes the list with the new name.
+    const result = await getRuntime().renameSession(opts.path, opts.name);
+    sessionIndex.touch();
+    return result;
+  });
   handle("pideck:get-session-messages", async (_e, path: string) => {
     const target = await validateSessionPath(sessionsRoot, path);
     const window = await readSessionTail(target);

@@ -669,6 +669,75 @@ describe("PiHost independent session execution", () => {
   }, 120_000);
 });
 
+describe("PiHost.renameSession", () => {
+  const seedPersistedFile = async (host: PiHost, cwd: string): Promise<string> => {
+    const file = await makeSessionFile(cwd);
+    await host.open({ path: file, cwd });
+    const manager = host.testSessions().get(file)!.runtime.session.sessionManager;
+    manager.appendMessage({ role: "user", content: [{ type: "text", text: "seed" }], timestamp: Date.now() });
+    const assistantId = manager.appendMessage({
+      role: "assistant",
+      content: [{ type: "text", text: "seeded" }],
+      api: "test",
+      provider: "test",
+      model: "test",
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: "stop",
+      timestamp: Date.now(),
+    });
+    (manager as unknown as { _persist: (entry: unknown) => void })._persist(manager.getEntry(assistantId));
+    return file;
+  };
+
+  it("renames a retained-idle session without moving the foreground", async () => {
+    const a = await makeProject("rename-a");
+    const b = await makeProject("rename-b");
+    const { host } = makeHost(a.cwd, a.agentDir);
+    await host.start();
+    try {
+      const fileA = await seedPersistedFile(host, a.cwd);
+      const fileB = await seedPersistedFile(host, b.cwd);
+      await host.open({ path: fileB, cwd: b.cwd });
+      expect(host.activeSessionFile).toBe(fileB);
+      await host.renameSession(fileA, "Idle chat");
+      expect(host.testSessions().get(fileA)!.runtime.session.sessionManager.getSessionName()).toBe("Idle chat");
+      expect(host.activeSessionFile).toBe(fileB);
+    } finally {
+      await host.dispose();
+    }
+  }, 60_000);
+
+  it("renames a never-opened session without creating a runtime", async () => {
+    const a = await makeProject("rename-cold");
+    const { host } = makeHost(a.cwd, a.agentDir);
+    await host.start();
+    try {
+      const file = await seedPersistedFile(host, a.cwd);
+      expect(await host.releaseSession(file)).toBe(true);
+      expect(host.testSessions().size).toBe(0);
+      await host.renameSession(file, "Cold chat");
+      expect(host.testSessions().size).toBe(0);
+      expect(host.activeSessionFile).toBeNull();
+      expect(SessionManager.open(file, undefined, a.cwd).getSessionName()).toBe("Cold chat");
+    } finally {
+      await host.dispose();
+    }
+  }, 60_000);
+
+  it("rejects unknown paths and blank names", async () => {
+    const a = await makeProject("rename-bad");
+    const { host } = makeHost(a.cwd, a.agentDir);
+    await host.start();
+    try {
+      await expect(host.renameSession(join(a.cwd, "nope.jsonl"), "x")).rejects.toThrow();
+      const file = await makeSessionFile(a.cwd);
+      await expect(host.renameSession(file, "")).rejects.toThrow("invalid session name");
+    } finally {
+      await host.dispose();
+    }
+  }, 60_000);
+});
+
 describe("drain for restart", () => {
   function liveSession(streaming: boolean): SessionEntry {
     // The drain path only reads isStreaming/sessionId; the fake carries

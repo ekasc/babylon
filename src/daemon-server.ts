@@ -118,6 +118,7 @@ export interface DaemonPiHost {
   getSettings(): Promise<PiSettings>;
   setSettings(patch: Partial<PiSettings>): Promise<PiSettings>;
   setSessionName(name: string): Promise<unknown>;
+  renameSession(sessionFile: string, name: string): Promise<unknown>;
   compact(customInstructions?: string): Promise<unknown>;
   getTree(): Promise<unknown>;
   getHistory(): Promise<unknown>;
@@ -812,6 +813,12 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
             case "pi.setSessionName": {
               const { name } = request.payload as { name: string };
               payload = await piHost.setSessionName(name);
+              break;
+            }
+            case "pi.renameSession": {
+              const { sessionFile, name } = request.payload as { sessionFile: string; name: string };
+              if (typeof sessionFile !== "string" || typeof name !== "string") throw new Error("invalid rename payload");
+              payload = await piHost.renameSession(sessionFile, name);
               break;
             }
             case "pi.compact":

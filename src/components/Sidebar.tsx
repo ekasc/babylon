@@ -8,6 +8,7 @@ import {
 	BlockedIcon,
 	BranchIcon,
 	ChatIcon,
+	CheckIcon,
 	ChevronIcon,
 	ClockIcon,
 	FlaskIcon,
@@ -423,6 +424,20 @@ export function ThreadMenu(props: {
 								>
 									{unread ? "Mark read" : "Mark unread"}
 								</Menu.Item>
+								<Menu.Item
+									closeOnClick={false}
+									className="thread-menu-item"
+									onClick={() => {
+										props.onCopy(
+											"path",
+											session,
+										);
+										onClose();
+									}}
+								>
+									<span>Copy path</span>
+									<kbd className="ml-auto text-[12px] text-dim">⌘⇧C</kbd>
+								</Menu.Item>
 								<div className="relative">
 									<Menu.SubmenuRoot>
 										<Menu.SubmenuTrigger className="thread-menu-item">
@@ -440,19 +455,6 @@ export function ThreadMenu(props: {
 												className="thread-menu-sub"
 												style={{ position: "static" }}
 											>
-												<Menu.Item
-													closeOnClick={false}
-													className="thread-menu-item"
-													onClick={() => {
-														props.onCopy(
-															"path",
-															session,
-														);
-														onClose();
-													}}
-												>
-													Path
-												</Menu.Item>
 												<Menu.Item
 													closeOnClick={false}
 													className="thread-menu-item"
@@ -951,6 +953,20 @@ const SessionRow = memo(function SessionRow(props: RowProps) {
 	return (
 		<div className={rowClass} style={rowStyle}>
 			{button}
+			{canSettle(execution) && !settled ? (
+				<button
+					type="button"
+					onClick={(e) => {
+						e.stopPropagation();
+						props.onSettle(session.path);
+					}}
+					title="Settle chat"
+					aria-label={`Settle ${title}`}
+					className="grid shrink-0 place-items-center rounded-md p-1.5 text-dim opacity-0 transition-opacity hover:bg-inset hover:text-fg focus-visible:opacity-100 group-hover/session:opacity-100"
+				>
+					<CheckIcon size={13} />
+				</button>
+			) : null}
 			{menuPortal}
 		</div>
 	);

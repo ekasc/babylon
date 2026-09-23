@@ -57,6 +57,9 @@ export interface RuntimeFacade {
   getSettings(): Promise<unknown>;
   setSettings(patch: unknown): Promise<unknown>;
   setSessionName(name: string): Promise<unknown>;
+  /** Path-addressed rename: retained sessions go through their live runtime,
+   *  never-opened files get a session_info append. Never moves foreground. */
+  renameSession(sessionFile: string, name: string): Promise<unknown>;
   compact(): Promise<unknown>;
   getTree(): Promise<unknown>;
   getHistory(): Promise<HistoryProjection>;

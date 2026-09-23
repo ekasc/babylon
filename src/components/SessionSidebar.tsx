@@ -1,5 +1,6 @@
-import { useEffect, type ReactNode } from "react";
-import { PlusIcon, XIcon } from "./icons";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { CheckIcon, PlusIcon, XIcon } from "./icons";
+import { PopoverPanel, PopoverRoot, PopoverTrigger } from "./ui/Popover";
 
 // The one right sidebar. It either shows its index, a grid of the features
 // that act on the current session, or one open tab per feature instance.
@@ -24,10 +25,75 @@ export type SessionMenuItem = {
 
 export type SessionTab = {
   key: string;
+  /** Feature id, matching a SessionMenuItem id (drives the + menu's open marks). */
+  feature: string;
   label: string;
   icon: ReactNode;
   loading?: boolean;
 };
+
+/**
+ * The + menu: jump straight to a feature (focus-or-create, same as a grid
+ * tile) without the transient grid screen in between.
+ */
+function FeaturePlusMenu({
+  items,
+  tabs,
+  onOpen,
+}: {
+  items: SessionMenuItem[];
+  tabs: SessionTab[];
+  onOpen(id: string): void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const openFeatures = new Set(tabs.map((t) => t.feature));
+  return (
+    <div ref={rootRef} className="relative grid shrink-0 place-items-center self-center">
+      <PopoverRoot open={open} onOpenChange={setOpen}>
+        <PopoverTrigger
+          title="Open feature"
+          aria-label="Open feature"
+          aria-haspopup="dialog"
+          className="grid place-items-center rounded-md p-2 text-dim hover:bg-inset/60 hover:text-fg"
+        >
+          <PlusIcon size={14} />
+        </PopoverTrigger>
+        <PopoverPanel
+          container={rootRef.current}
+          side="bottom"
+          align="end"
+          sideOffset={4}
+          matchTriggerWidth={false}
+          collisionAvoidance={{ side: "none", align: "shift" }}
+          positionerClassName="z-50"
+          className="operator-popover w-[240px] max-w-[calc(100vw-32px)] p-1.5"
+        >
+          {items.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              disabled={item.disabled}
+              onClick={() => {
+                setOpen(false);
+                onOpen(item.id);
+              }}
+              title={item.hint}
+              className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] hover:bg-inset disabled:opacity-40"
+            >
+              <span className="grid shrink-0 place-items-center text-dim">{item.icon}</span>
+              <span className="min-w-0 flex-1 truncate">{item.label}</span>
+              {item.badge ? (
+                <span className="shrink-0 rounded-full bg-accent/15 px-1.5 text-[11px] tabular-nums text-accent">{item.badge}</span>
+              ) : null}
+              {openFeatures.has(item.id) ? <CheckIcon size={11} className="shrink-0 text-accent" aria-label="Open" /> : null}
+            </button>
+          ))}
+        </PopoverPanel>
+      </PopoverRoot>
+    </div>
+  );
+}
 
 export default function SessionSidebar({
   width,
@@ -48,7 +114,7 @@ export default function SessionSidebar({
   items: SessionMenuItem[];
   tabs: SessionTab[];
   activeKey: string | null;
-  /** A grid tile always opens a new tab. */
+  /** Grid tiles and the + menu focus-or-create (singletons, except browser). */
   onOpen(id: string): void;
   onFocus(key: string): void;
   onCloseTab(key: string): void;
@@ -118,15 +184,7 @@ export default function SessionSidebar({
               );
             })}
           </div>
-          <button
-            type="button"
-            onClick={onShowGrid}
-            title="Show all features"
-            aria-label="Show all features"
-            className="grid shrink-0 place-items-center self-center rounded-md p-2 text-dim hover:bg-inset/60 hover:text-fg"
-          >
-            <PlusIcon size={14} />
-          </button>
+          <FeaturePlusMenu items={items} tabs={tabs} onOpen={onOpen} />
           <button onClick={onClose} className="context-header-button shrink-0 self-center" title="Close the sidebar" aria-label="Close the sidebar">
             <XIcon size={14} />
           </button>
