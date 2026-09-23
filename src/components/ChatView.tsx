@@ -1,6 +1,22 @@
-import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ChatItem } from "../store";
 import { buildTurnFolds } from "../lib/chat-folds";
+import {
+  TURN_OVERSCAN,
+  buildTurnViewModels,
+  compensateMeasuredHeight,
+  estimateTurnHeight,
+  findTurnIndexForItem,
+  getMeasuredHeight,
+  groupContiguousRuns,
+  layoutTurns,
+  resolveVisibleTurnRange,
+  setMeasuredHeight,
+  type TurnEntry as Entry,
+  type TurnMeasurements,
+  type TurnViewModel,
+  type TurnWindow,
+} from "../lib/chat-turns";
 import { isContinuousScroll, isScrollKey, shouldBreakFollow } from "../lib/scroll-follow";
 import type { HistoryTurn } from "../bridge";
 import type { Bot } from "../bots";
@@ -90,10 +106,6 @@ import { TurnChanges } from "./TurnChanges";
 
 /** Runs of consecutive tool calls at least this long render as one collapsed row. */
 const TOOL_GROUP_MIN = 4;
-
-type Entry =
-  | { type: "single"; item: ChatItem; index: number }
-  | { type: "group"; tools: Array<Extract<ChatItem, { kind: "tool" }>>; index: number };
 
 function buildEntries(shown: ChatItem[]): Entry[] {
   const entries: Entry[] = [];
@@ -228,6 +240,12 @@ export function resolveLongChat(
   return stored.latched;
 }
 
+/**
+ * Shared empty turns list. A `historyTurns = []` default would allocate a
+ * fresh array per render, defeating the historyById/cards/foldMap memo
+ * chain (O(turns) recompute on every parent re-render).
+ */
+const NO_TURNS: HistoryTurn[] = [];
 
 export default memo(function ChatView({
   items,
@@ -235,7 +253,7 @@ export default memo(function ChatView({
   loadingEarlier = false,
   onNeedEarlier,
   streaming,
-  historyTurns = [],
+  historyTurns = NO_TURNS,
   onRollback,
   onQuote,
   onOpenLaunch,
@@ -411,6 +429,10 @@ export default memo(function ChatView({
     setQuoteSel(null);
     const el = ref.current;
     if (!el) return;
+    // Window the turn list around the new viewport (state updates only when
+    // the band actually moves, so scrolling stays cheap).
+    const next = computeWin(el.scrollTop);
+    setWin((prev) => (sameWin(prev, next) ? prev : next));
     const now = Date.now();
     const pin = lastPin.current;
     if (pin && now - pin.at < 500 && Math.abs(el.scrollTop - pin.target) < 4) {
@@ -651,6 +673,354 @@ export default memo(function ChatView({
   }, [foldMap, shown, cards]);
   const entries = useMemo(() => buildEntries(shown), [shown]);
 
+  // ---- Turn-level windowing (virtualization) ----
+  // Turns (not items) are the mount unit: settled offscreen turns become
+  // spacers, the streaming turn and find targets mount as islands. The flat
+  // entries/visibleEntries memos above stay intact (cheap array work); only
+  // DOM mounting is windowed. content-visibility remains as an extra
+  // browser-level optimization for mounted turns, never the primitive.
+  const turns = useMemo(
+    () =>
+      buildTurnViewModels({
+        entries,
+        itemCount: shown.length,
+        userIndices,
+        userIdAt: (start) => {
+          const item = shown[start];
+          return item?.kind === "user" ? (item.entryId ?? item.key) : null;
+        },
+        foldAt: (start) => foldMap.get(start),
+        liveTurnId,
+        isCollapsed: (id) => !expandedTurns.has(id) && id !== liveTurnId,
+        streaming,
+      }),
+    [entries, shown, userIndices, foldMap, liveTurnId, expandedTurns, streaming]
+  );
+
+  // Session-scoped measured heights (never shared across sessions).
+  const measureCacheRef = useRef<TurnMeasurements>(new Map());
+  const [heightsTick, setHeightsTick] = useState(0);
+  const turnHeights = useMemo(() => {
+    void heightsTick;
+    const estimate = estimateTurnHeight(measureCacheRef.current, sessionKey);
+    return turns.map((t) => getMeasuredHeight(measureCacheRef.current, sessionKey, t.id) ?? estimate);
+  }, [turns, sessionKey, heightsTick]);
+  const { offsets: turnOffsets, total: turnsTotal } = useMemo(() => layoutTurns(turnHeights), [turnHeights]);
+
+  // Live mirrors for the ResizeObserver callback (stable instance).
+  const turnsRef = useRef(turns);
+  turnsRef.current = turns;
+  const offsetsRef = useRef(turnOffsets);
+  offsetsRef.current = turnOffsets;
+  const heightsRef = useRef(turnHeights);
+  heightsRef.current = turnHeights;
+  const sessionKeyRef = useRef(sessionKey);
+  sessionKeyRef.current = sessionKey;
+
+  const [win, setWin] = useState<TurnWindow>({ start: 0, end: 0, extra: [] });
+  const lastWinSession = useRef<string | null | undefined>(undefined);
+
+  const computeWin = useCallback(
+    (
+      scrollTop: number,
+      turnsArg: TurnViewModel[] = turnsRef.current,
+      offsetsArg: number[] = offsetsRef.current,
+      heightsArg: number[] = heightsRef.current
+    ): TurnWindow => {
+      const el = ref.current;
+      const viewportHeight = el?.clientHeight ?? 800;
+      const pinned: number[] = [];
+      const liveIdx = turnsArg.findIndex((t) => t.live);
+      if (liveIdx >= 0) pinned.push(liveIdx);
+      if (findActive) {
+        const found = findTurnIndexForItem(turnsArg, findActive.index);
+        if (found >= 0) pinned.push(found);
+      }
+      return resolveVisibleTurnRange({
+        turnCount: turnsArg.length,
+        scrollTop,
+        viewportHeight,
+        offsets: offsetsArg,
+        heights: heightsArg,
+        overscanTurns: TURN_OVERSCAN,
+        pinned,
+      });
+    },
+    [findActive]
+  );
+
+  const sameWin = useCallback((a: TurnWindow, b: TurnWindow): boolean => {
+    return a.start === b.start && a.end === b.end && a.extra.join(",") === b.extra.join(",");
+  }, []);
+
+  // Recompute the window when turns, layout, ownership, or session change.
+  // A session switch resets to the bottom band (measurements retained per
+  // session); anything else re-resolves against the live scroll position so
+  // a settled user's viewport never moves under them. Layout effect (not
+  // passive): the corrected band must commit before paint, otherwise a
+  // prepend/switch flashes one wrong-band frame and the passive pin/follow
+  // effects below measure a stale scrollHeight.
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (sessionKey !== lastWinSession.current) {
+      lastWinSession.current = sessionKey;
+      const pinned: number[] = [];
+      const liveIdx = turns.findIndex((t) => t.live);
+      if (liveIdx >= 0) pinned.push(liveIdx);
+      const bottom = Math.max(0, turns.length - (TURN_OVERSCAN * 2 + 1));
+      setWin((prev) => {
+        const next: TurnWindow = {
+          start: bottom,
+          end: turns.length,
+          extra: pinned.filter((t) => t < bottom),
+        };
+        return sameWin(prev, next) ? prev : next;
+      });
+      return;
+    }
+    if (!el) return;
+    const next = computeWin(el.scrollTop);
+    setWin((prev) => (sameWin(prev, next) ? prev : next));
+  }, [turns, turnOffsets, sessionKey, findActive, liveTurnId, computeWin, sameWin]);
+
+  // Per-turn measurement. One ResizeObserver per turn container (not per
+  // message): settled turns report once and go quiet; the streaming turn
+  // reports as it grows. Height changes entirely above the viewport shift
+  // scrollTop by the delta (anchor preservation); anything else only
+  // refreshes the cache — notably, an expanding fold never fights the
+  // viewport because its turn contains (or sits below) the visible area.
+  const turnObserver = useRef<ResizeObserver | null>(null);
+  if (turnObserver.current === null && typeof ResizeObserver !== "undefined") {
+    turnObserver.current = new ResizeObserver((records) => {
+      const el = ref.current;
+      const session = sessionKeyRef.current;
+      let changed = false;
+      for (const record of records) {
+        const target = record.target as HTMLElement;
+        const id = target.dataset.turnId;
+        if (!id || !el) continue;
+        const idx = turnsRef.current.findIndex((t) => t.id === id);
+        if (idx < 0) continue;
+        const height = target.offsetHeight;
+        const prev = getMeasuredHeight(measureCacheRef.current, session, id);
+        if (prev !== undefined && Math.abs(prev - height) <= 0.5) continue;
+        setMeasuredHeight(measureCacheRef.current, session, id, height);
+        changed = true;
+        const offs = offsetsRef.current;
+        const turnTop = offs[idx] ?? 0;
+        const oldH = prev ?? estimateTurnHeight(measureCacheRef.current, session);
+        const adjusted = compensateMeasuredHeight({
+          scrollTop: el.scrollTop,
+          turnOffsetTop: turnTop,
+          oldHeight: oldH,
+          newHeight: height,
+        });
+        if (adjusted !== el.scrollTop) el.scrollTop = adjusted;
+      }
+      if (changed) setHeightsTick((t) => t + 1);
+    });
+  }
+  useEffect(() => () => turnObserver.current?.disconnect(), []);
+  const trackTurnEl = useCallback(
+    (id: string) => (el: HTMLDivElement | null) => {
+      const ro = turnObserver.current;
+      if (el) {
+        turnEls.current.set(id, el);
+        ro?.observe(el);
+      } else {
+        const prev = turnEls.current.get(id);
+        if (prev) ro?.unobserve(prev);
+        turnEls.current.delete(id);
+      }
+    },
+    []
+  );
+  const turnEls = useRef(new Map<string, HTMLDivElement>());
+
+  // Visible entries bucketed per turn (single pass; both sorted by index).
+  // Only mounted turns render — the window slice below selects them.
+  const turnSlices = useMemo(() => {
+    const slices: Entry[][] = turns.map(() => []);
+    const visible = entries.filter((e) => !allHiddenIndices.has(e.index));
+    let t = 0;
+    for (const entry of visible) {
+      while (t + 1 < turns.length && entry.index >= (turns[t + 1]?.start ?? Infinity)) t++;
+      const turn = turns[t];
+      if (turn && entry.index >= turn.start && entry.index < turn.end) slices[t]!.push(entry);
+    }
+    return slices;
+  }, [entries, turns, allHiddenIndices]);
+
+  // Mounted runs with spacer gaps (offsets resolved against measured or
+  // estimated heights). Turn divs below are keyed by stable turn id, so
+  // sliding the window moves DOM instead of remounting it; spacers (cheap
+  // empty divs) may remount freely.
+  const mountedRuns = useMemo(() => {
+    const all: number[] = [];
+    for (let i = win.start; i < win.end; i++) all.push(i);
+    for (const t of win.extra) all.push(t);
+    const runs = groupContiguousRuns(all.filter((i) => i >= 0 && i < turns.length));
+    const endOffset = (endEx: number) => (endEx >= turns.length ? turnsTotal : (turnOffsets[endEx] ?? turnsTotal));
+    let prevBottom = 0;
+    const decorated = runs.map((run) => {
+      const top = turnOffsets[run.start] ?? 0;
+      const gap = run.start === 0 ? 0 : Math.max(0, top - prevBottom);
+      prevBottom = endOffset(run.end);
+      return { ...run, gap };
+    });
+    return { runs: decorated, tail: Math.max(0, turnsTotal - prevBottom) };
+  }, [win, turns.length, turnOffsets, turnsTotal]);
+
+  const prevEntryBeforeTurn = useCallback(
+    (ti: number): Entry | null => {
+      for (let t = ti - 1; t >= 0; t--) {
+        const slice = turnSlices[t];
+        if (slice && slice.length > 0) return slice[slice.length - 1]!;
+      }
+      return null;
+    },
+    [turnSlices]
+  );
+
+  // One entry row (user/assistant/tool/group/card + fold bar + hidden
+  // container). Extracted verbatim from the former full-list map so mounted
+  // turns render byte-identical rows; `prev` crosses turn boundaries for the
+  // assistant divider.
+  const renderRow = (entry: Entry, prev: Entry | null) => {
+    const foldForUser = entry.type === "single" && entry.item.kind === "user" ? foldMap.get(entry.index) : undefined;
+    const isCollapsed = foldForUser ? isFoldCollapsed(foldForUser.turnId) : false;
+    const hiddenEntriesForFold = foldForUser
+      ? (() => {
+          const slice = shown.slice(foldForUser.start + 1, foldForUser.end).filter((_, i) => allHiddenIndices.has(foldForUser.start + 1 + i));
+          return slice.length ? buildEntries(slice) : [];
+        })()
+      : [];
+    return entry.type === "group" ? (
+      <Fragment key={`g-${entry.index}`}>
+        <div className={longChat ? "chat-item chat-item-long" : "chat-item"}>
+          <ToolGroup tools={entry.tools} onDisclosureToggle={suspendFollowForDisclosure} />
+        </div>
+        {cards.get(entry.index) ? (
+          <TurnChanges turn={cards.get(entry.index)!} isLatest={latestChanged?.entryId === cards.get(entry.index)!.entryId} />
+        ) : null}
+      </Fragment>
+    ) : (
+      <Fragment key={entry.item.key}>
+        <div ref={trackItemEl(entry.item.key)} className={longChat ? "chat-item chat-item-long" : "chat-item"}>
+          {(() => {
+            const prevIsTool = !!prev && (prev.type === "group" || (prev.type === "single" && (prev.item.kind === "tool" || prev.item.kind === "launch")));
+            const showTopDivider = entry.item.kind === "assistant" && prevIsTool;
+            return (
+              <>
+                {showTopDivider ? <hr className="assistant-divider" /> : null}
+                {entry.item.kind === "user" ? (
+                  <UserMessage item={entry.item} historyTurn={entry.item.entryId ? historyById.get(entry.item.entryId) : undefined} rollbackDisabled={streaming} onRollback={onRollback} hideActions={foldForUser != null} />
+                ) : entry.item.kind === "assistant" ? (
+                  <>
+                    <SpeakerHead speaker={entry.item.speaker} streaming={entry.item.streaming} roomHandle={roomHandle} members={roomMembers} isRoom={isRoom} roomName={roomName} showSpeakers={showSpeakers} />
+                    <AssistantMessage item={entry.item} hideThinking={isRoom || collapsedTerminals.has(entry.index)} />
+                  </>
+                ) : entry.item.kind === "tool" ? (
+                  <ToolCard item={entry.item} onDisclosureToggle={suspendFollowForDisclosure} />
+                ) : entry.item.kind === "recap" ? (
+                  <RecapLine text={entry.item.text} />
+                ) : entry.item.kind === "launch" ? (
+                  <LaunchCard item={entry.item} onOpen={onOpenLaunch} onControl={onControlLaunch} />
+                ) : entry.item.kind === "compaction" ? (
+                  <CompactionCard item={entry.item} />
+                ) : (
+                  <SystemLine text={entry.item.text} />
+                )}
+              </>
+            );
+          })()}
+        </div>
+        {foldForUser ? (
+          <>
+            <div className="turn-fold my-0.5 flex w-full items-center gap-2 rounded-md border-b border-line/60 px-2 py-1 text-left text-[11px] text-dim">
+              <button
+                type="button"
+                aria-expanded={isCollapsed ? "false" : "true"}
+                aria-label={isCollapsed ? `Expand ${foldForUser.hiddenCount} hidden steps: ${foldForUser.label}` : `Collapse turn: ${foldForUser.label}`}
+                onPointerDown={(e) => e.currentTarget.setPointerCapture?.(e.pointerId)}
+                onClick={() =>
+                  setExpandedTurns((prevTurns) => {
+                    suspendFollowForDisclosure();
+                    const n = new Set(prevTurns);
+                    if (isCollapsed) n.add(foldForUser.turnId);
+                    else n.delete(foldForUser.turnId);
+                    return n;
+                  })
+                }
+                className="flex min-w-0 flex-1 items-center gap-2 text-left transition-colors hover:text-fg"
+              >
+                <span className="truncate">{isCollapsed ? foldForUser.label : "Hide details"}</span>
+                <span className="ml-auto shrink-0 text-[length:var(--chat-r-11)]">{isCollapsed ? (foldForUser.hiddenCount > 0 ? `${foldForUser.hiddenCount} hidden` : "Show") : "Collapse"}</span>
+              </button>
+              {(() => {
+                // The turn's Rollback lives here, not on a floating
+                // chip: the absolutely-positioned message actions
+                // overlap this full-width row. Turns without a fold
+                // keep the floating chip in UserMessage.
+                const userEntryId = entry.item.kind === "user" ? entry.item.entryId : undefined;
+                const turn = userEntryId ? historyById.get(userEntryId) : undefined;
+                if (!onRollback || !userEntryId || !turn) return null;
+                const disabled = streaming || !turn.rollbackAvailable;
+                return (
+                  <button
+                    type="button"
+                    onClick={() => onRollback(userEntryId)}
+                    disabled={disabled}
+                    title={streaming ? "Finish or stop the active response before rolling back" : turn.rollbackReason ?? "Rollback conversation and files from this turn"}
+                    className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-dim hover:text-fg disabled:opacity-40"
+                  >
+                    Rollback
+                  </button>
+                );
+              })()}
+            </div>
+            <div
+              className="grid transition-[grid-template-rows] duration-200 ease-[cubic-bezier(0.2,0.8,0.2,1)] will-change-[grid-template-rows]"
+              style={{ gridTemplateRows: isCollapsed ? "0fr" : "1fr" }}
+            >
+              <div className="overflow-hidden">
+                {hiddenEntriesForFold.map((he) =>
+                  he.type === "group" ? (
+                    <div key={`h-${he.index}`} className={longChat ? "chat-item chat-item-long" : "chat-item"}>
+                      <ToolGroup tools={he.tools} onDisclosureToggle={suspendFollowForDisclosure} />
+                    </div>
+                  ) : (
+                    <div ref={trackItemEl(he.item.key)} key={he.item.key} className={longChat ? "chat-item chat-item-long" : "chat-item"}>
+                      {he.item.kind === "user" ? (
+                        <UserMessage item={he.item} historyTurn={he.item.entryId ? historyById.get(he.item.entryId) : undefined} rollbackDisabled={streaming} onRollback={onRollback} />
+                      ) : he.item.kind === "assistant" ? (<>
+                        <SpeakerHead speaker={he.item.speaker} streaming={he.item.streaming} roomHandle={roomHandle} members={roomMembers} isRoom={isRoom} roomName={roomName} showSpeakers={showSpeakers} />
+                        <AssistantMessage item={he.item} hideThinking={isRoom} />
+                      </>) : he.item.kind === "tool" ? (
+                        <ToolCard item={he.item} onDisclosureToggle={suspendFollowForDisclosure} />
+                      ) : he.item.kind === "recap" ? (
+                        <RecapLine text={he.item.text} />
+                      ) : he.item.kind === "launch" ? (
+                        <LaunchCard item={he.item} onOpen={onOpenLaunch} onControl={onControlLaunch} />
+                      ) : he.item.kind === "compaction" ? (
+                        <CompactionCard item={he.item} />
+                      ) : (
+                        <SystemLine text={he.item.text} />
+                      )}
+                    </div>
+                  )
+                )}
+              </div>
+            </div>
+          </>
+        ) : null}
+        {!foldForUser || !isCollapsed ? (cards.get(entry.index) ? (
+          <TurnChanges turn={cards.get(entry.index)!} isLatest={latestChanged?.entryId === cards.get(entry.index)!.entryId} />
+        ) : null) : null}
+      </Fragment>
+    );
+  };
+
   return (
     <div className="relative flex flex-1 min-h-0 flex-col">
       <div
@@ -690,144 +1060,24 @@ export default memo(function ChatView({
             <p>{streaming ? "Preparing this session…" : "Describe the change, question, or outcome you want."}</p>
           </div>
         ) : null}
-        {(() => {
-          const visibleEntries = entries.filter((e) => !allHiddenIndices.has(e.index));
-          return visibleEntries.map((entry, idx) => {
-            const foldForUser = entry.type === "single" && entry.item.kind === "user" ? foldMap.get(entry.index) : undefined;
-            const isCollapsed = foldForUser ? isFoldCollapsed(foldForUser.turnId) : false;
-            const hiddenEntriesForFold = foldForUser
-              ? (() => {
-                  const slice = shown.slice(foldForUser.start + 1, foldForUser.end).filter((_, i) => allHiddenIndices.has(foldForUser.start + 1 + i));
-                  return slice.length ? buildEntries(slice) : [];
-                })()
-              : [];
-            return entry.type === "group" ? (
-              <Fragment key={`g-${entry.index}`}>
-                <div className={longChat ? "chat-item chat-item-long" : "chat-item"}>
-                  <ToolGroup tools={entry.tools} onDisclosureToggle={suspendFollowForDisclosure} />
-                </div>
-                {cards.get(entry.index) ? (
-                  <TurnChanges turn={cards.get(entry.index)!} isLatest={latestChanged?.entryId === cards.get(entry.index)!.entryId} />
-                ) : null}
-              </Fragment>
-            ) : (
-              <Fragment key={entry.item.key}>
-                <div ref={trackItemEl(entry.item.key)} className={longChat ? "chat-item chat-item-long" : "chat-item"}>
-                  {(() => {
-                    const prev = idx > 0 ? visibleEntries[idx - 1] : null;
-                    const prevIsTool = !!prev && (prev.type === "group" || (prev.type === "single" && (prev.item.kind === "tool" || prev.item.kind === "launch")));
-                    const showTopDivider = entry.item.kind === "assistant" && prevIsTool;
-                    return (
-                      <>
-                        {showTopDivider ? <hr className="assistant-divider" /> : null}
-                        {entry.item.kind === "user" ? (
-                          <UserMessage item={entry.item} historyTurn={entry.item.entryId ? historyById.get(entry.item.entryId) : undefined} rollbackDisabled={streaming} onRollback={onRollback} hideActions={foldForUser != null} />
-                        ) : entry.item.kind === "assistant" ? (
-                          <>
-                            <SpeakerHead speaker={entry.item.speaker} streaming={entry.item.streaming} roomHandle={roomHandle} members={roomMembers} isRoom={isRoom} roomName={roomName} showSpeakers={showSpeakers} />
-                            <AssistantMessage item={entry.item} hideThinking={isRoom || collapsedTerminals.has(entry.index)} />
-                          </>
-                        ) : entry.item.kind === "tool" ? (
-                          <ToolCard item={entry.item} onDisclosureToggle={suspendFollowForDisclosure} />
-                        ) : entry.item.kind === "recap" ? (
-                          <RecapLine text={entry.item.text} />
-                        ) : entry.item.kind === "launch" ? (
-                          <LaunchCard item={entry.item} onOpen={onOpenLaunch} onControl={onControlLaunch} />
-                        ) : entry.item.kind === "compaction" ? (
-                          <CompactionCard item={entry.item} />
-                        ) : (
-                          <SystemLine text={entry.item.text} />
-                        )}
-                      </>
-                    );
-                  })()}
-                </div>
-                {foldForUser ? (
-                  <>
-                    <div className="turn-fold my-0.5 flex w-full items-center gap-2 rounded-md border-b border-line/60 px-2 py-1 text-left text-[11px] text-dim">
-                      <button
-                        type="button"
-                        aria-expanded={isCollapsed ? "false" : "true"}
-                        aria-label={isCollapsed ? `Expand ${foldForUser.hiddenCount} hidden steps: ${foldForUser.label}` : `Collapse turn: ${foldForUser.label}`}
-                        onPointerDown={(e) => e.currentTarget.setPointerCapture?.(e.pointerId)}
-                        onClick={() =>
-                          setExpandedTurns((prev) => {
-                            suspendFollowForDisclosure();
-                            const n = new Set(prev);
-                            if (isCollapsed) n.add(foldForUser.turnId);
-                            else n.delete(foldForUser.turnId);
-                            return n;
-                          })
-                        }
-                        className="flex min-w-0 flex-1 items-center gap-2 text-left transition-colors hover:text-fg"
-                      >
-                        <span className="truncate">{isCollapsed ? foldForUser.label : "Hide details"}</span>
-                        <span className="ml-auto shrink-0 text-[length:var(--chat-r-11)]">{isCollapsed ? (foldForUser.hiddenCount > 0 ? `${foldForUser.hiddenCount} hidden` : "Show") : "Collapse"}</span>
-                      </button>
-                      {(() => {
-                        // The turn's Rollback lives here, not on a floating
-                        // chip: the absolutely-positioned message actions
-                        // overlap this full-width row. Turns without a fold
-                        // keep the floating chip in UserMessage.
-                        const userEntryId = entry.item.kind === "user" ? entry.item.entryId : undefined;
-                        const turn = userEntryId ? historyById.get(userEntryId) : undefined;
-                        if (!onRollback || !userEntryId || !turn) return null;
-                        const disabled = streaming || !turn.rollbackAvailable;
-                        return (
-                          <button
-                            type="button"
-                            onClick={() => onRollback(userEntryId)}
-                            disabled={disabled}
-                            title={streaming ? "Finish or stop the active response before rolling back" : turn.rollbackReason ?? "Rollback conversation and files from this turn"}
-                            className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-dim hover:text-fg disabled:opacity-40"
-                          >
-                            Rollback
-                          </button>
-                        );
-                      })()}
-                    </div>
-                    <div
-                      className="grid transition-[grid-template-rows] duration-200 ease-[cubic-bezier(0.2,0.8,0.2,1)] will-change-[grid-template-rows]"
-                      style={{ gridTemplateRows: isCollapsed ? "0fr" : "1fr" }}
-                    >
-                      <div className="overflow-hidden">
-                        {hiddenEntriesForFold.map((he) =>
-                          he.type === "group" ? (
-                            <div key={`h-${he.index}`} className={longChat ? "chat-item chat-item-long" : "chat-item"}>
-                              <ToolGroup tools={he.tools} onDisclosureToggle={suspendFollowForDisclosure} />
-                            </div>
-                          ) : (
-                            <div ref={trackItemEl(he.item.key)} key={he.item.key} className={longChat ? "chat-item chat-item-long" : "chat-item"}>
-                              {he.item.kind === "user" ? (
-                                <UserMessage item={he.item} historyTurn={he.item.entryId ? historyById.get(he.item.entryId) : undefined} rollbackDisabled={streaming} onRollback={onRollback} />
-                              ) : he.item.kind === "assistant" ? (<>
-                                <SpeakerHead speaker={he.item.speaker} streaming={he.item.streaming} roomHandle={roomHandle} members={roomMembers} isRoom={isRoom} roomName={roomName} showSpeakers={showSpeakers} />
-                                <AssistantMessage item={he.item} hideThinking={isRoom} />
-                              </>) : he.item.kind === "tool" ? (
-                                <ToolCard item={he.item} onDisclosureToggle={suspendFollowForDisclosure} />
-                              ) : he.item.kind === "recap" ? (
-                                <RecapLine text={he.item.text} />
-                              ) : he.item.kind === "launch" ? (
-                                <LaunchCard item={he.item} onOpen={onOpenLaunch} onControl={onControlLaunch} />
-                              ) : he.item.kind === "compaction" ? (
-                                <CompactionCard item={he.item} />
-                              ) : (
-                                <SystemLine text={he.item.text} />
-                              )}
-                            </div>
-                          )
-                        )}
-                      </div>
-                    </div>
-                  </>
-                ) : null}
-                {!foldForUser || !isCollapsed ? (cards.get(entry.index) ? (
-                  <TurnChanges turn={cards.get(entry.index)!} isLatest={latestChanged?.entryId === cards.get(entry.index)!.entryId} />
-                ) : null) : null}
-              </Fragment>
+        {mountedRuns.runs.flatMap((run) => {
+          const out: ReactNode[] = [];
+          if (run.gap > 0) {
+            out.push(<div key={`sp-${run.start}`} aria-hidden="true" style={{ height: run.gap }} />);
+          }
+          for (let ti = run.start; ti < run.end; ti++) {
+            const turn = turns[ti];
+            if (!turn) continue;
+            const rows = turnSlices[ti] ?? [];
+            out.push(
+              <div key={turn.id} ref={trackTurnEl(turn.id)} data-turn-id={turn.id}>
+                {rows.map((entry, j) => renderRow(entry, j > 0 ? rows[j - 1]! : prevEntryBeforeTurn(ti)))}
+              </div>
             );
-          });
-        })()}
+          }
+          return out;
+        })}
+        {mountedRuns.tail > 0 ? <div key="sp-tail" aria-hidden="true" style={{ height: mountedRuns.tail }} /> : null}
         {(isRoom || showSpeakers) && streaming && roomHandle ? (
           <div className="chat-item">
             <p className="my-2 flex items-center gap-2 text-[12px] text-dim" aria-live="polite">
@@ -908,10 +1158,13 @@ export default memo(function ChatView({
             if (!el) return;
             setStick(true);
             lastUserScrollAt.current = 0;
+            // Mount the bottom band first so the pin measures real content
+            // rather than the bottom spacer; the pin lands after paint.
             // Instant, never smooth: a smooth flight toward a moving target
             // lands short while streaming, and the short landing then reads
             // as scrolled-up and clears the follow we just set.
-            pinToBottom();
+            setWin(computeWin(Number.MAX_SAFE_INTEGER));
+            requestAnimationFrame(() => pinToBottom());
           }}
           className="absolute bottom-4 right-4 z-10 grid h-8 w-8 place-items-center rounded-full border border-line bg-raised text-dim transition-colors hover:text-fg active:scale-[0.97]"
           aria-label="Jump to bottom"
