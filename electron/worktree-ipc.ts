@@ -15,6 +15,24 @@ import type { ProcessManager } from "./process-manager";
 
 type Handle = IpcHandle;
 
+/** Build the owner-project resolver worktree mutations use.
+ *
+ * Identity comes from the runtime's execution registry — local host or daemon —
+ * and NEVER from UI focus. A resolver failure is a failure, not an invitation to
+ * substitute whichever project the user happens to be looking at (C3).
+ */
+export function createOwnerCwdResolver(
+  getRuntime: () => RuntimeFacade
+): (sessionFile: string) => Promise<string | null> {
+  return async (sessionFile: string) => {
+    try {
+      return await getRuntime().executionCwdFor(sessionFile);
+    } catch {
+      return null;
+    }
+  };
+}
+
 export function registerWorktreeIpc(
   handle: Handle,
   deps: {

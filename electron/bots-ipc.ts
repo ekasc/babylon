@@ -407,8 +407,10 @@ export function registerBotsIpc(
       // The origin is EXPLICIT and validated against the project's real
       // ownership: a relay never lands in an arbitrary transcript, and never
       // in a historical chat that does not own its project (items 13, 14).
+      // BOTH sides are normalized: an entry may hold a lexically-spelled cwd
+      // while the ownership index is keyed by the resolved project (R1/R7).
       const originOwnerCwd = getHost().sessionCwdFor(origin);
-      if (originOwnerCwd !== projectKey(originCwd)) {
+      if (!originOwnerCwd || projectKey(originOwnerCwd) !== projectKey(originCwd)) {
         throw new Error("Return to the live session first");
       }
       // Run the target turn in the target's canonical chat.

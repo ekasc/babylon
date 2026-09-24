@@ -44,6 +44,50 @@ function makeRegistry(onUpdate: (u: ActivityUpdate) => void = () => undefined) {
   return registry;
 }
 
+describe("ActivityRegistry focus", () => {
+  it("clearFocus forgets the destination but keeps the project's live bridge", async () => {
+    const p = await makeProject("clear-focus");
+    await writeThread(p, "t1", "running", "/p/s.jsonl");
+    const registry = makeRegistry();
+    registry.ensure(p);
+    // Focused, with its bridge tracked.
+    expect(registry.tracked()).toContain(p);
+
+    registry.clearFocus();
+
+    // The bridge is NOT disposed: the project stays tracked, so live
+    // background work keeps its home...
+    expect(registry.tracked()).toContain(p);
+    // ...while an unattributed event can no longer be routed into it: with no
+    // cwd on the event and no focus, there is nowhere for it to go.
+    // An event with no identity at all: neither sessionFile nor cwd.
+    await registry.observeAgentEvent({ type: "agent_start" });
+    expect(registry.focusedCwdForTest()).toBeNull();
+    registry.disposeAll();
+  });
+
+  it("focusedCwd is null after clearFocus and restored by ensure", async () => {
+    const p = await makeProject("focus-seam");
+    const registry = makeRegistry();
+    expect(registry.focusedCwdForTest()).toBeNull();
+    registry.ensure(p);
+    expect(registry.focusedCwdForTest()).toBe(p);
+    registry.clearFocus();
+    expect(registry.focusedCwdForTest()).toBeNull();
+    registry.disposeAll();
+  });
+
+  it("focusing again restores the destination", async () => {
+    const p = await makeProject("refocus");
+    const registry = makeRegistry();
+    registry.ensure(p);
+    registry.clearFocus();
+    registry.ensure(p);
+    expect(registry.tracked()).toContain(p);
+    registry.disposeAll();
+  });
+});
+
 describe("ActivityRegistry", () => {
   it("aggregates live entries across projects; navigating never drops them", async () => {
     const a = await makeProject("a");

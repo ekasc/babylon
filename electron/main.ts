@@ -21,7 +21,7 @@ import type { WorkflowsBridgeLike } from "./activity-ipc";
 import { registerSessionsIpc } from "./sessions-ipc";
 import { registerBotsIpc } from "./bots-ipc";
 import { registerPermissionsIpc } from "./permissions-ipc";
-import { registerWorktreeIpc } from "./worktree-ipc";
+import { createOwnerCwdResolver, registerWorktreeIpc } from "./worktree-ipc";
 import { getSettings } from "./app-settings";
 import { PiHost, defaultStateDir } from "./pi-host";
 import { PermissionEngine, type AgentAction, type Risk } from "./permissions";
@@ -607,6 +607,10 @@ function clearProjectFocus(): void {
   // LSP must stop reporting the project the user just left, not keep serving
   // its diagnostics in the background.
   void lspManager.setActiveProject(null).catch(() => undefined);
+  // ...and the activity registry must stop using it as a fallback
+  // destination for unattributed events. Live work in that project keeps its
+  // bridge; only the focus is forgotten.
+  activityRegistry?.clearFocus();
 }
 
 function updateActivityBridge(cwd: string): void {
@@ -912,13 +916,7 @@ function registerIpc(): void {
     getRuntime,
     // Runtime-owner aware: the daemon owns the runtime in daemon mode, and the
     // registry answers there just as the local host does. Never UI focus.
-    ownerCwdFor: async (sessionFile) => {
-      try {
-        return await getRuntime().executionCwdFor(sessionFile);
-      } catch {
-        return null;
-      }
-    },
+    ownerCwdFor: createOwnerCwdResolver(getRuntime),
     isDaemonOwned,
     daemonOnly,
     requireDaemonClient,

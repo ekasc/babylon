@@ -102,7 +102,7 @@ export class ActivityBridge {
   private transientSubagents = new Map<string, SubagentActivity>();
   private prevThreads = new Map<string, { status?: string; blocker?: string | null; milestones?: ThreadActivity["milestones"] }>();
   private lastThreadNotify = new Map<string, number>();
-  /** Last foreground visit or routed agent event. Pure reads (list/refresh)
+  /** Last UI visit or routed agent event. Pure reads (list/refresh)
    *  never touch this: looking at a project is not evidence of live work. */
   private lastUsedAt = Date.now();
 
@@ -110,7 +110,7 @@ export class ActivityBridge {
     this.cwd = options.cwd;
   }
 
-  /** Mark the bridge as recently interesting (foreground visit, agent event). */
+  /** Mark the bridge as recently interesting (UI visit, agent event). */
   touch(): void {
     this.lastUsedAt = Date.now();
   }
@@ -128,7 +128,7 @@ export class ActivityBridge {
     return this.last.subagents.some((s) => LIVE_SUBAGENT_STATUSES.has(s.status));
   }
 
-  /** Milliseconds since the last foreground visit or routed event. */
+  /** Milliseconds since the last UI visit or routed event. */
   idleMs(now = Date.now()): number {
     return now - this.lastUsedAt;
   }
@@ -424,7 +424,7 @@ async function readTail(path: string, maxBytes: number): Promise<string> {
 /**
  * Process-wide activity observation, keyed by project.
  *
- * Foreground navigation must never stop, hide, or re-scope tracking of LIVE
+ * Navigation must never stop, hide, or re-scope tracking of LIVE
  * work: every project with running threads/subagents keeps its own poll
  * rhythm (the disk scan IS the authoritative lifecycle signal for file-backed
  * thread/subagent state — there is no push channel for their completion),
@@ -433,10 +433,10 @@ async function readTail(path: string, maxBytes: number): Promise<string> {
  * (completion, abort, deletion) — never because another project was opened.
  *
  * Idle projects do NOT poll forever: a bridge with no live work that has
- * seen neither a foreground visit nor an agent event for `idleTtlMs` is
+ * seen neither a UI visit nor an agent event for `idleTtlMs` is
  * disposed, keeping its last snapshot frozen in the aggregate (pruned
  * entries are always terminal, so the frozen rows are stable). Any new
- * event or foreground visit revives the bridge. One registry-level sweep
+ * event or UI visit revives the bridge. One registry-level sweep
  * timer replaces N per-project idle checks.
  */
 export class ActivityRegistry {
@@ -460,7 +460,7 @@ export class ActivityRegistry {
     }
   ) {}
 
-  /** Foreground a project for tracking. Creates (or revives) its bridge;
+  /** Focus a project for tracking. Creates (or revives) its bridge;
    *  never disturbs any other project's bridge. */
   ensure(cwd: string): ActivityBridge | null {
     if (!cwd) return null;
@@ -472,7 +472,20 @@ export class ActivityRegistry {
     return bridge;
   }
 
-  /** Get-or-create WITHOUT foregrounding: event routing and revives use
+  /** Forget the focused project WITHOUT disposing its bridge. When the UI has
+   *  no Space selected there is no fallback destination, so an unattributed
+   *  event must not land in the project the user just left. Live background
+   *  work stays tracked and keeps its bridge. */
+  clearFocus(): void {
+    this.activeCwd = null;
+  }
+
+  /** Test seam: the project unattributed events would fall back to. */
+  focusedCwdForTest(): string | null {
+    return this.activeCwd;
+  }
+
+  /** Get-or-create WITHOUT changing focus: event routing and revives use
    *  this so background work never steals `activeCwd`. */
   private getOrCreate(cwd: string): ActivityBridge | null {
     if (!cwd) return null;
@@ -556,7 +569,7 @@ export class ActivityRegistry {
   /** Route a live event to its owning project, resolved from the stamped
    *  session file — NOT from UI focus. Background sessions keep their own
    *  transient rows. Events with no attributable session (e.g. aggregate
-   *  notifications) fall back to the foregrounded project, the previous
+   *  notifications) fall back to the focused project, the previous
    *  behavior. Routing revives a pruned bridge and marks it live. */
   async observeAgentEvent(event: AgentEvent): Promise<void> {
     const sessionFile = wireStr(event, "sessionFile");

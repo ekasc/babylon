@@ -191,6 +191,39 @@ describe("C10 retention: bot and group opens claim execution", () => {
     }
   }, 60_000);
 
+  it("a DM accepts an origin that owns its project through a lexical cwd spelling", async () => {
+    // R1/R7: "/p" and "/p/." are ONE project. The origin validation compares
+    // normalized keys on both sides, so an entry created through the lexical
+    // spelling is still a legitimate origin.
+    const p = await makeProject("bot-dm-lexical");
+    const host = makeHost(p.cwd, p.agentDir);
+    await host.start();
+    try {
+      const botStore = new BotStore(join(p.state, "bots.json"));
+      const target = botStore.create({ name: "target", cwd: p.cwd });
+      const h = makeHarness(host, botStore, new ProjectSettingsStore(join(p.state, "projects")), p.state, p.cwd);
+
+      // Activate through the lexical spelling: the entry records it verbatim.
+      const lexical = `${p.cwd}/.`;
+      const owner = await host.activateExecution(lexical);
+      expect(host.testSessions().get(owner.sessionFile)?.cwd).toBe(lexical);
+      expect(host.testExecutionByCwd().get(p.cwd)).toBe(owner.sessionFile);
+
+      // The renderer addresses the canonical spelling; ownership still matches.
+      await h.invoke("pideck:bots-message", {
+        targetId: target.id,
+        text: "hi",
+        originSessionFile: owner.sessionFile,
+        originCwd: p.cwd,
+      });
+      expect(host.testExecutionByCwd().get(p.cwd)).toBe(owner.sessionFile);
+      expect(host.testSessions().size).toBe(1);
+      host.testAssertRetentionInvariant();
+    } finally {
+      await host.dispose();
+    }
+  }, 60_000);
+
   it("an idle project's bot chat becomes its single execution owner", async () => {
     const p = await makeProject("bot-idle");
     const host = makeHost(p.cwd, p.agentDir);
