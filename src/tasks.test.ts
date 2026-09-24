@@ -41,18 +41,18 @@ describe("task-owned worktrees", () => {
 
   it("updates immutably", () => {
     const r = updateTask(withTask(), "t1", { status: "running", dirty: true });
-    expect(r.tasks.t1.status).toBe("running");
-    expect(r.tasks.t1.dirty).toBe(true);
-    expect(withTask().tasks.t1.status).toBe("proposed");
+    expect(r.tasks.t1?.status).toBe("running");
+    expect(r.tasks.t1?.dirty).toBe(true);
+    expect(withTask().tasks.t1?.status).toBe("proposed");
   });
 
   it("tracks terminals and checkpoints without duplicates", () => {
     let r = addTerminal(withTask(), "t1", "term-1");
     r = addTerminal(r, "t1", "term-1"); // duplicate ignored
     r = addTerminal(r, "t1", "term-2");
-    expect(r.tasks.t1.terminalIds).toEqual(["term-1", "term-2"]);
+    expect(r.tasks.t1?.terminalIds).toEqual(["term-1", "term-2"]);
     r = addCheckpoint(r, "t1", "cp-1");
-    expect(r.tasks.t1.checkpointIds).toEqual(["cp-1"]);
+    expect(r.tasks.t1?.checkpointIds).toEqual(["cp-1"]);
   });
 
   it("removes a task from the registry", () => {
@@ -64,16 +64,18 @@ describe("task-owned worktrees", () => {
     const r = withTask();
     const dup = createTask({ id: "t1", title: "Other" });
     expect(addTask(r, dup)).toBe(r);
-    expect(r.tasks.t1.title).toBe("Refactor auth");
+    expect(r.tasks.t1?.title).toBe("Refactor auth");
   });
 
   it("returns clones from listTasks so the registry is not mutated", () => {
     const r = withTask();
     const listed = listTasks(r);
-    listed[0].status = "completed";
-    listed[0].terminalIds.push("x");
-    expect(r.tasks.t1.status).toBe("proposed");
-    expect(r.tasks.t1.terminalIds).toEqual([]);
+    const first = listed[0];
+    if (!first) throw new Error("missing task");
+    first.status = "completed";
+    first.terminalIds.push("x");
+    expect(r.tasks.t1?.status).toBe("proposed");
+    expect(r.tasks.t1?.terminalIds).toEqual([]);
   });
 
   it("removeTask is a no-op reference when the id is absent", () => {
@@ -88,8 +90,16 @@ describe("task-owned worktrees", () => {
 
   it("isRemovable reflects the dirty flag", () => {
     const dirty = updateTask(withTask(), "t1", { dirty: true });
-    expect(isRemovable(dirty.tasks.t1)).toBe(false);
-    expect(isRemovable(withTask().tasks.t1)).toBe(true);
+    {
+      const t = dirty.tasks.t1;
+      if (!t) throw new Error("missing task");
+      expect(isRemovable(t)).toBe(false);
+    }
+    {
+      const t = withTask().tasks.t1;
+      if (!t) throw new Error("missing task");
+      expect(isRemovable(t)).toBe(true);
+    }
   });
 
   it("lists all and by owner", () => {

@@ -11,8 +11,21 @@ import { mapToolToAction } from "./permission-agent";
 import type { BabylonPermissionController } from "./permissions";
 import type { HookManager } from "./hook-manager";
 
+/** The agent surface the permission hook wraps (subset of the SDK agent). */
+export interface GuardedAgent {
+  beforeToolCall?:
+    | ((ctx: AgentHookContext, signal: AbortSignal | undefined) => Promise<unknown>)
+    | undefined;
+}
+
+export interface AgentHookContext {
+  toolCall?: { name?: string } | null;
+  args?: unknown;
+  [key: string]: unknown;
+}
+
 export function installPermissionHook(
-  agent: any,
+  agent: GuardedAgent,
   controller: BabylonPermissionController,
   cwd: string
 ): void {
@@ -20,11 +33,11 @@ export function installPermissionHook(
 }
 
 export function installAgentGuards(
-  agent: any,
+  agent: GuardedAgent,
   opts: { controller: BabylonPermissionController; cwd: string; hookManager?: HookManager; sessionId?: string; taskId?: string }
 ): void {
   const originalBefore = agent.beforeToolCall?.bind(agent);
-  agent.beforeToolCall = async (ctx: any, signal: any) => {
+  agent.beforeToolCall = async (ctx: AgentHookContext, signal: AbortSignal | undefined) => {
     const hookManager = opts.hookManager;
     if (hookManager) {
       const outcome = await hookManager.dispatch(
@@ -53,12 +66,12 @@ export function installAgentGuards(
 
     const action = mapToolToAction(ctx?.toolCall?.name ?? "", ctx?.args, opts.cwd);
     if (action) {
-      const result = opts.controller.evaluate(action);
+      const result = opts.controller.evaluate(action, opts.sessionId);
       if (result.decision === "deny") {
         return { block: true, reason: result.reason ?? "Blocked by Babylon permission policy" };
       }
       if (result.decision === "ask") {
-        const allowed = await opts.controller.requestApproval(action, result.risk ?? "uncertain");
+        const allowed = await opts.controller.requestApproval(action, result.risk ?? "uncertain", opts.sessionId);
         if (!allowed) return { block: true, reason: "Denied by user approval" };
       }
     }

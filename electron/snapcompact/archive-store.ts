@@ -142,8 +142,8 @@ export class ArchiveStore {
         const buf = await fsp.readFile(fp);
         frames.push({ index: meta.index, width: meta.width, height: meta.height, png: buf, sourceOffset: meta.sourceOffset, sourceEnd: meta.sourceEnd });
       }
-    } catch (err: any) {
-      throw new ArchiveIntegrityError(`snapcompact archive frame file missing: ${err?.message ?? String(err)}`);
+    } catch (err: unknown) {
+      throw new ArchiveIntegrityError(`snapcompact archive frame file missing: ${err instanceof Error ? err.message : String(err)}`);
     }
     return {
       version: MANIFEST_VERSION,
@@ -165,7 +165,7 @@ export class ArchiveStore {
       lastKeptEntryId: raw.lastKeptEntryId ?? raw.coveredThroughMessageId,
       keptCount: raw.keptCount ?? frames.length,
       omittedTrailing: raw.omittedTrailing ?? [],
-      textFallback: (raw as any).textFallback ?? "",
+      textFallback: raw.textFallback ?? "",
     };
   }
 
@@ -191,7 +191,7 @@ export class ArchiveStore {
       gmap.set(archive.compactionGenerationId, archive);
       this.genCache.set(k, gmap);
       return archive;
-    } catch (err: any) {
+    } catch (err: unknown) {
       if (err instanceof ArchiveIntegrityError) {
         this.cache.set(k, null);
         throw err;
@@ -243,7 +243,7 @@ export class ArchiveStore {
       map2.set(generationId, archive);
       this.genCache.set(k, map2);
       return archive;
-    } catch (err: any) {
+    } catch (err: unknown) {
       if (err instanceof ArchiveIntegrityError) {
         const map2 = this.genCache.get(k) ?? new Map();
         map2.set(generationId, null);
@@ -319,7 +319,7 @@ export class ArchiveStore {
         lastKeptEntryId: archive.lastKeptEntryId,
         keptCount: archive.keptCount,
         omittedTrailing: archive.omittedTrailing,
-        textFallback: (archive as any).textFallback ?? "",
+        textFallback: archive.textFallback ?? "",
       };
       // Also write a per-generation snapshot so loadGeneration can
       // reconstruct older branches without the active manifest.

@@ -40,20 +40,20 @@ describe("process registry", () => {
 
   it("updates fields immutably", () => {
     const r = updateProcess(withProcess(), "p1", { pid: 999 });
-    expect(r.processes.p1.pid).toBe(999);
-    expect(withProcess().processes.p1.pid).toBe(1234);
+    expect(r.processes.p1?.pid).toBe(999);
+    expect(withProcess().processes.p1?.pid).toBe(1234);
   });
 
   it("dedupes and sorts detected ports", () => {
     let r = detectPorts(withProcess(), "p1", [5173, 3000]);
     r = detectPorts(r, "p1", [5173, 8080]);
-    expect(r.processes.p1.detectedPorts).toEqual([3000, 5173, 8080]);
+    expect(r.processes.p1?.detectedPorts).toEqual([3000, 5173, 8080]);
   });
 
   it("terminates into history without losing the record", () => {
     const r = terminateProcess(withProcess(), "p1", { exitedAt: 200, exitCode: 0, state: "exited" });
-    expect(r.processes.p1.state).toBe("exited");
-    expect(r.processes.p1.exitCode).toBe(0);
+    expect(r.processes.p1?.state).toBe("exited");
+    expect(r.processes.p1?.exitCode).toBe(0);
     expect(listHistory(r)).toHaveLength(1);
     expect(listActive(r)).toHaveLength(0);
   });

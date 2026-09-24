@@ -22,7 +22,7 @@ describe("babylon runtime authority", () => {
     r = { ...r, tasks: addTask(r.tasks, createTask({ id: "t1", title: "x" })) as TaskRegistry };
     const json = snapshotRuntime(r);
     const restored = restoreRuntime(json);
-    expect(restored.tasks.tasks.t1.title).toBe("x");
+    expect(restored.tasks.tasks.t1?.title).toBe("x");
     expect(restored.version).toBe(RUNTIME_VERSION);
   });
 
@@ -41,6 +41,19 @@ describe("babylon runtime authority", () => {
     const r = restoreRuntime(bad);
     expect(r.tasks.tasks).toEqual({});
     expect(r.version).toBe(RUNTIME_VERSION);
+  });
+
+  it("rejects corrupt registry entries instead of restoring them", () => {
+    const bad = JSON.stringify({
+      version: RUNTIME_VERSION,
+      tasks: { tasks: { t1: { id: "t1" } } },
+      attention: { items: { a1: { id: "a1", title: "x", createdAt: "now", resolved: false } } },
+      contracts: { c1: { id: "c1", title: "y" } },
+    });
+    const r = restoreRuntime(bad);
+    expect(r.tasks.tasks).toEqual({});
+    expect(r.attention.items).toEqual({});
+    expect(r.contracts).toEqual({});
   });
 
   it("drops unknown/tampered keys on restore", () => {

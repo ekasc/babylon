@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { bridge } from "../bridge";
 import type { Dialog } from "../store";
+import { errorMessage } from "../lib/errors";
 
 interface Props {
   dialogs: Dialog[];
@@ -20,13 +21,14 @@ export default function DialogHost({ dialogs, onDismiss, toast }: Props) {
   // Composer now handles select/input/editor (ask_question) inline — only
   // render confirm and other non-inline dialogs here to avoid blocking chat.
   const filtered = dialogs.filter((d) => d.method !== "select" && d.method !== "input" && d.method !== "editor");
-  if (!filtered.length) return null;
+  const first = filtered[0];
+  if (first === undefined) return null;
   return (
     <div
       className="pointer-events-none fixed inset-x-0 z-40 flex flex-col items-center px-6"
       style={{ bottom: "var(--dock-bottom, 188px)" }}
     >
-      <DialogCard key={filtered[0].id} dialog={filtered[0]} onDismiss={onDismiss} toast={toast} />
+      <DialogCard key={first.id} dialog={first} onDismiss={onDismiss} toast={toast} />
     </div>
   );
 }
@@ -47,8 +49,8 @@ function DialogCard({
     onDismiss(dialog.id);
     try {
       await bridge.uiRespond({ id: dialog.id, ...payload });
-    } catch (e: any) {
-      toast("error", e?.message ?? "failed to answer extension dialog");
+    } catch (e) {
+      toast("error", errorMessage(e, "failed to answer extension dialog"));
     }
   };
 
@@ -78,8 +80,8 @@ function DialogCard({
       aria-labelledby={`dialog-title-${dialog.id}`}
       className="operator-popover pointer-events-auto w-full max-w-md p-4"
     >
-      <h2 id={`dialog-title-${dialog.id}`} className="text-[14px] font-semibold tracking-tight">{dialog.title ?? "Extension request"}</h2>
-      {dialog.message && <p className="mt-1 text-[12.5px] text-dim">{dialog.message}</p>}
+      <h2 id={`dialog-title-${dialog.id}`} className="text-[14px] font-semibold tracking-tight break-words">{dialog.title ?? "Extension request"}</h2>
+      {dialog.message && <div className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md border border-line/60 bg-inset/40 px-3 py-2 text-[13px] leading-[1.6] text-dim">{dialog.message}</div>}
 
       <div className="mt-3">
         {dialog.method === "select" && (
@@ -98,12 +100,12 @@ function DialogCard({
 
         {dialog.method === "confirm" && (
           <div className="flex justify-end gap-2">
-            <button onClick={cancel} className="rounded-lg border border-line px-3 py-1.5 text-[12.5px]">
+            <button onClick={cancel} className="rounded-lg border border-line px-3 py-1.5 text-[13px]">
               Cancel
             </button>
             <button
               onClick={() => void respond({ confirmed: true })}
-              className="rounded-lg bg-accent px-3 py-1.5 text-[12.5px] font-semibold text-bg"
+              className="rounded-lg bg-accent px-3 py-1.5 text-[13px] font-semibold text-bg"
             >
               Confirm
             </button>
@@ -131,12 +133,12 @@ function DialogCard({
               />
             )}
             <div className="flex justify-end gap-2">
-              <button onClick={cancel} className="rounded-lg border border-line px-3 py-1.5 text-[12.5px]">
+              <button onClick={cancel} className="rounded-lg border border-line px-3 py-1.5 text-[13px]">
                 Cancel
               </button>
               <button
                 onClick={() => void respond({ value })}
-                className="rounded-lg bg-accent px-3 py-1.5 text-[12.5px] font-semibold text-bg"
+                className="rounded-lg bg-accent px-3 py-1.5 text-[13px] font-semibold text-bg"
               >
                 Submit
               </button>

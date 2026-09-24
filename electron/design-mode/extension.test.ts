@@ -1,0 +1,107 @@
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { createDesignModeExtension } from "./extension";
+import { createDesignState, loadDesignState, saveDesignState } from "./store";
+
+const roots: string[] = [];
+afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))));
+
+const SESSION_ID = "test-session-01";
+
+function mockCtx() {
+  return {
+    hasUI: true,
+    ui: { notify: vi.fn(), setStatus: vi.fn() },
+  } as unknown as ExtensionCommandContext;
+}
+
+async function makeProject(tag: string) {
+  const root = await mkdtemp(join(tmpdir(), `pideck-design-${tag}-`));
+  roots.push(root);
+  const cwd = join(root, "project");
+  await mkdir(cwd, { recursive: true });
+  return { root, cwd };
+}
+
+async function seedDesign(cwd: string, subject = "Redesign settings") {
+  const state = createDesignState(subject, "redesign-settings");
+  await saveDesignState(cwd, SESSION_ID, state);
+  return state;
+}
+
+describe("approval moved to the review surface", () => {
+  it("no longer offers a CLI approve subcommand", async () => {
+    const { cwd } = await makeProject("no-cli-approve");
+    await seedDesign(cwd);
+    const ext = createDesignModeExtension({
+      getCwd: () => cwd,
+      getSessionId: () => SESSION_ID,
+      sendFollowUp: () => undefined,
+    });
+    const handler = ext.commands?.get("design")?.handler;
+    const ctx = mockCtx();
+    // A stale scripted invocation is inert, not a silent approval.
+    await handler!("approve-brief", ctx);
+    expect((await loadDesignState(cwd, SESSION_ID))?.briefApproved).toBe(false);
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/Usage/), "warning");
+  });
+});
+
+describe("design_set_target tool", () => {
+  it("records web, mobile-web, and native", async () => {
+    const { cwd } = await makeProject("target");
+    await seedDesign(cwd);
+    const ext = createDesignModeExtension({
+      getCwd: () => cwd,
+      getSessionId: () => SESSION_ID,
+      sendFollowUp: () => undefined,
+    });
+    const tool = ext.tools?.get("design_set_target");
+    expect(tool).toBeDefined();
+    const execute = tool!.definition.execute;
+    for (const target of ["mobile-web", "native", "web"] as const) {
+      const result = await execute("call-1", { target }, undefined, undefined, {} as unknown as ExtensionContext);
+      expect((await loadDesignState(cwd, SESSION_ID))?.target).toBe(target);
+      expect(JSON.stringify(result)).toMatch(new RegExp(target));
+    }
+  });
+
+  it("rejects unknown targets and missing sessions", async () => {
+    const { cwd } = await makeProject("target-bad");
+    await seedDesign(cwd);
+    const ext = createDesignModeExtension({
+      getCwd: () => cwd,
+      getSessionId: () => SESSION_ID,
+      sendFollowUp: () => undefined,
+    });
+    const execute = ext.tools?.get("design_set_target")?.definition.execute;
+    expect(execute).toBeDefined();
+    await expect(execute!("call-1", { target: "desktop" }, undefined, undefined, {} as unknown as ExtensionContext)).rejects.toThrow(/web, mobile-web, or native/);
+    await expect(execute!("call-1", {}, undefined, undefined, {} as unknown as ExtensionContext)).rejects.toThrow();
+    expect((await loadDesignState(cwd, SESSION_ID))?.target).toBe("web");
+  });
+});
+
+describe("/design start mutual exclusion", () => {
+  it("refuses to start or resume while a goal is active", async () => {
+    const { cwd } = await makeProject("excl");
+    const { saveSessionGoal } = await import("../goal-mode/store");
+    const { createDurableGoalState, defaultDurableGoalModeConfig } = await import("../../src/lib/durable-goal");
+    await saveSessionGoal(cwd, SESSION_ID, createDurableGoalState("Fix it", defaultDurableGoalModeConfig()));
+    const ext = createDesignModeExtension({
+      getCwd: () => cwd,
+      getSessionId: () => SESSION_ID,
+      sendFollowUp: () => undefined,
+    });
+    const ctx = mockCtx();
+    const handler = ext.commands?.get("design")?.handler;
+    await handler!("start Redesign settings", ctx);
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/goal.*active/i), "warning");
+    expect(await loadDesignState(cwd, SESSION_ID)).toBeNull();
+    await handler!("resume", ctx);
+    expect(await loadDesignState(cwd, SESSION_ID)).toBeNull();
+  });
+});

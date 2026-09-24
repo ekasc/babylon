@@ -20,11 +20,15 @@ import {
   createEnvelope,
   parseEnvelope,
   serializeEnvelope,
+  toPayload,
   type ProtocolEnvelope,
 } from "./daemon-protocol";
 import { registerHook, removeHook, type HookDefinition } from "./hooks";
 import type { HookManager } from "../electron/hook-manager";
-import { createFrameDecoder, encodeFrame, type FrameDecoder } from "./daemon-transport";
+import { createFrameDecoder, encodeFrame, DEFAULT_MAX_FRAME_BYTES, type FrameDecoder } from "./daemon-transport";
+import { verifyToken } from "./remote-auth";
+import { isPlainObject } from "./lib/wire";
+import { toExecutionActivateResult, type ProjectExecution } from "./execution";
 import { dispatchRequest } from "./daemon-host";
 import {
   restoreRuntime,
@@ -45,13 +49,36 @@ import {
   type RunnerResult,
 } from "./automation-runner";
 import type { PiHost } from "../electron/pi-host";
-import { applyApproval, PermissionEngine, type AgentAction, type Risk } from "../electron/permissions";
+import { isPiDiagnostics, type PiDiagnostic } from "../electron/pi-host";
+import type { GeneratedCommitMessage } from "../electron/git-commit-message";
+import type { PreparedCommitContext } from "../electron/git";
+import type { SubagentControlAction } from "../electron/subagents";
+import type { Recap } from "../electron/recap";
+import type { PiSettings } from "./lib/settings-shared";
+import type { DurableGoalState } from "./lib/durable-goal";
+import { toSettingsPatch } from "./lib/settings-patch";
+import {
+  applyApproval,
+  isApprovalChoice,
+  isPermissionMatch,
+  isPolicyCategory,
+  PermissionEngine,
+  type AgentAction,
+  type Risk,
+} from "../electron/permissions";
 import {
   defaultPolicy,
   type BackgroundPolicy,
   type EnvironmentSignals,
 } from "./background-policy";
 import { runBackgroundTick } from "./background-controller";
+import type {
+  AgentModel,
+  AgentState,
+  CommandInfo,
+  PromptImage,
+  SessionStats,
+} from "./bridge";
 
 const SNAPSHOT_VERSION = 1;
 
@@ -67,6 +94,72 @@ export type DaemonListenOptions =
   | { socketPath: string }
   | { port: number; host?: string };
 
+/**
+ * The PiHost surface the daemon actually calls. Structural (not the
+ * concrete Electron class) so the daemon stays decoupled and tests can
+ * fake it method by method. Unknown-returning members are forwarded to
+ * the wire through toPayload, which rejects non-objects.
+ */
+export interface DaemonPiHost {
+  prompt(message: string, images: PromptImage[] | undefined, streamingBehavior: "steer" | "followUp" | undefined, sessionFile: string): Promise<unknown>;
+  /** Run a `/goal …` control invocation without opening a turn; returns the fresh durable goal. */
+  execGoalCommand(sessionFile: string, args: string): Promise<DurableGoalState | null>;
+  listProjectExecutions(): Promise<ProjectExecution[]>;
+  executionSnapshot(cwd: string): Promise<ProjectExecution | null>;
+  /** Narrow structural view of SessionEntry: the server only needs identity. */
+  activateExecution(cwd: string, sessionFile?: string, opts?: { systemPrompt?: string | null }): Promise<{ sessionFile: string; sessionId: string }>;
+  relocateExecution(sessionFile: string, fromCwd: string, toCwd: string): Promise<{ sessionFile: string; sessionId: string }>;
+  deactivateExecution(cwd: string, expectedSessionFile: string): Promise<boolean>;
+  /** Silently persist a goal objective for an addressed session (no follow-up turn). */
+  beginGoalPrompt(sessionFile: string, objective: string, message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp"): Promise<import("../src/lib/durable-goal").GoalBeginResult>;
+  /** Run a `/design …` control invocation; returns the fresh design state. */
+  execDesignCommand(sessionFile: string, args: string): Promise<import("../electron/design-mode/store").DesignStatus>;
+  designGetArtifact(sessionFile: string, kind: "brief" | "direction"): Promise<unknown>;
+  designApproveArtifact(sessionFile: string, kind: "brief" | "direction", revision: string): Promise<import("../electron/design-mode/store").DesignStatus>;
+  /** Transactional design start + first interview turn for an addressed session. */
+  beginDesignPrompt(sessionFile: string, subject: string, message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp"): Promise<import("../electron/design-mode/store").DesignBeginResult>;
+  abort(sessionFile: string): Promise<unknown>;
+  respondUi(id: string, resp: unknown): void;
+  notifyDiagnostics(cwd: string, diagnostics: PiDiagnostic[]): Promise<void>;
+  getToolOutput(sessionFile: string, toolCallId: string): Promise<{ content: string; truncated: boolean }>;
+  getModels(cwd: string): Promise<AgentModel[]>;
+  warmProject(cwd: string): { warmed: boolean };
+  setModel(sessionFile: string, provider: string, modelId: string): Promise<unknown>;
+  getThinkingLevels(sessionFile: string): Promise<string[]>;
+  setThinking(sessionFile: string, level: string): Promise<unknown>;
+  getSettings(): Promise<PiSettings>;
+  setSettings(patch: Partial<PiSettings>): Promise<PiSettings>;
+  setSessionName(sessionFile: string, name: string): Promise<unknown>;
+  renameSession(sessionFile: string, name: string): Promise<unknown>;
+  compact(sessionFile: string, customInstructions?: string): Promise<unknown>;
+  getTree(sessionFile: string): Promise<unknown>;
+  getHistory(sessionFile: string): Promise<unknown>;
+  getTurnChanges(sessionFile: string, entryId: string): Promise<unknown>;
+  getTurnFileDiff(sessionFile: string, entryId: string, path: string): Promise<unknown>;
+  prepareRollback(sessionFile: string, entryId: string): Promise<unknown>;
+  commitRollback(planId: string): Promise<unknown>;
+  undoRollback(sessionFile: string): Promise<unknown>;
+  getForkMessages(sessionFile: string): Promise<unknown[]>;
+  fork(sessionFile: string, entryId: string): Promise<unknown>;
+  clone(sessionFile: string): Promise<unknown>;
+  generateGitCommitMessage(context: PreparedCommitContext): Promise<GeneratedCommitMessage>;
+  getRecaps(sessionFile: string): Promise<Recap[]>;
+  refreshFromDisk(sessionFile: string): Promise<boolean>;
+  controlThread(action: "steer" | "follow-up" | "stop", threadId: string, message?: string): Promise<unknown>;
+  promoteThread(threadId: string): Promise<{ sessionFile: string; cwd: string; parentSessionFile: string | null }>;
+  controlSubagent(action: SubagentControlAction, runId: string, message?: string): Promise<unknown>;
+  promoteSubagent(runId: string): Promise<{ sessionFile: string; cwd: string; parentSessionFile: string | null }>;
+  getState(sessionFile: string): Promise<AgentState>;
+  getMessages(sessionFile: string): Promise<unknown[]>;
+  getStats(sessionFile: string): Promise<SessionStats>;
+  getCommands(sessionFile: string): Promise<CommandInfo[]>;
+  /** Rewire event/execution sinks (daemon broadcast attaches here). */
+  attachSinks(sinks: {
+    onEvent: (event: unknown) => void;
+    onExecutionChanged?: (execution: ProjectExecution) => void;
+  }): void;
+}
+
 export interface DaemonServerOptions {
   listen: DaemonListenOptions;
   /** Atomic JSON persistence target. Omit to run without persistence. */
@@ -77,13 +170,30 @@ export interface DaemonServerOptions {
   runAutomation?: (task: ScheduledTask) => RunnerResult;
   defaultProject?: string;
   log?: (message: string) => void;
-  piHost?: PiHost;
+  piHost?: DaemonPiHost;
   /** Permission engine enforced for daemon-owned agent sessions. */
   permissionEngine?: PermissionEngine;
+  /**
+   * SHA-256 hex of the owner bearer token. When set (TCP mode), every
+   * connection must complete `daemon.auth` before any other request;
+   * Unix-socket mode leaves it unset and keeps filesystem-permission trust.
+   */
+  authTokenHash?: string;
+  /** True while the host is draining for restart. Advertised on pong so a
+   *  newcomer waits the holder out instead of adopting a dying daemon. */
+  isDraining?: () => boolean;
   /** HookManager used by the daemon-owned PiHost. Mutating this is what
    *  makes `pre_tool_use` / `post_tool_use` actually fire on the PiHost side
    *  in daemon mode. */
   hookManager?: HookManager;
+  /** Transport frame budget, both directions. Defaults to
+   *  DEFAULT_MAX_FRAME_BYTES; tests inject a small value to exercise the
+   *  oversize guard without allocating a real transcript. */
+  maxFrameBytes?: number;
+  /** Invoked after a `daemon.shutdown` request is acknowledged. The daemon
+   *  entry point wires this to its own stop path so a newer client can retire
+   *  a daemon built from incompatible source. Omit to ignore the request. */
+  onShutdown?: () => void | Promise<void>;
 }
 
 export interface DaemonServer {
@@ -93,13 +203,23 @@ export interface DaemonServer {
   /** Run one background-policy tick now (also runs automatically on the timer). */
   tick(now?: number): Promise<void>;
   /** Request interactive approval for an agent action; resolves true to allow. */
-  requestApproval(action: AgentAction, risk: Risk): Promise<boolean>;
+  requestApproval(action: AgentAction, risk: Risk, sessionId?: string): Promise<boolean>;
   /** Flush pending persistence, stop the loop, disconnect clients, close. */
   close(): Promise<void>;
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+/** Narrow an untrusted images array to the renderer image shape. Non-image
+ *  entries are dropped; a non-array is rejected. */
+function toPromptImages(images: unknown): PromptImage[] | undefined {
+  if (images === undefined) return undefined;
+  if (!Array.isArray(images)) throw new Error("pi.prompt: images must be an array");
+  return images.flatMap((entry) => {
+    if (typeof entry !== "object" || entry === null) return [];
+    const data = (entry as Record<string, unknown>).data;
+    const mimeType = (entry as Record<string, unknown>).mimeType;
+    if (typeof data !== "string") return [];
+    return [{ data, ...(typeof mimeType === "string" ? { mimeType } : {}) }];
+  });
 }
 
 /** Fill a valid partial policy over the defaults; reject malformed input. */
@@ -165,20 +285,59 @@ const TRIGGER_KINDS = ["interval", "daily", "file_watch", "branch_watch"] as con
  */
 export function validateScheduledTask(payload: unknown): ScheduledTask | string {
   if (!isPlainObject(payload)) return "automation.registered requires a task object";
-  if (typeof payload.id !== "string" || payload.id.trim().length === 0) {
+  const { id, name, enabled, runCount, trigger: rawTrigger } = payload;
+  if (typeof id !== "string" || id.trim().length === 0) {
     return "automation.registered requires a non-empty string id";
   }
-  if (typeof payload.name !== "string") return "automation.registered requires a string name";
-  if (typeof payload.enabled !== "boolean") return "automation.registered requires a boolean enabled";
-  if (typeof payload.runCount !== "number" || !Number.isFinite(payload.runCount)) {
+  if (typeof name !== "string") return "automation.registered requires a string name";
+  if (typeof enabled !== "boolean") return "automation.registered requires a boolean enabled";
+  if (typeof runCount !== "number" || !Number.isFinite(runCount)) {
     return "automation.registered requires a finite number runCount";
   }
-  const trigger = payload.trigger;
-  if (!isPlainObject(trigger)) return "automation.registered requires a trigger object";
-  if (!TRIGGER_KINDS.includes(trigger.kind as (typeof TRIGGER_KINDS)[number])) {
-    return `automation.registered requires trigger.kind to be one of ${TRIGGER_KINDS.join(", ")}`;
+  if (!isPlainObject(rawTrigger)) return "automation.registered requires a trigger object";
+  switch (rawTrigger.kind) {
+    case "interval":
+    case "daily":
+    case "file_watch":
+    case "branch_watch":
+      break;
+    default:
+      return `automation.registered requires trigger.kind to be one of ${TRIGGER_KINDS.join(", ")}`;
   }
-  return payload as unknown as ScheduledTask;
+  const kind = rawTrigger.kind;
+  // Rebuild rather than pass through: only validated fields enter the
+  // registry, so extra socket keys can never become schedule behavior.
+  const trigger = { kind };
+  if (kind === "interval") {
+    const { intervalMs } = rawTrigger;
+    if (typeof intervalMs !== "number" || !Number.isFinite(intervalMs) || intervalMs <= 0) {
+      return "automation.registered requires a positive intervalMs for interval triggers";
+    }
+    Object.assign(trigger, { intervalMs });
+  }
+  if (kind === "daily") {
+    const { hour, minute } = rawTrigger;
+    if (
+      typeof hour !== "number" || !Number.isInteger(hour) || hour < 0 || hour > 23 ||
+      typeof minute !== "number" || !Number.isInteger(minute) || minute < 0 || minute > 59
+    ) {
+      return "automation.registered requires hour 0-23 and minute 0-59 for daily triggers";
+    }
+    Object.assign(trigger, { hour, minute });
+  }
+  if (kind === "file_watch") {
+    if (typeof rawTrigger.path !== "string" || !rawTrigger.path) {
+      return "automation.registered requires a path for file_watch triggers";
+    }
+    Object.assign(trigger, { path: rawTrigger.path });
+  }
+  if (kind === "branch_watch") {
+    if (typeof rawTrigger.branch !== "string" || !rawTrigger.branch) {
+      return "automation.registered requires a branch for branch_watch triggers";
+    }
+    Object.assign(trigger, { branch: rawTrigger.branch });
+  }
+  return { id, name, enabled, runCount, trigger };
 }
 
 function emptyState(): DaemonState {
@@ -216,13 +375,37 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
 
   const clients = new Set<net.Socket>();
   const decoders = new WeakMap<net.Socket, FrameDecoder>();
+  // Sockets that completed `daemon.auth`. Only consulted when
+  // options.authTokenHash is set (TCP mode); empty means no gate.
+  const authed = new Set<net.Socket>();
 
+  const maxFrameBytes = options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES;
   const send = (socket: net.Socket, envelope: ProtocolEnvelope): void => {
     if (socket.destroyed) return;
-    socket.write(encodeFrame(serializeEnvelope(envelope)));
+    const frame = encodeFrame(serializeEnvelope(envelope));
+    // The peer's decoder measures the line without its trailing newline.
+    if (frame.length - 1 > maxFrameBytes) {
+      log(`dropping oversized ${envelope.kind} ${envelope.type} (${frame.length} bytes)`);
+      if (envelope.kind === "response" && envelope.inReplyTo) {
+        socket.write(
+          encodeFrame(
+            serializeEnvelope(
+              createEnvelope(
+                "response",
+                "error",
+                { error: `${envelope.type} response exceeds the transport frame limit (${frame.length} bytes)` },
+                envelope.inReplyTo
+              )
+            )
+          )
+        );
+      }
+      return;
+    }
+    socket.write(frame);
   };
   const broadcast = (type: ProtocolEnvelope["type"], payload: unknown, except?: net.Socket): void => {
-    const event = createEnvelope("event", type, payload);
+    const event = createEnvelope("event", type, toPayload(payload));
     for (const client of clients) {
       if (client !== except) send(client, event);
     }
@@ -233,7 +416,7 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
   // first client to answer wins; an unanswered ask fails closed on timeout.
   const pendingApprovals = new Map<
     string,
-    { action: AgentAction; resolve: (allowed: boolean) => void; timer: NodeJS.Timeout }
+    { action: AgentAction; risk: Risk; sessionId?: string; resolve: (allowed: boolean) => void; timer: NodeJS.Timeout }
   >();
 
   const permissionSnapshot = (): { mode: string; rules: unknown[] } =>
@@ -241,7 +424,7 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
       ? { mode: options.permissionEngine.getMode(), rules: options.permissionEngine.listRules() }
       : { mode: "auto", rules: [] };
 
-  const requestApproval = (action: AgentAction, risk: Risk): Promise<boolean> =>
+  const requestApproval = (action: AgentAction, risk: Risk, sessionId?: string): Promise<boolean> =>
     new Promise<boolean>((resolve) => {
       const id = randomUUID();
       const timeoutMs = Number(process.env.PIDECK_APPROVAL_TIMEOUT_MS) || 15 * 60_000;
@@ -250,8 +433,8 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
         resolve(false);
       }, timeoutMs);
       timer.unref();
-      pendingApprovals.set(id, { action, resolve, timer });
-      broadcast("approval.requested", { id, action, risk });
+      pendingApprovals.set(id, { action, risk, sessionId, resolve, timer });
+      broadcast("approval.requested", { id, action, risk, ...(sessionId ? { sessionId } : {}) });
     });
 
   const resolveApproval = (id: string, choice: string): void => {
@@ -259,8 +442,8 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
     if (!pending) return;
     clearTimeout(pending.timer);
     pendingApprovals.delete(id);
-    if (options.permissionEngine) {
-      applyApproval(options.permissionEngine, pending.action, choice as never);
+    if (options.permissionEngine && isApprovalChoice(choice)) {
+      applyApproval(options.permissionEngine, pending.action, choice, pending.sessionId);
     }
     pending.resolve(choice !== "deny");
     broadcast("permissions.changed", permissionSnapshot());
@@ -269,9 +452,10 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
   // If a PiHost was supplied, wire its events to daemon broadcast so Electron
   // thin clients receive live agent streaming.
   if (options.piHost) {
-    const piHost = options.piHost as unknown as { opts: { onEvent: (ev: unknown) => void; onStatus: (s: unknown) => void } };
-    piHost.opts.onEvent = (ev: unknown) => broadcast("pi.event", ev);
-    piHost.opts.onStatus = (s: unknown) => broadcast("pi.session.status", s);
+    options.piHost.attachSinks({
+      onEvent: (ev: unknown) => broadcast("pi.event", ev),
+      onExecutionChanged: (execution: ProjectExecution) => broadcast("pi.executionChanged", execution),
+    });
   }
 
   const handleFrame = (socket: net.Socket, json: string): void => {
@@ -280,6 +464,40 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
       request = parseEnvelope(json);
     } catch (err) {
       send(socket, createEnvelope("response", "error", { error: err instanceof Error ? err.message : String(err) }));
+      return;
+    }
+
+    // TCP mode gates everything behind `daemon.auth`; the Unix socket keeps
+    // filesystem-permission trust and never sets authTokenHash.
+    if (options.authTokenHash && !authed.has(socket)) {
+      if (request.type !== "daemon.auth") {
+        send(socket, createEnvelope("response", "error", { error: "daemon authentication required" }, request.id));
+        return;
+      }
+      const token = (request.payload as { token?: unknown } | null)?.token;
+      if (typeof token === "string" && verifyToken(token, options.authTokenHash)) {
+        authed.add(socket);
+        send(socket, createEnvelope("response", "daemon.auth", { ok: true }, request.id));
+      } else {
+        send(socket, createEnvelope("response", "error", { error: "daemon authentication failed" }, request.id));
+      }
+      return;
+    }
+
+    if (request.type === "daemon.auth") {
+      send(socket, createEnvelope("response", "daemon.auth", { ok: true }, request.id));
+      return;
+    }
+
+    if (request.type === "daemon.shutdown") {
+      send(socket, createEnvelope("response", "daemon.shutdown", { ok: true }, request.id));
+      const shutdown = options.onShutdown;
+      if (shutdown) {
+        // Ack first: the caller is waiting on this response, and stop() tears
+        // the socket down. The timer keeps the write from racing the exit.
+        const timer = setTimeout(() => void shutdown(), 50);
+        timer.unref();
+      }
       return;
     }
 
@@ -383,8 +601,8 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
         send(socket, createEnvelope("response", "error", { error: "permission engine not available in daemon" }, request.id));
         return;
       }
-      const input = request.payload as { category?: string; decision?: string; scope?: string; match?: unknown; note?: unknown };
-      if (!input || typeof input.category !== "string" || (input.decision !== "allow" && input.decision !== "deny")) {
+      const input = request.payload as { category?: unknown; decision?: unknown; scope?: unknown; match?: unknown; note?: unknown };
+      if (!input || !isPolicyCategory(input.category) || (input.decision !== "allow" && input.decision !== "deny")) {
         send(socket, createEnvelope("response", "error", { error: "invalid rule" }, request.id));
         return;
       }
@@ -392,15 +610,31 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
         send(socket, createEnvelope("response", "error", { error: "invalid rule scope" }, request.id));
         return;
       }
+      if (input.match !== undefined && !isPermissionMatch(input.match)) {
+        send(socket, createEnvelope("response", "error", { error: "invalid rule match" }, request.id));
+        return;
+      }
+      if (input.note !== undefined && typeof input.note !== "string") {
+        send(socket, createEnvelope("response", "error", { error: "invalid rule note" }, request.id));
+        return;
+      }
       const rule = engine.addRule({
-        category: input.category as never,
+        category: input.category,
         decision: input.decision,
         scope: input.scope,
-        match: input.match as never,
-        note: input.note as never,
+        match: input.match,
+        note: input.note,
       });
-      send(socket, createEnvelope("response", "permissions.add-rule", rule, request.id));
-      broadcast("permissions.changed", permissionSnapshot());
+      void (async () => {
+        try {
+          await engine.flush();
+        } catch (err) {
+          send(socket, createEnvelope("response", "error", { error: err instanceof Error ? err.message : String(err) }, request.id));
+          return;
+        }
+        send(socket, createEnvelope("response", "permissions.add-rule", rule, request.id));
+        broadcast("permissions.changed", permissionSnapshot());
+      })();
       return;
     }
 
@@ -416,13 +650,43 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
         return;
       }
       const removed = engine.removeRule(id);
-      send(socket, createEnvelope("response", "permissions.remove-rule", { id, ok: true, removed }, request.id));
-      if (removed) broadcast("permissions.changed", permissionSnapshot());
+      void (async () => {
+        try {
+          await engine.flush();
+        } catch (err) {
+          send(socket, createEnvelope("response", "error", { error: err instanceof Error ? err.message : String(err) }, request.id));
+          return;
+        }
+        send(socket, createEnvelope("response", "permissions.remove-rule", { id, ok: true, removed }, request.id));
+        if (removed) broadcast("permissions.changed", permissionSnapshot());
+      })();
       return;
     }
 
-    if (request.type === "approval.resolved") {
-      const { id, choice } = (request.payload ?? {}) as { id?: string; choice?: string };
+    // Detached-renderer recovery: list approvals still waiting so a
+    // reloaded GUI can re-raise them (timers keep running; resolved or
+    // timed-out entries vanish from this list on their own).
+    if (request.type === "approval.list") {
+      send(
+        socket,
+        createEnvelope(
+          "response",
+          "approval.list",
+          {
+            approvals: [...pendingApprovals.entries()].map(([id, pending]) => ({
+              id,
+              action: pending.action,
+              risk: pending.risk,
+              ...(pending.sessionId ? { sessionId: pending.sessionId } : {}),
+            })),
+          },
+          request.id
+        )
+      );
+      return;
+    }
+
+    if (request.type === "approval.resolved") {      const { id, choice } = (request.payload ?? {}) as { id?: string; choice?: string };
       const validChoice =
         choice === "allow_once" || choice === "allow_session" || choice === "allow_always" || choice === "deny";
       if (!id || !validChoice) {
@@ -445,65 +709,269 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
       void (async () => {
         try {
           let payload: unknown = {};
-          switch ((request as any).type as string) {
-            case "pi.getState":
-              payload = await piHost.getState();
+          switch (request.type) {
+            case "pi.getState": {
+              const { sessionFile } = request.payload as { sessionFile?: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) {
+                send(socket, createEnvelope("response", "error", { error: "pi.getState requires { sessionFile }" }, request.id));
+                return;
+              }
+              payload = await piHost.getState(sessionFile);
               break;
-            case "pi.getMessages":
-              payload = await piHost.getMessages();
+            }
+            case "pi.getMessages": {
+              const { sessionFile } = request.payload as { sessionFile?: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) {
+                send(socket, createEnvelope("response", "error", { error: "pi.getMessages requires { sessionFile }" }, request.id));
+                return;
+              }
+              // The protocol rejects bare array payloads, so array results are
+              // wrapped under a named key (same as pi.getCommands).
+              payload = { messages: await piHost.getMessages(sessionFile) };
               break;
-            case "pi.getStats":
-              payload = await piHost.getStats();
+            }
+            case "pi.getStats": {
+              const { sessionFile } = request.payload as { sessionFile?: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) {
+                send(socket, createEnvelope("response", "error", { error: "pi.getStats requires { sessionFile }" }, request.id));
+                return;
+              }
+              payload = await piHost.getStats(sessionFile);
               break;
-            case "pi.getCommands":
+            }
+            case "pi.getCommands": {
+              const { sessionFile } = request.payload as { sessionFile?: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) {
+                send(socket, createEnvelope("response", "error", { error: "pi.getCommands requires { sessionFile }" }, request.id));
+                return;
+              }
               // The thin client's getCommands() reads payload.commands, so the
               // daemon must wrap the array rather than send it bare.
-              payload = { commands: await (piHost as any).getCommands() };
-              break;
-            case "pi.openSession": {
-              const { path, cwd, requestId } = request.payload as { path?: string; cwd: string; requestId?: number };
-              payload = await piHost.open({ path, cwd, requestId });
+              payload = { commands: await piHost.getCommands(sessionFile) };
               break;
             }
             case "pi.prompt": {
-              const { message, images, streamingBehavior } = request.payload as { message: string; images?: unknown[]; streamingBehavior?: string };
-              payload = await piHost.prompt(message, images as never, streamingBehavior as never);
+              const { message, images, streamingBehavior, sessionFile } = request.payload as { message: string; images?: unknown; streamingBehavior?: string; sessionFile?: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) {
+                send(socket, createEnvelope("response", "error", { error: "pi.prompt requires { sessionFile }" }, request.id));
+                return;
+              }
+              // Narrow the wire string to the union the host accepts rather than
+              // asserting it; an unknown value simply means "no streaming mode".
+              const behavior = streamingBehavior === "steer" || streamingBehavior === "followUp" ? streamingBehavior : undefined;
+              // PiHost.prompt resolves void on success. The envelope payload
+              // must stay an object, so ack explicitly instead of forwarding
+              // undefined through toPayload (which rejects non-objects).
+              await piHost.prompt(message, toPromptImages(images), behavior, sessionFile);
+              payload = { ok: true };
               break;
             }
-            case "pi.abort":
-              payload = await piHost.abort();
+            case "pi.abort": {
+              const { sessionFile } = request.payload as { sessionFile?: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) {
+                send(socket, createEnvelope("response", "error", { error: "pi.abort requires { sessionFile }" }, request.id));
+                return;
+              }
+              // Same void-to-object wrap as pi.prompt: PiHost.abort resolves
+              // undefined, which toPayload would reject below.
+              await piHost.abort(sessionFile);
+              payload = { ok: true };
               break;
+            }
+            case "pi.goalControl": {
+              const { sessionFile, args } = request.payload as { sessionFile?: unknown; args?: unknown };
+              if (typeof sessionFile !== "string" || typeof args !== "string") {
+                send(socket, createEnvelope("response", "error", { error: "pi.goalControl requires { sessionFile, args }" }, request.id));
+                return;
+              }
+              // Wrapped so a missing goal reads as null, never a bare
+              // non-object payload.
+              payload = { goal: await piHost.execGoalCommand(sessionFile, args) };
+              break;
+            }
+            case "pi.goalBeginPrompt": {
+              const { sessionFile, objective, message, images, streamingBehavior } = request.payload as {
+                sessionFile?: unknown; objective?: unknown; message?: unknown; images?: unknown; streamingBehavior?: unknown;
+              };
+              if (typeof sessionFile !== "string" || typeof objective !== "string" || typeof message !== "string") {
+                send(socket, createEnvelope("response", "error", { error: "pi.goalBeginPrompt requires { sessionFile, objective, message }" }, request.id));
+                return;
+              }
+              const behavior = streamingBehavior === "steer" || streamingBehavior === "followUp" ? streamingBehavior : undefined;
+              // The result already is the wire envelope ({ goal, started,
+              // error }); do not wrap it again.
+              payload = await piHost.beginGoalPrompt(sessionFile, objective, message, toPromptImages(images), behavior);
+              break;
+            }
+            case "pi.executionList":
+              payload = { executions: await piHost.listProjectExecutions() };
+              break;
+            case "pi.relocateExecution": {
+              const { sessionFile, fromCwd, toCwd } = request.payload as { sessionFile?: unknown; fromCwd?: unknown; toCwd?: unknown };
+              if (
+                typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096 ||
+                typeof fromCwd !== "string" || fromCwd.length < 1 || fromCwd.length > 4096 ||
+                typeof toCwd !== "string" || toCwd.length < 1 || toCwd.length > 4096
+              ) {
+                send(socket, createEnvelope("response", "error", { error: "pi.relocateExecution requires { sessionFile, fromCwd, toCwd }" }, request.id));
+                return;
+              }
+              const relocated = await piHost.relocateExecution(sessionFile, fromCwd, toCwd);
+              payload = { sessionFile: relocated.sessionFile, cwd: toCwd };
+              break;
+            }
+            case "pi.executionActivate": {
+              const { cwd, sessionFile, systemPrompt } = request.payload as { cwd?: unknown; sessionFile?: unknown; systemPrompt?: unknown };
+              const overlay = systemPrompt == null ? null : systemPrompt;
+              if (
+                typeof cwd !== "string" || cwd.length < 1 ||
+                (sessionFile != null && typeof sessionFile !== "string") ||
+                (overlay !== null && (typeof overlay !== "string" || overlay.length > 20_000))
+              ) {
+                send(socket, createEnvelope("response", "error", { error: "pi.executionActivate requires { cwd }" }, request.id));
+                return;
+              }
+              try {
+                await piHost.activateExecution(cwd, typeof sessionFile === "string" ? sessionFile : undefined, { systemPrompt: overlay });
+                const execution = await piHost.executionSnapshot(cwd);
+                if (!execution) throw new Error("activation produced no execution record");
+                payload = { ok: true, execution };
+              } catch (e) {
+                // Busy owners travel as a structured envelope (error classes
+                // do not survive message-only serialization); anything else
+                // falls through to the outer error sender.
+                const busy = toExecutionActivateResult(e);
+                if (!busy) throw e;
+                payload = busy;
+              }
+              break;
+            }
+            case "pi.executionDeactivate": {
+              const { cwd, expectedSessionFile } = request.payload as { cwd?: unknown; expectedSessionFile?: unknown };
+              if (typeof cwd !== "string" || cwd.length < 1 || typeof expectedSessionFile !== "string" || expectedSessionFile.length < 1) {
+                send(socket, createEnvelope("response", "error", { error: "pi.executionDeactivate requires { cwd, expectedSessionFile }" }, request.id));
+                return;
+              }
+              payload = { released: await piHost.deactivateExecution(cwd, expectedSessionFile) };
+              break;
+            }
+            case "pi.designGetArtifact": {
+              const { sessionFile, kind } = request.payload as { sessionFile?: unknown; kind?: unknown };
+              if (
+                typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096 ||
+                (kind !== "brief" && kind !== "direction")
+              ) {
+                send(socket, createEnvelope("response", "error", { error: "pi.designGetArtifact requires { sessionFile, kind }" }, request.id));
+                return;
+              }
+              payload = await piHost.designGetArtifact(sessionFile, kind);
+              break;
+            }
+            case "pi.designApproveArtifact": {
+              const { sessionFile, kind, revision } = request.payload as {
+                sessionFile?: unknown;
+                kind?: unknown;
+                revision?: unknown;
+              };
+              if (
+                typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096 ||
+                typeof revision !== "string" || revision.length < 1 || revision.length > 128 ||
+                (kind !== "brief" && kind !== "direction")
+              ) {
+                send(socket, createEnvelope("response", "error", { error: "pi.designApproveArtifact requires { sessionFile, kind, revision }" }, request.id));
+                return;
+              }
+              const approved = await piHost.designApproveArtifact(sessionFile, kind, revision);
+              payload = { design: approved.design, stage: approved.stage, maxRounds: approved.maxRounds };
+              break;
+            }
+            case "pi.designControl": {
+              const { sessionFile, args } = request.payload as { sessionFile?: unknown; args?: unknown };
+              if (typeof sessionFile !== "string" || typeof args !== "string") {
+                send(socket, createEnvelope("response", "error", { error: "pi.designControl requires { sessionFile, args }" }, request.id));
+                return;
+              }
+              // Same shape as the goal branch: missing design reads as null.
+              payload = await piHost.execDesignCommand(sessionFile, args);
+              break;
+            }
+            case "pi.designBeginPrompt": {
+              const { sessionFile, subject, message, images, streamingBehavior } = request.payload as {
+                sessionFile?: unknown; subject?: unknown; message?: unknown; images?: unknown; streamingBehavior?: unknown;
+              };
+              if (typeof sessionFile !== "string" || typeof subject !== "string" || typeof message !== "string") {
+                send(socket, createEnvelope("response", "error", { error: "pi.designBeginPrompt requires { sessionFile, subject, message }" }, request.id));
+                return;
+              }
+              const designBehavior = streamingBehavior === "steer" || streamingBehavior === "followUp" ? streamingBehavior : undefined;
+              // The result already is the wire envelope; do not wrap it again.
+              payload = await piHost.beginDesignPrompt(sessionFile, subject, message, toPromptImages(images), designBehavior);
+              break;
+            }
             case "pi.ui.respond": {
               const { id, resp } = request.payload as { id: string; resp: unknown };
-              piHost.respondUi(id, resp as never);
+              piHost.respondUi(id, resp);
               payload = { ok: true };
               break;
             }
             case "pi.notifyDiagnostics": {
-              const { diagnostics } = request.payload as { diagnostics: unknown[] };
-              await piHost.notifyDiagnostics(diagnostics as never);
+              const { cwd, diagnostics } = request.payload as { cwd?: unknown; diagnostics: unknown };
+              if (typeof cwd !== "string" || cwd.length < 1 || cwd.length > 4096 || !isPiDiagnostics(diagnostics)) {
+                send(socket, createEnvelope("response", "error", { error: "pi.notifyDiagnostics requires { cwd, diagnostics }" }, request.id));
+                return;
+              }
+              await piHost.notifyDiagnostics(cwd, diagnostics);
               payload = { ok: true };
               break;
             }
             case "pi.getToolOutput": {
-              const { toolCallId } = request.payload as { toolCallId: string };
-              payload = await piHost.getToolOutput(toolCallId);
+              const { sessionFile, toolCallId } = request.payload as { sessionFile?: unknown; toolCallId: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096 || typeof toolCallId !== "string" || toolCallId.length < 1 || toolCallId.length > 200) {
+                send(socket, createEnvelope("response", "error", { error: "pi.getToolOutput requires { sessionFile, toolCallId }" }, request.id));
+                return;
+              }
+              payload = await piHost.getToolOutput(sessionFile, toolCallId);
               break;
             }
-            case "pi.getModels":
-              payload = await piHost.getModels();
+            case "pi.getModels": {
+              const { cwd } = request.payload as { cwd?: unknown };
+              if (typeof cwd !== "string" || cwd.length < 1 || cwd.length > 4096) {
+                send(socket, createEnvelope("response", "error", { error: "pi.getModels requires { cwd }" }, request.id));
+                return;
+              }
+              payload = { models: await piHost.getModels(cwd) };
               break;
+            }
+            case "pi.warmProject": {
+              const { cwd } = request.payload as { cwd: string };
+              payload = piHost.warmProject(cwd);
+              break;
+            }
             case "pi.setModel": {
-              const { provider, modelId } = request.payload as { provider: string; modelId: string };
-              payload = await piHost.setModel(provider, modelId);
+              const { sessionFile, provider, modelId } = request.payload as { sessionFile?: unknown; provider?: unknown; modelId?: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096 || typeof provider !== "string" || typeof modelId !== "string") {
+                send(socket, createEnvelope("response", "error", { error: "pi.setModel requires { sessionFile, provider, modelId }" }, request.id));
+                return;
+              }
+              payload = await piHost.setModel(sessionFile, provider, modelId);
               break;
             }
-            case "pi.getThinkingLevels":
-              payload = await piHost.getThinkingLevels();
+            case "pi.getThinkingLevels": {
+              const { sessionFile } = request.payload as { sessionFile?: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) {
+                send(socket, createEnvelope("response", "error", { error: "pi.getThinkingLevels requires { sessionFile }" }, request.id));
+                return;
+              }
+              payload = { levels: await piHost.getThinkingLevels(sessionFile) };
               break;
+            }
             case "pi.setThinking": {
-              const { level } = request.payload as { level: string };
-              payload = await piHost.setThinking(level);
+              const { sessionFile, level } = request.payload as { sessionFile?: unknown; level?: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096 || typeof level !== "string") {
+                send(socket, createEnvelope("response", "error", { error: "pi.setThinking requires { sessionFile, level }" }, request.id));
+                return;
+              }
+              payload = await piHost.setThinking(sessionFile, level);
               break;
             }
             case "pi.getSettings":
@@ -511,36 +979,76 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
               break;
             case "pi.setSettings": {
               const { patch } = request.payload as { patch: unknown };
-              payload = await piHost.setSettings(patch as any);
+              payload = await piHost.setSettings(toSettingsPatch(patch));
               break;
             }
             case "pi.setSessionName": {
-              const { name } = request.payload as { name: string };
-              payload = await piHost.setSessionName(name);
+              const { sessionFile, name } = request.payload as { sessionFile?: unknown; name?: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096 || typeof name !== "string") {
+                send(socket, createEnvelope("response", "error", { error: "pi.setSessionName requires { sessionFile, name }" }, request.id));
+                return;
+              }
+              payload = await piHost.setSessionName(sessionFile, name);
               break;
             }
-            case "pi.compact":
-              payload = await piHost.compact();
+            case "pi.renameSession": {
+              const { sessionFile, name } = request.payload as { sessionFile: string; name: string };
+              if (typeof sessionFile !== "string" || typeof name !== "string") throw new Error("invalid rename payload");
+              payload = await piHost.renameSession(sessionFile, name);
               break;
-            case "pi.getTree":
-              payload = await piHost.getTree();
+            }
+            case "pi.compact": {
+              const { sessionFile, customInstructions } = request.payload as { sessionFile?: unknown; customInstructions?: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096 || (customInstructions !== undefined && typeof customInstructions !== "string")) {
+                send(socket, createEnvelope("response", "error", { error: "pi.compact requires { sessionFile }" }, request.id));
+                return;
+              }
+              payload = await piHost.compact(sessionFile, customInstructions as string | undefined);
               break;
-            case "pi.getHistory":
-              payload = await piHost.getHistory();
+            }
+            case "pi.getTree": {
+              const { sessionFile } = request.payload as { sessionFile?: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) {
+                send(socket, createEnvelope("response", "error", { error: "pi.getTree requires { sessionFile }" }, request.id));
+                return;
+              }
+              payload = await piHost.getTree(sessionFile);
               break;
+            }
+            case "pi.getHistory": {
+              const { sessionFile } = request.payload as { sessionFile?: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) {
+                send(socket, createEnvelope("response", "error", { error: "pi.getHistory requires { sessionFile }" }, request.id));
+                return;
+              }
+              payload = await piHost.getHistory(sessionFile);
+              break;
+            }
             case "pi.getTurnChanges": {
-              const { entryId } = request.payload as { entryId: string };
-              payload = await piHost.getTurnChanges(entryId);
+              const { sessionFile, entryId } = request.payload as { sessionFile?: unknown; entryId: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096 || typeof entryId !== "string" || entryId.length < 1 || entryId.length > 200) {
+                send(socket, createEnvelope("response", "error", { error: "pi.getTurnChanges requires { sessionFile, entryId }" }, request.id));
+                return;
+              }
+              payload = await piHost.getTurnChanges(sessionFile, entryId);
               break;
             }
             case "pi.getTurnFileDiff": {
-              const { entryId, path } = request.payload as { entryId: string; path: string };
-              payload = await piHost.getTurnFileDiff(entryId, path);
+              const { sessionFile, entryId, path } = request.payload as { sessionFile?: unknown; entryId: unknown; path: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096 || typeof entryId !== "string" || entryId.length < 1 || entryId.length > 200 || typeof path !== "string" || path.length < 1 || path.length > 4096) {
+                send(socket, createEnvelope("response", "error", { error: "pi.getTurnFileDiff requires { sessionFile, entryId, path }" }, request.id));
+                return;
+              }
+              payload = await piHost.getTurnFileDiff(sessionFile, entryId, path);
               break;
             }
             case "pi.prepareRollback": {
-              const { entryId } = request.payload as { entryId: string };
-              payload = await piHost.prepareRollback(entryId);
+              const { sessionFile, entryId } = request.payload as { sessionFile?: unknown; entryId?: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096 || typeof entryId !== "string" || entryId.length < 1 || entryId.length > 200) {
+                send(socket, createEnvelope("response", "error", { error: "pi.prepareRollback requires { sessionFile, entryId }" }, request.id));
+                return;
+              }
+              payload = await piHost.prepareRollback(sessionFile, entryId);
               break;
             }
             case "pi.commitRollback": {
@@ -548,28 +1056,53 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
               payload = await piHost.commitRollback(planId);
               break;
             }
-            case "pi.undoRollback":
-              payload = await piHost.undoRollback();
-              break;
-            case "pi.getForkMessages":
-              payload = await piHost.getForkMessages();
-              break;
-            case "pi.fork": {
-              const { entryId } = request.payload as { entryId: string };
-              payload = await piHost.fork(entryId);
+            case "pi.undoRollback": {
+              const { sessionFile } = request.payload as { sessionFile?: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) {
+                send(socket, createEnvelope("response", "error", { error: "pi.undoRollback requires { sessionFile }" }, request.id));
+                return;
+              }
+              payload = await piHost.undoRollback(sessionFile);
               break;
             }
-            case "pi.clone":
-              payload = await piHost.clone();
+            case "pi.getForkMessages": {
+              const { sessionFile } = request.payload as { sessionFile?: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) {
+                send(socket, createEnvelope("response", "error", { error: "pi.getForkMessages requires { sessionFile }" }, request.id));
+                return;
+              }
+              payload = { messages: await piHost.getForkMessages(sessionFile) };
               break;
+            }
+            case "pi.fork": {
+              const { sessionFile, entryId } = request.payload as { sessionFile?: unknown; entryId?: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096 || typeof entryId !== "string" || entryId.length < 1 || entryId.length > 200) {
+                send(socket, createEnvelope("response", "error", { error: "pi.fork requires { sessionFile, entryId }" }, request.id));
+                return;
+              }
+              payload = await piHost.fork(sessionFile, entryId);
+              break;
+            }
+            case "pi.clone": {
+              const { sessionFile } = request.payload as { sessionFile?: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) {
+                send(socket, createEnvelope("response", "error", { error: "pi.clone requires { sessionFile }" }, request.id));
+                return;
+              }
+              payload = await piHost.clone(sessionFile);
+              break;
+            }
             case "pi.generateCommitMessage": {
               const { context } = request.payload as { context: unknown };
-              payload = await (piHost as any).generateGitCommitMessage(context);
+              if (typeof context !== "object" || context === null) {
+                throw new Error("pi.generateCommitMessage requires a context object");
+              }
+              payload = await piHost.generateGitCommitMessage(context as PreparedCommitContext);
               break;
             }
             case "pi.getRecaps": {
               const { sessionFile } = request.payload as { sessionFile: string };
-              payload = await piHost.getRecaps(sessionFile);
+              payload = { recaps: await piHost.getRecaps(sessionFile) };
               break;
             }
             case "pi.refreshFromDisk": {
@@ -577,40 +1110,35 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
               payload = { refreshed: await piHost.refreshFromDisk(sessionFile) };
               break;
             }
-            case "pi.switchTo" as any: {
-              const { sessionFile } = request.payload as { sessionFile: string };
-              payload = await (piHost as any).switchTo(sessionFile);
-              break;
-            }
-            case "pi.getActiveSessionFile" as any: {
-              payload = { path: (piHost as any).activeSessionFile ?? null };
-              break;
-            }
-            case "pi.controlThread" as any: {
+            case "pi.controlThread": {
               const { action, threadId, message } = request.payload as { action: "steer" | "follow-up" | "stop"; threadId: string; message?: string };
-              payload = await (piHost as any).controlThread(action, threadId, message);
+              payload = await piHost.controlThread(action, threadId, message);
               break;
             }
-            case "pi.promoteThread" as any: {
+            case "pi.promoteThread": {
               const { threadId } = request.payload as { threadId: string };
-              payload = await (piHost as any).promoteThread(threadId);
+              payload = await piHost.promoteThread(threadId);
               break;
             }
-            case "pi.controlSubagent" as any: {
+            case "pi.controlSubagent": {
               const { action, runId, message } = request.payload as { action: "steer" | "follow-up" | "stop"; runId: string; message?: string };
-              payload = await (piHost as any).controlSubagent(action, runId, message);
+              payload = await piHost.controlSubagent(action, runId, message);
               break;
             }
-            case "pi.promoteSubagent" as any: {
+            case "pi.promoteSubagent": {
               const { runId } = request.payload as { runId: string };
-              payload = await (piHost as any).promoteSubagent(runId);
+              payload = await piHost.promoteSubagent(runId);
               break;
             }
             default:
               send(socket, createEnvelope("response", "error", { error: `unsupported pi request ${request.type}` }, request.id));
               return;
           }
-          send(socket, createEnvelope("response", request.type, payload as never, request.id));
+          // A handler's raw result becomes a wire payload here. `toPayload`
+          // validates object-ness instead of asserting it: the previous
+          // `as never` let an array through the type check, which is what
+          // produced "payload for pi.getModels must be an object" on the wire.
+          send(socket, createEnvelope("response", request.type, toPayload(payload), request.id));
         } catch (err) {
           send(socket, createEnvelope("response", "error", { error: err instanceof Error ? err.message : String(err) }, request.id));
         }
@@ -618,34 +1146,50 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
       return;
     }
 
-    if ((request as any).type === "hooks.register") {
-      const hook = (request as any).payload as HookDefinition;
-      if (options.hookManager) {
-        options.hookManager.register(hook);
+    if (request.type === "hooks.register") {
+      const hook = request.payload as HookDefinition;
+      try {
+        if (!hook || typeof hook !== "object" || typeof hook.id !== "string" || hook.id.length === 0) {
+          throw new Error("hooks.register requires a hook object with a non-empty string id");
+        }
+        if (options.hookManager) {
+          options.hookManager.register(hook);
+        }
+        const beforeHooks = state.runtime.hooks;
+        const afterHooks = registerHook(beforeHooks, hook);
+        if (afterHooks !== beforeHooks) {
+          state = { ...state, runtime: { ...state.runtime, hooks: afterHooks } };
+          persist();
+          broadcast("hooks.updated", afterHooks, socket);
+        }
+      } catch (err) {
+        send(socket, createEnvelope("response", "error", { error: err instanceof Error ? err.message : String(err) }, request.id));
+        return;
       }
-      const beforeHooks = state.runtime.hooks;
-      const afterHooks = registerHook(beforeHooks, hook);
-      if (afterHooks !== beforeHooks) {
-        state = { ...state, runtime: { ...state.runtime, hooks: afterHooks } };
-        persist();
-        broadcast("hooks.updated" as any, afterHooks as any, socket);
-      }
-      send(socket, createEnvelope("response", "hooks.register" as any, { ok: true } as any, request.id));
+      send(socket, createEnvelope("response", "hooks.register", { ok: true }, request.id));
       return;
     }
-    if ((request as any).type === "hooks.remove") {
-      const { id } = (request as any).payload as { id: string };
-      if (options.hookManager) {
-        options.hookManager.remove(id);
+    if (request.type === "hooks.remove") {
+      const { id } = request.payload as { id?: unknown };
+      if (typeof id !== "string" || id.length === 0) {
+        send(socket, createEnvelope("response", "error", { error: "hooks.remove requires a non-empty string id" }, request.id));
+        return;
       }
-      const beforeHooks = state.runtime.hooks;
-      const afterHooks = removeHook(beforeHooks, id);
-      if (afterHooks !== beforeHooks) {
-        state = { ...state, runtime: { ...state.runtime, hooks: afterHooks } };
-        persist();
-        broadcast("hooks.updated" as any, afterHooks as any, socket);
+      try {
+        if (options.hookManager) {
+          options.hookManager.remove(id);
+        }
+        const beforeHooks = state.runtime.hooks;
+        const afterHooks = removeHook(beforeHooks, id);
+        if (afterHooks !== beforeHooks) {
+          state = { ...state, runtime: { ...state.runtime, hooks: afterHooks } };
+          persist();
+          broadcast("hooks.updated", afterHooks, socket);
+        }
+        send(socket, createEnvelope("response", "hooks.remove", { ok: true, removed: afterHooks !== beforeHooks }, request.id));
+      } catch (err) {
+        send(socket, createEnvelope("response", "error", { error: err instanceof Error ? err.message : String(err) }, request.id));
       }
-      send(socket, createEnvelope("response", "hooks.remove" as any, { ok: true, removed: afterHooks !== beforeHooks } as any, request.id));
       return;
     }
 
@@ -653,7 +1197,7 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
     // attention.*, contract.registered). Unsupported types come back as
     // explicit errors.
     const before = state.runtime;
-    const result = dispatchRequest(before, request);
+    const result = dispatchRequest(before, request, { draining: options.isDraining?.() ?? false });
     state = { ...state, runtime: result.runtime };
     send(socket, result.response);
     if (result.runtime !== before && result.response.type !== "error") {
@@ -674,7 +1218,7 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
 
   const wireClient = (socket: net.Socket): void => {
     clients.add(socket);
-    const decoder = createFrameDecoder();
+    const decoder = createFrameDecoder(maxFrameBytes);
     decoders.set(socket, decoder);
     socket.on("data", (chunk: Buffer) => {
       const d = decoders.get(socket);
@@ -693,6 +1237,7 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
     });
     const drop = (): void => {
       clients.delete(socket);
+      authed.delete(socket);
     };
     socket.on("close", drop);
     socket.on("error", drop);

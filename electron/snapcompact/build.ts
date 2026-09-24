@@ -7,11 +7,11 @@
 // if any budget is exceeded. Persistence is the caller's job.
 
 import { randomUUID } from "node:crypto";
-import { serializeTranscript } from "./serializer";
+import { serializeTranscript, type OmittedEntry } from "./serializer";
 import { extractHighValueTokens, type RawSymbol } from "./symbol-dictionary";
 import { renderFrames } from "./renderer";
 import { profileToFrameProfile, type SnapcompactModelProfile } from "./model-profiles";
-import type { SnapcompactArchive, SnapcompactSymbol } from "./types";
+import type { SnapcompactArchive } from "./types";
 
 export class ArchiveBudgetError extends Error {
   readonly budget: string;
@@ -29,7 +29,7 @@ export class ArchiveBudgetError extends Error {
 export interface BuildArchiveInput {
   sessionId: string;
   sessionFile: string;
-  messages: any[];
+  messages: unknown[];
   profile: SnapcompactModelProfile;
   /** Optional last message entryId for the coveredThrough anchor. */
   coveredThroughMessageId?: string | null;
@@ -88,7 +88,7 @@ export function buildArchive(input: BuildArchiveInput): BuildArchiveResult {
   let keptCount = serializedNew.keptCount;
   let firstKept = serializedNew.firstKeptEntryId;
   let lastKept = serializedNew.lastKeptEntryId;
-  let omitted: import("./serializer").OmittedEntry[] = [...serializedNew.omittedTrailing] as import("./serializer").OmittedEntry[];
+  let omitted: OmittedEntry[] = [...serializedNew.omittedTrailing];
   if (input.previousArchive?.sourceText) {
     const prev = input.previousArchive.sourceText;
     const sep = prev && combinedSource ? "\n\n" : "";
@@ -106,7 +106,15 @@ export function buildArchive(input: BuildArchiveInput): BuildArchiveResult {
     firstKept = input.previousArchive.firstKeptEntryId ?? firstKept;
     // lastKept stays as newest
     keptCount = (input.previousArchive.keptCount ?? 0) + keptCount;
-    omitted = [...((input.previousArchive.omittedTrailing as any) ?? []), ...omitted] as any;
+    // Previous archives predate the reason union: keep only entries that
+    // still name a known reason so the omitted ledger stays exact.
+    const prevOmitted = (input.previousArchive.omittedTrailing ?? []).filter(
+      (o): o is OmittedEntry =>
+        typeof o?.entryId === "string" &&
+        typeof o?.role === "string" &&
+        (o?.reason === "tool-result-image-only" || o?.reason === "total-budget")
+    );
+    omitted = [...prevOmitted, ...omitted];
   }
   const t1 = performance.now();
   const rawSymbols = extractHighValueTokens(combinedSource);

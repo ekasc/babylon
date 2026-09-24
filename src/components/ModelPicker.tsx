@@ -1,27 +1,33 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { CheckIcon, ChevronIcon, CpuIcon, SparkleIcon } from "./icons";
+import { PopoverPanel, PopoverRoot, PopoverTrigger } from "./ui/Popover";
 
-interface Model {
-  id: string;
-  name?: string;
-  provider: string;
-  contextWindow?: number;
-  cost?: { input?: number; output?: number; cacheRead?: number };
-  reasoning?: boolean;
-}
+import type { AgentModel } from "../bridge";
+
+export type { AgentModel as PickerModel };
 
 interface Props {
-  models: Model[];
-  current?: Model | null;
+  models: AgentModel[];
+  current?: AgentModel | null;
   disabled?: boolean;
   align?: "left" | "right";
   wide?: boolean;
+  /** Popover direction; the composer variant opens upward above the input. */
+  side?: "top" | "bottom";
+  /** Denser trigger + upward panel for the composer controls row. */
+  compactTrigger?: boolean;
   onSelect(provider: string, modelId: string): void;
 }
 
 const RECENTS_KEY = "babylon:recent-models";
 const MAX_RECENT = 5;
 const RECENT_LABEL = "Recent";
+
+/** Rows under this index get a mod+digit quick-select hint (T3 ⌘N rows). */
+export const MODEL_PICKER_SHORTCUT_LIMIT = 9;
+
+const isMac = typeof navigator !== "undefined" && /mac/i.test(navigator.platform ?? "");
+const modGlyph = isMac ? "⌘" : "Ctrl";
 
 const fmtWin = (n?: number) => (n ? `${Math.round(n / 1000)}k` : "—");
 const fmtCost = (n?: number) => (n ? `$${n.toFixed(2)}/M` : "—");
@@ -37,10 +43,10 @@ function loadRecents(): string[] {
 
 interface Group {
   label: string;
-  models: Model[];
+  models: AgentModel[];
 }
 
-export default function ModelPicker({ models, current, disabled, align = "left", wide, onSelect }: Props) {
+export default function ModelPicker({ models, current, disabled, align = "left", wide, side, compactTrigger, onSelect }: Props) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [hi, setHi] = useState(0);
@@ -81,10 +87,10 @@ export default function ModelPicker({ models, current, disabled, align = "left",
     if (!searching && recent.length > 0) {
       const rec = recent
         .map((key) => models.find((m) => `${m.provider}/${m.id}` === key))
-        .filter((m): m is Model => !!m);
+        .filter((m): m is AgentModel => !!m);
       if (rec.length > 0) out.push({ label: RECENT_LABEL, models: rec });
     }
-    const byProvider = new Map<string, Model[]>();
+    const byProvider = new Map<string, AgentModel[]>();
     for (const m of filtered) {
       const arr = byProvider.get(m.provider) ?? [];
       arr.push(m);
@@ -94,7 +100,7 @@ export default function ModelPicker({ models, current, disabled, align = "left",
     // registry in unstable insertion order and gets rebuilt behind our back;
     // without a derived sort, rows permute after mount and any scroll-to-
     // selected lands stale.
-    const byName = (a: Model, b: Model) =>
+    const byName = (a: AgentModel, b: AgentModel) =>
       (a.name ?? a.id).localeCompare(b.name ?? b.id) || a.id.localeCompare(b.id);
     for (const [label, ms] of [...byProvider.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
       out.push({ label, models: [...ms].sort(byName) });
@@ -164,26 +170,21 @@ export default function ModelPicker({ models, current, disabled, align = "left",
     [open]
   );
 
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    window.addEventListener("mousedown", onDown);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-    };
-  }, [open]);
-
   // Keyboard: ↑↓ move within the pane, ←→ switch provider tabs, Enter picks,
-  // Escape closes.
+  // mod+digit quick-picks a visible row (T3 ⌘N). Escape/outside-press
+  // dismissal is owned by the popover primitive.
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        setOpen(false);
-      } else if (e.key === "ArrowDown") {
+      if ((e.metaKey || e.ctrlKey) && /^[1-9]$/.test(e.key)) {
+        const m = flat[Number(e.key) - 1];
+        if (m) {
+          e.preventDefault();
+          pick(m.provider, m.id);
+        }
+        return;
+      }
+      if (e.key === "ArrowDown") {
         e.preventDefault();
         setHi((i) => Math.min(i + 1, flat.length - 1));
       } else if (e.key === "ArrowUp") {
@@ -194,7 +195,8 @@ export default function ModelPicker({ models, current, disabled, align = "left",
         setActiveLabel((prev) => {
           const idx = tabs.findIndex((t) => t.label === prev);
           const next = e.key === "ArrowRight" ? Math.min(idx + 1, tabs.length - 1) : Math.max(idx - 1, 0);
-          return tabs[next === -1 ? 0 : next].label;
+          const tab = tabs[next === -1 ? 0 : next];
+        return tab !== undefined ? tab.label : prev;
         });
       } else if (e.key === "Enter") {
         e.preventDefault();
@@ -222,15 +224,23 @@ export default function ModelPicker({ models, current, disabled, align = "left",
 
   return (
     <div ref={rootRef} className="relative">
-      <button
-        onClick={() => setOpen((v) => !v)}
+      <PopoverRoot open={open} onOpenChange={setOpen}>
+      <PopoverTrigger
         disabled={disabled || !models.length}
-        title={currentKey ? `Switch model — ${currentKey}` : "Switch model"}
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        className="operator-meta-control flex h-8 max-w-[220px] items-center gap-1.5 px-2.5 text-[13px] disabled:opacity-50"
+        title={
+          models.length === 0
+            ? "No models available — check provider auth, then reopen"
+            : currentKey
+              ? `Switch model — ${currentKey}`
+              : "Switch model"
+        }
+        className={
+          compactTrigger
+            ? "operator-meta-control flex h-8 items-center gap-1.5 px-2.5 disabled:opacity-50"
+            : "operator-meta-control flex h-8 max-w-[220px] items-center gap-1.5 px-2.5 text-[13px] disabled:opacity-50"
+        }
       >
-        <CpuIcon size={12} className="shrink-0 text-dim" />
+        <CpuIcon size={compactTrigger ? 15 : 12} className="shrink-0 text-dim" />
         {current ? (
           <span className="min-w-0 truncate">
             <span className="text-dim">{current.provider}/</span>
@@ -240,13 +250,18 @@ export default function ModelPicker({ models, current, disabled, align = "left",
           <span className="min-w-0 truncate text-dim">select model</span>
         )}
         <ChevronIcon size={10} className={`shrink-0 text-dim transition-transform ${open ? "rotate-90" : ""}`} />
-      </button>
+      </PopoverTrigger>
 
-      {open && (
-        <>
-          {wide && <div className="fixed inset-0 z-40 bg-black/20" onClick={() => setOpen(false)} aria-hidden />}
-          <div className={`operator-popover absolute top-full ${align === "right" ? "right-0" : "left-0"} z-50 mt-2 overflow-hidden p-1.5 ${wide ? "w-[560px] max-w-[min(560px,calc(100vw-24px))] rounded-xl border border-white/15 bg-[#0F0F0F] shadow-2xl flex flex-col max-h-[min(560px,calc(100vh-80px))]" : "w-[460px] max-w-[calc(100vw-32px)]"}`}>
-            {wide && <div className="pointer-events-none absolute -top-1.5 right-[140px] h-3 w-3 rotate-45 border-l border-t border-white/15 bg-[#0F0F0F]" aria-hidden />}
+      {open && wide && <div className="fixed inset-0 z-40 bg-black/20" aria-hidden />}
+      <PopoverPanel
+        container={rootRef.current}
+        side={side ?? "bottom"}
+        align={align === "right" ? "end" : "start"}
+        sideOffset={8}
+        positionerClassName={side === "top" ? "z-[70]" : "z-50"}
+        className={`operator-popover overflow-hidden p-1.5 ${wide ? "w-[560px] max-w-[min(560px,calc(100vw-24px))] rounded-xl border border-line bg-bg flex flex-col max-h-[min(560px,calc(100vh-80px))]" : side === "top" ? "flex flex-col w-[460px] max-w-[min(460px,calc(100vw-24px))] max-h-[min(420px,calc(100vh-80px))]" : "w-[460px] max-w-[calc(100vw-32px)]"}`}
+      >
+          {wide && <div className="pointer-events-none absolute -top-1.5 right-[140px] h-3 w-3 rotate-45 border-l border-t border-line bg-bg" aria-hidden />}
           <div className="border-b border-line/60 p-2">
             <input
               ref={searchRef}
@@ -254,12 +269,12 @@ export default function ModelPicker({ models, current, disabled, align = "left",
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search…"
               aria-label="Search models"
-              className="w-full rounded-md border border-white/10 bg-transparent px-2.5 py-1.5 text-[12px] placeholder:text-white/40 outline-none focus:border-white/15"
+              className="w-full rounded-[var(--radius-sm)] border border-line bg-transparent px-2.5 py-1.5 text-[12px] placeholder:text-dim outline-none focus:border-line-strong"
             />
           </div>
           {!searching && tabs.length > 0 ? (
             <div className={wide ? "flex flex-1 min-h-0" : "flex h-[340px]"}>
-              <div role="tablist" aria-label="Providers" className={wide ? "w-[150px] shrink-0 overflow-y-auto border-r border-white/10 bg-white/[0.02] py-2" : "w-[128px] shrink-0 overflow-y-auto border-r border-line/60 py-1"}>
+              <div role="tablist" aria-label="Providers" className={wide ? "w-[150px] shrink-0 overflow-y-auto border-r border-line/60 py-2" : "w-[128px] shrink-0 overflow-y-auto border-r border-line/60 py-1"}>
                 {tabs.map((t) => {
                   const selected = t.label === activeLabel;
                   return (
@@ -275,8 +290,8 @@ export default function ModelPicker({ models, current, disabled, align = "left",
                         selected ? "font-medium text-accent" : "text-dim hover:text-fg"
                       }`}
                     >
-                      <span className="min-w-0 truncate text-[12.5px]">{t.label}</span>
-                      <span className="shrink-0 font-mono text-[10px] text-dim/70">{t.models.length}</span>
+                      <span className="min-w-0 truncate text-[13px]">{t.label}</span>
+                      <span className="shrink-0 text-[10px] text-dim/70">{t.models.length}</span>
                     </button>
                   );
                 })}
@@ -297,7 +312,7 @@ export default function ModelPicker({ models, current, disabled, align = "left",
                       data-idx={idx}
                       onMouseEnter={() => setHi(idx)}
                       onClick={() => pick(m.provider, m.id)}
-                      className={`flex w-full items-center gap-2.5 rounded-md px-3 py-1.5 text-left transition-colors duration-100 ${
+                      className={`flex w-full items-center gap-2.5 px-3 text-left transition-colors duration-100 ${compactTrigger ? "rounded-lg py-2" : "rounded-md py-1.5"} ${
                         active ? "bg-fg/[0.1]" : ""
                       } ${isCurrent ? "text-accent" : ""}`}
                     >
@@ -308,13 +323,16 @@ export default function ModelPicker({ models, current, disabled, align = "left",
                             <SparkleIcon size={9} className="shrink-0 text-dim" />
                           )}
                         </span>
-                        <span className="mt-px block truncate font-mono text-[11px] leading-4 text-dim/80">
+                        <span className="mt-px block truncate text-[11px] leading-4 text-dim/80">
                           {fmtWin(m.contextWindow)} ctx · in {fmtCost(m.cost?.input)} / out {fmtCost(m.cost?.output)}
                         </span>
                       </span>
                       {isCurrent && <CheckIcon size={11} className="shrink-0 text-accent" />}
                       {!isCurrent && active && (
-                        <kbd className="shrink-0 rounded border border-line bg-bg px-1.5 py-px font-mono text-[10px] leading-4 text-dim">↵</kbd>
+                        <kbd className="shrink-0 rounded border border-line bg-bg px-1.5 py-px text-[10px] leading-4 text-dim">↵</kbd>
+                      )}
+                      {!isCurrent && !active && idx < MODEL_PICKER_SHORTCUT_LIMIT && (
+                        <kbd title={`${modGlyph}+${idx + 1} to select`} className="shrink-0 rounded border border-line/60 bg-transparent px-1.5 py-px text-[10px] leading-4 text-dim/60">{modGlyph}{idx + 1}</kbd>
                       )}
                     </button>
                   );
@@ -341,7 +359,7 @@ export default function ModelPicker({ models, current, disabled, align = "left",
                     data-idx={idx}
                     onMouseEnter={() => setHi(idx)}
                     onClick={() => pick(m.provider, m.id)}
-                    className={`flex w-full items-center gap-2.5 rounded-md px-3 py-1.5 text-left transition-colors duration-100 ${
+                    className={`flex w-full items-center gap-2.5 px-3 text-left transition-colors duration-100 ${compactTrigger ? "rounded-lg py-2" : "rounded-md py-1.5"} ${
                       active ? "bg-fg/[0.1]" : ""
                     } ${isCurrent ? "text-accent" : ""}`}
                   >
@@ -352,22 +370,24 @@ export default function ModelPicker({ models, current, disabled, align = "left",
                           <SparkleIcon size={9} className="shrink-0 text-dim" />
                         )}
                       </span>
-                      <span className="mt-px block truncate font-mono text-[11px] leading-4 text-dim/80">
+                      <span className="mt-px block truncate text-[11px] leading-4 text-dim/80">
                         {m.provider}/{m.id} · {fmtWin(m.contextWindow)} ctx · in {fmtCost(m.cost?.input)} / out {fmtCost(m.cost?.output)}
                       </span>
                     </span>
                     {isCurrent && <CheckIcon size={11} className="shrink-0 text-accent" />}
                     {!isCurrent && active && (
-                      <kbd className="shrink-0 rounded border border-line bg-bg px-1.5 py-px font-mono text-[10px] leading-4 text-dim">↵</kbd>
+                      <kbd className="shrink-0 rounded border border-line bg-bg px-1.5 py-px text-[10px] leading-4 text-dim">↵</kbd>
+                    )}
+                    {!isCurrent && !active && idx < MODEL_PICKER_SHORTCUT_LIMIT && (
+                      <kbd title={`${modGlyph}+${idx + 1} to select`} className="shrink-0 rounded border border-line/60 bg-transparent px-1.5 py-px text-[10px] leading-4 text-dim/60">{modGlyph}{idx + 1}</kbd>
                     )}
                   </button>
                 );
               })}
             </div>
           )}
-        </div>
-        </>
-      )}
+      </PopoverPanel>
+      </PopoverRoot>
     </div>
   );
 }

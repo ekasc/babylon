@@ -16,10 +16,15 @@
 // Access mode. That invariant is the security backbone of the whole system.
 
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 
 export type ExecutionMode = "supervised" | "auto" | "full_access";
+
+/** Runtime narrowing for IPC payloads (mode arrives as an untyped string). */
+export function isExecutionMode(value: unknown): value is ExecutionMode {
+  return value === "supervised" || value === "auto" || value === "full_access";
+}
 
 /**
  * Policy categories Babylon can distinguish. These are the smallest meaningful
@@ -37,24 +42,57 @@ export type PolicyCategory =
   | "package_install"
   | "privileged";
 
+const POLICY_CATEGORIES: readonly PolicyCategory[] = [
+  "file_read",
+  "file_write_workspace",
+  "file_write_outside",
+  "shell_command",
+  "shell_destructive",
+  "network_access",
+  "git_commit",
+  "git_push",
+  "package_install",
+  "privileged",
+];
+
+/** Runtime narrowing for IPC payloads (the daemon accepts rule categories off
+ *  the wire and must not assert them). */
+export function isPolicyCategory(value: unknown): value is PolicyCategory {
+  return typeof value === "string" && (POLICY_CATEGORIES as readonly string[]).includes(value);
+}
+
 export type Risk = "low" | "high" | "uncertain";
 
 export type Decision = "allow" | "deny" | "ask";
 
-export interface PermissionMatch {
+export type PermissionMatch = {
   /** Glob (supports `*` and `**`) matched against any action path. */
   pathGlob?: string;
   /** Substring matched against the raw command for shell categories. */
   commandPattern?: string;
+};
+
+/** Runtime narrowing for IPC payloads: the daemon parses rules off the wire and
+ *  must not assert their shape. */
+export function isPermissionMatch(value: unknown): value is PermissionMatch {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    (v.pathGlob === undefined || typeof v.pathGlob === "string") &&
+    (v.commandPattern === undefined || typeof v.commandPattern === "string")
+  );
 }
 
-export interface PermissionRule {
+export type PermissionRule = {
   id: string;
   category: PolicyCategory;
   match?: PermissionMatch;
   decision: "allow" | "deny";
   /** "always" is persisted across restarts; "session" vanishes when the session ends. */
   scope: "always" | "session";
+  /** Owning session for session-scoped rules. Concurrent sessions must never
+   *  share allow/deny decisions: a rule applies only to its session. */
+  sessionId?: string;
   createdAt: number;
   note?: string;
 }
@@ -81,12 +119,16 @@ export interface EvalResult {
 
 /** Babylon-owned hook used to gate agent tool calls before they execute. */
 export interface BabylonPermissionController {
-  /** Evaluate an action against static policy + the active execution mode. */
-  evaluate(action: AgentAction): EvalResult;
+  /** Evaluate an action against static policy + the active execution mode.
+   *  The evaluating session id scopes session-only rules to their owner. */
+  evaluate(action: AgentAction, sessionId?: string): EvalResult;
   /** Request interactive approval; resolves true to allow, false to deny. */
-  requestApproval(action: AgentAction, risk: Risk): Promise<boolean>;
-  /** Drop session-only rules (called when the active session is replaced). */
-  clearSessionRules(): void;
+  requestApproval(action: AgentAction, risk: Risk, sessionId?: string): Promise<boolean>;
+  /** Drop session-only rules (called when a session ends; with an id, only
+   *  that session's rules are dropped). */
+  clearSessionRules(sessionId?: string): void;
+  getMode(): ExecutionMode;
+  listRules(): PermissionRule[];
 }
 
 const ROUTINE_CATEGORIES: ReadonlySet<PolicyCategory> = new Set<PolicyCategory>([
@@ -187,6 +229,47 @@ export function categorizeShellCommand(command: string): PolicyCategory {
   return "shell_command";
 }
 
+/** Categories whose actions originate from shell command text. */
+const SHELL_EFFECT_CATEGORIES: ReadonlySet<PolicyCategory> = new Set<PolicyCategory>([
+  "package_install",
+  "privileged",
+  "shell_destructive",
+  "git_push",
+  "git_commit",
+  "network_access",
+  "shell_command",
+]);
+
+/**
+ * Every policy category a shell command touches. A single command string
+ * can have several effects (`git push --force` pushes AND destroys;
+ * `npm install x && git push` installs AND pushes), but classification
+ * picks only one. Compound syntax (`&&`, `||`, `;`, `|`) is split
+ * conservatively per segment — over-approximation errs toward deny, which
+ * is the safe direction for the deny check below. This is a heuristic
+ * classifier, not an execution sandbox.
+ */
+export function detectShellCategories(command: string): PolicyCategory[] {
+  const segments = command
+    .split(/&&|\|\||;|\|/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  const found: PolicyCategory[] = [];
+  const push = (c: PolicyCategory) => {
+    if (!found.includes(c)) found.push(c);
+  };
+  for (const seg of segments.length > 0 ? segments : [command]) {
+    if (isPackageInstall(seg)) push("package_install");
+    if (isPrivileged(seg)) push("privileged");
+    if (isDestructive(seg)) push("shell_destructive");
+    if (GIT_PUSH.test(seg)) push("git_push");
+    if (GIT_COMMIT.test(seg)) push("git_commit");
+    if (isNetworkCommand(seg)) push("network_access");
+  }
+  if (found.length === 0) push("shell_command");
+  return found;
+}
+
 // ---------------------------------------------------------------------------
 // Rule matching
 // ---------------------------------------------------------------------------
@@ -196,6 +279,7 @@ function globToRegExp(glob: string): RegExp {
   let i = 0;
   while (i < glob.length) {
     const c = glob[i];
+    if (c === undefined) break;
     if (c === "*") {
       // `**` matches across any number of path segments (including slashes).
       if (glob[i + 1] === "*") {
@@ -238,7 +322,12 @@ function commandMatches(pattern: string, command: string): boolean {
 }
 
 export function matchRule(rule: PermissionRule, action: AgentAction): boolean {
-  if (rule.category !== action.category) return false;
+  return matchRuleAs(rule, action, action.category);
+}
+
+/** matchRule against one of several detected categories (multi-effect deny). */
+function matchRuleAs(rule: PermissionRule, action: AgentAction, category: PolicyCategory): boolean {
+  if (rule.category !== category) return false;
   if (!rule.match) return true;
   if (rule.match.pathGlob && action.paths && action.paths.length > 0) {
     return action.paths.some((p) => pathMatchesGlob(rule.match!.pathGlob!, p));
@@ -288,20 +377,39 @@ export interface EvalInput {
   mode: ExecutionMode;
   /** Combined session + persistent rules. */
   rules: PermissionRule[];
+  /** Evaluating session: session-scoped rules owned by another session do
+   *  not apply. Omitted (legacy/global evaluation) matches all rules. */
+  sessionId?: string;
+}
+
+function ruleApplies(rule: PermissionRule, sessionId?: string): boolean {
+  if (rule.scope !== "session") return true;
+  // Session rules require ownership: an ownerless rule only applies to
+  // ownerless (legacy/global) evaluations, never across sessions.
+  if (!rule.sessionId || !sessionId) return rule.sessionId === sessionId;
+  return rule.sessionId === sessionId;
 }
 
 export function evaluate(action: AgentAction, input: EvalInput): EvalResult {
   const risk = classifyRisk(action);
 
-  // 1. Explicit deny wins — full stop. Nothing may override it.
-  for (const rule of input.rules) {
-    if (rule.decision === "deny" && matchRule(rule, action)) {
+  // 1. Explicit deny wins — full stop. Nothing may override it. Shell
+  // actions are checked across every detected effect category, so a deny
+  // on any effect of the command holds regardless of which single category
+  // classification picked.
+  const applicable = input.rules.filter((rule) => ruleApplies(rule, input.sessionId));
+  const denyCategories = (action: AgentAction): PolicyCategory[] =>
+    action.command && SHELL_EFFECT_CATEGORIES.has(action.category)
+      ? detectShellCategories(action.command)
+      : [action.category];
+  for (const rule of applicable) {
+    if (rule.decision === "deny" && denyCategories(action).some((c) => matchRuleAs(rule, action, c))) {
       return { decision: "deny", ruleId: rule.id, reason: "Blocked by an explicit deny rule" };
     }
   }
 
   // 2. Explicit allow.
-  for (const rule of input.rules) {
+  for (const rule of applicable) {
     if (rule.decision === "allow" && matchRule(rule, action)) {
       return { decision: "allow", ruleId: rule.id, reason: "Allowed by an explicit allow rule" };
     }
@@ -358,31 +466,61 @@ export class PermissionEngine {
     this.mode = opts.mode ?? "auto";
   }
 
-  /** Load persisted rules + mode from disk (best-effort). */
-  async load(): Promise<void> {
+  /** Load persisted rules + mode. Missing file means defaults. Returns
+   *  ok:false when the file exists but is unreadable or corrupt, so callers
+   *  can distinguish that from a first run. */
+  async load(): Promise<{ ok: boolean; error?: string }> {
+    let raw: string;
     try {
-      const raw = await readFile(this.filePath, "utf8");
+      raw = await readFile(this.filePath, "utf8");
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return { ok: true };
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+    try {
       const parsed = JSON.parse(raw) as { mode?: ExecutionMode; rules?: PermissionRule[] };
       if (typeof parsed.mode === "string") this.mode = parsed.mode;
       this.alwaysRules = Array.isArray(parsed.rules)
         ? parsed.rules.filter((r) => r.scope === "always")
         : [];
-    } catch {
-      // No persisted state yet — sensible defaults apply.
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
   }
 
-  private async persist(): Promise<void> {
-    try {
-      await mkdir(dirname(this.filePath), { recursive: true });
-      await writeFile(
-        this.filePath,
-        JSON.stringify({ mode: this.mode, rules: this.alwaysRules }, null, 2),
-        "utf8"
-      );
-    } catch {
-      // Persistence is best-effort; in-memory state still holds.
-    }
+  private writeChain: Promise<void> = Promise.resolve();
+  private lastPersistError: Error | null = null;
+
+  private async writeFileAtomic(): Promise<void> {
+    await mkdir(dirname(this.filePath), { recursive: true });
+    const tmpPath = `${this.filePath}.${process.pid}.tmp`;
+    await writeFile(tmpPath, JSON.stringify({ mode: this.mode, rules: this.alwaysRules }, null, 2), "utf8");
+    await rename(tmpPath, this.filePath);
+  }
+
+  /** Queue a durable write. Errors never reject here; await flush() to observe. */
+  private requestPersist(): void {
+    this.writeChain = this.writeChain.then(() =>
+      this.writeFileAtomic().then(
+        () => {
+          this.lastPersistError = null;
+        },
+        (err) => {
+          this.lastPersistError = err instanceof Error ? err : new Error(String(err));
+        }
+      )
+    );
+  }
+
+  /** Resolve when every write requested so far is durable; throws the latest
+   *  write failure once, then clears it. Mutating call sites await this
+   *  before acknowledging. */
+  async flush(): Promise<void> {
+    await this.writeChain;
+    const err = this.lastPersistError;
+    this.lastPersistError = null;
+    if (err) throw err;
   }
 
   getMode(): ExecutionMode {
@@ -395,12 +533,16 @@ export class PermissionEngine {
 
   async setModeAndPersist(mode: ExecutionMode): Promise<void> {
     this.mode = mode;
-    await this.persist();
+    this.requestPersist();
+    await this.flush();
   }
 
-  /** Drop all session-only rules (call when a session ends or is replaced). */
-  clearSessionRules(): void {
-    this.sessionRules = [];
+  /** Drop session-only rules (call when a session ends or is replaced). When a
+   *  session id is given, only that session's rules are dropped so concurrent
+   *  sessions keep theirs. */
+  clearSessionRules(sessionId?: string): void {
+    if (sessionId) this.sessionRules = this.sessionRules.filter((r) => r.sessionId !== sessionId);
+    else this.sessionRules = [];
   }
 
   listRules(): PermissionRule[] {
@@ -414,12 +556,13 @@ export class PermissionEngine {
       category: input.category,
       decision: input.decision,
       scope: input.scope,
+      ...(input.sessionId ? { sessionId: input.sessionId } : {}),
       match: input.match,
       note: input.note,
     };
     if (rule.scope === "always") {
       this.alwaysRules.push(rule);
-      void this.persist();
+      this.requestPersist();
     } else {
       this.sessionRules.push(rule);
     }
@@ -433,7 +576,7 @@ export class PermissionEngine {
     const beforeSession = this.sessionRules.length;
     this.sessionRules = this.sessionRules.filter((r) => r.id !== id);
     const wasSession = this.sessionRules.length !== beforeSession;
-    if (wasAlways) void this.persist();
+    if (wasAlways) this.requestPersist();
     return wasAlways || wasSession;
   }
 
@@ -442,8 +585,8 @@ export class PermissionEngine {
     return [...this.sessionRules, ...this.alwaysRules];
   }
 
-  evaluate(action: AgentAction): EvalResult {
-    return evaluate(action, { mode: this.mode, rules: this.allRules() });
+  evaluate(action: AgentAction, sessionId?: string): EvalResult {
+    return evaluate(action, { mode: this.mode, rules: this.allRules(), sessionId });
   }
 
   classifyRisk(action: AgentAction): Risk {
@@ -456,10 +599,18 @@ export class PermissionEngine {
  * other than "allow once". Returns the created rule (if any) so callers can
  * echo it back to the UI.
  */
+export type ApprovalChoice = "allow_once" | "allow_session" | "allow_always" | "deny";
+
+/** Runtime narrowing for IPC payloads (approval choices arrive from the wire). */
+export function isApprovalChoice(value: unknown): value is ApprovalChoice {
+  return value === "allow_once" || value === "allow_session" || value === "allow_always" || value === "deny";
+}
+
 export function applyApproval(
   engine: PermissionEngine,
   action: AgentAction,
-  choice: "allow_once" | "allow_session" | "allow_always" | "deny"
+  choice: ApprovalChoice,
+  sessionId?: string
 ): PermissionRule | null {
   switch (choice) {
     case "allow_once":
@@ -469,6 +620,7 @@ export function applyApproval(
         category: action.category,
         decision: "allow",
         scope: "session",
+        ...(sessionId ? { sessionId } : {}),
         match: action.command ? { commandPattern: action.command } : action.paths ? { pathGlob: action.paths[0] } : undefined,
       });
     case "allow_always":
@@ -483,6 +635,7 @@ export function applyApproval(
         category: action.category,
         decision: "deny",
         scope: "session",
+        ...(sessionId ? { sessionId } : {}),
         match: action.command ? { commandPattern: action.command } : action.paths ? { pathGlob: action.paths[0] } : undefined,
       });
   }

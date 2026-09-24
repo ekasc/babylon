@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ManagedSubagents, type ManagedSubagentRecord } from "./subagents";
+import type { AgentSession, ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 const roots: string[] = [];
 afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))));
@@ -50,10 +51,10 @@ describe("ManagedSubagents controls", () => {
     await writeRecord(value);
     const steer = vi.fn(async () => undefined);
     const onParentMessage = vi.fn(async () => undefined);
-    const manager = new ManagedSubagents({ agentDir: cwd, modelRuntime: {} as any, onParentMessage });
-    (manager as any).runtimes.set(runId, {
+    const manager = new ManagedSubagents({ agentDir: cwd, modelRuntime: { getModel: () => undefined } as unknown as ModelRuntime, onParentMessage });
+    manager.testRuntimes().set(runId, {
       record: value,
-      session: { steer },
+      session: { steer } as unknown as AgentSession,
       running: Promise.resolve(),
       unsubscribe: null,
       timeout: null,
@@ -79,10 +80,10 @@ describe("ManagedSubagents controls", () => {
     const unsubscribe = vi.fn();
     const dispose = vi.fn();
     const sendCustomMessage = vi.fn(async () => undefined);
-    const manager = new ManagedSubagents({ agentDir: cwd, modelRuntime: {} as any });
-    (manager as any).runtimes.set(runId, {
+    const manager = new ManagedSubagents({ agentDir: cwd, modelRuntime: { getModel: () => undefined } as unknown as ModelRuntime });
+    manager.testRuntimes().set(runId, {
       record: value,
-      session: { dispose, sendCustomMessage },
+      session: { dispose, sendCustomMessage } as unknown as AgentSession,
       running: null,
       unsubscribe,
       timeout: null,
@@ -91,7 +92,7 @@ describe("ManagedSubagents controls", () => {
     await expect(manager.promote(cwd, runId)).resolves.toEqual({ sessionFile, cwd, parentSessionFile: value.parentSessionFile });
     expect(unsubscribe).toHaveBeenCalledOnce();
     expect(dispose).toHaveBeenCalledOnce();
-    expect((manager as any).runtimes.has(runId)).toBe(false);
+    expect(manager.testRuntimes().has(runId)).toBe(false);
     expect(sendCustomMessage).toHaveBeenCalledWith(expect.objectContaining({ customType: "babylon_subagent_identity" }));
     const saved = JSON.parse(await readFile(join(cwd, ".pi", "state", "subagents", "runs", runId, "run.json"), "utf8"));
     expect(saved).toMatchObject({ status: "stopped", latestActivity: "Opened as main session" });

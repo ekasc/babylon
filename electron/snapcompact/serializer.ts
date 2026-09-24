@@ -28,6 +28,7 @@
 //   - never let one command output consume the entire archive
 
 import { extractHighValueTokens, type RawSymbol } from "./symbol-dictionary";
+import { wireOf, wireStr, type Wire } from "../../src/store";
 
 export const MARKER = {
   user: "\u00b6user",
@@ -43,7 +44,7 @@ export const TOTAL_BUDGET_CHARS = 60_000;
 export const OMITTED_TAIL_LINES = 0;
 
 export interface SerializeInput {
-  messages: any[];
+  messages: unknown[];
   perToolResultBudget?: number;
   totalBudget?: number;
 }
@@ -65,25 +66,26 @@ export interface SerializeOutput {
   omittedTrailing: OmittedEntry[];
 }
 
-function textOf(content: any): string {
+function textOf(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content
-    .map((b: any) => {
+    .map((b) => {
       if (typeof b === "string") return b;
-      if (!b) return "";
-      if (b.type === "text" && typeof b.text === "string") return b.text;
-      if (b.type === "thinking" && typeof b.thinking === "string") return b.thinking;
-      if (b.type === "image") return "";
-      if (typeof b.text === "string") return b.text;
+      const w = wireOf(b);
+      if (!w) return "";
+      if (w.type === "text" && typeof w.text === "string") return w.text;
+      if (w.type === "thinking" && typeof w.thinking === "string") return w.thinking;
+      if (w.type === "image") return "";
+      if (typeof w.text === "string") return w.text;
       return "";
     })
     .join("");
 }
 
-function hasImagePayload(content: any): boolean {
+function hasImagePayload(content: unknown): boolean {
   if (!Array.isArray(content)) return false;
-  return content.some((b: any) => b?.type === "image");
+  return content.some((b) => wireOf(b)?.type === "image");
 }
 
 function truncate(s: string, max: number): { text: string; truncated: boolean } {
@@ -95,15 +97,16 @@ function formatHeader(marker: string, label?: string): string {
   return label ? `${marker} ${label}` : marker;
 }
 
-function serializeAssistant(msg: any): string {
+function serializeAssistant(msg: Wire): string {
   const blocks: string[] = [];
   if (Array.isArray(msg.content)) {
     for (const b of msg.content) {
-      if (!b) continue;
-      if (b.type === "text" && typeof b.text === "string" && b.text.trim()) {
-        blocks.push(b.text.trimEnd());
-      } else if (b.type === "thinking" && typeof b.thinking === "string" && b.thinking.trim()) {
-        blocks.push(formatHeader(MARKER.thinking) + "\n" + b.thinking.trimEnd());
+      const w = wireOf(b);
+      if (!w) continue;
+      if (w.type === "text" && typeof w.text === "string" && w.text.trim()) {
+        blocks.push(w.text.trimEnd());
+      } else if (w.type === "thinking" && typeof w.thinking === "string" && w.thinking.trim()) {
+        blocks.push(formatHeader(MARKER.thinking) + "\n" + w.thinking.trimEnd());
       }
     }
   } else if (typeof msg.content === "string" && msg.content.trim()) {
@@ -112,16 +115,17 @@ function serializeAssistant(msg: any): string {
   const tools: { id: string; name: string; args: string }[] = [];
   if (Array.isArray(msg.toolCalls)) {
     for (const tc of msg.toolCalls) {
-      if (!tc?.id) continue;
-      const name = String(tc.name ?? "tool");
-      let args = tc.arguments;
+      const t = wireOf(tc);
+      if (!t?.id) continue;
+      const name = String(t.name ?? "tool");
+      let args: unknown = t.arguments;
       if (typeof args !== "string") {
         try { args = JSON.stringify(args ?? {}, null, 0); } catch { args = String(args); }
       }
-      tools.push({ id: String(tc.id), name, args: String(args) });
+      tools.push({ id: String(t.id), name, args: String(args) });
     }
   }
-  const header = formatHeader(MARKER.assistant, msg.model ? `model=${msg.model}` : undefined);
+  const header = formatHeader(MARKER.assistant, typeof msg.model === "string" && msg.model ? `model=${msg.model}` : undefined);
   const out: string[] = [header];
   for (const block of blocks) out.push(block);
   for (const t of tools) {
@@ -131,8 +135,8 @@ function serializeAssistant(msg: any): string {
   return out.join("\n");
 }
 
-function serializeToolResult(msg: any, budget: number): { text: string; skipped: boolean } {
-  if (Array.isArray(msg.content) && hasImagePayload(msg.content) && !msg.content.some((b: any) => b?.type === "text")) {
+function serializeToolResult(msg: Wire, budget: number): { text: string; skipped: boolean } {
+  if (Array.isArray(msg.content) && hasImagePayload(msg.content) && !msg.content.some((b) => wireOf(b)?.type === "text")) {
     return { text: "", skipped: true };
   }
   const text = textOf(msg.content);
@@ -143,25 +147,27 @@ function serializeToolResult(msg: any, budget: number): { text: string; skipped:
   return { text: `${label}${tag}\n${t.text}`, skipped: false };
 }
 
-function serializeUser(msg: any): string {
+function serializeUser(msg: Wire): string {
   if (hasImagePayload(msg.content) && !textOf(msg.content).trim()) {
     return "";
   }
   return formatHeader(MARKER.user) + "\n" + textOf(msg.content).trimEnd();
 }
 
-function serializeCustom(msg: any): string {
-  const label = msg.customType ? `${MARKER.custom} ${msg.customType}` : MARKER.custom;
+function serializeCustom(msg: Wire): string {
+  const customType = wireStr(msg, "customType");
+  const label = customType ? `${MARKER.custom} ${customType}` : MARKER.custom;
   return `${label}\n${textOf(msg.content).trimEnd()}`;
 }
 
-function entryIdOf(msg: any): string {
-  if (typeof msg?.entryId === "string" && msg.entryId) return msg.entryId;
+function entryIdOf(msg: Wire | undefined): string {
+  const id = msg ? wireStr(msg, "entryId") : undefined;
+  if (typeof id === "string" && id) return id;
   return "?";
 }
 
-function entryRoleOf(msg: any): string {
-  return typeof msg?.role === "string" ? msg.role : "?";
+function entryRoleOf(msg: Wire | undefined): string {
+  return wireStr(msg, "role") ?? "?";
 }
 
 /**
@@ -181,39 +187,41 @@ export function serializeTranscript(input: SerializeInput): SerializeOutput {
   // First pass: compute the would-be block for every message (or the
   // reason it's skipped). We do this before budgeting so we can drop
   // whole messages from the end instead of slicing a single string.
-  const perMessage: Array<{ msg: any; block: string; skipped: boolean }> = [];
+  const perMessage: Array<{ msg: Wire; block: string; skipped: boolean }> = [];
   const toolIndex = new Map<string, string>();
   let skippedCount = 0;
 
   for (const m of messages) {
-    if (!m) continue;
-    const role = m.role;
+    const wm = wireOf(m);
+    if (!wm) continue;
+    const role = wm.role;
     let block = "";
     let skipped = false;
     if (role === "user") {
-      block = serializeUser(m);
+      block = serializeUser(wm);
       if (!block) skipped = true;
     } else if (role === "assistant") {
-      block = serializeAssistant(m);
-      if (Array.isArray(m.toolCalls)) {
-        for (const tc of m.toolCalls) {
-          if (tc?.id) toolIndex.set(String(tc.id), String(tc.name ?? "tool"));
+      block = serializeAssistant(wm);
+      if (Array.isArray(wm.toolCalls)) {
+        for (const tc of wm.toolCalls) {
+          const id = wireStr(wireOf(tc), "id");
+          if (id) toolIndex.set(id, wireStr(wireOf(tc), "name") ?? "tool");
         }
       }
     } else if (role === "toolResult") {
-      const r = serializeToolResult(m, perTool);
+      const r = serializeToolResult(wm, perTool);
       if (r.skipped) skipped = true;
       else {
-        const name = toolIndex.get(String(m.toolCallId)) ?? "tool";
+        const name = toolIndex.get(String(wireStr(wm, "toolCallId") ?? "")) ?? "tool";
         block = `${MARKER.tool} ${name}\n${r.text}`;
       }
     } else if (role === "custom") {
-      block = serializeCustom(m);
+      block = serializeCustom(wm);
     } else {
       skipped = true;
     }
     if (skipped) skippedCount += 1;
-    perMessage.push({ msg: m, block, skipped });
+    perMessage.push({ msg: wm, block, skipped });
   }
 
   // Second pass: keep the most-recent suffix that fits the total
@@ -224,12 +232,13 @@ export function serializeTranscript(input: SerializeInput): SerializeOutput {
   let lastIdx = -1;
   // Find last non-skipped index
   for (let i = perMessage.length - 1; i >= 0; i--) {
-    if (!perMessage[i].skipped) { lastIdx = i; break; }
+    const cand = perMessage[i];
+    if (cand !== undefined && !cand.skipped) { lastIdx = i; break; }
   }
   if (lastIdx !== -1) {
     for (let i = lastIdx; i >= 0; i--) {
       const item = perMessage[i];
-      if (item.skipped) continue;
+      if (item === undefined || item.skipped) continue;
       const sep = totalLen === 0 ? 0 : 2;
       const added = item.block.length + sep;
       if (totalLen + added > totalBudget) break;
@@ -255,14 +264,15 @@ export function serializeTranscript(input: SerializeInput): SerializeOutput {
 
   const kept: string[] = [];
   for (let i = firstIdx; i <= lastIdx; i++) {
-    if (!perMessage[i].skipped) kept.push(perMessage[i].block);
+    const item = perMessage[i];
+    if (item !== undefined && !item.skipped) kept.push(item.block);
   }
   const sourceText = kept.join("\n\n");
   const omittedTrailing: OmittedEntry[] = [];
   // Dropped due to budget: oldest non-skipped entries before firstIdx
   for (let i = 0; i < firstIdx; i++) {
     const item = perMessage[i];
-    if (item.skipped) continue;
+    if (item === undefined || item.skipped) continue;
     omittedTrailing.push({ entryId: entryIdOf(item.msg), role: entryRoleOf(item.msg), reason: "total-budget" });
   }
   // Also record image-only / empty messages as omitted (skipped before budgeting).
@@ -279,8 +289,8 @@ export function serializeTranscript(input: SerializeInput): SerializeOutput {
     rawSymbols,
     truncated,
     skipped: skippedCount,
-    firstKeptEntryId: entryIdOf(perMessage[firstIdx].msg),
-    lastKeptEntryId: entryIdOf(perMessage[lastIdx].msg),
+    firstKeptEntryId: entryIdOf(perMessage[firstIdx]?.msg),
+    lastKeptEntryId: entryIdOf(perMessage[lastIdx]?.msg),
     keptCount: kept.length,
     omittedTrailing,
   };

@@ -28,9 +28,28 @@ describe("babylon daemon client", () => {
     const client = connectDaemonClient({ listen: { port }, reconnect: false });
     clients.push(client);
 
-    const pong = await client.request("ping", null);
+    const pong = await client.request("ping", {});
     expect(pong.type).toBe("pong");
     expect(client.connected()).toBe(true);
+  });
+
+  it("authenticates TCP connections when the server requires a token", async () => {
+    const { hashToken } = await import("./remote-auth");
+    const server = await startDaemonServer({
+      listen: { port: 0 },
+      policyTickMs: 0,
+      authTokenHash: hashToken("owner-secret"),
+    });
+    servers.push(server);
+    const port = (server.address() as { port: number }).port;
+
+    const authed = connectDaemonClient({ listen: { port }, reconnect: false, token: "owner-secret" });
+    clients.push(authed);
+    await expect(authed.request("ping", {})).resolves.toMatchObject({ type: "pong" });
+
+    const anon = connectDaemonClient({ listen: { port }, reconnect: false });
+    clients.push(anon);
+    await expect(anon.request("ping", {}, 1500)).rejects.toThrow(/authentication required/);
   });
 
   it("delivers events to subscribers and unsubscribes", async () => {
@@ -40,8 +59,8 @@ describe("babylon daemon client", () => {
     const a = connectDaemonClient({ listen: { port }, reconnect: false });
     const b = connectDaemonClient({ listen: { port }, reconnect: false });
     clients.push(a, b);
-    await a.request("ping", null); // wait until both are connected
-    await b.request("ping", null);
+    await a.request("ping", {}); // wait until both are connected
+    await b.request("ping", {});
 
     const seen: string[] = [];
     const unsubscribe = a.onEvent((e) => seen.push(e.type));
@@ -89,7 +108,7 @@ describe("babylon daemon client", () => {
     });
     const client = connectDaemonClient({ listen: { port }, reconnect: false });
     clients.push(client);
-    await expect(client.request("ping", null, 100)).rejects.toThrow(/timed out/);
+    await expect(client.request("ping", {}, 100)).rejects.toThrow(/timed out/);
     client.close();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
@@ -103,10 +122,10 @@ describe("babylon daemon client", () => {
       reconnect: { initialDelayMs: 20, maxDelayMs: 200 },
     });
     clients.push(client);
-    await client.request("ping", null);
+    await client.request("ping", {});
 
     // In-flight request at the moment the daemon dies must fail loudly.
-    const inflight = client.request("ping", null, 5000);
+    const inflight = client.request("ping", {}, 5000);
     await server.close();
     await expect(inflight).rejects.toBeInstanceOf(DaemonRequestError);
     await vi.waitFor(() => expect(client.connected()).toBe(false));
@@ -127,13 +146,13 @@ describe("babylon daemon client", () => {
       reconnect: { initialDelayMs: 20, maxDelayMs: 200 },
     });
     clients.push(client);
-    await client.request("ping", null);
+    await client.request("ping", {});
     await server.close();
     // Wait until the client has observed the disconnect; a request issued on
     // the dying socket would fail in-flight instead of queueing.
     await vi.waitFor(() => expect(client.connected()).toBe(false));
 
-    const queued = client.request("ping", null, 5000);
+    const queued = client.request("ping", {}, 5000);
     await startSocketServer(socketPath);
     await expect(queued).resolves.toMatchObject({ type: "pong" });
   });
@@ -155,7 +174,7 @@ describe("babylon daemon client", () => {
 
     // A control call still uses the 10s default, so by the time the prompt
     // already timed out (400ms) the ping must still be in flight.
-    const ping = client.request("ping", null);
+    const ping = client.request("ping", {});
     const settled = await Promise.race([
       ping.then(() => "resolved").catch(() => "rejected"),
       new Promise<string>((resolve) => setTimeout(() => resolve("pending"), 600)),
@@ -172,10 +191,10 @@ describe("babylon daemon client", () => {
     const server = await startSocketServer(socketPath);
     const client = connectDaemonClient({ listen: { socketPath }, reconnect: false });
     clients.push(client);
-    await client.request("ping", null);
+    await client.request("ping", {});
     await server.close();
     await vi.waitFor(() => expect(client.connected()).toBe(false));
-    await expect(client.request("ping", null, 500)).rejects.toThrow(/connection|timed out/);
+    await expect(client.request("ping", {}, 500)).rejects.toThrow(/connection|timed out/);
   });
 
   it("reports connect and disconnect transitions via onConnectionChange", async () => {

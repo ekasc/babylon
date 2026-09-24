@@ -184,7 +184,7 @@ async function main() {
     if (!p.mode) throw new Error("no mode");
   });
 
-  // 15. UI smoke: check that GitView would render (check DOM for Babylon shell)
+  // 15. UI smoke: check DOM for Babylon shell
   await ok("UI shell present (babylon splash replaced)", async () => {
     const html = await window.content();
     if (!html.includes("Babylon") && !html.includes("pideck") && !html.toLowerCase().includes("git")) {

@@ -12,6 +12,7 @@
 // survive that move unchanged.
 
 import { makeId } from "./runtime";
+import { isPlainObject } from "./lib/wire";
 
 // Real producers today: message.sent (renderer send path), turn.* and tool.*
 // (Pi agent events), approval.* (permission engine via IPC), checkpoint.created
@@ -126,10 +127,6 @@ export interface EventLog {
 
 export function createEventLog(): EventLog {
   return { events: [] };
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isPayloadPrimitive(value: unknown): boolean {

@@ -23,7 +23,7 @@ export interface ContractCheck {
   required: boolean;
 }
 
-export interface CompletionContract {
+export type CompletionContract = {
   id: string;
   title: string;
   checks: ContractCheck[];

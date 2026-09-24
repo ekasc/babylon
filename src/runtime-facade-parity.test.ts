@@ -17,17 +17,17 @@ const hostSrc = read("daemon-host.ts");
 const facadeSrc = read("runtime-facade.ts");
 
 // Every protocol message the thin client sends to the daemon.
-const sent = [...runtimeSrc.matchAll(/client\.request\(\s*"([^"]+)"/g)].map((m) => m[1]);
+const sent = [...runtimeSrc.matchAll(/client\.request\(\s*"([^"]+)"/g)].flatMap((m) => (m[1] !== undefined ? [m[1]] : []));
 
 // Every message the daemon server (or its dispatchRequest core) knows.
-const piHandled = new Set([...serverSrc.matchAll(/case\s+"(pi\.[^"]+)"/g)].map((m) => m[1]));
-const explicitHandled = new Set([...serverSrc.matchAll(/(?:\(request as any\)|request)\.type\s*===\s*"([^"]+)"/g)].map((m) => m[1]));
-const dispatchHandled = new Set([...hostSrc.matchAll(/case\s+"([^"]+)"/g)].map((m) => m[1]));
+const piHandled = new Set([...serverSrc.matchAll(/case\s+"(pi\.[^"]+)"/g)].flatMap((m) => (m[1] !== undefined ? [m[1]] : [])));
+const explicitHandled = new Set([...serverSrc.matchAll(/(?:request|\(request\))\.type\s*===\s*"([^"]+)"/g)].flatMap((m) => (m[1] !== undefined ? [m[1]] : [])));
+const dispatchHandled = new Set([...hostSrc.matchAll(/case\s+"([^"]+)"/g)].flatMap((m) => (m[1] !== undefined ? [m[1]] : [])));
 const handled = new Set<string>([...piHandled, ...explicitHandled, ...dispatchHandled]);
 
 // RuntimeFacade data methods (lifecycle subscriptions issue no request).
 const facadeMethods = [...facadeSrc.matchAll(/^  ([a-zA-Z][a-zA-Z0-9]*)\(/gm)]
-  .map((m) => m[1])
+  .flatMap((m) => (m[1] !== undefined ? [m[1]] : []))
   .filter((m) => !m.startsWith("on"));
 
 describe("RuntimeFacade <-> daemon parity", () => {

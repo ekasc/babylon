@@ -5,8 +5,8 @@ import { extractHighValueTokens, assignIds } from "./symbol-dictionary";
 function user(text: string, entryId = `u-${Math.random()}`) {
   return { role: "user", content: text, entryId, timestamp: 0 };
 }
-function assistant(text: string, opts: { toolCalls?: any[]; model?: string; entryId?: string; thinking?: string } = {}) {
-  const content: any[] = [];
+function assistant(text: string, opts: { toolCalls?: Array<{ id: string; name: string; arguments?: unknown }>; model?: string; entryId?: string; thinking?: string } = {}) {
+  const content: Array<{ type: string; text?: string; thinking?: string }> = [];
   if (opts.thinking) content.push({ type: "thinking", thinking: opts.thinking });
   if (text) content.push({ type: "text", text });
   return { role: "assistant", content, toolCalls: opts.toolCalls, model: opts.model, entryId: opts.entryId ?? `a-${Math.random()}` };
@@ -169,8 +169,8 @@ describe("snapcompact symbol dictionary", () => {
     const a = assignIds(extractHighValueTokens("see a1b2c3d4 and then a1b2c3d4 again"));
     const b = assignIds(extractHighValueTokens("see a1b2c3d4 and then a1b2c3d4 again"));
     expect(a).toEqual(b);
-    expect(a[0].id).toBe("E001");
-    expect(a[0].value).toBe("a1b2c3d4");
+    expect(a[0]?.id).toBe("E001");
+    expect(a[0]?.value).toBe("a1b2c3d4");
   });
 
   it("replaces repeated references with the same anchor", () => {

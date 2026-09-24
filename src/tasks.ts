@@ -1,3 +1,5 @@
+import { nextTerminalId } from "./lib/terminalLabels";
+
 // Task-Owned Worktrees model for Parallel Work.
 //
 // A parallel implementation task owns a Pi session, a git branch, a git
@@ -8,7 +10,7 @@
 
 export type TaskStatus = "proposed" | "running" | "paused" | "completed" | "failed" | "cancelled";
 
-export interface Task {
+export type Task = {
   id: string;
   title: string;
   status: TaskStatus;
@@ -66,6 +68,12 @@ export function addTask(registry: TaskRegistry, task: Task): TaskRegistry {
   return { tasks: { ...registry.tasks, [task.id]: task } };
 }
 
+/** Insert or replace a task wholesale (local runtime's create path, which
+ *  intentionally overwrites — unlike addTask's no-clobber rule). */
+export function putTask(registry: TaskRegistry, task: Task): TaskRegistry {
+  return { tasks: { ...registry.tasks, [task.id]: task } };
+}
+
 export function updateTask(
   registry: TaskRegistry,
   id: string,
@@ -97,6 +105,13 @@ export function addTerminal(registry: TaskRegistry, id: string, terminalId: stri
   const task = registry.tasks[id];
   if (!task || task.terminalIds.includes(terminalId)) return registry;
   return updateTask(registry, id, { terminalIds: [...task.terminalIds, terminalId] });
+}
+
+export function allocateTerminal(registry: TaskRegistry, id: string): { registry: TaskRegistry; terminalId: string } | null {
+  const task = registry.tasks[id];
+  if (!task) return null;
+  const terminalId = nextTerminalId(task.terminalIds);
+  return { registry: addTerminal(registry, id, terminalId), terminalId };
 }
 
 export function removeTerminal(registry: TaskRegistry, id: string, terminalId: string): TaskRegistry {

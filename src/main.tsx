@@ -10,7 +10,7 @@ import "./styles.css";
  * error panel on screen instead.
  */
 class FatalBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
-  state = { error: null as Error | null };
+  state: { error: Error | null } = { error: null };
 
   static getDerivedStateFromError(error: Error) {
     return { error };
@@ -24,7 +24,7 @@ class FatalBoundary extends Component<{ children: ReactNode }, { error: Error | 
             <p className="text-[11px] font-semibold uppercase tracking-wider text-err">
               Babylon hit an unexpected error
             </p>
-            <p className="mt-2 font-mono break-words text-[12px] leading-relaxed text-fg/80">
+            <p className="mt-2 break-words text-[12px] leading-relaxed text-fg/80">
               {this.state.error.message || String(this.state.error)}
             </p>
             <button
@@ -41,7 +41,9 @@ class FatalBoundary extends Component<{ children: ReactNode }, { error: Error | 
   }
 }
 
-createRoot(document.getElementById("root")!).render(
+const rootEl = document.getElementById("root");
+if (!rootEl) throw new Error("missing #root element");
+createRoot(rootEl).render(
   <FatalBoundary>
     <App />
   </FatalBoundary>

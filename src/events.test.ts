@@ -30,7 +30,7 @@ describe("event model", () => {
     const out = appendEvent(log, event({ id: "  e1  ", type: "turn.started" }));
     expect(typeof out).not.toBe("string");
     log = out as ReturnType<typeof createEventLog>;
-    expect(log.events[0].id).toBe("e1");
+    expect(log.events[0]?.id).toBe("e1");
     // " e1 " and "e1" are the same id once trimmed.
     expect(appendEvent(log, event({ id: " e1 ", type: "turn.completed" }))).toMatch(/already exists/);
   });
@@ -98,8 +98,8 @@ describe("event model", () => {
     payload.id = "MUTATED";
     e.owner.taskId = "MUTATED";
     e.payload.id = "MUTATED";
-    expect(log.events[0].owner).toEqual({ sessionId: "s1", taskId: "t1" });
-    expect(log.events[0].payload).toEqual({ id: "attn-1" });
+    expect(log.events[0]?.owner).toEqual({ sessionId: "s1", taskId: "t1" });
+    expect(log.events[0]?.payload).toEqual({ id: "attn-1" });
   });
 
   it("filters by type and owner", () => {

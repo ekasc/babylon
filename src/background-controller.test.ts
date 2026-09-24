@@ -34,7 +34,7 @@ describe("background tick", () => {
     expect(ran).toEqual(["s1"]);
     expect(out.history.runs).toHaveLength(1);
     expect(out.ran).toHaveLength(1);
-    expect(out.schedule.tasks.s1.runCount).toBe(1);
+    expect(out.schedule.tasks.s1?.runCount).toBe(1);
     expect(out.blocked).toEqual([]);
   });
 

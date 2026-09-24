@@ -6,6 +6,9 @@ export interface ModelRef {
 export interface PiSettings {
   chatModel?: ModelRef;
   chatReasoning?: string;
+  /** Vision model that reads attached images when the chat model has no
+   *  image support; its description is relayed to the session instead. */
+  imageModel?: ModelRef;
   titleModel?: ModelRef;
   titleReasoning?: string;
   gitCommitModel?: ModelRef;

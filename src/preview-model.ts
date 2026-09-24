@@ -1,74 +1,13 @@
-// Browser Preview model for Runtime Workspace.
+// Server detection for the browser sidebar.
 //
-// When Babylon detects a local HTTP server (e.g. `pnpm dev` -> localhost:5173)
-// it can offer an integrated preview. This module holds the detection heuristic
-// and the tracked-server registry as pure, testable functions; the live port
-// probing and the preview UI surface build on top.
+// When a spawned process announces a localhost port (captured by the process
+// manager as detectedPorts) or its command implies a dev server, the sidebar
+// lists it with a liveness probe. No fabricated entries: only observed
+// processes appear.
 
-export type ServerState = "starting" | "running" | "stopped";
-
-export interface TrackedServer {
-  id: string;
-  url: string;
+export interface DetectedServer {
   port: number;
-  ownerSession?: string;
-  owner?: string;
   framework?: string;
-  startedAt: number;
-  state: ServerState;
-}
-
-export interface PreviewRegistry {
-  servers: Record<string, TrackedServer>;
-}
-
-export function createPreviewRegistry(): PreviewRegistry {
-  return { servers: {} };
-}
-
-export function registerServer(
-  registry: PreviewRegistry,
-  params: {
-    id: string;
-    port: number;
-    ownerSession?: string;
-    owner?: string;
-    framework?: string;
-    startedAt?: number;
-    state?: ServerState;
-  }
-): PreviewRegistry {
-  const server: TrackedServer = {
-    id: params.id,
-    url: `http://localhost:${params.port}`,
-    port: params.port,
-    ownerSession: params.ownerSession,
-    owner: params.owner,
-    framework: params.framework,
-    startedAt: params.startedAt ?? 0,
-    state: params.state ?? "starting",
-  };
-  return { servers: { ...registry.servers, [params.id]: server } };
-}
-
-export function updateServer(
-  registry: PreviewRegistry,
-  id: string,
-  patch: Partial<Omit<TrackedServer, "id" | "port">>
-): PreviewRegistry {
-  const existing = registry.servers[id];
-  if (!existing) return registry;
-  return { servers: { ...registry.servers, [id]: { ...existing, ...patch } } };
-}
-
-export function removeServer(registry: PreviewRegistry, id: string): PreviewRegistry {
-  const next = { ...registry.servers };
-  delete next[id];
-  return { servers: next };
-}
-
-export function listServers(registry: PreviewRegistry): TrackedServer[] {
-  return Object.values(registry.servers);
 }
 
 /** Port each known framework dev server listens on by default. */
@@ -80,13 +19,8 @@ const FRAMEWORK_DEFAULT_PORT: Record<string, number> = {
   angular: 4200,
 };
 
-export interface DetectedServer {
-  port: number;
-  framework?: string;
-}
-
-/** Infer a framework from a command, word-bounded and context-aware for next. */
-function inferFramework(command: string): string | undefined {
+/** Infer a framework from a command, word-bounded and context-aware for next. Exported for sidebar labels. */
+export function inferFramework(command: string): string | undefined {
   const lower = command.toLowerCase();
   if (/\bvite\b/.test(lower)) return "vite";
   if (/\bwebpack\b/.test(lower)) return "webpack";
@@ -121,7 +55,8 @@ export function detectServerFromCommand(command: string): DetectedServer | null 
   if (colon) return { port: Number(colon[1]) };
 
   const framework = inferFramework(command);
-  if (framework) return { port: FRAMEWORK_DEFAULT_PORT[framework], framework };
+  const frameworkPort = framework ? FRAMEWORK_DEFAULT_PORT[framework] : undefined;
+  if (framework && frameworkPort !== undefined) return { port: frameworkPort, framework };
 
   // Generic package-manager dev script (most often Vite's 5173).
   if (/\b(?:pnpm|yarn|bun|npm)\b[^\n]*\bdev\b/i.test(command) && !/\/dev\//.test(lower)) {

@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { promises as fsp } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { wireOf, wireStr } from "../src/store";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 
@@ -126,9 +127,11 @@ async function runGit(args: string[], cwd: string, timeoutMs: number | null = DE
       maxBuffer: 16 * 1024 * 1024,
     });
     return { exitCode: 0, stdout, stderr };
-  } catch (err: any) {
-    if (typeof err?.code === "number") {
-      return { exitCode: err.code, stdout: err.stdout ?? "", stderr: err.stderr ?? "" };
+  } catch (err: unknown) {
+    const code = wireOf(err)?.code;
+    if (typeof code === "number") {
+      const w = wireOf(err);
+      return { exitCode: code, stdout: wireStr(w, "stdout") ?? "", stderr: wireStr(w, "stderr") ?? "" };
     }
     throw err;
   }
@@ -168,17 +171,36 @@ function parseBranchAb(value: string): { ahead: number; behind: number } {
 
 function parseNumstatEntries(stdout: string): Array<{ path: string; insertions: number; deletions: number }> {
   const entries: Array<{ path: string; insertions: number; deletions: number }> = [];
-  for (const line of stdout.split(/\r?\n/g)) {
-    if (line.trim().length === 0) continue;
-    const [addedRaw, deletedRaw, ...pathParts] = line.split("\t");
-    const rawPath = pathParts.length > 1 ? (pathParts.at(-1) ?? "").trim() : pathParts.join("\t").trim();
+  // NUL-delimited (`--numstat -z`); newline split kept as a fallback for
+  // non-z output. Paths are never trimmed: whitespace is significant.
+  const records = stdout.includes("\0") ? stdout.split("\0") : stdout.split(/\r?\n/g);
+  for (let i = 0; i < records.length; i++) {
+    const line = records[i];
+    if (line === undefined) continue;
+    if (line.length === 0) continue;
+    const tab = line.indexOf("\t");
+    if (tab === -1) continue;
+    const tab2 = line.indexOf("\t", tab + 1);
+    if (tab2 === -1) continue;
+    const added = Number.parseInt(line.slice(0, tab), 10);
+    const deleted = Number.parseInt(line.slice(tab + 1, tab2), 10);
+    let rawPath = line.slice(tab2 + 1);
+    if (rawPath.length === 0) {
+      // Rename in -z form: orig + new follow as separate NUL records.
+      const orig = records[i + 1] ?? "";
+      const next = records[i + 2] ?? "";
+      if (next.length === 0) continue;
+      i += 2;
+      rawPath = next;
+      void orig;
+    } else {
+      // Non-z rename arrow form (`old => new` in one field).
+      const renameArrowIndex = rawPath.indexOf(" => ");
+      if (renameArrowIndex >= 0) rawPath = rawPath.slice(renameArrowIndex + " => ".length);
+    }
     if (rawPath.length === 0) continue;
-    const added = Number.parseInt(addedRaw ?? "0", 10);
-    const deleted = Number.parseInt(deletedRaw ?? "0", 10);
-    const renameArrowIndex = rawPath.indexOf(" => ");
-    const normalizedPath = renameArrowIndex >= 0 ? rawPath.slice(renameArrowIndex + " => ".length).trim() : rawPath;
     entries.push({
-      path: normalizedPath.length > 0 ? normalizedPath : rawPath,
+      path: rawPath,
       insertions: Number.isFinite(added) ? added : 0,
       deletions: Number.isFinite(deleted) ? deleted : 0,
     });
@@ -186,31 +208,42 @@ function parseNumstatEntries(stdout: string): Array<{ path: string; insertions: 
   return entries;
 }
 
+/**
+ * Path from one porcelain=v2 record (`-z` NUL record). Field boundaries are
+ * fixed, so whitespace inside filenames is preserved exactly:
+ * - `? `/`! `: everything after the prefix (never trimmed).
+ * - `1`/`u`: 8 space-separated header fields, then the path to end of record.
+ * - `2` (rename/copy): the record's own path is the NEW name; the ORIG name
+ *   follows as a separate NUL record, which the caller skips.
+ */
 function parsePorcelainPath(line: string): string | null {
   if (line.startsWith("? ") || line.startsWith("! ")) {
-    const simple = line.slice(2).trim();
+    const simple = line.slice(2);
     return simple.length > 0 ? simple : null;
   }
   if (!(line.startsWith("1 ") || line.startsWith("2 ") || line.startsWith("u "))) return null;
-  const tabIndex = line.indexOf("\t");
-  if (tabIndex >= 0) {
-    const [filePath] = line.slice(tabIndex + 1).split("\t");
-    return filePath?.trim().length ? filePath.trim() : null;
+  // Skip exactly 8 header fields ("1", XY, subm, mH, mI, mW, hH, hI).
+  let spaces = 0;
+  for (let i = 0; i < line.length; i++) {
+    if (line[i] === " " && ++spaces === 8) {
+      const filePath = line.slice(i + 1);
+      return filePath.length > 0 ? filePath : null;
+    }
   }
-  const parts = line.trim().split(/\s+/g);
-  const filePath = parts.at(-1) ?? "";
-  return filePath.length > 0 ? filePath : null;
+  return null;
 }
 
 /** XY code from a porcelain=v2 entry, reduced to one display letter.
  *  Prefers the worktree letter (Y); falls back to the index letter (X). */
 function parsePorcelainStatus(line: string): string | null {
-  if (line.startsWith("? ")) return "?";
+  if (line.startsWith("? ") || line.startsWith("! ")) return "?";
   if (!(line.startsWith("1 ") || line.startsWith("2 ") || line.startsWith("u "))) return null;
-  const xy = line.split(" ")[1];
-  if (!xy || xy.length < 2) return null;
-  const [, y] = xy;
-  const chosen = y !== "." ? y : xy[0];
+  const xy = line.slice(2, 4);
+  if (xy.length < 2) return null;
+  const first = xy[0];
+  const second = xy[1];
+  if (first === undefined || second === undefined) return null;
+  const chosen = second !== "." ? second : first;
   return chosen === "." ? "M" : chosen;
 }
 
@@ -280,7 +313,9 @@ export async function statusDetails(cwd: string): Promise<GitStatusDetails> {
   // -uall lists untracked files individually instead of collapsing whole
   // directories, so every entry is a concrete diffable file.
   // core.quotepath=false keeps unicode filenames literal (no octal \303\274 quoting).
-  const status = await runGit(["-c", "core.quotepath=false", "status", "--porcelain=2", "--branch", "-uall"], cwd);
+  // -z NUL-terminates records so filenames containing spaces, tabs, or
+  // newlines survive parsing at exact field boundaries.
+  const status = await runGit(["-c", "core.quotepath=false", "status", "--porcelain=2", "--branch", "-uall", "-z"], cwd);
   if (status.exitCode !== 0) {
     if (isNotRepoStderr(status.stderr)) return NON_REPO_STATUS;
     throw new GitError(firstLine(status.stderr) || "git status failed");
@@ -294,7 +329,11 @@ export async function statusDetails(cwd: string): Promise<GitStatusDetails> {
   const changedWithoutNumstat = new Set<string>();
   const statusByPath = new Map<string, string>();
 
-  for (const line of status.stdout.split(/\r?\n/g)) {
+  // NUL records (`-z`); newline split retained for non-z output.
+  const records = status.stdout.includes("\0") ? status.stdout.split("\0") : status.stdout.split(/\r?\n/g);
+  for (let i = 0; i < records.length; i++) {
+    const line = records[i];
+    if (line === undefined) continue;
     if (line.startsWith("# branch.head ")) {
       const value = line.slice("# branch.head ".length).trim();
       branch = value.startsWith("(") ? null : value;
@@ -309,9 +348,11 @@ export async function statusDetails(cwd: string): Promise<GitStatusDetails> {
       ({ ahead, behind } = parseBranchAb(line.slice("# branch.ab ".length).trim()));
       continue;
     }
-    if (line.trim().length > 0 && !line.startsWith("#")) {
+    if (line.length > 0 && !line.startsWith("#")) {
       hasChanges = true;
       const pathValue = parsePorcelainPath(line);
+      // Rename/copy entries carry the ORIG name as a second NUL record.
+      if (line.startsWith("2 ")) i++;
       if (pathValue) {
         changedWithoutNumstat.add(pathValue);
         const st = parsePorcelainStatus(line);
@@ -321,13 +362,13 @@ export async function statusDetails(cwd: string): Promise<GitStatusDetails> {
   }
 
   let numstatStdout = "";
-  const numstat = await runGit(["-c", "core.quotepath=false", "diff", "HEAD", "--numstat", "--"], cwd);
+  const numstat = await runGit(["-c", "core.quotepath=false", "diff", "HEAD", "--numstat", "-z", "--"], cwd);
   if (numstat.exitCode === 0) {
     numstatStdout = numstat.stdout;
   } else if (isUnbornHeadStderr(numstat.stderr)) {
     const [unstaged, staged] = await Promise.all([
-      gitStdout(["-c", "core.quotepath=false", "diff", "--numstat"], cwd).catch(() => ""),
-      gitStdout(["-c", "core.quotepath=false", "diff", "--cached", "--numstat"], cwd).catch(() => ""),
+      gitStdout(["-c", "core.quotepath=false", "diff", "--numstat", "-z"], cwd).catch(() => ""),
+      gitStdout(["-c", "core.quotepath=false", "diff", "--cached", "--numstat", "-z"], cwd).catch(() => ""),
     ]);
     const merged = new Map<string, { insertions: number; deletions: number }>();
     for (const entry of [...parseNumstatEntries(staged), ...parseNumstatEntries(unstaged)]) {
@@ -433,7 +474,7 @@ export async function prepareCommitContext(cwd: string): Promise<PreparedCommitC
   const [stagedSummary, patchResult, numstatResult, recentResult] = await Promise.all([
     gitStdout(["-c", "core.quotepath=false", "diff", "--cached", "--name-status"], cwd),
     runGit(["-c", "core.quotepath=false", "diff", "--no-ext-diff", "--cached", "--patch", "--minimal"], cwd),
-    runGit(["-c", "core.quotepath=false", "diff", "--cached", "--numstat"], cwd),
+    runGit(["-c", "core.quotepath=false", "diff", "--cached", "--numstat", "-z"], cwd),
     runGit(["log", "-8", "--pretty=%s"], cwd),
   ]);
   if (!stagedSummary.trim()) throw new GitError("no staged changes to commit");
@@ -443,7 +484,7 @@ export async function prepareCommitContext(cwd: string): Promise<PreparedCommitC
   const stats = parseNumstatEntries(numstatResult.stdout);
   const insertions = stats.reduce((total, entry) => total + entry.insertions, 0);
   const deletions = stats.reduce((total, entry) => total + entry.deletions, 0);
-  const areas = [...new Set(stats.map((entry) => entry.path.includes("/") ? entry.path.split("/", 1)[0] : "repository root"))];
+  const areas = [...new Set(stats.map((entry) => entry.path.includes("/") ? (entry.path.split("/", 1)[0] ?? "repository root") : "repository root"))];
   const truncatedPatch = patchResult.stdout.length > PREPARED_COMMIT_PATCH_CHARS;
   const patch = truncatedPatch
     ? `${patchResult.stdout.slice(0, PREPARED_COMMIT_PATCH_CHARS)}\n[patch truncated at ${PREPARED_COMMIT_PATCH_CHARS} characters]`
@@ -488,6 +529,7 @@ export async function commitStaged(cwd: string, message: string): Promise<GitCom
   const normalized = message.replace(/\r\n/g, "\n").trim();
   if (!normalized) throw new GitError("commit message is required");
   const [subject, ...rest] = normalized.split("\n");
+  if (subject === undefined) throw new GitError("commit message is required");
   const body = rest.join("\n").trim();
   const staged = await runGit(["diff", "--cached", "--quiet"], cwd);
   if (staged.exitCode === 0) throw new GitError("no staged changes to commit");
@@ -525,7 +567,7 @@ async function resolvePushRemoteName(cwd: string): Promise<string | null> {
   const remotes = await runGit(["remote"], cwd);
   if (remotes.exitCode !== 0) return null;
   const names = remotes.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
-  return names.length === 1 ? names[0] : null;
+  return names.length === 1 ? (names[0] ?? null) : null;
 }
 
 export async function pushCurrentBranch(cwd: string): Promise<GitPushResult> {
@@ -691,9 +733,10 @@ async function toolAvailable(command: "gh" | "glab"): Promise<{ installed: boole
     const authArgs = command === "gh" ? ["auth", "status"] : ["auth", "status"];
     await execFileAsync(command, authArgs, { timeout: 10_000 });
     return { installed, authenticated: true };
-  } catch (err: any) {
+  } catch (err: unknown) {
     // gh exits non-zero when signed out but prints "Logged in to ..." lines when authed.
-    const combined = `${err?.stdout ?? ""}${err?.stderr ?? ""}`;
+    const w = wireOf(err);
+    const combined = `${wireStr(w, "stdout") ?? ""}${wireStr(w, "stderr") ?? ""}`;
     return { installed, authenticated: /logged in to/i.test(combined) };
   }
 }
@@ -708,14 +751,17 @@ async function ghListOpenPrs(cwd: string, headSelector: string): Promise<GitPrSu
   if (!raw) return [];
   const parsed = JSON.parse(raw);
   if (!Array.isArray(parsed)) return [];
-  return parsed.map((item: any) => ({
-    number: Number(item.number),
-    title: String(item.title ?? ""),
-    url: String(item.url ?? ""),
-    baseRef: String(item.baseRefName ?? ""),
-    headRef: String(item.headRefName ?? ""),
-    state: "open" as const,
-  }));
+  return parsed.map((item) => {
+    const w = wireOf(item);
+    return {
+      number: Number(w?.number),
+      title: String(wireStr(w, "title") ?? ""),
+      url: String(wireStr(w, "url") ?? ""),
+      baseRef: String(wireStr(w, "baseRefName") ?? ""),
+      headRef: String(wireStr(w, "headRefName") ?? ""),
+      state: "open" as const,
+    };
+  });
 }
 
 async function glabListOpenMrs(cwd: string, sourceBranch: string): Promise<GitPrSummary[]> {
@@ -728,14 +774,17 @@ async function glabListOpenMrs(cwd: string, sourceBranch: string): Promise<GitPr
   if (!raw) return [];
   const parsed = JSON.parse(raw);
   if (!Array.isArray(parsed)) return [];
-  return parsed.map((item: any) => ({
-    number: Number(item.iid),
-    title: String(item.title ?? ""),
-    url: String(item.web_url ?? ""),
-    baseRef: String(item.target_branch ?? ""),
-    headRef: String(item.source_branch ?? ""),
-    state: "open" as const,
-  }));
+  return parsed.map((item) => {
+    const w = wireOf(item);
+    return {
+      number: Number(w?.iid),
+      title: String(wireStr(w, "title") ?? ""),
+      url: String(wireStr(w, "web_url") ?? ""),
+      baseRef: String(wireStr(w, "target_branch") ?? ""),
+      headRef: String(wireStr(w, "source_branch") ?? ""),
+      state: "open" as const,
+    };
+  });
 }
 
 async function findOpenPr(cwd: string, provider: GitProviderKind, branch: string): Promise<GitPrSummary | null> {
@@ -792,7 +841,8 @@ export async function suggestPrContent(
 
   let title: string;
   if (commits.length === 1) {
-    title = commits[0].replace(/^[0-9a-f]+\s+/, "");
+    const only = commits[0];
+    title = only !== undefined ? only.replace(/^[0-9a-f]+\s+/, "") : details.branch;
   } else if (commits.length > 1) {
     title = `${details.branch}: ${commits.length} commits`;
   } else {
@@ -881,8 +931,9 @@ export async function createPr(cwd: string, input: { title: string; body?: strin
       baseBranch,
       headBranch: branch,
     };
-  } catch (err: any) {
-    const message = firstLine(String(err?.stderr ?? err?.message ?? ""));
+  } catch (err: unknown) {
+    const w = wireOf(err);
+    const message = firstLine(String(wireStr(w, "stderr") ?? wireStr(w, "message") ?? ""));
     throw new GitError(message || `${command} PR creation failed`);
   } finally {
     await fsp.rm(bodyFile, { force: true }).catch(() => {});
@@ -925,21 +976,23 @@ export async function diffForFile(cwd: string, file: string): Promise<string> {
 }
 
 export async function stageFile(cwd: string, file: string): Promise<void> {
-  const target = file.replace(/\/+$/, "").trim();
+  // Literal pathspec after `--`: never trim — surrounding whitespace is
+  // significant in filenames. Only strip meaningless trailing slashes.
+  const target = file.replace(/\/+$/, "");
   if (!target || target.startsWith("-") || target.includes("\0")) throw new GitError("invalid file path");
   const result = await runGit(["add", "--", target], cwd);
   if (result.exitCode !== 0) throw new GitError(firstLine(result.stderr) || "git add failed");
 }
 
 export async function unstageFile(cwd: string, file: string): Promise<void> {
-  const target = file.replace(/\/+$/, "").trim();
+  const target = file.replace(/\/+$/, "");
   if (!target || target.startsWith("-") || target.includes("\0")) throw new GitError("invalid file path");
   const result = await runGit(["reset", "HEAD", "--", target], cwd);
   if (result.exitCode !== 0) throw new GitError(firstLine(result.stderr) || "git reset failed");
 }
 
 export async function discardFile(cwd: string, file: string): Promise<void> {
-  const target = file.replace(/\/+$/, "").trim();
+  const target = file.replace(/\/+$/, "");
   if (!target || target.startsWith("-") || target.includes("\0")) throw new GitError("invalid file path");
   // Try checkout for tracked files, clean for untracked
   const ls = await runGit(["ls-files", "--", target], cwd);
@@ -958,7 +1011,7 @@ export async function discardFile(cwd: string, file: string): Promise<void> {
 }
 
 export async function stageHunk(cwd: string, file: string, patch: string): Promise<void> {
-  const target = file.replace(/\/+$/, "").trim();
+  const target = file.replace(/\/+$/, "");
   if (!target || !patch.trim()) throw new GitError("invalid hunk");
   const tmpFile = join(tmpdir(), `pideck-hunk-${randomUUID()}.patch`);
   try {

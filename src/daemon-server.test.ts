@@ -3,14 +3,16 @@ import * as net from "node:net";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseEnvelope, serializeEnvelope, createEnvelope } from "./daemon-protocol";
+import { parseEnvelope, serializeEnvelope, createEnvelope, DAEMON_PROTOCOL_VERSION, type ProtocolMessageType, type ProtocolPayload } from "./daemon-protocol";
 import { encodeFrame } from "./daemon-transport";
-import { startDaemonServer, type DaemonServer } from "./daemon-server";
+import { hashToken } from "./remote-auth";
+import { startDaemonServer, type DaemonPiHost, type DaemonServer } from "./daemon-server";
 import type { ScheduledTask } from "./automation";
 import { createTask } from "./tasks";
 import { PermissionEngine } from "../electron/permissions";
 import { HookManager } from "../electron/hook-manager";
 import type { HookDefinition } from "./hooks";
+import { ProjectExecutionBusyError } from "./execution";
 
 const servers: DaemonServer[] = [];
 const tempDirs: string[] = [];
@@ -25,6 +27,64 @@ async function start(opts: Partial<Parameters<typeof startDaemonServer>[0]> = {}
   });
   servers.push(server);
   return server;
+}
+
+/** Partial PiHost fake: unmentioned methods throw if the server calls them. */
+function fakePiHost(overrides: Partial<DaemonPiHost>): DaemonPiHost {
+  const fail = (name: string) => () => {
+    throw new Error(`not stubbed: ${name}`);
+  };
+  return {
+    prompt: fail("prompt"),
+    abort: fail("abort"),
+    respondUi: fail("respondUi"),
+    notifyDiagnostics: fail("notifyDiagnostics"),
+    getToolOutput: fail("getToolOutput"),
+    getModels: fail("getModels"),
+    warmProject: fail("warmProject"),
+    setModel: fail("setModel"),
+    getThinkingLevels: fail("getThinkingLevels"),
+    setThinking: fail("setThinking"),
+    getSettings: fail("getSettings"),
+    setSettings: fail("setSettings"),
+    setSessionName: fail("setSessionName"),
+    renameSession: fail("renameSession"),
+    beginGoalPrompt: fail("beginGoalPrompt"),
+    compact: fail("compact"),
+    getTree: fail("getTree"),
+    getHistory: fail("getHistory"),
+    getTurnChanges: fail("getTurnChanges"),
+    getTurnFileDiff: fail("getTurnFileDiff"),
+    prepareRollback: fail("prepareRollback"),
+    commitRollback: fail("commitRollback"),
+    undoRollback: fail("undoRollback"),
+    getForkMessages: fail("getForkMessages"),
+    fork: fail("fork"),
+    clone: fail("clone"),
+    generateGitCommitMessage: fail("generateGitCommitMessage"),
+    getRecaps: fail("getRecaps"),
+    refreshFromDisk: fail("refreshFromDisk"),
+    controlThread: fail("controlThread"),
+    promoteThread: fail("promoteThread"),
+    controlSubagent: fail("controlSubagent"),
+    promoteSubagent: fail("promoteSubagent"),
+    execGoalCommand: fail("execGoalCommand"),
+    listProjectExecutions: fail("listProjectExecutions"),
+    executionSnapshot: fail("executionSnapshot"),
+    activateExecution: fail("activateExecution"),
+    relocateExecution: fail("relocateExecution"),
+    deactivateExecution: fail("deactivateExecution"),
+    execDesignCommand: fail("execDesignCommand"),
+  designGetArtifact: fail("designGetArtifact"),
+  designApproveArtifact: fail("designApproveArtifact"),
+    beginDesignPrompt: fail("beginDesignPrompt"),
+    getState: fail("getState"),
+    getMessages: fail("getMessages"),
+    getStats: fail("getStats"),
+    getCommands: fail("getCommands"),
+    attachSinks: () => undefined,
+    ...overrides,
+  };
 }
 
 function connect(port: number): Promise<net.Socket> {
@@ -67,14 +127,15 @@ function reader(socket: net.Socket) {
       if (!line.trim()) continue;
       const envelope = parseEnvelope(line);
       const w = waiters.findIndex((x) => x.type === envelope.type);
-      if (w !== -1) waiters.splice(w, 1)[0].resolve(envelope);
-      else queue.push(envelope);
+      if (w === -1) queue.push(envelope);
+      else waiters.splice(w, 1)[0]?.resolve(envelope);
     }
   });
   return {
     next(type: string, timeoutMs = 2000): Promise<ReturnType<typeof parseEnvelope>> {
       const queued = queue.findIndex((e) => e.type === type);
-      if (queued !== -1) return Promise.resolve(queue.splice(queued, 1)[0]);
+      const found = queued !== -1 ? queue.splice(queued, 1)[0] : undefined;
+      if (found) return Promise.resolve(found);
       return new Promise((resolve, reject) => {
         const t = setTimeout(() => reject(new Error(`timed out waiting for ${type}`)), timeoutMs);
         waiters.push({
@@ -89,8 +150,8 @@ function reader(socket: net.Socket) {
   };
 }
 
-async function request(socket: net.Socket, type: string, payload: unknown) {
-  socket.write(encodeFrame(serializeEnvelope(createEnvelope("request", type as never, payload))));
+async function request(socket: net.Socket, type: ProtocolMessageType, payload: ProtocolPayload) {
+  socket.write(encodeFrame(serializeEnvelope(createEnvelope("request", type, payload))));
 }
 
 afterEach(async () => {
@@ -104,7 +165,7 @@ describe("babylon daemon server", () => {
     const addr = server.address() as { port: number };
     const socket = await connect(addr.port);
     const r = reader(socket);
-    await request(socket, "ping", null);
+    await request(socket, "ping", {});
     await expect(r.next("pong")).resolves.toMatchObject({ kind: "response" });
 
     await request(socket, "state.get", {});
@@ -112,18 +173,352 @@ describe("babylon daemon server", () => {
     expect(snap.payload).toMatchObject({ version: 1, runtime: { version: 1 } });
   });
 
-  it("wraps pi.getCommands in { commands } for the thin client", async () => {
-    const piHost = {
-      opts: { onEvent: () => {}, onStatus: () => {} },
-      getCommands: async () => [{ name: "ls", description: "list", source: "shell" }],
-    } as any;
+  it("advertises its protocol version on pong so a mismatched client can retire it", async () => {
+    const server = await start();
+    const port = (server.address() as { port: number }).port;
+    const socket = await connect(port);
+    const r = reader(socket);
+    await request(socket, "ping", { protocol: DAEMON_PROTOCOL_VERSION });
+    const res = await r.next("pong");
+    expect((res.payload as { protocol?: unknown }).protocol).toBe(DAEMON_PROTOCOL_VERSION);
+  });
+
+  it("acks daemon.shutdown before running the shutdown hook", async () => {
+    let stopped = false;
+    const server = await start({ onShutdown: () => { stopped = true; } });
+    const port = (server.address() as { port: number }).port;
+    const socket = await connect(port);
+    const r = reader(socket);
+    await request(socket, "daemon.shutdown", {});
+    const res = await r.next("daemon.shutdown");
+    expect(res.payload).toEqual({ ok: true });
+    // The ack is sent before the hook so the caller is not left hanging.
+    expect(stopped).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(stopped).toBe(true);
+  });
+
+  it("serves pi.goalControl by running the invocation and wrapping the fresh goal", async () => {
+    const goal = {
+      active: true,
+      paused: false,
+      objective: "Ship it",
+      slug: "ship-it",
+      status: "executing" as const,
+      currentStep: "step",
+      startedAt: new Date(0).toISOString(),
+      acceptanceCriteria: [],
+      nonGoals: [],
+      completedSteps: [],
+      evidence: [],
+      log: [],
+    };
+    const seen: Array<[string, string]> = [];
+    const piHost = fakePiHost({
+      execGoalCommand: async (sessionFile: string, args: string) => {
+        seen.push([sessionFile, args]);
+        return goal;
+      },
+    });
     const server = await start({ piHost });
     const port = (server.address() as { port: number }).port;
     const socket = await connect(port);
     const r = reader(socket);
-    await request(socket, "pi.getCommands", {});
+    await request(socket, "pi.goalControl", { sessionFile: "/s/a.jsonl", args: "pause" });
+    const res = await r.next("pi.goalControl");
+    expect(res.payload).toEqual({ goal });
+    expect(seen).toEqual([["/s/a.jsonl", "pause"]]);
+    await request(socket, "pi.goalControl", { args: 42 });
+    const err = await r.next("error");
+    expect(String((err.payload as { error?: string }).error)).toMatch(/requires \{ sessionFile, args \}/);
+  });
+
+  it("serves pi.goalBeginPrompt with the full turn payload", async () => {
+    const goal = {
+      active: true,
+      paused: false,
+      objective: "Fix it",
+      slug: "fix-it",
+      status: "planning" as const,
+      currentStep: "step",
+      startedAt: new Date(0).toISOString(),
+      acceptanceCriteria: [],
+      nonGoals: [],
+      completedSteps: [],
+      evidence: [],
+      log: [],
+    };
+    const seen: Array<[string, string, string]> = [];
+    const piHost = fakePiHost({
+      beginGoalPrompt: async (sessionFile: string, objective: string, message: string) => {
+        seen.push([sessionFile, objective, message]);
+        return { goal, started: true, error: null, maxRounds: 3 };
+      },
+    });
+    const server = await start({ piHost });
+    const port = (server.address() as { port: number }).port;
+    const socket = await connect(port);
+    const r = reader(socket);
+    await request(socket, "pi.goalBeginPrompt", { sessionFile: "/s/a.jsonl", objective: "Fix it", message: "Fix it" });
+    const res = await r.next("pi.goalBeginPrompt");
+    expect(res.payload).toEqual({ goal, started: true, error: null, maxRounds: 3 });
+    expect(seen).toEqual([["/s/a.jsonl", "Fix it", "Fix it"]]);
+    await request(socket, "pi.goalBeginPrompt", { sessionFile: "/s/a.jsonl" });
+    const err = await r.next("error");
+    expect(String((err.payload as { error?: string }).error)).toMatch(/requires \{ sessionFile, objective, message \}/);
+  });
+
+  it("wraps pi.getCommands in { commands } for the thin client", async () => {
+    const piHost = fakePiHost({
+      getCommands: async () => [{ name: "ls", description: "list", source: "prompt" as const }],
+    });
+    const server = await start({ piHost });
+    const port = (server.address() as { port: number }).port;
+    const socket = await connect(port);
+    const r = reader(socket);
+    await request(socket, "pi.getCommands", { sessionFile: "/tmp/s.jsonl" });
     const res = await r.next("pi.getCommands");
-    expect(res.payload).toEqual({ commands: [{ name: "ls", description: "list", source: "shell" }] });
+    expect(res.payload).toEqual({ commands: [{ name: "ls", description: "list", source: "prompt" }] });
+  });
+
+  it("serves pi.designControl addressed to a session", async () => {
+    const status = { design: null, stage: "idle" as const, maxRounds: 3 };
+    const seen: Array<[string, string]> = [];
+    const piHost = fakePiHost({
+      execDesignCommand: async (sessionFile: string, args: string) => {
+        seen.push([sessionFile, args]);
+        return status;
+      },
+    });
+    const server = await start({ piHost });
+    const port = (server.address() as { port: number }).port;
+    const socket = await connect(port);
+    const r = reader(socket);
+    await request(socket, "pi.designControl", { sessionFile: "/s/a.jsonl", args: "approve-brief" });
+    const res = await r.next("pi.designControl");
+    expect(res.payload).toEqual(status);
+    expect(seen).toEqual([["/s/a.jsonl", "approve-brief"]]);
+    await request(socket, "pi.designControl", { args: "approve-brief" });
+    const err = await r.next("error");
+    expect(String((err.payload as { error?: string }).error)).toMatch(/requires \{ sessionFile, args \}/);
+  });
+
+  it("serves pi.designBeginPrompt with the full turn payload", async () => {
+    const outcome = { design: null, stage: "elicit" as const, started: true, error: null, maxRounds: 3 };
+    const seen: Array<[string, string, string]> = [];
+    const piHost = fakePiHost({
+      beginDesignPrompt: async (sessionFile: string, subject: string, message: string) => {
+        seen.push([sessionFile, subject, message]);
+        return outcome;
+      },
+    });
+    const server = await start({ piHost });
+    const port = (server.address() as { port: number }).port;
+    const socket = await connect(port);
+    const r = reader(socket);
+    await request(socket, "pi.designBeginPrompt", { sessionFile: "/s/a.jsonl", subject: "Redesign", message: "Redesign" });
+    const res = await r.next("pi.designBeginPrompt");
+    expect(res.payload).toEqual(outcome);
+    expect(seen).toEqual([["/s/a.jsonl", "Redesign", "Redesign"]]);
+    await request(socket, "pi.designBeginPrompt", { sessionFile: "/s/a.jsonl" });
+    const err = await r.next("error");
+    expect(String((err.payload as { error?: string }).error)).toMatch(/requires \{ sessionFile, subject, message \}/);
+  });
+
+  it("serves pi.executionList as { executions }", async () => {
+    const execution = {
+      cwd: "/proj/a",
+      sessionFile: "/s/a1.jsonl",
+      sessionId: "session-a1",
+      state: "working" as const,
+      streaming: true,
+      generation: 3,
+    };
+    const piHost = fakePiHost({ listProjectExecutions: async () => [execution] });
+    const server = await start({ piHost });
+    const port = (server.address() as { port: number }).port;
+    const socket = await connect(port);
+    const r = reader(socket);
+    await request(socket, "pi.executionList", {});
+    const res = await r.next("pi.executionList");
+    expect(res.payload).toEqual({ executions: [execution] });
+  });
+
+  it("serves pi.executionActivate with ok envelope and busy envelope", async () => {
+    const execution = {
+      cwd: "/proj/a",
+      sessionFile: "/s/a2.jsonl",
+      sessionId: "session-a2",
+      state: "idle" as const,
+      streaming: false,
+      generation: 2,
+    };
+    const seen: Array<[string, string | undefined]> = [];
+    let busy = false;
+    const piHost = fakePiHost({
+      activateExecution: async (cwd: string, sessionFile?: string) => {
+        seen.push([cwd, sessionFile]);
+        if (busy) throw new ProjectExecutionBusyError("/s/a1.jsonl", "session-a1");
+        return { sessionFile: sessionFile ?? "/s/a2.jsonl", sessionId: "session-a2" };
+      },
+      executionSnapshot: async () => execution,
+    });
+    const server = await start({ piHost });
+    const port = (server.address() as { port: number }).port;
+    const socket = await connect(port);
+    const r = reader(socket);
+    await request(socket, "pi.executionActivate", { cwd: "/proj/a", sessionFile: "/s/a2.jsonl" });
+    const ok = await r.next("pi.executionActivate");
+    expect(ok.payload).toEqual({ ok: true, execution });
+    expect(seen).toEqual([["/proj/a", "/s/a2.jsonl"]]);
+    // Busy owners cross the wire as a structured envelope, not an error —
+    // error classes do not survive message-only serialization.
+    busy = true;
+    await request(socket, "pi.executionActivate", { cwd: "/proj/a" });
+    const busyRes = await r.next("pi.executionActivate");
+    expect(busyRes.payload).toEqual({
+      ok: false,
+      code: "PROJECT_EXECUTION_BUSY",
+      busySessionFile: "/s/a1.jsonl",
+      busySessionId: "session-a1",
+    });
+    await request(socket, "pi.executionActivate", { sessionFile: 42 });
+    const err = await r.next("error");
+    expect(String((err.payload as { error?: string }).error)).toMatch(/requires \{ cwd \}/);
+  });
+
+  it("broadcasts pi.executionChanged to clients when the host emits an ownership push", async () => {
+    // Holder object: TS does not track closure assignment through `let`
+    // narrowing, so the captured sinks live on a mutable property.
+    const captured: { sinks: Parameters<DaemonPiHost["attachSinks"]>[0] | null } = { sinks: null };
+    const piHost = fakePiHost({
+      attachSinks: (s) => {
+        captured.sinks = s;
+      },
+    });
+    const server = await start({ piHost });
+    const port = (server.address() as { port: number }).port;
+    const socket = await connect(port);
+    const r = reader(socket);
+    // Settle the connection so the server has registered this socket before
+    // a server-initiated broadcast (same pattern as approval.requested).
+    await request(socket, "ping", {});
+    await r.next("pong");
+    expect(captured.sinks?.onExecutionChanged).toBeDefined();
+    const execution = {
+      cwd: "/proj/a",
+      sessionFile: "/s/a1.jsonl",
+      sessionId: "session-a1",
+      state: "working" as const,
+      streaming: true,
+      generation: 7,
+    };
+    captured.sinks!.onExecutionChanged!(execution);
+    const ev = await r.next("pi.executionChanged");
+    expect(ev.payload).toEqual(execution);
+  });
+
+  it("rejects addressed mutators with a missing sessionFile", async () => {
+    const piHost = fakePiHost({ setModel: async () => ({ model: null }) });
+    const server = await start({ piHost });
+    const port = (server.address() as { port: number }).port;
+    const socket = await connect(port);
+    const r = reader(socket);
+    // Missing identity is a protocol error, never a foreground fallback.
+    await request(socket, "pi.setModel", { provider: "p", modelId: "m" });
+    const err = await r.next("error");
+    expect(String((err.payload as { error?: string }).error)).toMatch(/requires \{ sessionFile, provider, modelId \}/);
+    await request(socket, "pi.abort", {});
+    const err2 = await r.next("error");
+    expect(String((err2.payload as { error?: string }).error)).toMatch(/requires \{ sessionFile \}/);
+    await request(socket, "pi.undoRollback", { sessionFile: "" });
+    const err3 = await r.next("error");
+    expect(String((err3.payload as { error?: string }).error)).toMatch(/requires \{ sessionFile \}/);
+  });
+
+  it("serves pi.executionDeactivate as { released }", async () => {
+    const seen: Array<[string, string]> = [];
+    const piHost = fakePiHost({
+      deactivateExecution: async (cwd: string, expected: string) => {
+        seen.push([cwd, expected]);
+        return expected === "/s/a1.jsonl";
+      },
+    });
+    const server = await start({ piHost });
+    const port = (server.address() as { port: number }).port;
+    const socket = await connect(port);
+    const r = reader(socket);
+    await request(socket, "pi.executionDeactivate", { cwd: "/proj/a", expectedSessionFile: "/s/a1.jsonl" });
+    const res = await r.next("pi.executionDeactivate");
+    expect(res.payload).toEqual({ released: true });
+    expect(seen).toEqual([["/proj/a", "/s/a1.jsonl"]]);
+    await request(socket, "pi.executionDeactivate", { cwd: "/proj/a" });
+    const err = await r.next("error");
+    expect(String((err.payload as { error?: string }).error)).toMatch(/requires \{ cwd, expectedSessionFile \}/);
+  });
+
+  it("wraps array results so the protocol envelope stays an object", async () => {
+    const piHost = fakePiHost({
+      getMessages: async () => [{ role: "user", content: "hi" }],
+      getModels: async () => [{ provider: "pi", id: "m1" }],
+      getThinkingLevels: async () => ["low", "high"],
+      getForkMessages: async () => [{ entryId: "e1" }],
+      getRecaps: async () => [{ id: "r1", at: "2026-01-01T00:00:00.000Z", coveredEntryId: null, text: "Recap: r1" }],
+    });
+    const server = await start({ piHost });
+    const port = (server.address() as { port: number }).port;
+    const socket = await connect(port);
+    const r = reader(socket);
+
+    await request(socket, "pi.getMessages", { sessionFile: "/tmp/s.jsonl" });
+    expect((await r.next("pi.getMessages")).payload).toEqual({ messages: [{ role: "user", content: "hi" }] });
+
+    await request(socket, "pi.getModels", { cwd: "/tmp/project" });
+    expect((await r.next("pi.getModels")).payload).toEqual({ models: [{ provider: "pi", id: "m1" }] });
+
+    await request(socket, "pi.getThinkingLevels", { sessionFile: "/tmp/s.jsonl" });
+    expect((await r.next("pi.getThinkingLevels")).payload).toEqual({ levels: ["low", "high"] });
+
+    await request(socket, "pi.getForkMessages", { sessionFile: "/tmp/s.jsonl" });
+    expect((await r.next("pi.getForkMessages")).payload).toEqual({ messages: [{ entryId: "e1" }] });
+
+    await request(socket, "pi.getRecaps", { sessionFile: "/tmp/s.jsonl" });
+    expect((await r.next("pi.getRecaps")).payload).toEqual({ recaps: [{ id: "r1", at: "2026-01-01T00:00:00.000Z", coveredEntryId: null, text: "Recap: r1" }] });
+  });
+
+  it("serves pi.warmProject by delegating to the host", async () => {
+    const warmed: string[] = [];
+    const piHost = fakePiHost({
+      warmProject: (cwd: string) => {
+        warmed.push(cwd);
+        return { warmed: true };
+      },
+    });
+    const server = await start({ piHost });
+    const port = (server.address() as { port: number }).port;
+    const socket = await connect(port);
+    const r = reader(socket);
+    await request(socket, "pi.warmProject", { cwd: "/tmp/project" });
+    const res = await r.next("pi.warmProject");
+    expect(res.payload).toEqual({ warmed: true });
+    expect(warmed).toEqual(["/tmp/project"]);
+  });
+
+  it("answers an oversized response with a typed error instead of dropping the connection", async () => {
+    const piHost = fakePiHost({
+      getMessages: async () => [{ role: "assistant", content: "x".repeat(8192) }],
+    });
+    const server = await start({ piHost, maxFrameBytes: 1024 });
+    const port = (server.address() as { port: number }).port;
+    const socket = await connect(port);
+    const r = reader(socket);
+    await request(socket, "pi.getMessages", { sessionFile: "/tmp/s.jsonl" });
+    const res = await r.next("error");
+    expect(String((res.payload as { error?: string }).error)).toMatch(/exceeds the transport frame limit/);
+    // The socket survives: a dropped connection is what made the client
+    // reconnect and retry the same oversized request forever.
+    await request(socket, "ping", {});
+    await expect(r.next("pong")).resolves.toMatchObject({ kind: "response" });
   });
 
   it("applies task requests, persists them, and broadcasts events to other clients", async () => {
@@ -141,6 +536,7 @@ describe("babylon daemon server", () => {
 
     // A fresh server on the same snapshot path sees the persisted task.
     const dir = tempDirs[0];
+    if (!dir) throw new Error("missing temp dir");
     await server.close();
     const revived = await startDaemonServer({
       listen: { port: 0 },
@@ -204,11 +600,19 @@ describe("babylon daemon server", () => {
   });
 
   it("destroys a client that sends an oversized frame", async () => {
-    const server = await start();
+    const server = await start({ maxFrameBytes: 1024 });
     const port = (server.address() as { port: number }).port;
     const socket = await connect(port);
     drain(socket);
-    const big = JSON.stringify(createEnvelope("request", "ping", null)).replace("null", `"${"x".repeat(1024 * 1024 + 10)}"`);
+    // Craft the oversized frame on the wire directly: the decoder must reject
+    // it and drop the client.
+    const big = JSON.stringify({
+      id: "m1",
+      kind: "request",
+      type: "ping",
+      payload: { padding: "x".repeat(1024 * 1024 + 10) },
+      ts: Date.now(),
+    });
     socket.write(big + "\n");
     await new Promise<void>((resolve) => socket.once("close", resolve));
     expect(socket.destroyed).toBe(true);
@@ -225,7 +629,7 @@ describe("babylon daemon server", () => {
     // The first daemon still answers after the refused start.
     const socket = await connectSocketPath(socketPath);
     drain(socket);
-    socket.write(encodeFrame(serializeEnvelope(createEnvelope("request", "ping", null))));
+    socket.write(encodeFrame(serializeEnvelope(createEnvelope("request", "ping", {}))));
     socket.end();
     await new Promise<void>((resolve) => socket.once("close", resolve));
   });
@@ -266,6 +670,7 @@ describe("babylon daemon server", () => {
 
     // A fresh daemon on the same snapshot must still know the contract.
     const dir = tempDirs[0];
+    if (!dir) throw new Error("missing temp dir");
     await server.close();
     const revived = await startDaemonServer({
       listen: { port: 0 },
@@ -283,7 +688,7 @@ describe("babylon daemon server", () => {
     const completion = await rr.next("task.complete");
     expect(completion.kind).toBe("response");
     expect(completion.payload).toMatchObject({ blocked: true, reason: "contract failed: tests pass" });
-    expect(revived.state().runtime.tasks.tasks.t1.status).not.toBe("completed");
+    expect(revived.state().runtime.tasks.tasks.t1?.status).not.toBe("completed");
     const item = Object.values(revived.state().runtime.attention.items)[0];
     expect(item).toMatchObject({ type: "failed_task", title: "Completion blocked: Ship it" });
   });
@@ -310,7 +715,7 @@ describe("babylon daemon server", () => {
     const firstPort = (first.address() as { port: number }).port;
     const firstSocket = await connect(firstPort);
     const fr = reader(firstSocket);
-    await request(firstSocket, "hooks.register" as never, hook);
+    await request(firstSocket, "hooks.register", hook);
     await expect(fr.next("hooks.register")).resolves.toMatchObject({ kind: "response" });
     expect(liveHookManager.list().map((h) => h.id)).toEqual(["h-1"]);
 
@@ -406,7 +811,7 @@ describe("babylon daemon server", () => {
 
     // Settle the connection so the server has registered this socket before a
     // server-initiated approval broadcast (rather than a request response).
-    await request(socket, "ping", null);
+    await request(socket, "ping", {});
     await r.next("pong");
 
     const allowed = server.requestApproval({ category: "shell_command", command: "npm test" }, "uncertain");
@@ -426,5 +831,147 @@ describe("babylon daemon server", () => {
     await expect(denied).resolves.toBe(false);
     await expect(r.next("permissions.changed")).resolves.toMatchObject({ kind: "event" });
     expect(engine.evaluate({ category: "git_push" }).decision).toBe("deny");
+  });
+
+  it("TCP mode rejects unauthenticated requests, including state snapshots", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "babylon-perm-"));
+    tempDirs.push(dir);
+    const engine = new PermissionEngine({ dir });
+    await engine.load();
+    const server = await start({ permissionEngine: engine, authTokenHash: hashToken("owner-secret") });
+    const port = (server.address() as { port: number }).port;
+    const socket = await connect(port);
+    const r = reader(socket);
+
+    await request(socket, "permissions.set-mode", { mode: "full_access" });
+    await expect(r.next("error")).resolves.toMatchObject({ payload: { error: "daemon authentication required" } });
+    await request(socket, "state.get", {});
+    await expect(r.next("error")).resolves.toMatchObject({ payload: { error: "daemon authentication required" } });
+    // Nothing mutated behind the gate.
+    expect(engine.getMode()).toBe("auto");
+    socket.destroy();
+  });
+
+  it("TCP mode rejects wrong tokens but accepts the owner token", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "babylon-perm-"));
+    tempDirs.push(dir);
+    const engine = new PermissionEngine({ dir });
+    await engine.load();
+    const server = await start({ permissionEngine: engine, authTokenHash: hashToken("owner-secret") });
+    const port = (server.address() as { port: number }).port;
+
+    const bad = await connect(port);
+    const rb = reader(bad);
+    await request(bad, "daemon.auth", { token: "wrong" });
+    await expect(rb.next("error")).resolves.toMatchObject({ payload: { error: "daemon authentication failed" } });
+    await request(bad, "permissions.set-mode", { mode: "full_access" });
+    await expect(rb.next("error")).resolves.toMatchObject({ payload: { error: "daemon authentication required" } });
+    expect(engine.getMode()).toBe("auto");
+    bad.destroy();
+
+    const good = await connect(port);
+    const rg = reader(good);
+    await request(good, "daemon.auth", { token: "owner-secret" });
+    await expect(rg.next("daemon.auth")).resolves.toMatchObject({ payload: { ok: true } });
+    await request(good, "permissions.set-mode", { mode: "full_access" });
+    await expect(rg.next("permissions.set-mode")).resolves.toMatchObject({ payload: { mode: "full_access" } });
+    expect(engine.getMode()).toBe("full_access");
+    good.destroy();
+  });
+
+  it("Unix-socket mode needs no token", async () => {    const dir = await mkdtemp(join(tmpdir(), "babylon-daemon-"));
+    tempDirs.push(dir);
+    const server = await startDaemonServer({
+      listen: { socketPath: join(dir, "daemon.sock") },
+      snapshotPath: join(dir, "state.json"),
+    });
+    servers.push(server);
+    const socket = await connectSocketPath(join(dir, "daemon.sock"));
+    const r = reader(socket);
+    await request(socket, "ping", {});
+    await expect(r.next("pong")).resolves.toMatchObject({ kind: "response" });
+    await request(socket, "daemon.auth", { token: "anything" });
+    await expect(r.next("daemon.auth")).resolves.toMatchObject({ payload: { ok: true } });
+    socket.destroy();
+  });
+
+  it("approval.list exposes pending approvals for detached renderers (A06)", async () => {
+    const server = await start({});
+    const port = (server.address() as { port: number }).port;
+    const socket = await connect(port);
+    const r = reader(socket);
+
+    await request(socket, "ping", {});
+    await r.next("pong");
+    const asked = server.requestApproval({ category: "shell_command", command: "rm -rf /" }, "high", "sess-9");
+    const req = await r.next("approval.requested");
+    expect(req.payload).toMatchObject({ sessionId: "sess-9" });
+
+    // A second connection (a reloaded renderer) sees the same pending item.
+    const late = await connect(port);
+    const rl = reader(late);
+    await request(late, "approval.list", {});
+    await expect(rl.next("approval.list")).resolves.toMatchObject({
+      payload: {
+        approvals: [
+          {
+            id: (req.payload as { id: string }).id,
+            risk: "high",
+            sessionId: "sess-9",
+          },
+        ],
+      },
+    });
+
+    // Resolution removes it from the list.
+    const id = (req.payload as { id: string }).id;
+    await request(late, "approval.resolved", { id, choice: "deny" });
+    await rl.next("approval.resolved");
+    await expect(asked).resolves.toBe(false);
+    await request(late, "approval.list", {});
+    await expect(rl.next("approval.list")).resolves.toMatchObject({ payload: { approvals: [] } });
+    socket.destroy();
+    late.destroy();
+  });
+
+  it("invalid hook registration is a protocol error, not a crash (A07)", async () => {
+    const server = await start({});
+    const port = (server.address() as { port: number }).port;
+    const socket = await connect(port);
+    const r = reader(socket);
+
+    await request(socket, "hooks.register", { id: "bad", event: "pre_tool_use", enabled: true, timeoutMs: -1 });
+    await expect(r.next("error")).resolves.toMatchObject({ payload: { error: expect.stringContaining("timeoutMs") } });
+    await request(socket, "hooks.register", { event: "pre_tool_use", enabled: true });
+    await expect(r.next("error")).resolves.toMatchObject({ payload: { error: expect.stringContaining("id") } });
+    await request(socket, "hooks.remove", {});
+    await expect(r.next("error")).resolves.toMatchObject({ payload: { error: expect.stringContaining("id") } });
+    // Server still answers afterwards.
+    await request(socket, "ping", {});
+    await expect(r.next("pong")).resolves.toMatchObject({ kind: "response" });
+    socket.destroy();
+  });
+});
+
+describe("toSettingsPatch", () => {
+  it("passes valid patches through", async () => {
+    const { toSettingsPatch } = await import("./lib/settings-patch");
+    expect(
+      toSettingsPatch({ chatModel: { provider: "acme", modelId: "m1" }, chatReasoning: "high" })
+    ).toEqual({ chatModel: { provider: "acme", modelId: "m1" }, chatReasoning: "high" });
+  });
+
+  it("drops unknown keys and rejects mistyped values", async () => {
+    const { toSettingsPatch } = await import("./lib/settings-patch");
+    expect(toSettingsPatch({ chatModel: { provider: "a", modelId: "b" }, evil: "x" })).toEqual({
+      chatModel: { provider: "a", modelId: "b" },
+    });
+    expect(() => toSettingsPatch("nope")).toThrow("must be an object");
+    expect(() => toSettingsPatch({ chatModel: { provider: "a" } })).toThrow("modelId");
+    expect(() => toSettingsPatch({ appearance: { theme: "neon" } })).toThrow("theme");
+    expect(toSettingsPatch({ appearance: { theme: "dark" } })).toEqual({ appearance: { theme: "dark" } });
+    expect(() => toSettingsPatch({ contextWindowOverrides: { "a/b": "lots" } })).toThrow(
+      "Record<string, number>"
+    );
   });
 });

@@ -1,3 +1,5 @@
+import { wireOf } from "../src/lib/wire";
+
 // LSP wire protocol helpers for Babylon's language-intelligence service.
 //
 // These are the transport-level pieces (Content-Length framing for the JSON-RPC
@@ -58,7 +60,22 @@ export function decodeLspMessages(buffer: Buffer): DecodeResult {
     if (cursor.length < bodyEnd) break; // wait for the full body
     const body = cursor.toString("utf8", bodyStart, bodyEnd);
     try {
-      messages.push(JSON.parse(body) as LspMessage);
+      // Server output is untrusted: only well-formed JSON-RPC objects enter
+      // the message stream. Anything else is skipped like a malformed body.
+      const parsed: unknown = JSON.parse(body);
+      const wire = wireOf(parsed);
+      if (wire?.["jsonrpc"] === "2.0") {
+        const id = wire["id"];
+        const msg: LspMessage = {
+          jsonrpc: "2.0",
+          ...(typeof id === "number" || typeof id === "string" ? { id } : {}),
+          ...(typeof wire["method"] === "string" ? { method: wire["method"] } : {}),
+          ...("params" in wire ? { params: wire["params"] } : {}),
+          ...("result" in wire ? { result: wire["result"] } : {}),
+          ...("error" in wire ? { error: wire["error"] } : {}),
+        };
+        messages.push(msg);
+      }
     } catch {
       // Skip a malformed body but keep consuming the stream.
     }

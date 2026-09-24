@@ -1,5 +1,42 @@
 import type { Task } from "./tasks";
+import type { Bot, BotGroup, BotPatch, DefaultBot, DefaultBotPatch, NewBotInput, NewGroupInput } from "./bots";
+import type { Handoff } from "./handoff";
 import type { PiSettings } from "./lib/settings-shared";
+import type { DurableGoalState, GoalBeginResult } from "./lib/durable-goal";
+import type { ExecutionActivateResult, ProjectExecution } from "./execution";
+import type { SimEmulation, SimViewport } from "./lib/simulator";
+
+export interface SimBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface SimTabState {
+  id: string;
+  url: string;
+  title: string | null;
+  loading: boolean;
+  zoomFactor: number;
+}
+
+export type SimEvent =
+  | { type: "title"; tabId: string; title: string }
+  | { type: "url"; tabId: string; url: string; canBack: boolean; canForward: boolean }
+  | { type: "loading"; tabId: string; loading: boolean; canBack?: boolean; canForward?: boolean }
+  | { type: "fail"; tabId: string; error: string; url: string }
+  | { type: "crashed"; tabId: string; reason: string }
+  | { type: "tabs"; tabs: SimTabState[]; activeId: string | null }
+  | { type: "visibility"; open: boolean }
+  | { type: "emulation"; tabId: string; emulation: SimEmulation };
+
+export interface ProjectSettings {
+  projectPath: string;
+  defaultBot: DefaultBot;
+  memberIds: string[];
+  freeSpeak: boolean;
+}
 
 export interface SessionMeta {
   id: string;
@@ -20,6 +57,9 @@ export interface ProjectGroup {
 }
 
 export interface CommandInfo {
+  /** Invocation token. Skills are namespaced as "skill:<name>", so a skill
+   *  command sends only "/skill:<name>"; the agent reads SKILL.md itself and
+   *  the markdown body is never user-pasted into the transcript. */
   name: string;
   description?: string;
   argumentHint?: string;
@@ -31,6 +71,60 @@ export interface SessionsUpdate {
   changedPaths: string[];
   version: number;
   source?: "filesystem" | "host";
+}
+
+/** A model entry as it crosses the bridge (pi-host maps the SDK object to
+ *  exactly these fields, so renderer code never depends on SDK internals). */
+export interface AgentModel {
+  provider: string;
+  id: string;
+  name?: string;
+  contextWindow?: number;
+  cost?: { input?: number; output?: number; cacheRead?: number };
+  reasoning?: boolean;
+  supportsImages?: boolean;
+  vision?: boolean;
+  /** Accepted input modalities (e.g. ["text", "image"]). */
+  input?: string[];
+  capabilities?: { vision?: boolean } | null;
+}
+
+/** Live session state as returned by getState(). All fields optional: the
+ *  unavailable-bridge fallback resolves null, and runtimes may omit what
+ *  they don't track. */
+export interface AgentState {
+  model?: AgentModel | null;
+  thinkingLevel?: string;
+  isStreaming?: boolean;
+  isCompacting?: boolean;
+  sessionFile?: string | null;
+  sessionId?: string;
+  sessionName?: string;
+  autoCompactionEnabled?: boolean;
+  messageCount?: number;
+  pendingMessageCount?: number;
+  gitWorktree?: { branch?: string } | null;
+  git?: { branch?: string } | null;
+}
+
+export interface SessionTokenTotals {
+  total?: number;
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+}
+
+/** Session usage as returned by getStats(). */
+export interface SessionStats {
+  userMessages?: number;
+  assistantMessages?: number;
+  toolCalls?: number;
+  toolResults?: number;
+  totalMessages?: number;
+  tokens?: SessionTokenTotals;
+  cost?: number;
+  contextUsage?: { tokens?: number | null; contextWindow?: number; percent?: number | null };
 }
 
 export interface GitFileChange {
@@ -119,21 +213,38 @@ export interface GitPrCreateResult {
   headBranch: string;
 }
 
-export interface SessionStatus {
-  status: "idle" | "starting" | "ready" | "exited" | "error";
-  cwd?: string;
+import type { RegionReading } from "./lib/sketch-compile";
+
+export type CanvasSceneSummary = { name: string; path: string; mtime: number; size: number };
+export type CanvasScenePayload = { path: string; name: string; text: string | null };
+export type CanvasChangedEvent = { path: string; name: string; text: string | null };
+
+/** Runtime health only. It carries NO session or project identity, so it can
+ *  never select, prepare, or navigate a conversation (C4). */
+export interface RuntimeStatus {
+  status: "starting" | "ready" | "error";
   message?: string;
-  state?: any;
-  sessionPath?: string;
-  requestId?: number;
   code?: number;
 }
+
+/** Lifecycle states of an agent thread (queued through terminal). */
+export type ThreadStatus =
+  | "queued"
+  | "starting"
+  | "running"
+  | "interrupting"
+  | "idle"
+  | "blocked"
+  | "completed"
+  | "failed"
+  | "stopped"
+  | "interrupted";
 
 export interface ThreadActivity {
   threadId: string;
   name: string | null;
   goal: string;
-  status: string;
+  status: ThreadStatus;
   cwd?: string;
   parentSessionFile?: string | null;
   mode: string;
@@ -189,7 +300,7 @@ export interface ActivityUpdate {
 }
 
 /* -------------------------------------------------------------------------
-   Workflows (pi-dynamic-workflows extension) — run state contract.
+   Workflows (pi-dynamic-workflows extension), run state contract.
    Runs persist as JSON files at <project cwd>/.pi/workflows/runs/*.json
    (PersistedRunState). The Electron bridge (electron/workflows.ts) polls that
    dir and exposes summaries/details over IPC; these types mirror the on-disk
@@ -226,7 +337,7 @@ export interface WorkflowTokenUsage {
 export interface WorkflowAgentSummary {
   id: number;
   label: string;
-  status: string;
+  status: WorkflowAgentStatus;
   phase?: string;
 }
 
@@ -235,7 +346,7 @@ export interface WorkflowRunSummary {
   workflowName: string;
   description?: string;
   status: WorkflowRunStatus;
-  /** Owning pi session — absent for legacy/global runs (read-only in GUI). */
+  /** Owning pi session, absent for legacy/global runs (read-only in GUI). */
   sessionId?: string;
   phases: string[];
   currentPhase?: string;
@@ -257,7 +368,7 @@ export interface WorkflowHistoryEntry {
 }
 
 export interface WorkflowAgentDetail extends WorkflowAgentSummary {
-  /** Real run files persist the agent-options object ({ label, phase, tier, prompt }) —
+  /** Real run files persist the agent-options object ({ label, phase, tier, prompt }) ,
       treat as opaque; extract the instruction text for display. */
   prompt?: unknown;
   result?: unknown;
@@ -366,7 +477,7 @@ export interface SessionTreeRow {
 }
 
 export interface SessionWindow {
-  messages: any[];
+  messages: unknown[];
   /** Byte offset of the first message in the window (for older windows). */
   startOffset: number;
 }
@@ -409,6 +520,8 @@ export interface ApprovalRequest {
   id: string;
   action: AgentActionSummary;
   risk: Risk;
+  /** Owning session id for attribution; absent for legacy unattributed requests. */
+  sessionId?: string | null;
 }
 
 export interface PermissionState {
@@ -436,22 +549,110 @@ export interface ProcessSnapshot {
   outputTruncated: boolean;
 }
 
+/** An agent event off the wire. Payload fields beyond `type` are untyped
+ *  until narrowed at the handling site (see store.applyEvent). */
+export interface AgentEvent {
+  type: string;
+  [key: string]: unknown;
+}
+
+/** Image attachment as the renderer sends it (see toPiImages). */
+export interface PromptImage {
+  data: string;
+  mimeType?: string;
+}
+
 export interface Bridge {
   listSessions(): Promise<ProjectGroup[]>;
   getSessionMessages(path: string): Promise<SessionWindow>;
   getSessionWindow(path: string, endOffset: number, countBytes?: number): Promise<SessionWindow>;
-  getToolOutput(toolCallId: string): Promise<{ content: string; truncated: boolean }>;
+  getToolOutput(sessionFile: string, toolCallId: string): Promise<{ content: string; truncated: boolean }>;
   deleteSession(path: string): Promise<void>;
   pickFolder(): Promise<string | null>;
-  openSession(opts: { path?: string; cwd: string; requestId?: number }): Promise<void>;
+  botsList(): Promise<Bot[]>;
+  botsCreate(input: NewBotInput): Promise<Bot>;
+  botsUpdate(id: string, patch: BotPatch): Promise<Bot>;
+  botsDelete(id: string): Promise<{ removed: boolean }>;
+  /** Claims the bot's project execution session. `cwd` is resolved by the
+   *  renderer, so the backend claim and the viewed project are the same one. */
+  botsOpen(id: string, cwd: string): Promise<{ sessionFile: string | null; cwd: string; bot: Bot }>;
+  onBotsUpdate(cb: (bots: Bot[]) => void): () => void;
+  groupsList(): Promise<BotGroup[]>;
+  groupsCreate(input: NewGroupInput): Promise<BotGroup>;
+  groupsUpdate(id: string, patch: { name?: string; memberIds?: string[]; cwd?: string }): Promise<BotGroup>;
+  groupsDelete(id: string): Promise<{ removed: boolean }>;
+  groupsOpen(id: string, cwd: string): Promise<{ sessionFile: string | null; cwd: string; group: BotGroup }>;
+  onGroupsUpdate(cb: (groups: BotGroup[]) => void): () => void;
+  /** Room round driver: sends text, then runs serial member turns (≤3 rounds,
+   *  ≤10 turns). Resolves when the room settles or stops. */
+  groupSend(groupId: string, text: string): Promise<{ rounds: number; turns: number; spoke: number; stopped: boolean }>;
+  /** Bot-to-bot DM: runs one attributed turn in the target's chat and relays
+   *  the reply into the origin as a bot-message line. Idle sessions only. */
+  /** Bot DM. The origin is explicit and must own its project — the backend
+   *  never guesses a "current session". */
+  botsMessage(input: { targetId: string; text: string; fromId?: string; originSessionFile: string; originCwd: string }): Promise<{ reply: string | null; pass: boolean }>;
+  /** Which project the desktop UI is focused on. Never execution ownership. */
+  projectFocus(cwd: string | null): Promise<void>;
+  botsDefaultGet(): Promise<DefaultBot>;
+  botsDefaultSet(input: DefaultBot): Promise<DefaultBot>;
+  projectSettingsGet(cwd: string): Promise<{ settings: ProjectSettings; hash: string }>;
+  projectSettingsMembers(hash: string, memberIds: string[]): Promise<ProjectSettings>;
+  projectSettingsFreespeak(hash: string, on: boolean): Promise<ProjectSettings>;
+  projectDefaultUpdate(hash: string, patch: DefaultBotPatch): Promise<ProjectSettings>;
+  projectDefaultReset(hash: string): Promise<ProjectSettings>;
+  handoffCreate(projectHash: string, sourceFile: string): Promise<Handoff>;
+  handoffList(sourceFile: string): Promise<Handoff[]>;
+  handoffConsume(handoffId: string, liveFile: string): Promise<{ consumedInto: string }>;
 
-  prompt(message: string, images?: any[], streamingBehavior?: "steer" | "followUp"): Promise<any>;
-  abort(): Promise<any>;
+  prompt(message: string, images: PromptImage[] | undefined, streamingBehavior: "steer" | "followUp" | undefined, sessionFile: string): Promise<unknown>;
+  /** Abort one addressed session's run. Other
+   *  sessions keep running untouched. */
+  abort(sessionFile: string): Promise<unknown>;
+  /** Read a session's durable goal (null when none is set). */
+  goalGet(sessionId: string, cwd: string): Promise<{ goal: DurableGoalState | null }>;
+  /** Run a `/goal …` control invocation; resolves with the fresh durable goal. */
+  goalControl(sessionFile: string, args: string): Promise<{ goal: DurableGoalState | null }>;
+  /** Transactional goal start + first turn for an addressed session. */
+  beginGoalPrompt(sessionFile: string, objective: string, message: string, images?: unknown[], streamingBehavior?: string): Promise<GoalBeginResult>;
+  /** Execution records for every project slot (renderer rebuilds its
+   *  Record<cwd, ProjectExecution> on startup/reconnect). */
+  executionList(): Promise<ProjectExecution[]>;
+  /** Acquire/transfer a project's execution slot; busy owners come back as
+   *  a structured envelope (I4). */
+  executionActivate(cwd: string, sessionFile?: string, systemPrompt?: string | null): Promise<ExecutionActivateResult>;
+  /** Move a project's execution runtime (same session file/history) to another project cwd. */
+  relocateExecution(sessionFile: string, fromCwd: string, toCwd: string): Promise<unknown>;
+  executionDeactivate(cwd: string, expectedSessionFile: string): Promise<boolean>;
+  /** Ownership changed for a project: merges into the execution registry
+   *  only — never selects, opens, or navigates a transcript. */
+  onExecutionChanged(cb: (execution: ProjectExecution) => void): () => void;
+  /** Read a session's design state (null when none is set). */
+  designGet(sessionId: string, cwd: string): Promise<import("../electron/design-mode/store").DesignStatus>;
+  /** Read one review screenshot as a data URL, addressed by its identity (the
+   *  round's own record resolves the file in the main process). */
+  designReviewShot(opts: { cwd: string; slug: string; round: number; viewport: string }): Promise<{ dataUrl: string }>;
+  /** Run a `/design …` control invocation; resolves with the fresh design state. */
+  designControl(sessionFile: string, args: string): Promise<import("../electron/design-mode/store").DesignStatus>;
+  /** Read the artifact under review, with the revision the user would approve. */
+  designGetArtifact(sessionFile: string, kind: "brief" | "direction"): Promise<{ kind: string; content: string; revision: string }>;
+  /** Approve exactly the revision read above; refuses a changed artifact. */
+  designApproveArtifact(sessionFile: string, kind: "brief" | "direction", revision: string): Promise<import("../electron/design-mode/store").DesignStatus>;
+  /** Transactional design start + first interview turn for an addressed session. */
+  beginDesignPrompt(sessionFile: string, subject: string, message: string, images?: unknown[], streamingBehavior?: string): Promise<import("../electron/design-mode/store").DesignBeginResult>;
+  /** Release an idle session runtime (tab closed). Live runtimes refuse. */
   refreshSession(path: string): Promise<boolean>;
 
-  getMessages(): Promise<any[]>;
-  getState(): Promise<any>;
-  getStats(): Promise<any>;
+  canvasList(cwd: string): Promise<CanvasSceneSummary[]>;
+  canvasWrite(cwd: string, name: string, text: string): Promise<{ path: string }>;
+  canvasWatch(cwd: string | null, name: string | null): Promise<{ path?: string; name?: string; text: string | null }>;
+  canvasClassify(cwd: string, name: string, crops: { regionId: string; dataUrl: string }[]): Promise<Record<string, RegionReading>>;
+  canvasUnwatch(): Promise<{ ok: boolean }>;
+  onCanvasChanged(cb: (event: CanvasChangedEvent) => void): () => void;
+  onCanvasScenes(cb: (scenes: CanvasSceneSummary[]) => void): () => void;
+
+  getMessages(sessionFile: string): Promise<unknown[]>;
+  getState(sessionFile: string): Promise<AgentState | null>;
+  getStats(sessionFile: string): Promise<SessionStats | null>;
   gitStatus(cwd: string): Promise<GitStatusResult | null>;
   gitStatusDetails(cwd: string): Promise<GitStatusDetails>;
   /** Unified diff of one file's working-tree changes vs HEAD (untracked files diff as all-added). */
@@ -472,25 +673,29 @@ export interface Bridge {
   gitDiscardFile(cwd: string, file: string): Promise<void>;
   gitStageHunk(cwd: string, file: string, patch: string): Promise<void>;
   gitDiscardHunk(cwd: string, file: string, patch: string): Promise<void>;
-  getModels(): Promise<any[]>;
-  getCommands(): Promise<CommandInfo[]>;
-  setModel(provider: string, modelId: string): Promise<any>;
-  setThinking(level: string): Promise<any>;
-  getThinkingLevels(): Promise<string[]>;
+  getModels(cwd: string): Promise<AgentModel[]>;
+  /** Best-effort pre-warm of a project before its first session. */
+  warmProject(cwd: string): Promise<{ warmed: boolean }>;
+  getCommands(sessionFile: string): Promise<CommandInfo[]>;
+  setModel(sessionFile: string, provider: string, modelId: string): Promise<unknown>;
+  setThinking(sessionFile: string, level: string): Promise<unknown>;
+  getThinkingLevels(sessionFile: string): Promise<string[]>;
   listFonts(): Promise<string[]>;
-  setSessionName(name: string): Promise<any>;
-  compact(): Promise<any>;
+  setSessionName(sessionFile: string, name: string): Promise<unknown>;
+  /** Path-addressed rename (any session, no need to open it first). */
+  renameSession(path: string, name: string): Promise<unknown>;
+  compact(sessionFile: string, customInstructions?: string): Promise<unknown>;
 
-  getTree(): Promise<{ rows: SessionTreeRow[]; leafId: string | null }>;
-  getHistory(): Promise<HistoryProjection>;
-  getTurnChanges(entryId: string): Promise<TurnChanges>;
-  getTurnFileDiff(entryId: string, path: string): Promise<TurnFileDiff>;
-  prepareRollback(entryId: string): Promise<RollbackPlan>;
+  getTree(sessionFile: string): Promise<{ rows: SessionTreeRow[]; leafId: string | null }>;
+  getHistory(sessionFile: string): Promise<HistoryProjection>;
+  getTurnChanges(sessionFile: string, entryId: string): Promise<TurnChanges>;
+  getTurnFileDiff(sessionFile: string, entryId: string, path: string): Promise<TurnFileDiff>;
+  prepareRollback(sessionFile: string, entryId: string): Promise<RollbackPlan>;
   commitRollback(planId: string): Promise<{ editorText: string; history: HistoryProjection }>;
-  undoRollback(): Promise<{ history: HistoryProjection }>;
-  getForkMessages(): Promise<{ entryId: string; text: string }[]>;
-  fork(entryId: string): Promise<{ text?: string; cancelled?: boolean }>;
-  clone(): Promise<{ cancelled?: boolean }>;
+  undoRollback(sessionFile: string): Promise<{ history: HistoryProjection }>;
+  getForkMessages(sessionFile: string): Promise<{ entryId: string; text: string }[]>;
+  fork(sessionFile: string, entryId: string): Promise<{ text?: string; cancelled?: boolean }>;
+  clone(sessionFile: string): Promise<{ cancelled?: boolean; sessionFile?: string }>;
 
   taskList(): Promise<Task[]>;
   taskGet(id: string): Promise<Task | null>;
@@ -507,7 +712,7 @@ export interface Bridge {
   attentionList(): Promise<import("./attention").AttentionRegistry>;
   attentionResolve(id: string): Promise<import("./attention").AttentionRegistry>;
   onAttentionUpdate(cb: (registry: import("./attention").AttentionRegistry) => void): () => void;
-  worktreeInfo(): Promise<{
+  worktreeInfo(sessionFile: string): Promise<{
     isWorktree: boolean;
     sessionFile?: string;
     parentSession?: string;
@@ -515,19 +720,24 @@ export interface Bridge {
     task?: Task;
     git: { isRepo: boolean; root?: string; branch?: string; isLinkedWorktree?: boolean };
   }>;
-  worktreeCreate(opts: { name: string; description?: string; useGit?: boolean }): Promise<{
+  worktreeCreate(opts: { name: string; description?: string; useGit?: boolean }, sessionFile: string): Promise<{
     task: Task;
     taskId: string;
     worktreePath: string;
     originalPath: string;
     gitWorktree?: { path: string; branch: string; baseBranch?: string } | null;
+    /** Explicit navigation identity: the renderer views exactly this. */
+    sessionFile: string;
+    cwd: string;
   }>;
-  worktreeExit(opts: { keep: boolean }): Promise<{
+  worktreeExit(opts: { keep: boolean }, sessionFile: string): Promise<{
     originalPath: string;
     kept: boolean;
     gitRemoved: boolean;
     task?: Task;
     removed?: boolean;
+    sessionFile: string;
+    cwd: string;
   }>;
 
   uiRespond(resp: Record<string, unknown>): Promise<void>;
@@ -548,9 +758,32 @@ export interface Bridge {
   onSessionsUpdate(cb: (payload: SessionsUpdate) => void): () => void;
   onWorkflowsUpdate(cb: (payload: WorkflowUpdatePayload) => void): () => void;
 
-  onAgentEvents(cb: (events: any[]) => void): () => void;
-  onAgentEvent(cb: (event: any) => void): () => void;
-  onStatus(cb: (status: SessionStatus) => void): () => void;
+  onAgentEvents(cb: (events: AgentEvent[]) => void): () => void;
+  onAgentEvent(cb: (event: AgentEvent) => void): () => void;
+  onRuntimeStatus(cb: (status: RuntimeStatus) => void): () => void;
+  simOpenTab(url?: string): Promise<SimTabState>;
+  simActivate(tabId: string): Promise<SimTabState>;
+  simCloseTab(tabId?: string | null): Promise<{ closed: boolean }>;
+  simTabs(): Promise<{ tabs: SimTabState[]; activeId: string | null }>;
+  simAttach(): Promise<{ tabs: SimTabState[]; activeId: string | null; emulation: SimEmulation | null }>;
+  simDetach(): Promise<void>;
+  simClose(): Promise<void>;
+  simBounds(tabId: string | undefined, rect: SimBounds): Promise<void>;
+  simEmulate(tabId: string | undefined, emulation: SimEmulation): Promise<{ ok: boolean }>;
+  simViewport(tabId: string | undefined, viewport: SimViewport): Promise<{ ok: boolean }>;
+  simZoom(tabId: string | undefined, factor: number): Promise<{ zoomFactor: number }>;
+  simFitZoom(tabId: string | undefined, scale: number): Promise<void>;
+  simHardReload(tabId?: string | null): Promise<void>;
+  simDevTools(tabId?: string | null): Promise<void>;
+  simClearCookies(tabId?: string | null): Promise<void>;
+  simClearCache(tabId?: string | null): Promise<void>;
+  simMenu(opts: { tabId?: string | null; showDeviceToolbar: boolean }): Promise<{ deviceToolbar?: boolean; dismissed?: boolean }>;
+  simNavigate(tabId: string | undefined, url: string): Promise<{ ok: boolean }>;
+  simReload(tabId?: string | null): Promise<void>;
+  simBack(tabId?: string | null): Promise<void>;
+  simForward(tabId?: string | null): Promise<void>;
+  simProbe(port: number): Promise<{ open: boolean }>;
+  onSimEvent(cb: (ev: SimEvent) => void): () => void;
 
   permissionsGet(): Promise<PermissionState>;
   getSettings(): Promise<PiSettings>;
@@ -562,12 +795,17 @@ export interface Bridge {
   permissionsRemoveRule(id: string): Promise<{ removed: boolean }>;
   permissionsResolveApproval(id: string, choice: ApprovalChoice): Promise<{ ok: boolean }>;
   onApprovalRequested(cb: (req: ApprovalRequest) => void): () => void;
+  /** Pending permission approvals still awaited by the runtime (recovery
+   *  after renderer reload: the original request events are gone). */
+  approvalsPending(): Promise<ApprovalRequest[]>;
+  /** Daemon socket liveness (only fires in daemon-owned mode). */
+  onDaemonStatus(cb: (payload: { connected: boolean }) => void): () => void;
   /** Fires when a pending approval is released without a user decision
    *  (e.g. Full Access mode was enabled while the agent waited). */
   onApprovalCleared(cb: (payload: { id: string }) => void): () => void;
   /** Fires when an interactive approval is resolved (allowed/denied), so the
    *  UI can drop the matching attention item. */
-   onApprovalResolved(cb: (payload: { id: string; choice: ApprovalChoice }) => void): () => void;
+   onApprovalResolved(cb: (payload: { id: string; choice: ApprovalChoice; sessionId?: string | null }) => void): () => void;
   onPermissionsChanged(cb: (state: PermissionState) => void): () => void;
 
   lspGetSnapshot(cwd: string): Promise<LspProjectSnapshot | null>;
@@ -618,12 +856,16 @@ declare global {
 /**
  * Fail-safe bridge access. If the preload script failed to load (or the
  * renderer is opened outside Electron), `window.pideck` is undefined and the
- * old `export const bridge = window.pideck` made every effect call throw —
+ * old `export const bridge = window.pideck` made every effect call throw ,
  * React then unmounted the whole tree and the window went completely blank
  * (#161616, no UI, no error). Instead we surface the condition explicitly
  * (`bridgeAvailable`) and fall back to a no-op stub so the app can render a
  * visible, actionable error screen.
  */
+/** The round budget belongs to the backend. With no bridge there is no backend,
+ *  so this is a display placeholder, never a second copy of the real number. */
+const NO_BRIDGE_ROUNDS = 0;
+
 export const bridgeAvailable: boolean = !!window.pideck;
 
 export const bridge: Bridge = window.pideck ?? {
@@ -631,12 +873,59 @@ export const bridge: Bridge = window.pideck ?? {
   getSessionMessages: () => Promise.resolve({ messages: [], startOffset: 0 }),
   getSessionWindow: () => Promise.resolve({ messages: [], startOffset: 0 }),
   getToolOutput: () => Promise.reject(new Error("bridge unavailable")),
+  canvasList: () => Promise.resolve([]),
+  canvasWrite: () => Promise.reject(new Error("bridge unavailable")),
+  canvasWatch: () => Promise.resolve({ text: null }),
+  canvasClassify: () => Promise.reject(new Error("bridge unavailable")),
+  canvasUnwatch: () => Promise.resolve({ ok: true }),
+  onCanvasChanged: () => () => {},
+  onCanvasScenes: () => () => {},
   deleteSession: () => Promise.reject(new Error("bridge unavailable")),
   pickFolder: () => Promise.resolve(null),
-  openSession: () => Promise.resolve(),
+
+  botsList: () => Promise.resolve([]),
+  botsCreate: () => Promise.reject(new Error("bridge unavailable")),
+  botsUpdate: () => Promise.reject(new Error("bridge unavailable")),
+  botsDelete: () => Promise.resolve({ removed: false }),
+  botsOpen: () => Promise.reject(new Error("bridge unavailable")),
+  onBotsUpdate: () => () => {},
+  groupsList: () => Promise.resolve([]),
+  groupsCreate: () => Promise.reject(new Error("bridge unavailable")),
+  groupsUpdate: () => Promise.reject(new Error("bridge unavailable")),
+  groupsDelete: () => Promise.resolve({ removed: false }),
+  groupsOpen: () => Promise.reject(new Error("bridge unavailable")),
+  onGroupsUpdate: () => () => {},
+  groupSend: () => Promise.reject(new Error("bridge unavailable")),
+  botsMessage: () => Promise.reject(new Error("bridge unavailable")),
+  projectFocus: () => Promise.resolve(),
+  botsDefaultGet: () => Promise.reject(new Error("bridge unavailable")),
+  botsDefaultSet: () => Promise.reject(new Error("bridge unavailable")),
+  projectSettingsGet: () => Promise.reject(new Error("bridge unavailable")),
+  projectSettingsMembers: () => Promise.reject(new Error("bridge unavailable")),
+  projectSettingsFreespeak: () => Promise.reject(new Error("bridge unavailable")),
+  projectDefaultUpdate: () => Promise.reject(new Error("bridge unavailable")),
+  projectDefaultReset: () => Promise.reject(new Error("bridge unavailable")),
+  handoffCreate: () => Promise.reject(new Error("bridge unavailable")),
+  handoffList: () => Promise.reject(new Error("bridge unavailable")),
+  handoffConsume: () => Promise.reject(new Error("bridge unavailable")),
 
   prompt: () => Promise.resolve(),
   abort: () => Promise.resolve(),
+  goalGet: () => Promise.resolve({ goal: null }),
+  goalControl: () => Promise.resolve({ goal: null }),
+  beginGoalPrompt: () => Promise.resolve({ goal: null, started: true, error: null }),
+  executionList: () => Promise.resolve([]),
+  executionActivate: () => Promise.reject(new Error("bridge unavailable")),
+  relocateExecution: () => Promise.reject(new Error("bridge unavailable")),
+  executionDeactivate: () => Promise.resolve(false),
+  onExecutionChanged: () => () => {},
+  designGet: () => Promise.resolve({ design: null, stage: "idle" as const, maxRounds: NO_BRIDGE_ROUNDS }),
+  designReviewShot: () => Promise.reject(new Error("bridge unavailable")),
+  designControl: () => Promise.resolve({ design: null, stage: "idle" as const, maxRounds: NO_BRIDGE_ROUNDS }),
+  designGetArtifact: () => Promise.reject(new Error("bridge unavailable")),
+  designApproveArtifact: () => Promise.resolve({ design: null, stage: "idle" as const, maxRounds: NO_BRIDGE_ROUNDS }),
+  beginDesignPrompt: () =>
+    Promise.resolve({ design: null, stage: "idle" as const, started: true, error: null, maxRounds: NO_BRIDGE_ROUNDS }),
   refreshSession: () => Promise.resolve(false),
 
   getMessages: () => Promise.resolve([]),
@@ -662,12 +951,14 @@ export const bridge: Bridge = window.pideck ?? {
   gitStageHunk: () => Promise.reject(new Error("bridge unavailable")),
   gitDiscardHunk: () => Promise.reject(new Error("bridge unavailable")),
   getModels: () => Promise.resolve([]),
+  warmProject: () => Promise.resolve({ warmed: false }),
   getCommands: () => Promise.resolve([]),
   setModel: () => Promise.resolve(),
   setThinking: () => Promise.resolve(),
   getThinkingLevels: () => Promise.resolve([]),
   listFonts: () => Promise.resolve([]),
   setSessionName: () => Promise.resolve(),
+  renameSession: () => Promise.resolve(),
   compact: () => Promise.resolve(),
 
   getTree: () => Promise.resolve({ rows: [], leafId: null }),
@@ -722,7 +1013,30 @@ export const bridge: Bridge = window.pideck ?? {
 
   onAgentEvents: () => () => {},
   onAgentEvent: () => () => {},
-  onStatus: () => () => {},
+  onRuntimeStatus: () => () => {},
+  simOpenTab: () => Promise.reject(new Error("bridge unavailable")),
+  simActivate: () => Promise.reject(new Error("bridge unavailable")),
+  simCloseTab: () => Promise.resolve({ closed: false }),
+  simTabs: () => Promise.resolve({ tabs: [], activeId: null }),
+  simAttach: () => Promise.resolve({ tabs: [], activeId: null, emulation: null }),
+  simDetach: () => Promise.resolve(),
+  simClose: () => Promise.resolve(),
+  simBounds: () => Promise.resolve(),
+  simEmulate: () => Promise.reject(new Error("bridge unavailable")),
+  simViewport: () => Promise.reject(new Error("bridge unavailable")),
+  simZoom: () => Promise.reject(new Error("bridge unavailable")),
+  simFitZoom: () => Promise.resolve(),
+  simHardReload: () => Promise.resolve(),
+  simDevTools: () => Promise.resolve(),
+  simClearCookies: () => Promise.resolve(),
+  simClearCache: () => Promise.resolve(),
+  simMenu: () => Promise.resolve({ dismissed: true }),
+  simNavigate: () => Promise.reject(new Error("bridge unavailable")),
+  simReload: () => Promise.resolve(),
+  simBack: () => Promise.resolve(),
+  simForward: () => Promise.resolve(),
+  simProbe: () => Promise.resolve({ open: false }),
+  onSimEvent: () => () => {},
 
   permissionsGet: () => Promise.resolve({ mode: "auto", rules: [] }),
   getSettings: () => Promise.resolve({}),
@@ -734,6 +1048,8 @@ export const bridge: Bridge = window.pideck ?? {
   onApprovalRequested: () => () => {},
   onApprovalCleared: () => () => {},
   onApprovalResolved: () => () => {},
+  approvalsPending: () => Promise.resolve([]),
+  onDaemonStatus: () => () => {},
   onPermissionsChanged: () => () => {},
 
   lspGetSnapshot: () => Promise.resolve(null),

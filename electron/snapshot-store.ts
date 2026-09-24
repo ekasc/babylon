@@ -80,6 +80,32 @@ function safeRelative(root: string, input: string): string {
   return rel;
 }
 
+/**
+ * Agent-runtime bookkeeping inside the worktree: the pi engine's own
+ * per-project state (guardrail decision logs, etc.). These files change as
+ * a side effect of running tools, so a turn that only reads still "changes"
+ * them. They are not project content: snapshots skip them, diffs hide them,
+ * and rollback never restores them. User-authored `.pi/` content (skills,
+ * config outside `state/`) is still tracked. Input must already be a
+ * project-relative posix path (see `safeRelative`).
+ */
+export function isBookkeepingPath(rel: string): boolean {
+  return rel === ".pi/state" || rel.startsWith(".pi/state/");
+}
+
+/**
+ * Verify-pass variant of `isBookkeepingPath` for raw git output. A path
+ * that cannot even be relativized stays visible (fail closed: an unknown
+ * path forces another pass rather than being silently ignored).
+ */
+function isBookkeepingOutput(root: string, path: string): boolean {
+  try {
+    return isBookkeepingPath(safeRelative(root, path));
+  } catch {
+    return false;
+  }
+}
+
 function contained(root: string, target: string): boolean {
   const rel = relative(root, target);
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
@@ -94,8 +120,8 @@ async function assertSafeTarget(root: string, rel: string): Promise<string> {
       const real = await fsp.realpath(ancestor);
       if (!contained(root, real)) throw new Error("snapshot path traverses a symlink outside the project");
       return target;
-    } catch (error: any) {
-      if (error?.code !== "ENOENT") throw error;
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
       const parent = dirname(ancestor);
       if (parent === ancestor || !contained(root, parent)) throw new Error("invalid snapshot path");
       ancestor = parent;
@@ -171,10 +197,21 @@ export class SnapshotStore {
    *  mutation deterministically. Not part of the public API. */
   onBeforeVerifyReconcile: (() => Promise<void>) | null = null;
 
-  /** Per-repo worktree watchers. The watcher is a concurrent-mutation
-   *  detector only: it does not feed a fast path. Every capture runs the
-   *  authoritative Git candidate discovery; the watcher exists to force an
-   *  additional reconciliation pass if a write lands during the capture. */
+  /** Test-only seam: fired once per pass, after write-tree and before the
+   *  verification Git discovery. A test can write a file here so it lands
+   *  deterministically before the verification observation — exercising
+   *  the repass path without wall-clock racing (a setTimeout-based write
+   *  flakes on fast hardware where the whole capture finishes first).
+   *  Not part of the public API. */
+  onBeforeVerifyDiscovery: (() => Promise<void>) | null = null;
+
+  /** Per-repo worktree watchers. The watcher is informational only: it
+   *  buffers fs events into the per-repo dirty/pending sets, but nothing
+   *  consults those sets in the stability decision. Every capture runs the
+   *  authoritative Git candidate discovery, and the verification discovery
+   *  is the linearization point — a write before it is detected and
+   *  reconciled, a write after it legitimately belongs to the next
+   *  capture. */
   private watches = new Map<string, RepoWatch>();
 
   private async sourceRoot(cwd: string): Promise<string | null> {
@@ -289,7 +326,7 @@ export class SnapshotStore {
         ["core.untrackedCache", "true"],
         ["feature.manyFiles", "true"],
         ["index.version", "4"],
-      ]) {
+      ] as Array<[string, string]>) {
         const configured = await run("git", ["--git-dir", gitDir, "config", name, value], root);
         if (configured.code !== 0) throw new Error("failed to configure rollback snapshots");
       }
@@ -475,9 +512,8 @@ export class SnapshotStore {
    *    3. A second authoritative discovery. If empty, the checkpoint is
    *       stable and we return. If non-empty, a concurrent write
    *       happened during the pass — reconcile again.
-   *  Bounded by `MAX_RECONCILE_PASSES`. The watcher may force an early
-   *  retry, but it is never proof of stability. The only proof is the
-   *  second discovery coming back empty. */
+    *  Bounded by `MAX_RECONCILE_PASSES`. The only stability proof is the
+    *  second discovery coming back empty. */
   private async captureInner(repo: Repository, w: RepoWatch): Promise<SnapshotCapture | null> {
     const stateRoot = resolve(this.stateDir);
     const isInternal = (candidate: string) => {
@@ -499,14 +535,11 @@ export class SnapshotStore {
     await this.reconcileExclusions(repo, exclusions);
 
     for (let pass = 0; pass < MAX_RECONCILE_PASSES; pass++) {
-      // At pass start, merge any events the watcher buffered (w.pending)
-      // into the dirty set, then clear both. This guarantees the next
-      // pass's discovery sees them, and prevents the pass from
-      // returning "stable" while a mutation is still queued in
-      // pending.
-      for (const pending of w.pending) w.dirty.add(pending);
+      // Drain the watcher's buffered events. Informational only: the
+      // stability decision below consults the verification discovery, not
+      // these sets — a write before verification is detected there, and a
+      // write after it belongs to the next capture by definition.
       w.pending.clear();
-      const dirtySeen = new Set(w.dirty);
       w.dirty.clear();
 
       // 1. Authoritative candidate discovery against the SHADOW index.
@@ -531,11 +564,17 @@ export class SnapshotStore {
       const untracked = new Set<string>();
       for (const path of splitNul(dirtyResult.stdout)) {
         if (!path || isInternal(path)) continue;
-        candidates.add(safeRelative(repo.root, path));
+        const rel = safeRelative(repo.root, path);
+        // Bookkeeping is never staged, so it never enters a tree and can
+        // never appear in a turn diff. Skipped before the oversize policy
+        // so a large decision log cannot land in the exclusion map either.
+        if (isBookkeepingPath(rel)) continue;
+        candidates.add(rel);
       }
       for (const path of splitNul(untrackedResult.stdout)) {
         if (!path || isInternal(path)) continue;
         const rel = safeRelative(repo.root, path);
+        if (isBookkeepingPath(rel)) continue;
         candidates.add(rel);
         untracked.add(rel);
       }
@@ -563,8 +602,8 @@ export class SnapshotStore {
           // was previously excluded, drop it from the exclusion map.
           delete exclusions.paths[rel];
           finalCandidates.push(rel);
-        } catch (error: any) {
-          if (error?.code !== "ENOENT") throw error;
+        } catch (error: unknown) {
+          if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
           // The candidate no longer exists. diff-files entries here are
           // deletions (stage the removal); --others entries are raced
           // deletes of untracked files (nothing to stage).
@@ -603,6 +642,7 @@ export class SnapshotStore {
       //    before the Git calls, a mutation during those calls would
       //    leave stale exclusion metadata and the stability check
       //    could pass against it.
+      if (this.onBeforeVerifyDiscovery) await this.onBeforeVerifyDiscovery();
       const [vDirty, vUntracked] = await Promise.all([
         run("git", this.args(repo, ["diff-files", "-z", "--name-only"]), repo.root),
         run("git", this.args(repo, ["ls-files", "-z", "--others", "--exclude-standard"]), repo.root),
@@ -611,8 +651,14 @@ export class SnapshotStore {
       if (vUntracked.code !== 0) throw new Error("failed to verify snapshot stability");
       if (this.onBeforeVerifyReconcile) await this.onBeforeVerifyReconcile();
       await this.reconcileExclusions(repo, exclusions);
-      const verifyDirty = splitNul(vDirty.stdout);
-      const verifyUntracked = splitNul(vUntracked.stdout).filter((p) => !(p in exclusions.paths));
+      // Bookkeeping paths are invisible to both checks: untracked ones were
+      // never staged, and legacy ones already admitted to the shadow index
+      // (before the skip above existed) must not hold stability hostage.
+      // Anything else still forces another pass, as before.
+      const verifyDirty = splitNul(vDirty.stdout).filter((p) => !isBookkeepingOutput(repo.root, p));
+      const verifyUntracked = splitNul(vUntracked.stdout).filter(
+        (p) => !(p in exclusions.paths) && !isBookkeepingOutput(repo.root, p)
+      );
       if (verifyDirty.length === 0 && verifyUntracked.length === 0) {
         // Stable checkpoint. Persist the merged exclusion map and
         // return. The exclusion map may still contain entries for
@@ -656,7 +702,11 @@ export class SnapshotStore {
     if (!repo) throw new Error("rollback requires a Git project");
     const result = await run("git", this.args(repo, ["diff", "--name-only", "-z", "--no-renames", safeTree(from), safeTree(to), "--", "."]), repo.root);
     if (result.code !== 0) throw new Error("failed to compare project snapshots");
-    return splitNul(result.stdout).map((path) => safeRelative(repo.root, path));
+    // Bookkeeping admitted before the capture skip existed still lives in
+    // old trees; hide it here so legacy checkpoints stop reporting it.
+    return splitNul(result.stdout)
+      .map((path) => safeRelative(repo.root, path))
+      .filter((rel) => !isBookkeepingPath(rel));
   }
 
   async turnChanges(cwd: string, from: string, to: string): Promise<TurnFileChange[]> {
@@ -692,7 +742,12 @@ export class SnapshotStore {
         deletions: Number.isFinite(deletions) ? deletions : 0,
       });
     }
-    return [...changes.values()].sort((a, b) => a.path.localeCompare(b.path));
+    // Same legacy-trees hiding as `changedFiles`: a bookkeeping path
+    // admitted before the capture skip existed must not surface as a
+    // turn change. (Forward-going trees never contain it.)
+    return [...changes.values()]
+      .filter((change) => !isBookkeepingPath(change.path))
+      .sort((a, b) => a.path.localeCompare(b.path));
   }
 
   async fileDiff(cwd: string, from: string, to: string, input: string): Promise<{ diff: string; truncated: boolean }> {

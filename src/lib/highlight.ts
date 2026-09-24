@@ -8,18 +8,8 @@
 
 import type { HighlighterCore } from "shiki/core";
 
-const CORE_LANGS = [
-  "typescript",
-  "javascript",
-  "tsx",
-  "jsx",
-  "json",
-  "shellscript",
-  "markdown",
-  "diff",
-  "yaml",
-  "python",
-] as const;
+/** Whatever shiki's loadLanguage accepts (registrations, getters, specials). */
+type ShikiLang = Parameters<HighlighterCore["loadLanguage"]>[number];
 
 const HEAVY_LANGS: Record<string, () => Promise<unknown>> = {
   c: () => import("shiki/langs/c.mjs"),
@@ -89,7 +79,7 @@ export function cachedHighlight(code: string, lang?: string): string | null {
 function load(): Promise<HighlighterCore> {
   hlPromise ??= Promise.all([import("shiki/core"), import("shiki/engine/javascript")]).then(
     ([{ createHighlighterCore }, { createJavaScriptRegexEngine }]) => createHighlighterCore({
-    themes: [import("shiki/themes/github-light.mjs"), import("shiki/themes/github-dark.mjs")],
+    themes: [import("shiki/themes/github-light.mjs"), import("shiki/themes/tokyo-night.mjs")],
     langs: [
       import("shiki/langs/typescript.mjs"),
       import("shiki/langs/javascript.mjs"),
@@ -115,7 +105,16 @@ async function loadLang(hl: HighlighterCore, lang: string): Promise<void> {
     langLoads.set(
       lang,
       factory()
-        .then((module) => hl.loadLanguage(((module as { default?: unknown }).default ?? module) as any))
+        .then((module) => {
+          const registration = (module as { default?: unknown }).default ?? module;
+          // Dynamic lang bundles export a registration object (or getter);
+          // anything else is a bundling surprise, surfaced as a load failure
+          // so the grammar stays unloaded exactly as before.
+          if ((typeof registration !== "object" || registration === null) && typeof registration !== "function") {
+            throw new Error(`unexpected language module for ${lang}`);
+          }
+          return hl.loadLanguage(registration as ShikiLang);
+        })
         .catch(() => undefined)
     );
   }
@@ -234,7 +233,7 @@ async function renderHighlight(code: string, lang?: string): Promise<string> {
     return queued(() =>
       hl.codeToHtml(code, {
         lang: langName,
-        themes: { light: "github-light", dark: "github-dark" },
+        themes: { light: "github-light", dark: "tokyo-night" },
         defaultColor: false,
       })
     );

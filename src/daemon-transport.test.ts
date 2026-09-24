@@ -48,9 +48,18 @@ describe("daemon transport framing", () => {
   });
 
   it("keeps working after a frame that fits exactly", () => {
-    const d = createFrameDecoder(DEFAULT_MAX_FRAME_BYTES);
-    const big = "x".repeat(DEFAULT_MAX_FRAME_BYTES);
+    const d = createFrameDecoder(4096);
+    const big = "x".repeat(4096);
     expect(d.push(big + "\n")).toEqual([big]);
+  });
+
+  it("default budget carries a multi-megabyte session transcript", () => {
+    // The old 1 MiB cap rejected `pi.getMessages` for a long session, which
+    // dropped the socket and looped the client through reconnect+rehydrate.
+    const d = createFrameDecoder();
+    const payload = "y".repeat(4 * 1024 * 1024);
+    expect(DEFAULT_MAX_FRAME_BYTES).toBeGreaterThan(payload.length);
+    expect(d.push(payload + "\n")).toEqual([payload]);
   });
 
   it("rejects a non-positive or non-integer limit", () => {

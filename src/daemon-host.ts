@@ -10,11 +10,13 @@
 // attention.raised/resolved. Anything else returns an explicit error response so the
 // contract is honest rather than silently dropping frames.
 
-import {
-  createEnvelope,
+import { createEnvelope,
   parseEnvelope,
+  DAEMON_PROTOCOL_VERSION,
   type ProtocolEnvelope,
 } from "./daemon-protocol";
+import { buildId } from "./build-info";
+import { isPlainObject } from "./lib/wire";
 import { createRuntime, type RuntimeState } from "./runtime";
 import { addAttention, resolveAttention, type AttentionItem } from "./attention";
 import {
@@ -38,15 +40,15 @@ export function createDaemonRuntime(): RuntimeState {
   return createRuntime();
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function errorResponse(request: ProtocolEnvelope | null, message: string): ProtocolEnvelope {
   return createEnvelope("response", "error", { error: message }, request?.id);
 }
 
-export function dispatchRequest(runtime: RuntimeState, request: ProtocolEnvelope): DispatchResult {
+export function dispatchRequest(
+  runtime: RuntimeState,
+  request: ProtocolEnvelope,
+  opts?: { draining?: boolean }
+): DispatchResult {
   let next = runtime;
   let response: ProtocolEnvelope;
 
@@ -59,7 +61,14 @@ export function dispatchRequest(runtime: RuntimeState, request: ProtocolEnvelope
 
   switch (request.type) {
     case "ping":
-      response = createEnvelope("response", "pong", { ok: true }, request.id);
+      // The daemon advertises the protocol it speaks so a client built from
+      // other source can detect skew and retire it before using it.
+      response = createEnvelope(
+        "response",
+        "pong",
+        { ok: true, protocol: DAEMON_PROTOCOL_VERSION, build: buildId(), draining: !!opts?.draining },
+        request.id
+      );
       break;
 
     case "task.created": {
@@ -91,7 +100,12 @@ export function dispatchRequest(runtime: RuntimeState, request: ProtocolEnvelope
         break;
       }
       commitTasks(after);
-      response = createEnvelope("response", "task.updated", after.tasks[id], request.id);
+      const updated = after.tasks[id];
+      if (!updated) {
+        response = errorResponse(request, `task ${id} not found`);
+        break;
+      }
+      response = createEnvelope("response", "task.updated", updated, request.id);
       break;
     }
 

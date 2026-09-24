@@ -12,8 +12,7 @@ function textOf(node: ReactNode): string {
   if (node == null || typeof node === "boolean") return "";
   if (typeof node === "string" || typeof node === "number") return String(node);
   if (Array.isArray(node)) return node.map(textOf).join("");
-  const el = node as any;
-  if (el?.props?.children != null) return textOf(el.props.children);
+  if (React.isValidElement<{ children?: ReactNode }>(node)) return textOf(node.props.children);
   return "";
 }
 
@@ -25,27 +24,13 @@ function findCode(node: ReactNode): { lang?: string; text: string } | null {
     }
     return null;
   }
-  const el = node as any;
-  if (!el || typeof el !== "object") return null;
+  if (!React.isValidElement<{ children?: ReactNode; className?: string }>(node)) return null;
+  const el = node;
   if (el.type === "code") {
-    const m = /language-([\w+#-]+)/.exec(String(el.props?.className ?? ""));
-    return { lang: m?.[1], text: textOf(el.props?.children) };
+    const m = /language-([\w+#-]+)/.exec(String(el.props.className ?? ""));
+    return { lang: m?.[1], text: textOf(el.props.children) };
   }
-  return findCode(el.props?.children);
-}
-
-function slugify(text: string): string {
-  return text
-    .toLowerCase()
-    .replace(/[^\p{Letter}\p{Number}\s-]/gu, "")
-    .replace(/\s+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "")
-    .slice(0, 80);
-}
-
-function getNodeText(node: ReactNode): string {
-  return textOf(node).trim();
+  return findCode(el.props.children);
 }
 
 /** Extract `// !annotation: …` lines from the code body so CodeBlock can render
@@ -56,8 +41,10 @@ function extractAnnotations(code: string): string[] {
   for (const line of code.split("\n")) {
     const m = /^\s*\/\/\s*!\s*@?(\d+)?[: ]+(.*)$/.exec(line);
     if (!m) continue;
+    const body = m[2];
+    if (body === undefined) continue;
     const lineNo = m[1] ? Number(m[1]) : out.length + 1;
-    out[lineNo] = `${lineNo}: ${m[2].trim()}`;
+    out[lineNo] = `${lineNo}: ${body.trim()}`;
   }
   // Filter to only keep lines that match a `1:`, `2:` etc.
   return out.filter(Boolean);
@@ -102,7 +89,6 @@ function processMath(text: string): string {
   }
   const inFenceAt = (pos: number) => fences.some(([a, b]) => pos >= a && pos < b);
   let result = "";
-  let j = 0;
   const blockRe = /\$\$([\s\S]+?)\$\$/g;
   let last = 0;
   while ((m = blockRe.exec(out))) {
@@ -113,7 +99,6 @@ function processMath(text: string): string {
   result += out.slice(last);
   const inlineRe = /\$([^$\n]+?)\$/g;
   let result2 = "";
-  let k = 0;
   let last2 = 0;
   while ((m = inlineRe.exec(result))) {
     if (inFenceAt(m.index)) continue;
@@ -133,10 +118,15 @@ function renderTextWithMath(text: string, keyBase: string): ReactNode[] {
   let i = 0;
   while ((m = re.exec(text))) {
     if (m.index > last) nodes.push(<span key={`${keyBase}-t-${i++}`}>{text.slice(last, m.index)}</span>);
+    const tex = m[2];
+    if (tex === undefined) {
+      last = m.index + m[0].length;
+      continue;
+    }
     nodes.push(
       <MathBlock
         key={`${keyBase}-m-${i++}`}
-        tex={m[2].trim()}
+        tex={tex.trim()}
         display={m[1] === "BLOCK"}
       />
     );
@@ -146,9 +136,78 @@ function renderTextWithMath(text: string, keyBase: string): ReactNode[] {
   return nodes;
 }
 
+function wrapMath(node: ReactNode, keyBase: string): ReactNode {
+  if (node == null || typeof node === "boolean") return null;
+  if (typeof node === "string" || typeof node === "number") {
+    const s = String(node);
+    if (!s.includes("\u0000")) return s;
+    const parts = renderTextWithMath(s, keyBase);
+    return <>{parts}</>;
+  }
+  if (Array.isArray(node)) return node.map((n, i) => <React.Fragment key={`${keyBase}-${i}`}>{wrapMath(n, `${keyBase}-${i}`)}</React.Fragment>);
+  if (React.isValidElement<{ children?: ReactNode }>(node)) {
+    const children = node.props.children;
+    if (children != null) {
+      return React.cloneElement(node, { key: node.key ?? keyBase }, wrapMath(children, keyBase));
+    }
+    return node;
+  }
+  return node;
+}
+
+function escapeMarkdownCell(text: string): string {
+  return text.replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/\n/g, " ").replace(/\r/g, "");
+}
+
+function MarkdownTable({ children, ...props }: React.ComponentProps<"table">) {
+  const tableRef = useRef<HTMLTableElement>(null);
+  const [expanded, setExpanded] = useState(true);
+  const [copied, setCopied] = useState(false);
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handleCopy = () => {
+    const table = tableRef.current;
+    if (!table || typeof navigator === "undefined" || !navigator.clipboard) return;
+    const rows = [...table.querySelectorAll("tr")].map((tr) =>
+      [...tr.querySelectorAll("th, td")].map((cell) => cell.textContent?.trim() ?? "")
+    );
+    if (!rows.length) return;
+    const escaped = rows.map((r) => r.map(escapeMarkdownCell));
+    let textOut = escaped.map((r) => `| ${r.join(" | ")} |`).join("\n");
+    const header = escaped[0];
+    if (header) {
+      const separator = `| ${header.map(() => "---").join(" | ")} |`;
+      textOut = `${escaped.map((r) => `| ${r.join(" | ")} |`).join("\n").split("\n")[0]}\n${separator}` + (escaped.length > 1 ? `\n${escaped.slice(1).map((r) => `| ${r.join(" | ")} |`).join("\n")}` : "");
+    }
+    void navigator.clipboard.writeText(textOut).then(() => {
+      setCopied(true);
+      if (copyTimer.current) clearTimeout(copyTimer.current);
+      copyTimer.current = setTimeout(() => setCopied(false), 1200);
+    }).catch(() => {});
+  };
+  useEffect(() => () => { if (copyTimer.current) clearTimeout(copyTimer.current); }, []);
+  return (
+    <div className="my-3 overflow-hidden rounded-lg border border-line bg-raised" data-expanded={expanded ? "true" : "false"}>
+      <div className="overflow-x-auto">
+        <table ref={tableRef} {...props} className="w-full text-[length:var(--chat-r-13)]" style={{ border: 0, margin: 0, borderRadius: 0 }}>
+          {children}
+        </table>
+      </div>
+      <div className="flex items-center justify-between border-t border-line px-2 py-1">
+        <button onClick={() => setExpanded((v) => !v)} aria-pressed={expanded} className="context-header-button">
+          {expanded ? "Collapse cells" : "Expand cells"}
+        </button>
+        <div className="flex items-center gap-1">
+          <button onClick={handleCopy} className="context-header-button">
+            {copied ? "Copied" : "Copy Markdown"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function Markdown({ text }: { text: string }) {
   const preprocessed = useMemo(() => processMath(text), [text]);
-  const headingSlugs = useRef<Map<string, number>>(new Map());
 
   return (
     <div className="md">
@@ -175,12 +234,13 @@ export default function Markdown({ text }: { text: string }) {
               {children}
             </a>
           ),
-          h1: ({ children, ...rest }) => headingWithAnchor({ children, level: 1, headingSlugs }),
-          h2: ({ children }) => headingWithAnchor({ children, level: 2, headingSlugs }),
-          h3: ({ children }) => headingWithAnchor({ children, level: 3, headingSlugs }),
-          h4: ({ children }) => headingWithAnchor({ children, level: 4, headingSlugs }),
-          h5: ({ children }) => headingWithAnchor({ children, level: 5, headingSlugs }),
-          h6: ({ children }) => headingWithAnchor({ children, level: 6, headingSlugs }),
+          table: ({ children, ...props }) => <MarkdownTable {...props}>{children}</MarkdownTable>,
+          h1: ({ children }) => <h1 className="md-heading">{children}</h1>,
+          h2: ({ children }) => <h2 className="md-heading">{children}</h2>,
+          h3: ({ children }) => <h3 className="md-heading">{children}</h3>,
+          h4: ({ children }) => <h4 className="md-heading">{children}</h4>,
+          h5: ({ children }) => <h5 className="md-heading">{children}</h5>,
+          h6: ({ children }) => <h6 className="md-heading">{children}</h6>,
           pre: ({ children }) => {
             const found = findCode(children);
             if (found) {
@@ -207,32 +267,30 @@ export default function Markdown({ text }: { text: string }) {
               </pre>
             );
           },
-          p: ({ children }) => {
-            const textChildren = renderTextWithMath(textOf(children), "p");
-            return <p>{textChildren}</p>;
-          },
+          p: ({ children }) => <p>{wrapMath(children, "p")}</p>,
           li: ({ children, ...rest }) => {
-            const input = (rest as any).checked;
-            if (typeof input === "boolean") {
+            const checked = (rest as { checked?: unknown }).checked;
+            if (typeof checked === "boolean") {
               return (
                 <li className="md-task">
-                  <span className={`md-task-box ${input ? "is-checked" : ""}`} aria-hidden="true">
-                    {input ? "✓" : ""}
+                  <span className={`md-task-box ${checked ? "is-checked" : ""}`} aria-hidden="true">
+                    {checked ? "✓" : ""}
                   </span>
-                  <span className={input ? "md-task-text is-checked" : "md-task-text"}>{children}</span>
+                  <span className={checked ? "md-task-text is-checked" : "md-task-text"}>{wrapMath(children, "li")}</span>
                 </li>
               );
             }
-            // For non-task list items, render text with math.
-            return <li>{renderTextWithMath(textOf(children), "li")}</li>;
+            return <li>{wrapMath(children, "li")}</li>;
           },
           blockquote: ({ children }) => {
             const raw = textOf(children);
             const m = /^\[!(NOTE|TIP|WARNING|CAUTION|IMPORTANT)\]\s*/i.exec(raw);
             if (m) {
-              const kind = m[1].toLowerCase();
+              const kindRaw = m[1];
+              if (kindRaw === undefined) return <blockquote>{children}</blockquote>;
+              const kind = kindRaw.toLowerCase();
               const body = raw.slice(m[0].length);
-              return <blockquote className={`callout callout-${kind}`}><strong className="callout-label">{m[1].toUpperCase()}</strong>{body}</blockquote>;
+              return <blockquote className={`callout callout-${kind}`}><strong className="callout-label">{kindRaw.toUpperCase()}</strong>{body}</blockquote>;
             }
             return <blockquote>{children}</blockquote>;
           },
@@ -244,37 +302,4 @@ export default function Markdown({ text }: { text: string }) {
   );
 }
 
-function headingWithAnchor({ children, level, headingSlugs }: { children: ReactNode; level: number; headingSlugs: React.MutableRefObject<Map<string, number>> }) {
-  const [copied, setCopied] = useState(false);
-  const raw = getNodeText(children) || "";
-  const base = slugify(raw) || `h-${level}`;
-  const seen = headingSlugs.current.get(base) ?? 0;
-  headingSlugs.current.set(base, seen + 1);
-  const id = seen === 0 ? base : `${base}-${seen + 1}`;
-  const safeLevel = Math.min(Math.max(level, 1), 6);
-  const inner = (
-    <>
-      <a
-        href={`#${id}`}
-        className="md-heading-anchor"
-        aria-label="Copy link to this section"
-        onClick={(e) => {
-          e.preventDefault();
-          const url = `${location.origin}${location.pathname}#${id}`;
-          void navigator.clipboard.writeText(url).catch(() => undefined);
-          try {
-            history.replaceState(null, "", `#${id}`);
-          } catch {}
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1100);
-        }}
-      >
-        {children}
-      </a>
-      <span className={`md-heading-link ${copied ? "is-copied" : ""}`} aria-hidden="true">
-        #
-      </span>
-    </>
-  );
-  return React.createElement(`h${safeLevel}`, { id, className: "md-heading" }, inner);
-}
+

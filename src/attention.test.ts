@@ -26,15 +26,15 @@ describe("attention inbox", () => {
   it("adds an item and refuses to overwrite", () => {
     let r: AttentionRegistry = createAttentionRegistry();
     r = addAttention(r, item());
-    expect(r.items.i1.title).toBe("git push required");
+    expect(r.items.i1?.title).toBe("git push required");
     r = addAttention(r, item({ title: "other" }));
-    expect(r.items.i1.title).toBe("git push required");
+    expect(r.items.i1?.title).toBe("git push required");
   });
 
   it("resolves an item and is a no-op on a missing/already-resolved one", () => {
     let r = addAttention(createAttentionRegistry(), item());
     r = resolveAttention(r, "i1");
-    expect(r.items.i1.resolved).toBe(true);
+    expect(r.items.i1?.resolved).toBe(true);
     expect(resolveAttention(r, "i1")).toBe(r);
     expect(resolveAttention(r, "missing")).toBe(r);
   });

@@ -21,19 +21,6 @@ function base(props: IconProps) {
   };
 }
 
-export const PiMark = (props: IconProps) => (
-  <svg {...base(props)}>
-    <circle cx="12" cy="12" r="10" fill="currentColor" stroke="none" />
-    <path
-      d="M7 9.5h10M9 9.5c0 3.5.8 6 3 8M12 9.5c-1 3.2-1.2 5.6-.6 8M15 9.5c.4 2.4.3 4.8-.4 8"
-      stroke="var(--bg)"
-      strokeWidth="1.4"
-      strokeLinecap="round"
-      fill="none"
-    />
-  </svg>
-);
-
 export const CpuIcon = (props: IconProps) => (
   <svg {...base(props)}>
     <rect x="5" y="5" width="14" height="14" rx="2" />
@@ -191,6 +178,13 @@ export const MoreIcon = (props: IconProps) => (
   </svg>
 );
 
+export const GlobeIcon = (props: IconProps) => (
+  <svg {...base(props)}>
+    <circle cx="12" cy="12" r="8.5" />
+    <path d="M3.5 12h17M12 3.5c2.4 2.3 3.7 5.2 3.7 8.5s-1.3 6.2-3.7 8.5c-2.4-2.3-3.7-5.2-3.7-8.5S9.6 5.8 12 3.5z" />
+  </svg>
+);
+
 /** Small leading icon for tool cards (bash/edit/read/grep/find/ls). */
 export const ToolGlyph = ({ name, ...props }: IconProps & { name: string }) => {
   switch (name) {
@@ -230,6 +224,20 @@ export const PlusIcon = (props: IconProps) => (
   </svg>
 );
 
+export const ArrowRightIcon = (props: IconProps) => (
+  <svg {...base(props)}>
+    <path d="M5 12h14" />
+    <path d="m13 6 6 6-6 6" />
+  </svg>
+);
+
+export const RotateIcon = (props: IconProps) => (
+  <svg {...base(props)}>
+    <path d="M4 12a8 8 0 0 1 14.9-4M20 12a8 8 0 0 1-14.9 4" />
+    <path d="M19 3v4h-4M5 21v-4h4" />
+  </svg>
+);
+
 export const PinIcon = (props: IconProps) => (
   <svg {...base(props)}>
     <path d="M9 4h6l-1 7 3 3v2H7v-2l3-3-1-7z" />
@@ -248,6 +256,12 @@ export const ArchiveIcon = (props: IconProps) => (
   <svg {...base(props)}>
     <rect x="3" y="4" width="18" height="4" rx="1" />
     <path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8M10 12h4" />
+  </svg>
+);
+
+export const BookmarkIcon = (props: IconProps) => (
+  <svg {...base(props)}>
+    <path d="M7 3h10a1 1 0 0 1 1 1v17l-6-4-6 4V4a1 1 0 0 1 1-1z" />
   </svg>
 );
 
@@ -273,6 +287,12 @@ export const ArrowUpIcon = (props: IconProps) => (
 export const ArrowDownIcon = (props: IconProps) => (
   <svg {...base(props)}>
     <path d="M12 5v14M6 13l6 6 6-6" />
+  </svg>
+);
+
+export const ArrowLeftIcon = (props: IconProps) => (
+  <svg {...base(props)}>
+    <path d="M19 12H5M13 6l-6 6 6 6" />
   </svg>
 );
 
@@ -302,6 +322,37 @@ export const InputIcon = (props: IconProps) => (
     <circle cx="9" cy="12.5" r="0.9" fill="currentColor" stroke="none" />
     <circle cx="12.5" cy="12.5" r="0.9" fill="currentColor" stroke="none" />
     <circle cx="16" cy="12.5" r="0.9" fill="currentColor" stroke="none" />
+  </svg>
+);
+
+export const BellIcon = (props: IconProps) => (
+  <svg {...base(props)}>
+    <path d="M6 13a6 6 0 0 0 6 6 6 6 0 0 0 6-6V9a6 6 0 0 0-12 0v4z" />
+    <path d="M10 19a2 2 0 0 0 4 0" />
+  </svg>
+);
+
+// Inventory rail: a module/extension mark (two overlapping panels).
+export const ExtensionIcon = (props: IconProps) => (
+  <svg {...base(props)}>
+    <rect x="3" y="7" width="11" height="11" rx="2" />
+    <rect x="10" y="3" width="11" height="11" rx="2" />
+  </svg>
+);
+
+// Inventory rail: a template/layout mark (panel with a sidebar column).
+export const TemplateIcon = (props: IconProps) => (
+  <svg {...base(props)}>
+    <rect x="4" y="4" width="16" height="16" rx="2" />
+    <path d="M4 9h16M9 9v11" />
+  </svg>
+);
+
+// Inventory rail: a theme mark (light/dark half-filled circle).
+export const ThemeIcon = (props: IconProps) => (
+  <svg {...base(props)}>
+    <circle cx="12" cy="12" r="8" />
+    <path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor" stroke="none" />
   </svg>
 );
 

@@ -15,7 +15,11 @@ import {
   type WorkflowTokenUsage,
 } from "../bridge";
 import { fmtTokens } from "../store";
+import { errorMessage } from "../lib/errors";
+import { wireOf, wireStr } from "../lib/wire";
+import { inScope, isActiveWorkflow, isRunningSubagent, isRunningThread, subagentCwd, threadCwd, workflowCwd } from "../lib/activity";
 import Markdown from "./Markdown";
+import { WorkflowsTimeline } from "./WorkflowsTimeline";
 import {
   ChevronIcon,
   LayersIcon,
@@ -29,6 +33,12 @@ import {
 interface Props {
   onClose(): void;
   onOpenSession?(path: string, cwd?: string, parentPath?: string): void;  toast(type: "info" | "warning" | "error", text: string): void;
+  /** Current space: only live agents in it are listed. */
+  cwd?: string | null;
+  /** Map a session file to its project cwd, to attribute agents to a space. */
+  resolveCwd?(file: string | null | undefined): string | null;
+  /** Map a run's sessionId to its project cwd, to scope workflow runs. */
+  resolveRunCwd?(sessionId: string | null | undefined): string | null;
 }
 
 type ActivityTab = "workflows" | "agents";
@@ -56,7 +66,7 @@ const AGENT_STATUS: Record<string, { label: string; dot: string; text: string }>
 };
 
 function active(r: WorkflowRunSummary): boolean {
-  return r.status === "running" || r.status === "paused" || r.status === "pending";
+  return isActiveWorkflow(r.status);
 }
 
 function timeAgo(iso?: string): string {
@@ -83,8 +93,61 @@ function fmtCost(t?: WorkflowTokenUsage): string {
   return `$${t.cost < 0.01 ? t.cost.toFixed(4) : t.cost.toFixed(2)}`;
 }
 
-function clampText(s: string, max = 600): string {
+const PREVIEW_LIMIT = 600;
+const TOOL_PREVIEW_LIMIT = 400;
+const TOOL_TEXT_LIMIT = 500;
+const HISTORY_TEXT_LIMIT = 800;
+const ERROR_LIMIT = 2000;
+const PROMPT_LIMIT = 3000;
+const RESULT_LIMIT = 4000;
+const STDERR_LIMIT = 3000;
+const RUN_OUTPUT_MAX = 10000;
+
+function clampText(s: string, max = PREVIEW_LIMIT): string {
   return s.length > max ? s.slice(0, max) + "…" : s;
+}
+
+function extractAgentPrompt(raw: unknown): { text: string; label?: string } {
+  if (typeof raw === "string") return { text: raw.trim() };
+  if (raw && typeof raw === "object") {
+    const r = raw as Record<string, unknown>;
+    const text = typeof r.prompt === "string" ? (r.prompt as string).trim() : "";
+    const label = typeof r.label === "string" ? String(r.label) : undefined;
+    return { text, label };
+  }
+  return { text: "" };
+}
+
+/** Agent transcript. While the agent works we surface only the messages it
+ *  sends to the user (role "assistant") — never the tool activity pills or the
+ *  prompts that triggered them. Once finished, everything collapses to just
+ *  the final message. When there are no assistant messages at all the older
+ *  fallbacks (output / error / summary) still speak for the run. */
+/** Optional string field off a typed activity row (legacy payloads carry
+ *  failure text the contract never named). Unknown in, narrowed out. */
+function fieldText(obj: unknown, key: string): string | undefined {
+  return wireStr(wireOf(obj), key);
+}
+
+export function TranscriptContent({ recent, run, thread, live }: { recent?: Array<{ at: string; role: string; text: string }>; run?: SubagentActivity | null; thread?: ThreadActivity | null; live: boolean }) {
+  const messages = recent ?? [];
+  const agentMessages = messages.filter((m) => m.role === "assistant");
+  if (agentMessages.length) {
+    const last = agentMessages[agentMessages.length - 1];
+    return <MiniChat messages={live ? agentMessages : last !== undefined ? [last] : []} />;
+  }
+  if (run?.output) return <Markdown text={clampText(run.output, RUN_OUTPUT_MAX)} />;
+  const failure = (run && (fieldText(run, "error") ?? fieldText(run, "failureReason"))) || undefined;
+  if (failure) {
+    return (
+      <div className="rounded-lg border border-err/20 bg-err/5 px-3 py-3">
+        <p className="text-[13px] font-medium text-err">Subagent failed</p>
+        <p className="mt-1 text-[12px] leading-5 text-err">{failure}</p>
+      </div>
+    );
+  }
+  if (thread?.latestSummary) return <Markdown text={thread.latestSummary} />;
+  return <p className="text-[14px] text-dim">No transcript messages available yet.</p>;
 }
 
 function stringifyResult(r: unknown): string {
@@ -97,7 +160,7 @@ function stringifyResult(r: unknown): string {
   }
 }
 
-export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props) {
+export default function WorkflowsPanel({ onClose, onOpenSession, toast, cwd = null, resolveCwd, resolveRunCwd }: Props) {
   const [tab, setTab] = useState<ActivityTab>("workflows");
   const [activity, setActivity] = useState<ActivityUpdate>({ threads: [], subagents: [] });
   const [runs, setRuns] = useState<WorkflowRunSummary[]>([]);
@@ -116,8 +179,8 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props)
     try {
       setRuns(await bridge.workflowsList());
       setLoadError(null);
-    } catch (e: any) {
-      setLoadError(e?.message ?? "failed to load workflow runs");
+    } catch (e) {
+      setLoadError(errorMessage(e, "failed to load workflow runs"));
     } finally {
       setLoading(false);
     }
@@ -160,7 +223,7 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props)
           return d.agents?.find((a) => a.id === id) ?? prevA;
         });
       } catch {
-        /* transient — next poll tick will retry */
+        /* transient, next poll tick will retry */
       }
     },
     []
@@ -195,8 +258,8 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props)
         }
         setDetail(d);
         setAgent(null);
-      } catch (e: any) {
-        toast("error", e?.message ?? "failed to load run");
+      } catch (e) {
+        toast("error", errorMessage(e, "failed to load run"));
       }
     },
     [toast]
@@ -227,8 +290,8 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props)
           });
         }
         void load();
-      } catch (e: any) {
-        toast("error", e?.message ?? `${action} failed`);
+      } catch (e) {
+        toast("error", errorMessage(e, `${action} failed`));
       }
     },
     [load, toast]
@@ -252,8 +315,8 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props)
         setAgent(null);
         void load();
         toast("info", "run deleted");
-      } catch (e: any) {
-        toast("error", e?.message ?? "delete failed");
+      } catch (e) {
+        toast("error", errorMessage(e, "delete failed"));
       }
     },
     [load, toast]
@@ -276,13 +339,39 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props)
     return () => window.removeEventListener("keydown", onKey);
   }, [agent, detail, selectedAgent, back, onClose]);
 
-  const live = useMemo(
+  // Everything here is "running work in the current space": running subagents,
+  // persistent threads, and active workflow runs. Finished history is not
+  // shown — it lives in the session, not in this monitor. Unknown-cwd items
+  // are kept so live work never vanishes for missing attribution.
+  const visibleRuns = useMemo(
     () =>
-      runs.some(active) ||
-      activity.threads.some((thread) => ["queued", "starting", "running", "interrupting"].includes(thread.status)) ||
-      activity.subagents.some((subagent) => subagent.status === "running"),
-    [runs, activity]
+      runs
+        .filter(active)
+        .filter((r) => inScope(workflowCwd(r, resolveRunCwd), cwd))
+        .sort(
+          (a, b) =>
+            Date.parse(b.updatedAt ?? b.startedAt ?? "") - Date.parse(a.updatedAt ?? a.startedAt ?? "")
+        ),
+    [runs, cwd, resolveRunCwd]
   );
+  const agentItems = useMemo<AgentItem[]>(() => {
+    const all: AgentItem[] = [
+      ...activity.threads.map((thread) => ({ kind: "thread" as const, thread })),
+      ...activity.subagents.map((run) => ({ kind: "subagent" as const, run })),
+    ];
+    const updatedAt = (item: AgentItem) =>
+      item.kind === "thread" ? item.thread.updatedAt : item.run.updatedAt;
+    return all
+      .filter((item) =>
+        item.kind === "thread"
+          ? isRunningThread(item.thread.status) && inScope(threadCwd(item.thread, resolveCwd), cwd)
+          : isRunningSubagent(item.run.status) && inScope(subagentCwd(item.run, resolveCwd), cwd)
+      )
+      .sort((a, b) => Date.parse(updatedAt(b)) - Date.parse(updatedAt(a)));
+  }, [activity, cwd, resolveCwd]);
+  const live = visibleRuns.length > 0 || agentItems.length > 0;
+  const agentTotal = activity.threads.length + activity.subagents.length;
+  const scopeName = cwd ? cwd.split("/").filter(Boolean).pop() || cwd : null;
 
   return (
     <section aria-label="Activity workspace" className="context-pane flex h-full min-w-0 flex-col">
@@ -298,8 +387,6 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props)
             <ChevronIcon size={14} className="rotate-180" />
           </button>
         )}
-        <LayersIcon size={14} className="shrink-0 text-accent" />
-        <span className="text-[14px] font-semibold tracking-tight">Activity</span>
         {live ? <span className="h-2 w-2 rounded-full bg-accent" title="Work is active" /> : null}
         <span className="truncate text-[14px] tracking-[0.02em] text-dim">
           {tab === "agents" ? selectedAgent ? "agent transcript" : "subagents · threads" : agent ? "agent transcript" : detail ? "run detail" : "workflows · agents"}
@@ -317,13 +404,6 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props)
               <RefreshIcon size={12} />
             </button>
           )}
-          <button
-            onClick={onClose}
-            title="Close"
-            className="rounded-md px-1.5 py-0.5 text-dim hover:bg-inset hover:text-fg"
-          >
-            <XIcon size={12} />
-          </button>
         </div>
       </div>
 
@@ -339,7 +419,7 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props)
             }}
             className={`px-2 py-2.5 text-[14px] font-semibold capitalize tracking-wide ${tab === value ? "is-active" : ""}`}
           >
-            {value} · {value === "workflows" ? runs.length : activity.threads.length + activity.subagents.length}
+            {value} · {value === "workflows" ? visibleRuns.length : agentItems.length}
           </button>
         ))}
       </div>
@@ -350,7 +430,7 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props)
           selectedAgent ? (
             <AgentDetail item={selectedAgent} toast={toast} onOpenSession={onOpenSession} onUpdate={setSelectedAgent} />
           ) : (
-            <AgentsView threads={activity.threads} subagents={activity.subagents} onOpen={setSelectedAgent} />
+            <AgentsView items={agentItems} scoped={agentTotal > agentItems.length} scopeName={scopeName} onOpen={setSelectedAgent} />
           )
         ) : loading ? (
           <p className="px-2 py-8 text-center text-[14px] text-dim">Loading runs…</p>
@@ -361,19 +441,23 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props)
         ) : agent ? (
           <AgentView agent={agent} />
         ) : detail ? (
-          <RunDetailView run={detail} onControl={control} onDelete={remove} onOpenAgent={setAgent} />
-        ) : runs.length === 0 ? (
+          <WorkflowsTimeline run={detail} onControl={control} onDelete={remove} onOpenAgent={setAgent} />
+        ) : visibleRuns.length === 0 ? (
           <div className="flex flex-col items-center gap-3 px-4 py-14 text-center">
             <LayersIcon size={30} className="text-dim" />
             <div>
-              <p className="text-[14px] font-medium text-fg">No workflow runs yet</p>
+              <p className="text-[14px] font-medium text-fg">
+                {runs.length > 0 && cwd ? "No running workflows here" : "No running workflows"}
+              </p>
               <p className="mt-1 text-[14px] leading-relaxed text-dim">
-                Run a workflow from pi to see it here.
+                {runs.length > 0 && cwd
+                  ? `Only active runs in ${scopeName ?? "this project"} are listed; finished runs are hidden.`
+                  : "Run a workflow from pi to see it here."}
               </p>
             </div>
           </div>
         ) : (
-          <RunList runs={runs} onOpen={openRun} />
+          <RunList runs={visibleRuns} onOpen={openRun} />
         )}
       </div>
     </section>
@@ -381,12 +465,24 @@ export default function WorkflowsPanel({ onClose, onOpenSession, toast }: Props)
 }
 
 /* ---------------------------------------------------------------------------
-   Level 1 — runs list
+   Level 1, runs list
 --------------------------------------------------------------------------- */
 function RunList({ runs, onOpen }: { runs: WorkflowRunSummary[]; onOpen(runId: string): void }) {
+  const ROW_H = 86;
+  const listRef = useRef<HTMLDivElement>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const total = runs.length;
+  const viewportH = 520;
+  const needsVirt = total > 20;
+  const start = needsVirt ? Math.max(0, Math.floor(scrollTop / ROW_H) - 4) : 0;
+  const end = needsVirt ? Math.min(total, Math.ceil((scrollTop + viewportH) / ROW_H) + 4) : total;
+  const slice = needsVirt ? runs.slice(start, end) : runs;
+  const topPad = needsVirt ? start * ROW_H : 0;
+  const botPad = needsVirt ? (total - end) * ROW_H : 0;
   return (
-    <div className="flex flex-col gap-1.5">
-      {runs.map((r) => {
+    <div ref={listRef} onScroll={(e) => setScrollTop((e.target as HTMLDivElement).scrollTop)} className="flex flex-col gap-1.5 overflow-y-auto" style={needsVirt ? { maxHeight: viewportH, contain: "strict" } : undefined}>
+      {needsVirt && <div style={{ height: topPad, flexShrink: 0 }} />}
+      {slice.map((r) => {
         const meta = RUN_STATUS[r.status] ?? RUN_STATUS.pending;
         const nAgents = r.agents?.length ?? 0;
         const nPhases = r.phases.length;
@@ -403,7 +499,7 @@ function RunList({ runs, onOpen }: { runs: WorkflowRunSummary[]; onOpen(runId: s
             key={r.runId}
             onClick={() => onOpen(r.runId)}
             className="activity-row group flex w-full items-start gap-2.5 px-2.5 py-3 text-left"
-            title={`${r.workflowName} — ${meta.label}`}
+            title={`${r.workflowName}, ${meta.label}`}
           >
             <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${meta.dot}`} />
             <span className="min-w-0 flex-1">
@@ -431,12 +527,13 @@ function RunList({ runs, onOpen }: { runs: WorkflowRunSummary[]; onOpen(runId: s
           </button>
         );
       })}
+      {needsVirt && <div style={{ height: botPad, flexShrink: 0 }} />}
     </div>
   );
 }
 
 /* ---------------------------------------------------------------------------
-   Level 2 — run detail (phases + agents + controls)
+   Level 2, run detail (phases + agents + controls)
 --------------------------------------------------------------------------- */
 export function RunDetailView({
   run,
@@ -488,13 +585,13 @@ export function RunDetailView({
         {run.pauseReason && (
           <p className="mt-1.5 rounded-md border border-warn/30 bg-warn/10 px-2 py-1 text-[14px] leading-snug text-warn">
             Paused: {run.pauseReason}
-            {run.resetHint ? ` — ${run.resetHint}` : ""}
+            {run.resetHint ? `, ${run.resetHint}` : ""}
           </p>
         )}
         {run.error && (
           <p className="mt-1.5 rounded-md border border-err/30 bg-err/10 px-2 py-1 text-[14px] leading-snug text-err">
             {run.error}
-            {run.errorCode ? <span className="ml-1 font-mono text-[14px] opacity-80">[{run.errorCode}]</span> : null}
+            {run.errorCode ? <span className="ml-1 text-[14px] opacity-80">[{run.errorCode}]</span> : null}
           </p>
         )}
 
@@ -511,7 +608,7 @@ export function RunDetailView({
           ) : foreign ? (
             <span
               className="cursor-default rounded-md border border-line/40 px-2 py-1 text-[14px] text-dim opacity-70"
-              title="This run was started in another pi session — control it from there"
+              title="This run was started in another pi session, control it from there"
             >
               read-only · other session
             </span>
@@ -600,7 +697,7 @@ export function RunDetailView({
           )}
         </SectionLabel>
         {agents.length === 0 ? (
-          <p className="px-1 py-2 text-[14px] text-dim">No agents yet — queued runs appear here once they start.</p>
+          <p className="px-1 py-2 text-[14px] text-dim">No agents yet, queued runs appear here once they start.</p>
         ) : (
           <div className="flex flex-col gap-1">
             {agents.map((a) => (
@@ -618,7 +715,7 @@ export function RunDetailView({
           </summary>
           <div className="mt-1.5 flex max-h-56 flex-col gap-1 overflow-y-auto border-t border-line/30 pt-1.5 font-mono text-[14px] leading-relaxed text-dim">
             {run.logs.map((l, i) => (
-              <span key={i}>{clampText(l, 400)}</span>
+              <span key={i}>{clampText(l, TOOL_PREVIEW_LIMIT)}</span>
             ))}
           </div>
         </details>
@@ -644,7 +741,7 @@ function AgentRow({ agent, onOpen }: { agent: WorkflowAgentDetail; onOpen(): voi
       <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${meta.dot}`} />
       <span className="min-w-0 flex-1">
         <span className="flex items-baseline gap-1.5">
-          <span className="shrink-0 font-mono text-[14px] text-dim">#{agent.id}</span>
+          <span className="shrink-0 text-[14px] text-dim">#{agent.id}</span>
           <span className="truncate text-[14px] font-medium tracking-tight text-fg">{agent.label}</span>
         </span>
         {(agent.error || agent.waitReason) && (
@@ -658,7 +755,7 @@ function AgentRow({ agent, onOpen }: { agent: WorkflowAgentDetail; onOpen(): voi
         <span className="block text-[14px] tracking-[0.02em] text-dim">
           {[agent.model ? agent.model.split("/").pop() : "", agent.tokens != null ? `${fmtTokens(agent.tokens)} tok` : ""]
             .filter(Boolean)
-            .join(" · ") || "—"}
+            .join(" · ") || ","}
         </span>
       </span>
       <ChevronIcon size={12} className="shrink-0 text-dim" />
@@ -667,25 +764,14 @@ function AgentRow({ agent, onOpen }: { agent: WorkflowAgentDetail; onOpen(): voi
 }
 
 /* ---------------------------------------------------------------------------
-   Level 3 — agent detail (prompt / result / error / history)
+   Level 3, agent detail (prompt / result / error / history)
 --------------------------------------------------------------------------- */
 export function AgentView({ agent }: { agent: WorkflowAgentDetail }) {
   const meta = AGENT_STATUS[agent.status] ?? { label: agent.status, dot: "bg-dim", text: "text-dim" };
   const result = stringifyResult(agent.result);
-  // The prompt is stored as the agent-options object ({ label, phase, tier,
-  // prompt, ... }) in real run files — extract the instruction text.
-  const prompt =
-    typeof agent.prompt === "string"
-      ? agent.prompt.trim()
-      : agent.prompt && typeof agent.prompt === "object" && typeof (agent.prompt as any).prompt === "string"
-        ? ((agent.prompt as any).prompt as string).trim()
-        : "";
-  const promptLabel =
-    typeof agent.prompt === "object" && (agent.prompt as any)?.label
-      ? String((agent.prompt as any).label)
-      : undefined;
+  const { text: prompt, label: promptLabel } = extractAgentPrompt(agent.prompt);
   // resultPreview carries the readable markdown summary when the raw result is
-  // a structured object — prefer it for display.
+  // a structured object, prefer it for display.
   const displayResult =
     typeof agent.result === "object" && typeof agent.resultPreview === "string" && agent.resultPreview.trim()
       ? agent.resultPreview.trim()
@@ -699,7 +785,7 @@ export function AgentView({ agent }: { agent: WorkflowAgentDetail }) {
           <span className="min-w-0 flex-1 truncate text-[14px] font-semibold tracking-tight text-fg">
             {agent.label}
           </span>
-          <span className={`shrink-0 font-mono text-[14px] text-dim`}>#{agent.id}</span>
+          <span className={`shrink-0 text-[14px] text-dim`}>#{agent.id}</span>
           <span className={`shrink-0 text-[14px] font-medium tracking-[0.02em] ${meta.text}`}>{meta.label}</span>
         </div>
         <p className="mt-1.5 text-[14px] tracking-[0.02em] text-dim">
@@ -721,10 +807,10 @@ export function AgentView({ agent }: { agent: WorkflowAgentDetail }) {
         <div className="rounded-lg border border-err/30 bg-err/10 px-3 py-2">
           <p className="text-[14px] font-semibold text-err">Error</p>
           <p className="mt-1 whitespace-pre-wrap text-[14px] leading-relaxed text-err/90">
-            {clampText(agent.error, 2000)}
+            {clampText(agent.error, ERROR_LIMIT)}
           </p>
           {agent.errorCode && (
-            <span className="mt-1 inline-block rounded bg-err/15 px-1.5 py-px font-mono text-[14px] text-err">
+            <span className="mt-1 inline-block rounded bg-err/15 px-1.5 py-px text-[14px] text-err">
               {agent.errorCode}
             </span>
           )}
@@ -735,7 +821,7 @@ export function AgentView({ agent }: { agent: WorkflowAgentDetail }) {
         <div>
           <SectionLabel>{promptLabel ?? "Prompt"}</SectionLabel>
           <div className="max-h-64 overflow-y-auto whitespace-pre-wrap rounded-lg border border-line/50 bg-bg/40 px-3 py-2 text-[14px] leading-relaxed text-fg/85">
-            {clampText(prompt, 3000)}
+            {clampText(prompt, PROMPT_LIMIT)}
           </div>
         </div>
       )}
@@ -749,7 +835,7 @@ export function AgentView({ agent }: { agent: WorkflowAgentDetail }) {
             </div>
           ) : (
             <pre className="max-h-72 overflow-y-auto whitespace-pre-wrap break-all rounded-lg border border-line/50 bg-bg/40 px-3 py-2 font-mono text-[14px] leading-relaxed text-fg/85">
-              {clampText(displayResult, 4000)}
+              {clampText(displayResult, RESULT_LIMIT)}
             </pre>
           )}
         </div>
@@ -765,16 +851,19 @@ export function AgentView({ agent }: { agent: WorkflowAgentDetail }) {
   );
 }
 
-function AgentsView({ threads, subagents, onOpen }: { threads: ThreadActivity[]; subagents: SubagentActivity[]; onOpen(item: AgentItem): void }) {
-  const items: AgentItem[] = [
-    ...threads.map((thread) => ({ kind: "thread" as const, thread })),
-    ...subagents.map((run) => ({ kind: "subagent" as const, run })),
-  ].sort(
-    (a, b) =>
-      Date.parse(b.kind === "thread" ? b.thread.updatedAt : b.run.updatedAt) -
-      Date.parse(a.kind === "thread" ? a.thread.updatedAt : a.run.updatedAt)
-  );
-  if (!items.length) return <EmptyActivity icon="diamond" title="No agents yet" text="Subagents and persistent threads appear here. Spawn one from the chat." />;
+function AgentsView({ items, scoped, scopeName, onOpen }: { items: AgentItem[]; scoped: boolean; scopeName: string | null; onOpen(item: AgentItem): void }) {
+  if (!items.length)
+    return (
+      <EmptyActivity
+        icon="diamond"
+        title={scoped ? "No running agents here" : "No agents yet"}
+        text={
+          scoped
+            ? `Only live agents in ${scopeName ?? "this project"} are listed; finished agents are hidden.`
+            : "Subagents and persistent threads appear here. Spawn one from the chat."
+        }
+      />
+    );
   const attach = useFlipList(items.map((item) => (item.kind === "thread" ? item.thread.threadId : item.run.runId)));
   return <div className="divide-y divide-line">{items.map((item) => {
     const id = item.kind === "thread" ? item.thread.threadId : item.run.runId;
@@ -816,7 +905,7 @@ function MiniChat({ messages }: { messages: Array<{ at: string; role: string; te
         }
         if (m.role === "assistant") {
           return (
-            <div key={key} title={stamp} className="max-w-[94%] whitespace-pre-wrap text-[13.5px] leading-6">
+            <div key={key} title={stamp} className="max-w-[94%] whitespace-pre-wrap text-[14px] leading-6">
               {m.text}
             </div>
           );
@@ -844,7 +933,7 @@ function AgentDetail({ item, toast, onOpenSession, onUpdate }: { item: AgentItem
     : ["starting", "running"].includes(status);
   const badge = thread ? "thread" : run!.persistent ? "persistent" : "bounded";
   const description = thread ? thread.goal : (run!.task ?? run!.goal);
-  const model = thread ? thread.model : (run!.requestedModel ?? "—");
+  const model = thread ? thread.model : (run!.requestedModel ?? ",");
   const profile = thread ? thread.profile : run!.profile;
   const milestones = thread ? thread.milestones : run!.milestones;
   const recent = thread ? thread.recentMessages : run!.recentMessages;
@@ -875,8 +964,8 @@ function AgentDetail({ item, toast, onOpenSession, onUpdate }: { item: AgentItem
         onUpdate({ kind: "subagent", run: next });
       }
       toast("info", action === "stop" ? "Agent stopped" : action === "steer" ? "Agent redirected" : "Follow-up sent");
-    } catch (error: any) {
-      toast("error", error?.message ?? `${action} failed`);
+    } catch (error) {
+      toast("error", errorMessage(error, `${action} failed`));
     }
   };
 
@@ -886,8 +975,8 @@ function AgentDetail({ item, toast, onOpenSession, onUpdate }: { item: AgentItem
       if (thread) onUpdate({ kind: "thread", thread: { ...thread, status: "stopped", latestActivity: "Opened as main session" } });
       else onUpdate({ kind: "subagent", run: { ...run!, status: "stopped", controllable: false, latestActivity: "Opened as main session" } });
       onOpenSession?.(target.sessionFile, target.cwd, target.parentSessionFile ?? undefined);
-    } catch (error: any) {
-      toast("error", error?.message ?? "could not open agent as a session");
+    } catch (error) {
+      toast("error", errorMessage(error, "could not open agent as a session"));
     }
   };
 
@@ -895,18 +984,18 @@ function AgentDetail({ item, toast, onOpenSession, onUpdate }: { item: AgentItem
     <div className="border-b border-line pb-4">
       <div className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full ${live ? "bg-accent" : status === "failed" || status === "routing_mismatch" ? "bg-err" : status === "blocked" ? "bg-warn" : status === "completed" || status === "idle" ? "bg-ok" : "bg-dim"}`} /><h2 className="min-w-0 flex-1 truncate text-[16px] font-semibold">{name}</h2><span className="shrink-0 rounded bg-inset px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-dim">{badge}</span><span className="text-[13px] text-dim">{status.replace("_", " ")}</span></div>
       {!recent?.length && description ? <p className="mt-2 text-[14px] leading-6 text-dim">{description}</p> : null}
-      <p className="mt-2 text-[12px] text-dim">{model} · {profile ?? "—"} · {id.slice(0, 8)}</p>
-      {milestones?.length ? <div className="mt-3 rounded-lg border border-line bg-inset/40 px-3 py-2"><span className="text-[11px] font-semibold uppercase tracking-wide text-dim">Milestones</span><ul className="mt-1 space-y-1">{milestones.map((m, index) => <li key={`${m.at}-${index}`} className="flex items-start gap-2 text-[13px]"><span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-ok" /><span className="min-w-0"><span className="font-medium">{m.name}</span>{m.note ? <span className="text-dim"> — {m.note}</span> : null}<span className="ml-1 text-[11px] text-dim">{new Date(m.at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</span></span></li>)}</ul></div> : null}
+      <p className="mt-2 text-[12px] text-dim">{model} · {profile ?? ","} · {id.slice(0, 8)}</p>
+      {milestones?.length ? <div className="mt-3 rounded-lg border border-line bg-inset/40 px-3 py-2"><span className="text-[11px] font-semibold uppercase tracking-wide text-dim">Milestones</span><ul className="mt-1 space-y-1">{milestones.map((m, index) => <li key={`${m.at}-${index}`} className="flex items-start gap-2 text-[13px]"><span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-ok" /><span className="min-w-0"><span className="font-medium">{m.name}</span>{m.note ? <span className="text-dim">, {m.note}</span> : null}<span className="ml-1 text-[11px] text-dim">{new Date(m.at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</span></span></li>)}</ul></div> : null}
     </div>
     <div ref={scrollRef} className="max-h-[46vh] overflow-y-auto py-4">
-      {recent?.length ? <MiniChat messages={recent} /> : run?.output ? <Markdown text={clampText(run.output, 10000)} /> : (run as any)?.error || (run as any)?.failureReason ? <div className="rounded-lg border border-err/20 bg-err/5 px-3 py-3"><p className="text-[13px] font-medium text-err">Subagent failed</p><p className="mt-1 font-mono text-[12px] leading-5 text-err">{(run as any).error ?? (run as any).failureReason}</p></div> : thread?.latestSummary ? <Markdown text={thread.latestSummary} /> : <p className="text-[14px] text-dim">No transcript messages available yet.</p>}
+      <TranscriptContent recent={recent} run={run} thread={thread} live={live} />
     </div>
-    {run?.stderr ? <pre className="max-h-48 overflow-auto border-t border-line py-3 font-mono text-[12px] text-warn">{clampText(run.stderr, 3000)}</pre> : null}
+    {run?.stderr ? <pre className="max-h-48 overflow-auto border-t border-line py-3 font-mono text-[12px] text-warn">{clampText(run.stderr, STDERR_LIMIT)}</pre> : null}
     <div className="flex flex-wrap gap-2 border-t border-line pt-3">{sessionFile && onOpenSession ? <button onClick={() => void promote()} disabled={live} title={live ? "Stop or wait for the active turn first" : "Move this conversation into the main workspace"} className="context-button disabled:opacity-50">Open as session</button> : null}{controllable ? <><button onClick={() => void control("steer")} className="context-button is-primary">Steer</button><button onClick={() => void control("follow-up")} className="context-button">Follow up</button><button onClick={() => void control("stop")} className="context-button text-err">Stop</button></> : <span className="text-[13px] text-dim">This agent is read-only.</span>}</div>
   </div>;
 }
 function EmptyActivity({ icon, title, text }: { icon: string; title: string; text: string }) {
-  return <div className="flex flex-col items-center gap-2 px-6 py-16 text-center"><span className="text-3xl text-dim">{icon}</span><p className="text-[14px] font-medium">{title}</p><p className="text-[14px] leading-relaxed text-dim">{text}</p></div>;
+  return <div className="flex flex-col items-center gap-2 px-6 py-16 text-center"><span className="text-[24px] text-dim">{icon}</span><p className="text-[14px] font-medium">{title}</p><p className="text-[14px] leading-relaxed text-dim">{text}</p></div>;
 }
 
 function HistoryTranscript({ history }: { history: WorkflowHistoryEntry[] }) {
@@ -920,7 +1009,7 @@ function HistoryTranscript({ history }: { history: WorkflowHistoryEntry[] }) {
               className="rounded-md border border-line/50 bg-inset/40 px-2.5 py-1.5 font-mono text-[14px] leading-relaxed text-fg/80"
             >
               <span className="font-semibold tracking-[0.02em] text-accent">tool · {h.toolName ?? "?"}</span>
-              <span className="mt-0.5 block break-all whitespace-pre-wrap text-dim">{clampText(h.text, 500)}</span>
+              <span className="mt-0.5 block break-all whitespace-pre-wrap text-dim">{clampText(h.text, TOOL_TEXT_LIMIT)}</span>
             </div>
           );
         }
@@ -933,7 +1022,7 @@ function HistoryTranscript({ history }: { history: WorkflowHistoryEntry[] }) {
               }`}
             >
               {h.toolName ? <span className="font-semibold tracking-[0.02em]">{h.toolName}</span> : null}
-              <span className="mt-0.5 block break-all whitespace-pre-wrap">{clampText(h.text, 500)}</span>
+              <span className="mt-0.5 block break-all whitespace-pre-wrap">{clampText(h.text, TOOL_TEXT_LIMIT)}</span>
             </div>
           );
         }
@@ -941,20 +1030,20 @@ function HistoryTranscript({ history }: { history: WorkflowHistoryEntry[] }) {
           return (
             <div key={i} className="rounded-md bg-accent-soft/60 px-2.5 py-1.5 text-[14px] leading-relaxed text-fg/90">
               <span className="font-semibold text-accent">you</span>
-              <span className="mt-0.5 block break-words whitespace-pre-wrap">{clampText(h.text, 800)}</span>
+              <span className="mt-0.5 block break-words whitespace-pre-wrap">{clampText(h.text, HISTORY_TEXT_LIMIT)}</span>
             </div>
           );
         }
         if (h.kind === "error") {
           return (
             <div key={i} className="rounded-md border border-err/25 bg-err/10 px-2.5 py-1.5 text-[14px] leading-relaxed text-err/90">
-              {clampText(h.text, 800)}
+              {clampText(h.text, HISTORY_TEXT_LIMIT)}
             </div>
           );
         }
         return (
           <div key={i} className="rounded-md bg-bg/40 px-2.5 py-1.5 text-[14px] leading-relaxed text-fg/85">
-            {clampText(h.text, 800)}
+            {clampText(h.text, HISTORY_TEXT_LIMIT)}
           </div>
         );
       })}

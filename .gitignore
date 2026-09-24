@@ -3,6 +3,11 @@ node_modules/
 dist/
 dist-electron/
 dist-bench/
+dist-daemon/
+bench-results/
+# Packaged app bundles, DMGs and zips (~1.4 GB). Untracked here means the
+# rollback snapshot hashes them into its shadow index on every cold capture.
+release/
 
 # Local Pi/agent state and research material
 .pi/
@@ -24,6 +29,8 @@ coverage/
 .vscode/
 .idea/
 
+# Web research scratch (firecrawl CLI writes here)
+.firecrawl/
+
 # Local screenshots
 ui-shot-*.png
-dist-daemon/

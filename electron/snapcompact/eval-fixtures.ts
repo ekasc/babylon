@@ -25,27 +25,38 @@ export interface EvalQuestion {
   id: string;
   /** Description shown in benchmark output. */
   description: string;
-  messages: any[];
+  messages: EvalMessage[];
   questions: EvalQuestion[];
 }
 
-const A = (role: "user" | "assistant", text: string, opts: { toolCalls?: any[]; toolResults?: Array<{ id: string; name: string; text: string; isError?: boolean }>; entryId?: string; timestamp?: number; thinking?: string } = {}): any => {
+/** Fixture message shape (feeds the serializer as unknown[]). */
+export interface EvalMessage {
+  role: string;
+  content: unknown;
+  entryId: string;
+  timestamp: number;
+  toolCalls?: Array<{ id: string; name: string; arguments?: unknown }>;
+  toolCallId?: string;
+  isError?: boolean;
+}
+
+const A = (role: "user" | "assistant", text: string, opts: { toolCalls?: Array<{ id: string; name: string; arguments?: unknown }>; toolResults?: Array<{ id: string; name: string; text: string; isError?: boolean }>; entryId?: string; timestamp?: number; thinking?: string } = {}): EvalMessage => {
   const entryId = opts.entryId ?? `${role[0]}${Math.random().toString(36).slice(2, 6)}`;
   const timestamp = opts.timestamp ?? 0;
   if (role === "user") {
     return { role: "user", content: text, entryId, timestamp };
   }
-  const content: any[] = [];
+  const content: Array<{ type: string; text?: string; thinking?: string }> = [];
   if (opts.thinking) content.push({ type: "thinking", thinking: opts.thinking });
   if (text) content.push({ type: "text", text });
-  const toolCalls = (opts.toolCalls ?? []).map((tc: any) => ({ id: tc.id, name: tc.name, arguments: typeof tc.arguments === "string" ? tc.arguments : JSON.stringify(tc.arguments) }));
+  const toolCalls = (opts.toolCalls ?? []).map((tc) => ({ id: tc.id, name: tc.name, arguments: typeof tc.arguments === "string" ? tc.arguments : JSON.stringify(tc.arguments) }));
   return { role: "assistant", content, toolCalls, entryId, timestamp };
 };
 
-const TR = (toolCallId: string, text: string, isError = false): any => ({ role: "toolResult", toolCallId, content: [{ type: "text", text }], isError, entryId: "tr" + Math.random().toString(36).slice(2, 6), timestamp: 0 });
+const TR = (toolCallId: string, text: string, isError = false): EvalMessage => ({ role: "toolResult", toolCallId, content: [{ type: "text", text }], isError, entryId: "tr" + Math.random().toString(36).slice(2, 6), timestamp: 0 });
 
-function makeFixture(id: string, description: string, body: { user: string; assistant: string; tool?: { name: string; args: any; result: string; isError?: boolean }; thinking?: string }[], questions: EvalQuestion[]): EvalFixture {
-  const messages: any[] = [];
+function makeFixture(id: string, description: string, body: { user: string; assistant: string; tool?: { name: string; args: unknown; result: string; isError?: boolean }; thinking?: string }[], questions: EvalQuestion[]): EvalFixture {
+  const messages: EvalMessage[] = [];
   let ts = 1000;
   for (const step of body) {
     messages.push(A("user", step.user, { entryId: `u${messages.length}`, timestamp: ts }));

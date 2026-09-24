@@ -1,4 +1,6 @@
-import type { ActiveRollback, TurnCheckpoint } from "./rollback-store";
+import type { ActiveRollback, TurnCheckpoint, TurnReceipt } from "./rollback-store";
+import { missingCheckpointReason } from "./rollback-store";
+import { isBookkeepingPath } from "./snapshot-store";
 import type { SessionTreeRow } from "./session-tree";
 
 export interface HistoryTurn {
@@ -32,8 +34,7 @@ export interface HistoryProjection {
   };
 }
 
-export function activePath(rows: SessionTreeRow[], leafId: string | null): Set<string> {
-  const byId = new Map(rows.map((row) => [row.id, row]));
+export function activePathFromIndex(byId: Map<string, SessionTreeRow>, leafId: string | null): Set<string> {
   const path = new Set<string>();
   let current = leafId ? byId.get(leafId) : undefined;
   while (current && !path.has(current.id)) {
@@ -43,10 +44,15 @@ export function activePath(rows: SessionTreeRow[], leafId: string | null): Set<s
   return path;
 }
 
+export function activePath(rows: SessionTreeRow[], leafId: string | null): Set<string> {
+  return activePathFromIndex(new Map(rows.map((row) => [row.id, row])), leafId);
+}
+
 export function projectHistory(input: {
   rows: SessionTreeRow[];
   leafId: string | null;
   checkpoints: TurnCheckpoint[];
+  receipts?: TurnReceipt[];
   gitAvailable: boolean;
   streaming: boolean;
   activeRollback?: ActiveRollback;
@@ -55,24 +61,35 @@ export function projectHistory(input: {
 }): HistoryProjection {
   const { rows, leafId } = input;
   const byId = new Map(rows.map((row) => [row.id, row]));
-  const path = activePath(rows, leafId);
+  const path = activePathFromIndex(byId, leafId);
   const checkpointByUser = new Map(input.checkpoints.map((checkpoint) => [checkpoint.userEntryId, checkpoint]));
-  const raw = rows
-    .filter((row) => row.type === "message" && row.role === "user")
-    .map((row) => {
-      let parent = row.parentId ? byId.get(row.parentId) : undefined;
-      while (parent && parent.role !== "user") parent = parent.parentId ? byId.get(parent.parentId) : undefined;
-      let depth = 0;
-      let ancestor = parent;
-      while (ancestor) {
-        depth++;
-        let next = ancestor.parentId ? byId.get(ancestor.parentId) : undefined;
-        while (next && next.role !== "user") next = next.parentId ? byId.get(next.parentId) : undefined;
-        ancestor = next;
+  // Single preorder pass (flattenSessionTree emits parents before children),
+  // so one iterative sweep resolves nearest-user ancestry, per-user depth,
+  // and first-assistant responses with only map lookups — no nested scans.
+  // Semantics preserved exactly:
+  // - any row with role "user" is an ancestry boundary (even non-messages),
+  //   but only type "message" users become turns;
+  // - depth counts user-role nodes from the nearest user ancestor up;
+  // - the FIRST assistant child in row order wins the response snippet.
+  const nearestUser = new Map<string, { id: string; depth: number }>();
+  const responseByUser = new Map<string, string>();
+  const users: { row: SessionTreeRow; parentUserEntryId: string | null; depth: number }[] = [];
+  for (const row of rows) {
+    const parentUser = row.parentId ? nearestUser.get(row.parentId) : undefined;
+    if (row.role === "assistant" && row.parentId && !responseByUser.has(row.parentId)) {
+      responseByUser.set(row.parentId, row.snippet);
+    }
+    if (row.role === "user") {
+      const depth = parentUser ? parentUser.depth + 1 : 0;
+      nearestUser.set(row.id, { id: row.id, depth });
+      if (row.type === "message") {
+        users.push({ row, parentUserEntryId: parentUser?.id ?? null, depth });
       }
-      const response = rows.find((candidate) => candidate.parentId === row.id && candidate.role === "assistant")?.snippet ?? "";
-      return { row, parentUserEntryId: parent?.id ?? null, depth, response };
-    });
+    } else if (parentUser) {
+      nearestUser.set(row.id, parentUser);
+    }
+  }
+  const raw = users.map((turn) => ({ ...turn, response: responseByUser.get(turn.row.id) ?? "" }));
   const children = new Map<string, number>();
   for (const turn of raw) {
     if (turn.parentUserEntryId) children.set(turn.parentUserEntryId, (children.get(turn.parentUserEntryId) ?? 0) + 1);
@@ -88,7 +105,7 @@ export function projectHistory(input: {
     else if (input.streaming) rollbackReason = "Finish or stop the active response before rolling back";
     else if (!onActivePath) rollbackReason = "This turn is not on the active path";
     else if (!input.gitAvailable) rollbackReason = "Rollback requires a Git project";
-    else if (!checkpoint) rollbackReason = "No filesystem checkpoint was recorded for this turn";
+    else if (!checkpoint) rollbackReason = missingCheckpointReason(input.receipts, row.id);
     else if (!checkpoint.complete) rollbackReason = "This filesystem checkpoint is incomplete";
     return {
       entryId: row.id,
@@ -100,7 +117,12 @@ export function projectHistory(input: {
       onActivePath,
       current: current?.id === row.id,
       branchCount: children.get(row.id) ?? 0,
-      changedCount: checkpoint?.complete ? checkpoint.changedPaths.length : 0,
+      // Bookkeeping-only turns read as zero: the engine's own `.pi/state`
+      // logs are hidden from turn diffs, so a read-only turn with tool calls
+      // shows no card (legacy checkpoints included).
+      changedCount: checkpoint?.complete
+        ? checkpoint.changedPaths.filter((path) => !isBookkeepingPath(path)).length
+        : 0,
       checkpointAvailable: !!checkpoint?.complete,
       rollbackAvailable: !rollbackReason,
       rollbackReason,

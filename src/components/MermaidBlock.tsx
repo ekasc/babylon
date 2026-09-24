@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import ErrorBoundary from "./ErrorBoundary";
+import { useCanvasOpener } from "./canvas-context";
 
 let init: Promise<void> | null = null;
 function ensureInit(theme: "light" | "dark") {
@@ -78,9 +79,25 @@ function MermaidInner({ code, theme }: { code: string; theme: "light" | "dark" }
 }
 
 export default function MermaidBlock(props: { code: string; theme: "light" | "dark" }) {
+  const canvas = useCanvasOpener();
   return (
-    <ErrorBoundary fallback={<div className="mermaid-fallback"><p className="mermaid-error">Diagram crashed — showing source</p><pre className="codeblock-fallback"><code>{props.code}</code></pre></div>}>
-      <MermaidInner {...props} />
-    </ErrorBoundary>
+    <div className="relative">
+      <ErrorBoundary fallback={<div className="mermaid-fallback"><p className="mermaid-error">Diagram crashed — showing source</p><pre className="codeblock-fallback"><code>{props.code}</code></pre></div>}>
+        <MermaidInner {...props} />
+      </ErrorBoundary>
+      {/* Locked decision: v1 of the canvas is this flow. Mermaid is already a
+          dependency, already code, and models are fluent in it, so it is the
+          cheapest way to prove the round trip before any vision path exists. */}
+      {canvas ? (
+        <button
+          type="button"
+          className="thread-action thread-action-text absolute right-1 top-1"
+          onClick={() => canvas.openInCanvas(props.code)}
+          title="Open on the canvas as an editable scene the agent can read"
+        >
+          Canvas
+        </button>
+      ) : null}
+    </div>
   );
 }

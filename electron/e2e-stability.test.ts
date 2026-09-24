@@ -10,7 +10,7 @@ import { SessionIndex, readSessionInfo } from "./sessions";
 import { parseGeneratedCommitMessage } from "./git-commit-message";
 
 const exec = promisify(execFile);
-const TEST_ROOT = "/tmp/babylon-e2e-20260827";
+const TEST_ROOT = tmpdir();
 const roots: string[] = [];
 
 async function git(cwd: string, args: string[]): Promise<string> {

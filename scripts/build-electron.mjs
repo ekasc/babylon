@@ -5,6 +5,7 @@
 import esbuild from "esbuild";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { computeBuildId } from "./build-id.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -15,9 +16,11 @@ const requireBanner = {
 const shared = {
   bundle: true,
   platform: "node",
+  minify: true,
   // Pi loads provider auth and API implementations with relative dynamic
   // imports. Keep the package intact so those imports resolve inside it.
   external: ["electron", "@earendil-works/pi-coding-agent"],
+  define: { __BABYLON_BUILD_ID__: JSON.stringify(computeBuildId(root)) },
   sourcemap: true,
 };
 

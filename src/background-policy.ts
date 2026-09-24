@@ -8,7 +8,7 @@
 
 export type BackgroundMode = "never" | "while_plugged_in" | "always";
 
-export interface BackgroundPolicy {
+export type BackgroundPolicy = {
   mode: BackgroundMode;
   pauseOnBattery: boolean;
   pauseOnSleep: boolean;

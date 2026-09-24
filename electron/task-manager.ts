@@ -7,6 +7,7 @@ import {
   createTask,
   createTaskRegistry,
   listTasks,
+  putTask,
   removeTask,
   updateTask,
   type Task,
@@ -48,6 +49,23 @@ export class TaskManager {
   get(id: string): Task | undefined {
     const task = this.registry.tasks[id];
     return task ? cloneTask(task) : undefined;
+  }
+
+  /** Insert or replace a task by id (local runtime's create path). */
+  upsert(task: Task): Task {
+    this.registry = putTask(this.registry, task);
+    this.broadcast();
+    const stored = this.registry.tasks[task.id];
+    if (!stored) throw new Error("task not stored");
+    return cloneTask(stored);
+  }
+
+  /** Remove a task by id. Returns false when absent. */
+  remove(id: string): boolean {
+    if (!this.registry.tasks[id]) return false;
+    this.registry = removeTask(this.registry, id);
+    this.broadcast();
+    return true;
   }
 
   findBySessionFile(sessionFile: string | null | undefined): Task | undefined {
@@ -112,6 +130,7 @@ export class TaskManager {
     try {
       this.registry = updateTask(this.registry, current.id, { dirty: params.dirty });
       const task = this.registry.tasks[current.id];
+      if (!task) throw new Error("unknown task");
       if (!params.keep && task.dirty) {
         this.broadcast();
         throw new Error("Cannot discard a task worktree with uncommitted changes");
@@ -128,7 +147,7 @@ export class TaskManager {
       this.broadcast();
 
       return Object.assign(cleanupResult, {
-        task: cloneTask(params.keep ? this.registry.tasks[task.id] : task),
+        task: cloneTask(params.keep ? (this.registry.tasks[task.id] ?? task) : task),
         removed: !params.keep,
       });
     } finally {

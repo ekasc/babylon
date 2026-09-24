@@ -8,16 +8,16 @@ export function SettingRow({
 }: {
   title: string;
   description?: string;
-  control: React.ReactNode;
+  control?: React.ReactNode;
   onReset?: () => void;
   customized?: boolean;
   id?: string;
 }) {
   return (
-    <div id={id} className="group flex items-start gap-6 px-4 py-4 border-b border-white/10 last:border-0">
+    <div id={id} className="group flex items-start gap-6 px-2.5 py-3 border-b border-line last:border-0">
       <div className="w-[380px] shrink-0">
         <div className="flex items-center gap-2">
-          <span className="text-[14px] font-[550] tracking-[-0.01em] text-white">{title}</span>
+          <span className="text-[14px] font-[550] tracking-[-0.01em] text-fg">{title}</span>
           {customized && onReset ? (
             <button
               onClick={onReset}
@@ -28,9 +28,9 @@ export function SettingRow({
             </button>
           ) : null}
         </div>
-        {description ? <p className="mt-1 text-[13px] leading-5 text-white/55 max-w-[60ch]">{description}</p> : null}
+        {description ? <p className="mt-1 text-[13px] leading-5 text-dim max-w-[60ch]">{description}</p> : null}
       </div>
-      <div className="flex flex-none items-center gap-2">{control}</div>
+      <div className="flex flex-none items-center gap-2">{control ?? null}</div>
     </div>
   );
 }

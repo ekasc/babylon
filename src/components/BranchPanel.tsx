@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { bridge, type HistoryProjection, type HistoryTurn } from "../bridge";
-import { BranchIcon, FlaskIcon, XIcon } from "./icons";
+import { FlaskIcon, ChevronIcon } from "./icons";
 
 interface Props {
   onClose(): void;
+  /** Viewed session this pane reads history for (null: nothing viewed). */
+  sessionFile: string | null;
   refreshToken: number;
   onRollback(entryId: string): void;
   onUndoRollback(): void;
@@ -11,15 +13,21 @@ interface Props {
   toast(type: "info" | "warning" | "error", text: string): void;
 }
 
-export default function BranchPanel({ onClose, refreshToken, onRollback, onUndoRollback, onForkCurrent, toast }: Props) {
+export default function BranchPanel({ onClose, sessionFile, refreshToken, onRollback, onUndoRollback, onForkCurrent, toast }: Props) {
   const [history, setHistory] = useState<HistoryProjection>({ turns: [], leafId: null, hasBranches: false });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [folded, setFolded] = useState(false);
 
   useEffect(() => {
+    if (!sessionFile) {
+      setHistory({ turns: [], leafId: null, hasBranches: false });
+      setLoading(false);
+      return;
+    }
     let active = true;
     setLoading(true);
-    bridge.getHistory()
+    bridge.getHistory(sessionFile)
       .then((value) => {
         if (!active) return;
         setHistory(value);
@@ -28,7 +36,7 @@ export default function BranchPanel({ onClose, refreshToken, onRollback, onUndoR
       .catch((error) => toast("error", error?.message ?? "failed to load session history"))
       .finally(() => active && setLoading(false));
     return () => { active = false; };
-  }, [refreshToken, toast]);
+  }, [refreshToken, toast, sessionFile]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => event.key === "Escape" && onClose();
@@ -41,20 +49,30 @@ export default function BranchPanel({ onClose, refreshToken, onRollback, onUndoR
     [history.turns, selectedId]
   );
 
+  const branched = history.hasBranches;
+  const visibleTurns = useMemo(
+    () => (folded ? history.turns.filter((turn) => turn.onActivePath) : history.turns),
+    [history.turns, folded]
+  );
+
   return (
     <section aria-label="Session history workspace" className="context-pane flex h-full min-w-0 flex-col">
-      <div className="context-header flex h-16 shrink-0 items-center gap-2 px-4">
-        <BranchIcon size={14} className="shrink-0 text-accent" />
-        <span className="text-[15px] font-semibold tracking-tight">History</span>
-        <span className="truncate text-[13px] text-dim">
-          {history.hasBranches ? "conversation branches" : "conversation timeline"}
-        </span>
-        <button onClick={onForkCurrent} className="context-header-button ml-auto" title="Fork the session from its current position">
+      {/* The sidebar's header names this pane, so only its own actions remain. */}
+      <div className="flex shrink-0 items-center gap-2 px-4 py-2">
+        {branched ? (
+          <button
+            onClick={() => setFolded((f) => !f)}
+            className="context-header-button"
+            aria-pressed={folded}
+            title={folded ? "Show all paths" : "Focus active path"}
+          >
+            <ChevronIcon size={12} className={folded ? "-rotate-90" : ""} />
+            {folded ? "All paths" : "Fold"}
+          </button>
+        ) : null}
+        <button onClick={onForkCurrent} className="context-header-button" title="Fork the session from its current position">
           <FlaskIcon size={12} />
           Fork current
-        </button>
-        <button onClick={onClose} aria-label="Close history" className="context-icon-button">
-          <XIcon size={12} />
         </button>
       </div>
 
@@ -84,8 +102,8 @@ export default function BranchPanel({ onClose, refreshToken, onRollback, onUndoR
           <p className="px-2 py-6 text-center text-[14px] text-dim">No user turns yet.</p>
         ) : (
           <HistoryRows
-            turns={history.turns}
-            branched={history.hasBranches}
+            turns={visibleTurns}
+            branched={branched}
             selectedId={selectedId}
             onSelect={setSelectedId}
           />
@@ -136,7 +154,7 @@ function HistoryRows({ turns, branched, selectedId, onSelect }: { turns: History
             <span className="min-w-0 flex-1">
               <span className="flex items-center gap-2">
                 <span className="shrink-0 text-[12px] tabular-nums text-dim">{turn.index}</span>
-                <span className="block truncate text-[14px] font-medium">{turn.text || "Untitled turn"}</span>
+                <span className={`block truncate text-[14px] ${branched && turn.onActivePath ? "font-semibold text-fg" : "font-medium"}`}>{turn.text || "Untitled turn"}</span>
               </span>
               {turn.response ? <span className="mt-0.5 block truncate pl-5 text-[12px] leading-5 text-dim">{turn.response}</span> : null}
             </span>

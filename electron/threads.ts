@@ -21,6 +21,8 @@ import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import type { ThreadStatus } from "../src/bridge";
+import { wireArr, wireOf, wireStr } from "../src/store";
 
 export type ThreadControlAction = "steer" | "follow-up" | "stop";
 
@@ -32,7 +34,7 @@ export interface ThreadMilestone {
 
 export type ThreadEvent =
   | { type: "milestone"; threadId: string; name: string | null; milestone: ThreadMilestone }
-  | { type: "terminal"; threadId: string; name: string | null; status: string }
+  | { type: "terminal"; threadId: string; name: string | null; status: ThreadStatus }
   | { type: "blocked"; threadId: string; name: string | null; blocker: string | null };
 
 /** Pure transition detector: diff one thread's polled state against the last
@@ -51,9 +53,9 @@ export function detectThreadEvents(
       events.push({ type: "milestone", threadId: next.threadId, name: next.name, milestone });
     }
   }
-  const terminal = ["completed", "failed", "stopped"];
-  if (prev && prev.status !== next.status && next.status && terminal.includes(next.status)) {
-    events.push({ type: "terminal", threadId: next.threadId, name: next.name, status: next.status });
+  const status = next.status;
+  if (prev && prev.status !== status && (status === "completed" || status === "failed" || status === "stopped")) {
+    events.push({ type: "terminal", threadId: next.threadId, name: next.name, status });
   }
   if (prev && prev.status !== "blocked" && next.status === "blocked") {
     events.push({ type: "blocked", threadId: next.threadId, name: next.name, blocker: next.blocker ?? null });
@@ -63,7 +65,7 @@ export function detectThreadEvents(
 
 export interface ThreadManagerOptions {
   /** Executes an extension tool in the center session (provided by pi-host). */
-  runTool: (toolName: string, args: Record<string, unknown>) => Promise<unknown>;
+  runTool: (toolName: string, args: Record<string, unknown>, sessionId?: string | null) => Promise<unknown>;
   /** Called after a control action so the owning parent conversation learns. */
   onParentMessage?: (
     thread: { threadId: string; name: string | null; parentSessionId: string | null },
@@ -74,34 +76,57 @@ export interface ThreadManagerOptions {
 
 const THREAD_ID = /^[a-zA-Z0-9-]{1,64}$/;
 
+/** Persisted thread.json shape (read back unvalidated JSON). */
+export interface ThreadState {
+  threadId: string;
+  name?: string | null;
+  parentSessionId?: string | null;
+  sessionFile?: string | null;
+  status?: ThreadStatus;
+  [key: string]: unknown;
+}
+
 /** Threads whose runtime still owns the session file must not be promoted. */
 const LIVE_STATUS = new Set(["queued", "starting", "running", "interrupting", "idle", "blocked"]);
 
 /** Shared, cached parent-session-file resolver for pi session ids. Session files
- *  are named `<timestamp>_<sessionId>.jsonl` under ~/.pi/agent/sessions. */
+ *  are named `<timestamp>_<sessionId>.jsonl` under the instance sessions root. */
 const parentFileCache = new Map<string, string | null>();
 
-export async function resolveParentSessionFile(sessionId: string | null | undefined): Promise<string | null> {
+export async function resolveParentSessionFile(
+  sessionId: string | null | undefined,
+  root: string = join(homedir(), ".pi", "agent", "sessions")
+): Promise<string | null> {
   if (!sessionId) return null;
-  const cached = parentFileCache.get(sessionId);
+  // Keyed by root: one process can resolve for several instances (tests do).
+  const cacheKey = `${root}\0${sessionId}`;
+  const cached = parentFileCache.get(cacheKey);
   if (cached !== undefined) return cached;
   try {
-    const root = join(homedir(), ".pi", "agent", "sessions");
-    const projects = await fs.readdir(root);
-    for (const project of projects) {
-      const dir = join(root, project);
-      const files = await fs.readdir(dir).catch(() => []);
-      const hit = files.find((file) => file.includes(sessionId) && file.endsWith(".jsonl"));
-      if (hit) {
-        const path = join(dir, hit);
-        parentFileCache.set(sessionId, path);
-        return path;
+    // Both layouts occur: the default store groups files per encoded cwd,
+    // while an explicit session dir holds them flat.
+    const top = await fs.readdir(root).catch(() => [] as string[]);
+    const candidates: string[] = [];
+    for (const entry of top) {
+      const full = join(root, entry);
+      const stat = await fs.lstat(full).catch(() => null);
+      if (!stat) continue;
+      if (stat.isFile()) {
+        if (entry.endsWith(".jsonl")) candidates.push(full);
+      } else if (stat.isDirectory()) {
+        const files = await fs.readdir(full).catch(() => [] as string[]);
+        for (const file of files) if (file.endsWith(".jsonl")) candidates.push(join(full, file));
       }
+    }
+    const hit = candidates.find((path) => path.includes(sessionId));
+    if (hit) {
+      parentFileCache.set(cacheKey, hit);
+      return hit;
     }
   } catch {
     /* sessions store unavailable */
   }
-  parentFileCache.set(sessionId, null);
+  parentFileCache.set(cacheKey, null);
   return null;
 }
 
@@ -112,15 +137,18 @@ export class ThreadManager {
     return join(cwd, ".pi", "state", "threads", threadId, "thread.json");
   }
 
-  async readState(cwd: string, threadId: string): Promise<any | null> {
+  async readState(cwd: string, threadId: string): Promise<ThreadState | null> {
     try {
-      return JSON.parse(await fs.readFile(this.threadFile(cwd, threadId), "utf8"));
+      const parsed: unknown = JSON.parse(await fs.readFile(this.threadFile(cwd, threadId), "utf8"));
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+      const state = parsed as ThreadState;
+      return typeof state.threadId === "string" ? state : null;
     } catch {
       return null;
     }
   }
 
-  async control(cwd: string, action: ThreadControlAction, threadId: string, message?: string): Promise<any> {
+  async control(cwd: string, action: ThreadControlAction, threadId: string, message?: string): Promise<ThreadState> {
     if (!THREAD_ID.test(threadId)) throw new Error("Invalid thread id");
     const state = await this.readState(cwd, threadId);
     if (!state) throw new Error("Thread not found");
@@ -129,9 +157,15 @@ export class ThreadManager {
       toolName,
       action === "stop"
         ? { threadId, reason: "stopped from Babylon" }
-        : { threadId, message: message!.trim(), delivery: action === "steer" ? "steer" : "follow_up" }
+        : { threadId, message: message!.trim(), delivery: action === "steer" ? "steer" : "follow_up" },
+      state.parentSessionId ?? null
     );
-    if ((result as any)?.isError) throw new Error((result as any)?.content?.[0]?.text ?? "Thread control failed");
+    const failed = wireOf(result);
+    if (failed?.isError) {
+      const content = wireArr(failed, "content");
+      const firstText = content && content.length > 0 ? wireStr(wireOf(content[0]), "text") : undefined;
+      throw new Error(firstText ?? "Thread control failed");
+    }
     await this.opts.onParentMessage?.(
       { threadId: state.threadId, name: state.name ?? null, parentSessionId: state.parentSessionId ?? null },
       action,
@@ -152,7 +186,7 @@ export class ThreadManager {
     await fs.access(state.sessionFile).catch(() => {
       throw new Error("The thread session file no longer exists");
     });
-    if (LIVE_STATUS.has(state.status)) {
+    if (state.status && LIVE_STATUS.has(state.status)) {
       throw new Error("Stop or wait for the thread to finish before opening it as the main session");
     }
     const supervision = [

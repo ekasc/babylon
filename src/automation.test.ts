@@ -68,22 +68,22 @@ describe("scheduled task registry", () => {
   it("registers without clobbering", () => {
     let r: ScheduledTaskRegistry = createScheduledTaskRegistry();
     r = registerScheduledTask(r, task());
-    expect(r.tasks.s1.enabled).toBe(true);
+    expect(r.tasks.s1?.enabled).toBe(true);
     r = registerScheduledTask(r, task({ enabled: false }));
-    expect(r.tasks.s1.enabled).toBe(true);
+    expect(r.tasks.s1?.enabled).toBe(true);
   });
 
   it("isolates the caller's trigger on register", () => {
     const original = task();
     const r = registerScheduledTask(createScheduledTaskRegistry(), original);
     original.trigger.intervalMs = 999999;
-    expect(r.tasks.s1.trigger.intervalMs).toBe(1000);
+    expect(r.tasks.s1?.trigger.intervalMs).toBe(1000);
   });
 
   it("toggles enabled and is a no-op on match", () => {
     let r = registerScheduledTask(createScheduledTaskRegistry(), task());
     r = setScheduledTaskEnabled(r, "s1", false);
-    expect(r.tasks.s1.enabled).toBe(false);
+    expect(r.tasks.s1?.enabled).toBe(false);
     expect(setScheduledTaskEnabled(r, "s1", false)).toBe(r);
   });
 
@@ -97,8 +97,8 @@ describe("scheduled task registry", () => {
   it("records a run and increments count", () => {
     let r = registerScheduledTask(createScheduledTaskRegistry(), task());
     r = recordRun(r, "s1", 123);
-    expect(r.tasks.s1.lastRunAt).toBe(123);
-    expect(r.tasks.s1.runCount).toBe(1);
+    expect(r.tasks.s1?.lastRunAt).toBe(123);
+    expect(r.tasks.s1?.runCount).toBe(1);
   });
 
   it("omits disabled tasks from due list", () => {

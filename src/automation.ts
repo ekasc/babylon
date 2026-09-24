@@ -1,7 +1,7 @@
 // Automation for Phase 8 (Feature 16: Scheduled and Conditional Tasks).
 //
 // After background execution is reliable, Babylon tasks can run without an open
-// foreground session. This module models scheduled/conditional triggers and an
+// addressed session. This module models scheduled/conditional triggers and an
 // evaluator that decides, given the current time and an optional watch event,
 // which tasks are due. The registry is pure and testable; the scheduler and
 // executor build on top.
@@ -29,7 +29,7 @@ export interface WatchEvent {
   branch?: string;
 }
 
-export interface ScheduledTask {
+export type ScheduledTask = {
   id: string;
   name: string;
   enabled: boolean;

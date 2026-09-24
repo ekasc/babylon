@@ -1,6 +1,8 @@
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { detectThreadEvents, type ThreadEvent } from "./threads";
+import type { AgentEvent } from "../src/bridge";
+import { wireArr, wireOf, wireStr } from "../src/store";
 
 export interface ThreadActivity {
   threadId: string;
@@ -75,17 +77,66 @@ interface Options {
  *  blocked events always pass). Keeps the parent conversation uncluttered. */
 const MILESTONE_NOTIFY_GAP_MS = 45_000;
 
+/** Thread states after which no further transitions are expected. `interrupted`
+ *  counts: the run was killed by request, and anything still moving will
+ *  re-announce itself through events (which revive the bridge). */
+const TERMINAL_THREAD_STATUSES = new Set(["completed", "failed", "stopped", "interrupted"]);
+
+/** Subagent states that mean a worker is still alive. End states
+ *  (`completed`, `failed`, `stopped`, `interrupted`, `routing_mismatch`,
+ *  `unknown`) are settled outcomes, not live work. */
+const LIVE_SUBAGENT_STATUSES = new Set(["starting", "running", "idle"]);
+
+/** Max frozen project snapshots retained. Retired entries are terminal
+ *  history, not live state: past this cap the oldest projects drop out of
+ *  the aggregate (their disk state is untouched; foregrounding re-adds
+ *  them). Without a cap, every project ever opened would ride every
+ *  activity publication for the life of the process. */
+const RETIRED_PROJECT_CAP = 50;
+
 export class ActivityBridge {
   readonly cwd: string;
   private timer: NodeJS.Timeout | null = null;
   private signature = "";
   private last: ActivityUpdate = { threads: [], subagents: [] };
   private transientSubagents = new Map<string, SubagentActivity>();
-  private prevThreads = new Map<string, { status?: string; blocker?: string | null; milestones?: any[] }>();
+  private prevThreads = new Map<string, { status?: string; blocker?: string | null; milestones?: ThreadActivity["milestones"] }>();
   private lastThreadNotify = new Map<string, number>();
+  /** Last UI visit or routed agent event. Pure reads (list/refresh)
+   *  never touch this: looking at a project is not evidence of live work. */
+  private lastUsedAt = Date.now();
 
   constructor(private readonly options: Options) {
     this.cwd = options.cwd;
+  }
+
+  /** Mark the bridge as recently interesting (UI visit, agent event). */
+  touch(): void {
+    this.lastUsedAt = Date.now();
+  }
+
+  /** True while anything owned by this project may still transition: a live
+   *  transient (pre-persistence) row, a non-terminal thread, or a live
+   *  subagent worker. Settled transients awaiting their cleanup timer do
+   *  NOT count — otherwise every completion would pin the bridge. Drives
+   *  idle pruning — see ActivityRegistry. */
+  hasLiveWork(): boolean {
+    for (const s of this.transientSubagents.values()) {
+      if (LIVE_SUBAGENT_STATUSES.has(s.status)) return true;
+    }
+    if (this.last.threads.some((t) => !TERMINAL_THREAD_STATUSES.has(t.status))) return true;
+    return this.last.subagents.some((s) => LIVE_SUBAGENT_STATUSES.has(s.status));
+  }
+
+  /** Milliseconds since the last UI visit or routed event. */
+  idleMs(now = Date.now()): number {
+    return now - this.lastUsedAt;
+  }
+
+  /** Last published snapshot without forcing a rescan. The registry reads
+   *  this so aggregate pushes never flap on bridges that haven't polled. */
+  snapshot(): ActivityUpdate {
+    return this.last;
   }
 
   start(): void {
@@ -100,35 +151,40 @@ export class ActivityBridge {
     this.timer = null;
   }
 
-  observeAgentEvent(event: any): void {
-    if (event?.type === "tool_execution_start" && event.toolName === "subagent") {
+  observeAgentEvent(event: AgentEvent): void {
+    if (event.type === "tool_execution_start" && event.toolName === "subagent") {
       const now = new Date().toISOString();
-      this.transientSubagents.set(event.toolCallId, {
-        runId: `pending-${event.toolCallId}`,
+      const toolCallId = wireStr(event, "toolCallId") ?? "";
+      this.transientSubagents.set(toolCallId, {
+        runId: `pending-${toolCallId}`,
         status: "running",
-        requestedModel: event.args?.model,
+        requestedModel: wireStr(wireOf(event.args), "model"),
         startedAt: now,
         updatedAt: now,
       });
       this.publishTransient();
       return;
     }
-    if (event?.type === "tool_execution_end" && event.toolName === "subagent") {
-      const details = event.result?.details ?? {};
-      const previous = this.transientSubagents.get(event.toolCallId);
-      this.transientSubagents.delete(event.toolCallId);
-      const runId = typeof details.runId === "string" ? details.runId : `result-${event.toolCallId}`;
+    if (event.type === "tool_execution_end" && event.toolName === "subagent") {
+      const toolCallId = wireStr(event, "toolCallId") ?? "";
+      const details = wireOf(wireOf(event.result)?.details) ?? {};
+      const previous = this.transientSubagents.get(toolCallId);
+      this.transientSubagents.delete(toolCallId);
+      const runId = wireStr(details, "runId") ?? `result-${toolCallId}`;
+      const status = wireStr(details, "status");
+      const content = wireArr(wireOf(event.result), "content") ?? [];
+      const payloadObserved = wireArr(details, "payloadModelsObserved")?.[0];
       this.transientSubagents.set(runId, {
         runId,
-        status: details.status === "routing_mismatch" ? "routing_mismatch" : event.isError ? "unknown" : "completed",
-        requestedModel: details.requestedModel ?? previous?.requestedModel,
-        sessionModel: details.primaryModel ?? undefined,
-        payloadModel: details.payloadModelsObserved?.[0],
-        matched: details.status !== "routing_mismatch",
+        status: status === "routing_mismatch" ? "routing_mismatch" : event.isError ? "unknown" : "completed",
+        requestedModel: wireStr(details, "requestedModel") ?? previous?.requestedModel,
+        sessionModel: wireStr(details, "primaryModel"),
+        payloadModel: typeof payloadObserved === "string" ? payloadObserved : undefined,
+        matched: status !== "routing_mismatch",
         startedAt: previous?.startedAt,
         updatedAt: new Date().toISOString(),
-        output: event.result?.content?.map((block: any) => block?.text ?? "").join("").trim() || undefined,
-        stderr: details.stderr || undefined,
+        output: content.map((block) => wireStr(wireOf(block), "text") ?? "").join("").trim() || undefined,
+        stderr: wireStr(details, "stderr") || undefined,
       });
       this.publishTransient();
       setTimeout(() => {
@@ -306,10 +362,10 @@ export class ActivityBridge {
               }
             }
             const routes = routeStat ? parseJsonLines(await fs.readFile(routePath, "utf8").catch(() => "")) : [];
-            const lastRoute = routes[routes.length - 1] as any;
+            const lastRoute = wireOf(routes[routes.length - 1]);
             const output = stdoutStat ? await readTail(stdoutPath, 32 * 1024) : undefined;
             const stderr = stderrStat ? await readTail(stderrPath, 16 * 1024) : undefined;
-            const mismatch = routes.some((route: any) => route?.matched === false);
+            const mismatch = routes.some((route) => wireOf(route)?.matched === false);
             const recentlyActive = Date.now() - newest < 10 * 60_000;
             const status: SubagentActivity["status"] = mismatch
               ? "routing_mismatch"
@@ -318,14 +374,15 @@ export class ActivityBridge {
                 : recentlyActive
                   ? "running"
                   : "unknown";
+            const firstRoute = wireOf(routes[0]);
             return {
               runId: entry.name,
               status,
-              requestedModel: lastRoute?.requestedModel,
-              sessionModel: lastRoute?.sessionModel,
-              payloadModel: lastRoute?.payloadModel,
-              matched: lastRoute?.matched,
-              startedAt: routes[0]?.at,
+              requestedModel: wireStr(lastRoute, "requestedModel"),
+              sessionModel: wireStr(lastRoute, "sessionModel"),
+              payloadModel: wireStr(lastRoute, "payloadModel"),
+              matched: typeof lastRoute?.matched === "boolean" ? lastRoute.matched : undefined,
+              startedAt: wireStr(firstRoute, "at"),
               updatedAt: new Date(newest).toISOString(),
               output: output?.trim() || undefined,
               stderr: stderr?.trim() || undefined,
@@ -338,12 +395,12 @@ export class ActivityBridge {
   }
 }
 
-function parseJsonLines(raw: string): any[] {
-  const values: any[] = [];
+function parseJsonLines(raw: string): unknown[] {
+  const values: unknown[] = [];
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     try {
-      values.push(JSON.parse(line));
+      values.push(JSON.parse(line) as unknown);
     } catch {
       // A writer may be appending the final line; the next poll retries it.
     }
@@ -361,5 +418,195 @@ async function readTail(path: string, maxBytes: number): Promise<string> {
     return buffer.toString("utf8", 0, bytesRead);
   } finally {
     await handle.close();
+  }
+}
+
+/**
+ * Process-wide activity observation, keyed by project.
+ *
+ * Navigation must never stop, hide, or re-scope tracking of LIVE
+ * work: every project with running threads/subagents keeps its own poll
+ * rhythm (the disk scan IS the authoritative lifecycle signal for file-backed
+ * thread/subagent state — there is no push channel for their completion),
+ * and the renderer always receives the aggregate across every tracked
+ * project. Entries disappear only when a bridge's own snapshot drops them
+ * (completion, abort, deletion) — never because another project was opened.
+ *
+ * Idle projects do NOT poll forever: a bridge with no live work that has
+ * seen neither a UI visit nor an agent event for `idleTtlMs` is
+ * disposed, keeping its last snapshot frozen in the aggregate (pruned
+ * entries are always terminal, so the frozen rows are stable). Any new
+ * event or UI visit revives the bridge. One registry-level sweep
+ * timer replaces N per-project idle checks.
+ */
+export class ActivityRegistry {
+  private readonly bridges = new Map<string, ActivityBridge>();
+  /** Frozen last snapshots of pruned idle projects (terminal entries only). */
+  private readonly retired = new Map<string, ActivityUpdate>();
+  private activeCwd: string | null = null;
+  private sweepTimer: NodeJS.Timeout | null = null;
+
+  constructor(
+    private readonly options: {
+      pollIntervalMs?: number;
+      resolveParentSessionFile?: (sessionId: string) => Promise<string | null>;
+      /** Session file -> owning project cwd (tasks, daemon tasks, session index). */
+      resolveEventCwd?: (sessionFile: string) => Promise<string | null> | string | null;
+      /** Idle time with no live work before a bridge is disposed (default 5 min). */
+      idleTtlMs?: number;
+      /** How often the idle sweep runs (default 60 s). */
+      sweepIntervalMs?: number;
+      onUpdate: (update: ActivityUpdate) => void;
+    }
+  ) {}
+
+  /** Focus a project for tracking. Creates (or revives) its bridge;
+   *  never disturbs any other project's bridge. */
+  ensure(cwd: string): ActivityBridge | null {
+    if (!cwd) return null;
+    this.activeCwd = cwd;
+    this.startSweep();
+    this.pruneIdle();
+    const bridge = this.getOrCreate(cwd);
+    bridge?.touch();
+    return bridge;
+  }
+
+  /** Forget the focused project WITHOUT disposing its bridge. When the UI has
+   *  no Space selected there is no fallback destination, so an unattributed
+   *  event must not land in the project the user just left. Live background
+   *  work stays tracked and keeps its bridge. */
+  clearFocus(): void {
+    this.activeCwd = null;
+  }
+
+  /** Test seam: the project unattributed events would fall back to. */
+  focusedCwdForTest(): string | null {
+    return this.activeCwd;
+  }
+
+  /** Get-or-create WITHOUT changing focus: event routing and revives use
+   *  this so background work never steals `activeCwd`. */
+  private getOrCreate(cwd: string): ActivityBridge | null {
+    if (!cwd) return null;
+    let bridge = this.bridges.get(cwd);
+    if (!bridge) {
+      bridge = new ActivityBridge({
+        cwd,
+        pollIntervalMs: this.options.pollIntervalMs,
+        resolveParentSessionFile: this.options.resolveParentSessionFile,
+        onUpdate: () => this.publish(),
+      });
+      this.bridges.set(cwd, bridge);
+      bridge.start();
+      // Fresh live data supersedes any frozen snapshot for this project.
+      this.retired.delete(cwd);
+    }
+    return bridge;
+  }
+
+  private startSweep(): void {
+    if (this.sweepTimer) return;
+    this.sweepTimer = setInterval(() => this.pruneIdle(), this.options.sweepIntervalMs ?? 60_000);
+    this.sweepTimer.unref();
+  }
+
+  /** Dispose bridges with no live work idle past the TTL, freezing their
+   *  terminal entries in the aggregate. Public for tests. */
+  pruneIdle(now = Date.now()): void {
+    const ttl = this.options.idleTtlMs ?? 5 * 60_000;
+    for (const [cwd, bridge] of this.bridges) {
+      if (bridge.hasLiveWork() || bridge.idleMs(now) < ttl) continue;
+      this.retire(cwd, bridge.snapshot());
+      bridge.dispose();
+      this.bridges.delete(cwd);
+    }
+  }
+
+  /** Freeze a snapshot with LRU eviction (insertion-ordered Map: re-set
+   *  refreshes recency, overflow drops the oldest project). */
+  private retire(cwd: string, snapshot: ActivityUpdate): void {
+    this.retired.delete(cwd);
+    this.retired.set(cwd, snapshot);
+    while (this.retired.size > RETIRED_PROJECT_CAP) {
+      const oldest = this.retired.keys().next();
+      if (oldest.done) break;
+      this.retired.delete(oldest.value);
+    }
+  }
+
+  /** Frozen-project count, for tests. */
+  retiredCount(): number {
+    return this.retired.size;
+  }
+
+  tracked(): string[] {
+    return [...this.bridges.keys()];
+  }
+
+  /** Aggregate snapshot across every tracked project plus frozen snapshots
+   *  of pruned idle ones (stable entry identity: thread ids and subagent
+   *  run ids are globally unique). */
+  snapshot(): ActivityUpdate {
+    const threads: ThreadActivity[] = [];
+    const subagents: SubagentActivity[] = [];
+    for (const bridge of this.bridges.values()) {
+      const snap = bridge.snapshot();
+      threads.push(...snap.threads);
+      subagents.push(...snap.subagents);
+    }
+    for (const snap of this.retired.values()) {
+      threads.push(...snap.threads);
+      subagents.push(...snap.subagents);
+    }
+    return { threads, subagents };
+  }
+
+  publish(): void {
+    this.options.onUpdate(this.snapshot());
+  }
+
+  /** Route a live event to its owning project, resolved from the stamped
+   *  session file — NOT from UI focus. Background sessions keep their own
+   *  transient rows. Events with no attributable session (e.g. aggregate
+   *  notifications) fall back to the focused project, the previous
+   *  behavior. Routing revives a pruned bridge and marks it live. */
+  async observeAgentEvent(event: AgentEvent): Promise<void> {
+    const sessionFile = wireStr(event, "sessionFile");
+    let cwd: string | null = null;
+    if (sessionFile) {
+      try {
+        cwd = (await this.options.resolveEventCwd?.(sessionFile)) ?? null;
+      } catch {
+        cwd = null;
+      }
+    }
+    const target = cwd ?? this.activeCwd;
+    if (!target) return;
+    const bridge = cwd != null ? this.getOrCreate(target) : this.bridges.get(target);
+    if (!bridge) return;
+    bridge.touch();
+    bridge.observeAgentEvent(event);
+  }
+
+  /** Force every tracked project to rescan (after control actions). Pruned
+   *  projects stay pruned: the control's own events revive their bridge if
+   *  work actually resumed. */
+  async refreshAll(): Promise<void> {
+    await Promise.all([...this.bridges.values()].map((bridge) => bridge.refresh()));
+  }
+
+  async listAll(): Promise<ActivityUpdate> {
+    await this.refreshAll();
+    return this.snapshot();
+  }
+
+  disposeAll(): void {
+    for (const bridge of this.bridges.values()) bridge.dispose();
+    this.bridges.clear();
+    this.retired.clear();
+    this.activeCwd = null;
+    if (this.sweepTimer) clearInterval(this.sweepTimer);
+    this.sweepTimer = null;
   }
 }

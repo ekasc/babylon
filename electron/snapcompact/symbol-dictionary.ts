@@ -71,16 +71,22 @@ export function extractHighValueTokens(text: string): RawSymbol[] {
   while ((m = URL_RE.exec(text))) uniqPush(out, m[0], "url");
 
   SEMVER_RE.lastIndex = 0;
-  while ((m = SEMVER_RE.exec(text))) uniqPush(out, m[1], "version");
+  while ((m = SEMVER_RE.exec(text))) {
+    const v = m[1];
+    if (v !== undefined) uniqPush(out, v, "version");
+  }
 
   SHA_RE.lastIndex = 0;
   while ((m = SHA_RE.exec(text))) {
     const v = m[0];
-    if (/^[0-9a-f]{7,40}$/.test(v) && v.match(/[0-9a-f]/g)!.length >= 7) uniqPush(out, v, "sha");
+    if (/^[0-9a-f]{7,40}$/.test(v) && (v.match(/[0-9a-f]/g) ?? []).length >= 7) uniqPush(out, v, "sha");
   }
 
   BRANCH_HINT_RE.lastIndex = 0;
-  while ((m = BRANCH_HINT_RE.exec(text))) uniqPush(out, m[1], "branch");
+  while ((m = BRANCH_HINT_RE.exec(text))) {
+    const v = m[1];
+    if (v !== undefined) uniqPush(out, v, "branch");
+  }
 
   ABS_PATH_RE.lastIndex = 0;
   while ((m = ABS_PATH_RE.exec(text))) uniqPush(out, m[0], "path");
@@ -91,11 +97,14 @@ export function extractHighValueTokens(text: string): RawSymbol[] {
   REL_PATH_RE.lastIndex = 0;
   while ((m = REL_PATH_RE.exec(text))) {
     const v = m[1];
-    if (isLikelyPath(v)) uniqPush(out, v, "path");
+    if (v !== undefined && isLikelyPath(v)) uniqPush(out, v, "path");
   }
 
   PORT_RE.lastIndex = 0;
-  while ((m = PORT_RE.exec(text))) uniqPush(out, m[1], "port");
+  while ((m = PORT_RE.exec(text))) {
+    const v = m[1];
+    if (v !== undefined) uniqPush(out, v, "port");
+  }
 
   ENV_RE.lastIndex = 0;
   while ((m = ENV_RE.exec(text))) {
@@ -111,7 +120,8 @@ export function extractHighValueTokens(text: string): RawSymbol[] {
 
   IDENT_RE.lastIndex = 0;
   while ((m = IDENT_RE.exec(text))) {
-    if (isLikelyIdentifier(m[1])) uniqPush(out, m[1], "identifier");
+    const v = m[1];
+    if (v !== undefined && isLikelyIdentifier(v)) uniqPush(out, v, "identifier");
   }
 
   return [...out.values()];

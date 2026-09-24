@@ -1,11 +1,14 @@
-export type EventBatchSink = (events: any[]) => void;
+import type { AgentEvent } from "../src/bridge";
+import { wireOf } from "../src/store";
+
+export type EventBatchSink = (events: AgentEvent[]) => void;
 
 /**
  * Coalesces high-frequency streaming events into one renderer IPC per frame.
  * Lifecycle and UI events remain immediate and flush any preceding deltas first.
  */
 export class AgentEventBuffer {
-  private pending: any[] = [];
+  private pending: AgentEvent[] = [];
   private timer: NodeJS.Timeout | null = null;
 
   constructor(
@@ -13,7 +16,7 @@ export class AgentEventBuffer {
     private readonly intervalMs = 24
   ) {}
 
-  push(event: any): void {
+  push(event: AgentEvent): void {
     if (this.coalesce(event)) {
       this.schedule();
       return;
@@ -42,21 +45,22 @@ export class AgentEventBuffer {
     this.timer = setTimeout(() => this.flush(), this.intervalMs);
   }
 
-  private coalesce(event: any): boolean {
-    if (event?.type === "message_update") {
-      const delta = event.assistantMessageEvent;
-      if (delta?.type !== "text_delta" && delta?.type !== "thinking_delta") return false;
+  private coalesce(event: AgentEvent): boolean {
+    if (event.type === "message_update") {
+      const delta = wireOf(event.assistantMessageEvent);
+      const deltaType = delta?.type;
+      if (deltaType !== "text_delta" && deltaType !== "thinking_delta") return false;
       const last = this.pending[this.pending.length - 1];
-      const lastDelta = last?.assistantMessageEvent;
+      const lastDelta = wireOf(last?.assistantMessageEvent);
       if (
         last?.type === "message_update" &&
         last.sessionId === event.sessionId &&
-        lastDelta?.type === delta.type &&
-        lastDelta?.contentIndex === delta.contentIndex
+        lastDelta?.type === deltaType &&
+        lastDelta?.contentIndex === delta?.contentIndex
       ) {
         last.assistantMessageEvent = {
-          ...lastDelta,
-          delta: `${lastDelta.delta ?? ""}${delta.delta ?? ""}`,
+          ...delta,
+          delta: `${String(lastDelta?.delta ?? "")}${String(delta?.delta ?? "")}`,
         };
       } else {
         this.pending.push({ ...event, assistantMessageEvent: { ...delta } });
@@ -64,7 +68,7 @@ export class AgentEventBuffer {
       return true;
     }
 
-    if (event?.type === "tool_execution_update") {
+    if (event.type === "tool_execution_update") {
       const last = this.pending[this.pending.length - 1];
       if (
         last?.type === "tool_execution_update" &&

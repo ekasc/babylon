@@ -7,6 +7,7 @@ import {
   applyApproval,
   categorizeShellCommand,
   classifyRisk,
+  detectShellCategories,
   evaluate,
   isDestructive,
   isNetworkCommand,
@@ -23,7 +24,18 @@ beforeEach(async () => {
   tmp = await mkdtemp(join(tmpdir(), "babylon-perm-"));
 });
 afterEach(async () => {
-  await rm(tmp, { recursive: true, force: true });
+  // Engine writes are fire-and-forget (awaited via flush() only where the
+  // test asserts durability); a write landing mid-cleanup breaks rmdir, so
+  // retry briefly instead of racing it.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await rm(tmp, { recursive: true, force: true });
+      return;
+    } catch (err: unknown) {
+      if (attempt >= 5 || (err as NodeJS.ErrnoException)?.code !== "ENOTEMPTY") throw err;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+  }
 });
 
 const fileWriteWs: AgentAction = {
@@ -208,6 +220,7 @@ describe("PermissionEngine persistence + scope", () => {
     await engine.load();
     engine.addRule({ category: "file_write_workspace", decision: "allow", scope: "always" });
     await engine.setModeAndPersist("full_access");
+    await engine.flush();
 
     const reloaded = new PermissionEngine({ dir: tmp });
     await reloaded.load();
@@ -234,12 +247,29 @@ describe("PermissionEngine persistence + scope", () => {
     expect(sessionRule.scope).toBe("session");
   });
 
+  it("session rules are scoped to their owning session", async () => {
+    const engine = new PermissionEngine({ dir: tmp });
+    await engine.load();
+    engine.addRule({ category: "git_push", decision: "allow", scope: "session", sessionId: "sess-a" });
+    // Owning session sees the allow; other sessions and legacy callers do not leak it.
+    expect(engine.evaluate(pushAction, "sess-a").decision).toBe("allow");
+    expect(engine.evaluate(pushAction, "sess-b").decision).toBe("ask");
+    // Clearing one session keeps the other's rules.
+    engine.addRule({ category: "git_push", decision: "allow", scope: "session", sessionId: "sess-b" });
+    engine.clearSessionRules("sess-a");
+    expect(engine.evaluate(pushAction, "sess-a").decision).toBe("ask");
+    expect(engine.evaluate(pushAction, "sess-b").decision).toBe("allow");
+    engine.clearSessionRules();
+    expect(engine.listRules()).toHaveLength(0);
+  });
+
   it("removeRule drops both scopes and persists for always", async () => {
     const engine = new PermissionEngine({ dir: tmp });
     await engine.load();
     const r = engine.addRule({ category: "git_push", decision: "deny", scope: "always" });
     expect(engine.removeRule(r.id)).toBe(true);
     expect(engine.listRules()).toHaveLength(0);
+    await engine.flush();
 
     const reloaded = new PermissionEngine({ dir: tmp });
     await reloaded.load();
@@ -252,6 +282,29 @@ describe("PermissionEngine persistence + scope", () => {
     const session = engine.addRule({ category: "git_push", decision: "allow", scope: "session" });
     expect(engine.removeRule(session.id)).toBe(true);
     expect(engine.listRules()).toHaveLength(0);
+  });
+
+  it("write failures reject instead of acknowledging (A04)", async () => {
+    const { writeFileSync } = await import("node:fs");
+    const blocker = join(tmp, "blocker");
+    writeFileSync(blocker, "x");
+    // A regular file where a directory is needed: every write fails.
+    const engine = new PermissionEngine({ dir: join(blocker, "sub") });
+    // Unreadable location reports failure rather than silent defaults.
+    await expect(engine.load()).resolves.toMatchObject({ ok: false });
+    await expect(engine.setModeAndPersist("supervised")).rejects.toThrow();
+    engine.addRule({ category: "git_push", decision: "deny", scope: "always" });
+    await expect(engine.flush()).rejects.toThrow();
+  });
+
+  it("distinguishes corrupt policy from a first run (A04)", async () => {
+    const { writeFileSync } = await import("node:fs");
+    const engine = new PermissionEngine({ dir: tmp });
+    await expect(engine.load()).resolves.toMatchObject({ ok: true });
+    writeFileSync(join(tmp, "babylon-permissions.json"), "{not json");
+    const reloaded = new PermissionEngine({ dir: tmp });
+    await expect(reloaded.load()).resolves.toMatchObject({ ok: false });
+    expect(reloaded.getMode()).toBe("auto");
   });
 });
 
@@ -279,5 +332,71 @@ describe("applyApproval", () => {
     const deny = applyApproval(engine, fileWriteOutside, "deny");
     expect(deny?.decision).toBe("deny");
     expect(engine.evaluate(fileWriteOutside).decision).toBe("deny");
+  });
+
+  it("session approvals stay in their session (A02)", async () => {
+    const engine = new PermissionEngine({ dir: tmp });
+    await engine.load();
+
+    const rule = applyApproval(engine, shellRisky, "allow_session", "session-a");
+    expect(rule?.sessionId).toBe("session-a");
+    expect(engine.evaluate(shellRisky, "session-a").decision).toBe("allow");
+    // Unrelated concurrent session: the rule must not apply.
+    expect(engine.evaluate(shellRisky, "session-b").decision).not.toBe("allow");
+
+    const deny = applyApproval(engine, fileWriteOutside, "deny", "session-a");
+    expect(deny?.sessionId).toBe("session-a");
+    expect(engine.evaluate(fileWriteOutside, "session-a").decision).toBe("deny");
+    expect(engine.evaluate(fileWriteOutside, "session-b").decision).not.toBe("deny");
+
+    // Session cleanup is scoped too.
+    engine.clearSessionRules("session-a");
+    expect(engine.evaluate(shellRisky, "session-a").decision).not.toBe("allow");
+  });
+
+  it("denies hold across every detected effect of a command (A03)", async () => {
+    const engine = new PermissionEngine({ dir: tmp, mode: "full_access" });
+    await engine.load();
+    const deny = (category: string): PermissionRule => ({
+      id: `deny-${category}`,
+      category: category as PermissionRule["category"],
+      decision: "deny",
+      scope: "always",
+      createdAt: Date.now(),
+    });
+
+    // A force-push is classified destructive, but a git_push deny still holds.
+    const forcePush: AgentAction = { category: "shell_destructive", command: "git push --force origin main" };
+    expect(detectShellCategories(forcePush.command!)).toContain("git_push");
+    expect(
+      evaluate(forcePush, { mode: "full_access", rules: [deny("git_push")] }).decision
+    ).toBe("deny");
+    // And the reverse: a destructive deny catches the same command.
+    expect(
+      evaluate(forcePush, { mode: "full_access", rules: [deny("shell_destructive")] }).decision
+    ).toBe("deny");
+
+    // Compound commands expose every segment's effects.
+    const installAndPush: AgentAction = { category: "package_install", command: "npm install leftpad && git push" };
+    expect(detectShellCategories(installAndPush.command!)).toEqual(
+      expect.arrayContaining(["package_install", "git_push"])
+    );
+    expect(
+      evaluate(installAndPush, { mode: "full_access", rules: [deny("git_push")] }).decision
+    ).toBe("deny");
+    expect(
+      evaluate(installAndPush, { mode: "full_access", rules: [deny("package_install")] }).decision
+    ).toBe("deny");
+
+    // Unrelated denies do not leak across, and ordinary commands still pass.
+    expect(
+      evaluate(forcePush, { mode: "full_access", rules: [deny("network_access")] }).decision
+    ).toBe("allow");
+    expect(
+      evaluate(
+        { category: "git_push", command: "git push origin main" },
+        { mode: "full_access", rules: [] }
+      ).decision
+    ).toBe("allow");
   });
 });

@@ -41,7 +41,7 @@ describe("snapcompact font", () => {
     expect(g[0].length).toBe(GLYPH_W);
   });
   it("renders space as a blank column", () => {
-    expect(FONT_5X7[" "].every((r) => r === ".....")).toBe(true);
+    expect(FONT_5X7[" "]?.every((r) => r === ".....")).toBe(true);
   });
   it("does not crash on Unicode code points", () => {
     expect(() => glyph5x7("\u4e2d")).not.toThrow();
@@ -72,7 +72,11 @@ describe("snapcompact renderer", () => {
     const a = renderFrames({ sourceText: text, rawSymbols: [], profile });
     const b = renderFrames({ sourceText: text, rawSymbols: [], profile });
     expect(a.frames.length).toBe(b.frames.length);
-    expect(a.frames[0].png.equals(b.frames[0].png)).toBe(true);
+    const pngA = a.frames[0]?.png;
+    const pngB = b.frames[0]?.png;
+    expect(pngA).toBeDefined();
+    expect(pngB).toBeDefined();
+    expect(pngA !== undefined && pngB !== undefined && pngA.equals(pngB)).toBe(true);
   });
   it("returns at least one frame for non-empty input", () => {
     const r = renderFrames({ sourceText: "hello", rawSymbols: [], profile });
@@ -81,8 +85,8 @@ describe("snapcompact renderer", () => {
   it("emits an empty-but-valid PNG when the source is empty", () => {
     const r = renderFrames({ sourceText: "", rawSymbols: [], profile });
     expect(r.frames.length).toBe(1);
-    expect(r.frames[0].png.length).toBeGreaterThan(0);
-    expect(r.frames[0].png.subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]));
+    expect(r.frames[0]?.png.length).toBeGreaterThan(0);
+    expect(r.frames[0]?.png.subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]));
   });
   it("truncates frame count to profile.maxFrames and sets truncated, with an omission marker frame (no silent holes)", () => {
     const small: FrameProfile = { ...profile, maxFrames: 2 };
@@ -104,8 +108,8 @@ describe("snapcompact renderer", () => {
     const symbols = [{ value: "/repo/electron/snapshot-store.ts", kind: "path" as const }];
     const r = renderFrames({ sourceText: "/repo/electron/snapshot-store.ts and /repo/electron/snapshot-store.ts", rawSymbols: symbols, profile });
     expect(r.symbols.length).toBe(1);
-    expect(r.symbols[0].id).toBe("E001");
-    expect(r.symbols[0].value).toBe("/repo/electron/snapshot-store.ts");
+    expect(r.symbols[0]?.id).toBe("E001");
+    expect(r.symbols[0]?.value).toBe("/repo/electron/snapshot-store.ts");
     // Adjusted source: first occurrence verbatim, second as anchor.
     expect(r.adjustedSourceText.indexOf("/repo/electron/snapshot-store.ts")).toBeGreaterThanOrEqual(0);
     expect(r.adjustedSourceText).toContain("[E001]");
@@ -124,11 +128,14 @@ describe("snapcompact renderer", () => {
     // (body frames cover the head, the omission-marker frame covers
     // the tail, so totalCovered === totalLines).
     const ranges = r.plan.entries.map((e) => [e.lineStart, e.lineEnd] as const);
-    ranges.sort((a, b) => a[0] - b[0]);
+    ranges.sort((a, b) => (a[0] ?? 0) - (b[0] ?? 0));
     for (let i = 0; i < ranges.length - 1; i++) {
-      expect(ranges[i][1] + 1).toBeLessThanOrEqual(ranges[i + 1][0]);
+      const cur = ranges[i];
+      const nxt = ranges[i + 1];
+      if (cur === undefined || nxt === undefined) continue;
+      expect(cur[1] + 1).toBeLessThanOrEqual(nxt[0]);
     }
-    const totalCovered = ranges.reduce((n, [a, b]) => n + (b - a + 1), 0);
+    const totalCovered = ranges.reduce((n, [a, b]) => n + ((b ?? 0) - (a ?? 0) + 1), 0);
     expect(totalCovered).toBe(r.plan.totalLines);
     // Body frames alone cover exactly linesAssigned lines.
     const bodyCovered = r.plan.entries

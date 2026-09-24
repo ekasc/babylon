@@ -3,7 +3,7 @@
 // Instead of spawning `pi --mode rpc` per session, this hosts the pi SDK
 // directly in the Electron main process: one shared ModelRuntime + one shared
 // resource loader + one AgentSessionRuntime. Sessions are reopened in ~1ms
-// (vs ~1.3s for an RPC switch_session) because nothing is rebuilt — the loader
+// (vs ~1.3s for an RPC switch_session) because nothing is rebuilt, the loader
 // and model runtime are constructed once and reused, exactly how T3 Code hosts
 // the OpenCode SDK in its backend process.
 //
@@ -13,14 +13,37 @@
 
 import { randomUUID } from "node:crypto";
 import { promises as fsp } from "node:fs";
-import { join, resolve } from "node:path";
-import { flattenSessionTree } from "./session-tree";
+import { dirname, join, resolve } from "node:path";
 import { projectHistory } from "./session-history";
-import { ActiveRollback, RollbackStore, entryDigest, type TurnCheckpoint } from "./rollback-store";
-import { SnapshotStore, type RestoreChange, type SnapshotCapture } from "./snapshot-store";
-import { toPiImages } from "./prompt-images";
+import { ActiveRollback, RollbackStore, entryDigest, missingCheckpointReason, type Ledger, type TurnCheckpoint } from "./rollback-store";
+import { validateSessionPath, contained } from "./session-path";
+import { readSessionHeader } from "./session-files";
+import { errorMessage, isSessionNotFound, SessionNotFoundError } from "../src/lib/errors";
+import { ProjectExecutionBusyError, deriveExecutionState, type ProjectExecution } from "../src/execution";
+import { SnapshotStore, isBookkeepingPath, type RestoreChange, type SnapshotCapture } from "./snapshot-store";
+import { createGoalModeExtension, isExternalGoalModeExtension } from "./goal-mode/extension";
+import { createDesignModeExtension } from "./design-mode/extension";
+import { loadSessionGoal, saveSessionGoal, clearSessionGoal, loadGoalModeConfig } from "./goal-mode/store";
+import { createDurableGoalState, defaultDurableGoalModeConfig, type GoalBeginResult } from "../src/lib/durable-goal";
+import { loadDesignState, saveDesignState, clearDesignState, createDesignState, slugFor, stageOfState, JUDGE_MAX_ROUNDS, type DesignStatus, type DesignState, type DesignBeginResult } from "./design-mode/store";
+import {
+  approveDesignArtifact,
+  approvedFlagFor,
+  readDesignArtifact,
+  type DesignArtifact,
+  type DesignArtifactKind,
+} from "./design-mode/artifact";
+import type { DurableGoalState } from "../src/lib/durable-goal";
+import { shouldRelayImagesThrough, toPiImages } from "./prompt-images";
 import { clampToolOutput, readSessionTail, readToolOutput } from "./sessions";
 import { RecapStore } from "./recap-store";
+import { mergeSkillEntries, readUserSkillEntries } from "./user-skills";
+import { CANVAS_PROMPT } from "../src/lib/canvas-prompt";
+import { readCrops } from "../src/lib/sketch-classify";
+import type { RegionReading } from "../src/lib/sketch-compile";
+import type { AgentEvent, AgentModel, AgentState, CommandInfo, HistoryProjection, PromptImage, RollbackPlan, SessionStats, TurnChanges, TurnFileDiff } from "../src/bridge";
+import { toAgentModel, toSessionStats, type RuntimeModelLike } from "./pi-host-shapes";
+import { wireOf, wireStr } from "../src/store";
 import { DEFAULT_GIT_COMMIT_MODEL, type PiSettings } from "./app-settings";
 import { getSettings as defaultGetSettings, saveSettings as defaultSaveSettings } from "./app-settings";
 import { buildGitCommitPrompt, extractModelText, parseGeneratedCommitMessage, type GeneratedCommitMessage } from "./git-commit-message";
@@ -31,11 +54,15 @@ import { createSnapcompactExtension, type SnapcompactExtensionOptions } from "./
 import { ManagedSubagents, type ManagedSubagentRecord, type SubagentControlAction, type SubagentParentEvent } from "./subagents";
 import { createAskQuestionTool } from "./ask-question";
 import { createBabylonBashTool } from "./bash-tool";
-import { installAgentGuards } from "./permission-hook";
+import { createBrowserTools } from "./sim-tools";
+import { createCanvasTools } from "./canvas-tools";
+import type { SimController } from "./sim-controller";
+import { installAgentGuards, type GuardedAgent } from "./permission-hook";
 import { mapToolToAction } from "./permission-agent";
-import type { BabylonPermissionController } from "./permissions";
+import type { AgentAction, BabylonPermissionController, Risk } from "./permissions";
 import type { HookManager } from "./hook-manager";
-import { ThreadManager } from "./threads";
+import { ThreadManager, type ThreadEvent, type ThreadState } from "./threads";
+import { flattenSessionTree, type SessionTreeRow } from "./session-tree";
 import {
   AgentSessionRuntime,
   ModelRuntime,
@@ -50,14 +77,34 @@ import {
   type AgentSession,
   type CreateAgentSessionRuntimeFactory,
   type CreateAgentSessionRuntimeResult,
-  type ExtensionUIContext,
+  type CompactionResult,
+  type CustomMessageEntry,
+  type SessionMessageEntry,
+  type ExtensionCommandContextActions,
+  type ExtensionContext,
+  type AgentSessionServices,
+  type ExtensionError,
+  type ExtensionUIDialogOptions,
+  type PromptOptions,
+  type ResourceLoader,
+  type TerminalInputHandler,
+  Theme,
+  type ToolDefinition,
+  type WorkingIndicatorOptions,
 } from "@earendil-works/pi-coding-agent";
 
-function messageText(message: any): string {
-  const content = message?.content;
+function messageText(message: unknown): string {
+  const content = wireOf(message)?.content;
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
-  return content.map((block: any) => typeof block === "string" ? block : block?.text ?? "").join("");
+  return content.map((block) => (typeof block === "string" ? block : String(wireOf(block)?.text ?? ""))).join("");
+}
+
+/** A read failed because the session file was never flushed (canonical
+ *  future path of a brand-new session), not because state is corrupt. */
+function isMissingFileError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  return (err as NodeJS.ErrnoException).code === "ENOENT" || /no such file|ENOENT/i.test(err.message);
 }
 
 function changedExclusions(
@@ -74,15 +121,132 @@ function changedExclusions(
   });
 }
 
+/** A Pi language-server diagnostic as delivered to the agent. */
+export type PiDiagnostic = {
+  file: string;
+  line: number;
+  character: number;
+  severity: string;
+  message: string;
+  source?: string;
+  code?: string | number;
+};
+
+/** Runtime narrowing for IPC payloads: diagnostics arrive from the wire. */
+export function isPiDiagnostics(value: unknown): value is PiDiagnostic[] {
+  return (
+    Array.isArray(value) &&
+    value.every((d) => {
+      if (d === null || typeof d !== "object") return false;
+      const v = d as Record<string, unknown>;
+      return (
+        typeof v.file === "string" &&
+        typeof v.line === "number" &&
+        typeof v.character === "number" &&
+        typeof v.severity === "string" &&
+        typeof v.message === "string" &&
+        (v.source === undefined || typeof v.source === "string")
+      );
+    })
+  );
+}
+
+/** Babylon-owned state outside project worktrees: rollback snapshots,
+ *  rollback ledgers, recaps, and compaction archives. One canonical location
+ *  for both the in-process host and the daemon, so which process owns the
+ *  runtime never changes where a session's rollback history lives. */
+export function defaultStateDir(agentDir?: string): string {
+  return join(agentDir ?? getAgentDir(), "pideck-state");
+}
+
+/** Reasoning levels the commit/title models accept, derived from the SDK's
+ *  own completeSimple signature so drift fails the build. Unknown
+ *  settings-file strings (including "off", which simple completion does
+ *  not accept) fall back to low. */
+type SdkReasoning = NonNullable<Parameters<ModelRuntime["completeSimple"]>[2]>["reasoning"];
+
+function asThinkingLevel(value: unknown): SdkReasoning {
+  switch (value) {
+    case "minimal":
+    case "low":
+    case "medium":
+    case "high":
+    case "xhigh":
+    case "max":
+      return value;
+    default:
+      return "low";
+  }
+}
+
+/** SDK resource-loader entries (untyped at the SDK boundary). */
+interface PromptLike {
+  name: string;
+  description?: string;
+  argumentHint?: string;
+}
+
+interface SkillLike {
+  name: string;
+  description?: string;
+}
+
+/** Extension command-context option shapes, via the SDK's own interface so
+ *  they stay in sync (used by commandContextActions and createSessionIn). */
+type NewSessionOptions = Parameters<ExtensionCommandContextActions["newSession"]>[0];
+type ForkOptions = Parameters<ExtensionCommandContextActions["fork"]>[1];
+type NavigateTreeOptions = Parameters<ExtensionCommandContextActions["navigateTree"]>[1];
+type SwitchSessionOptions = Parameters<ExtensionCommandContextActions["switchSession"]>[1];
+
+/**
+ * Headless TUI theme for the extension UI context. Nothing renders headless,
+ * but ExtensionUIContext requires a real Theme, so this builds one with a
+ * degenerate grayscale palette. The Record types make the key lists
+ * self-verifying: a new SDK color key fails the build until added here.
+ */
+const HEADLESS_FG_KEYS = [
+  "accent", "border", "borderAccent", "borderMuted", "success", "error",
+  "warning", "muted", "dim", "text", "thinkingText", "userMessageText",
+  "customMessageText", "customMessageLabel", "toolTitle", "toolOutput",
+  "mdHeading", "mdLink", "mdLinkUrl", "mdCode", "mdCodeBlock",
+  "mdCodeBlockBorder", "mdQuote", "mdQuoteBorder", "mdHr", "mdListBullet",
+  "toolDiffAdded", "toolDiffRemoved", "toolDiffContext", "syntaxComment",
+  "syntaxKeyword", "syntaxFunction", "syntaxVariable", "syntaxString",
+  "syntaxNumber", "syntaxType", "syntaxOperator", "syntaxPunctuation",
+  "thinkingOff", "thinkingMinimal", "thinkingLow", "thinkingMedium",
+  "thinkingHigh", "thinkingXhigh", "thinkingMax", "bashMode",
+] as const;
+
+const HEADLESS_BG_KEYS = [
+  "selectedBg", "userMessageBg", "customMessageBg",
+  "toolPendingBg", "toolSuccessBg", "toolErrorBg",
+] as const;
+
+function headlessTheme(): Theme {
+  const fg = Object.fromEntries(HEADLESS_FG_KEYS.map((k) => [k, 7])) as Record<(typeof HEADLESS_FG_KEYS)[number], number>;
+  const bg = Object.fromEntries(HEADLESS_BG_KEYS.map((k) => [k, 0])) as Record<(typeof HEADLESS_BG_KEYS)[number], number>;
+  return new Theme(fg, bg, "256color", { name: "babylon-headless" });
+}
+/**
+ * SDK services surface, re-exported under a Babylon name so call sites read
+ * intent ("the services bound to this entry") instead of SDK plumbing.
+ * Deliberately the full SDK type, not a Pick: narrowing here would hide
+ * real capabilities from future readers.
+ */
+export type PiHostServices = AgentSessionServices;
+
 export interface HostOptions {
   cwd: string;
   agentDir?: string;
   /** Babylon-owned state outside project worktrees. */
   stateDir?: string;
+  /** Instance sessions root. Unset keeps the SDK default (shared legacy store). */
+  sessionsRoot?: string;
+  /** Execution ownership changed for a project (activate only; the renderer
+   *  registry merges by generation and never navigates from this event). */
+  onExecutionChanged?: (execution: ProjectExecution) => void;
   /** Called for every agent event (mirrors RPC stdout events). */
-  onEvent: (event: any) => void;
-  /** Called with status changes. */
-  onStatus: (status: { status: string; message?: string; cwd?: string; sessionPath?: string; requestId?: number; state?: any }) => void;
+  onEvent: (event: AgentEvent) => void;
   /**
    * Called when a session's stored cwd no longer exists. Return the replacement
    * cwd (e.g. from a folder picker), or null/undefined to abort the open.
@@ -96,34 +260,510 @@ export interface HostOptions {
   hookManager?: HookManager;
   /** Resolve the owning task id for a session file, if any. */
   getTaskIdForSessionFile?: (sessionFile: string | null) => string | undefined;
+  /** Resolve the owning bot id for a session file, if any. */
+  getBotIdForSessionFile?: (sessionFile: string | null) => string | undefined;
   /** Settings provider for daemon vs Electron. */
   settingsProvider?: { getSettings(): PiSettings; saveSettings(patch: Partial<PiSettings>): PiSettings };
+  /** In-app browser simulator controller for the agent browser_* tools. */
+  getSimController?: () => SimController | null;
 }
 
-export class PiHost {
+/** One installed execution runtime. Identity and ownership live in the
+ *  entry and the project's execution slot — there is no foreground pointer
+ *  and no host-global "current session" (C3/C5). */
+export interface SessionEntry {
+  runtime: AgentSessionRuntime;
+  services: AgentSessionServices;
+  cwd: string;
+  sessionId: string;
+  sessionFile: string;
+  unsubscribe: (() => void) | null;
+  lifecycleVersion: number;
+  /**
+   * Last observed disk identity of the transcript (set on creation and
+   * after every sync). Activation skips the full SessionManager.open +
+   * context rebuild when the fingerprint is unchanged — retained runtimes
+   * stay cheap to switch back to. Null until the first successful stat
+   * (unflushed new sessions have no file yet: always sync).
+   */
+  diskFingerprint?: DiskFingerprint | null;
+}
+
+/**
+ * The single normalized project key. Every execution-retention structure
+ * (executionByCwd, executionGenerationByCwd, installation checks, one-hot
+ * assertions) is keyed by this, so `/repo`, `/repo/.` and lexical variants
+ * can never create separate execution slots (R1/R7).
+ */
+export function projectKey(cwd: string): string {
+  return resolve(cwd);
+}
+
+/** Cheap disk identity for change detection (stat, not parse). */
+export interface DiskFingerprint {
+  ino: number;
+  size: number;
+  mtimeMs: number;
+}
+
+/**
+ * Permissive fallback controller for sessions running without the permission
+ * system (tests, hook-only hosts): every action allows, approvals auto-yes.
+ */
+function allowAllController(): BabylonPermissionController {
+  return {
+    evaluate: () => ({ decision: "allow" as const }),
+    requestApproval: async () => true,
+    clearSessionRules: () => {},
+    getMode: () => "auto" as const,
+    listRules: () => [],
+  };
+}
+
+import type { LocalPiHost } from "../src/local-pi-host";
+export class PiHost implements LocalPiHost {
   private opts: HostOptions;
-  private modelRuntime!: ModelRuntime;
-  private runtime!: AgentSessionRuntime;
-  private transitionQueue: Promise<unknown> = Promise.resolve();
-  private unsubscribeEvents: (() => void) | null = null;
-  private uiRequests = new Map<string, { resolve: (r: any) => void; reject: (e: Error) => void }>();
-  private _cwd: string;
+  /** Per-project model runtimes (project/cwd-bound: extension provider
+   *  registrations must never leak across projects). Created lazily,
+   *  creation deduplicated so concurrent opens share one build. */
+  private readonly projectRuntimes = new Map<string, Promise<ModelRuntime>>();
+  /** Installed top-level execution runtimes keyed by session FILE (stable
+   *  identity). NOT a session cache: every entry here is the execution owner
+   *  of its normalized project cwd (R1-R3), so `sessions.size` tracks
+   *  executing projects, not history, tabs or views (R9). Entries leave only
+   *  through an ownership transition, deactivation, or shutdown. */
+  private readonly sessions = new Map<string, SessionEntry>();
+  /** Set while the host is draining for restart: new turns fail fast. */
+  private draining = false;
+  /** Per-session transition chains (open/compact/model changes serialize
+   *  within a session, never across unrelated sessions). */
+  private readonly transitionQueues = new Map<string, Promise<unknown>>();
+  /** Services object -> live session, for closures created before the
+   *  session exists (snapcompact getters run lazily per LLM call). */
+  private readonly sessionForServices = new WeakMap<object, AgentSession>();
+  private uiRequests = new Map<string, { resolve: (r: unknown) => void; reject: (e: Error) => void; sessionFile: string | null; sessionId: string | null }>();
+  /** Monotonic count of AgentSession constructions. Tests use it to prove a
+   *  historical view never even transiently built a runtime (R5/R9). */
+  private runtimeCreations = 0;
+  /** A Pi switch requested from inside a fork/switch that has not returned
+   *  yet. The source must survive until then (item 45), and the transient
+   *  target may not outlive it (R8). */
+  private pendingHandoff: { source: SessionEntry; candidate: SessionEntry; targetFile: string; targetCwd: string } | null = null;
+  /** Nesting depth of source operations (fork/clone) that can trigger a Pi
+   *  switch callback; a handoff staged inside one is finalized by them. */
+  private sourceOperationDepth = 0;
+  /** The project this host was constructed for. Bootstrap/discovery only:
+   *  execution activation NEVER mutates it (C2/C6). */
+  private readonly bootstrapCwd: string;
   private readonly snapshots: SnapshotStore;
   private readonly rollbacks: RollbackStore;
   private readonly recaps: RecapStore;
   private readonly recapping = new Set<string>();
   private readonly snapcompact: ArchiveStore;
+  /** Project cwds whose rollback shadow index has already been warmed. */
+  private readonly warmedSnapshotCwds = new Set<string>();
+  /**
+   * Per-file persona overlay staged for runtime creation. The old
+   * setBotSystemPrompt global raced concurrent opens (open A stages A's
+   * prompt, open B stages B's, A's creation reads B's). Keyed by session
+   * file so each creation reads exactly its own prompt; consumed on use.
+   */
+  private readonly pendingSystemPrompts = new Map<string, string>();
   /** Session file → last observed message timestamp (ms). Event-driven, so the
    *  sweep never reads the session file unless a recap might be due. */
   private readonly lastMessageAt = new Map<string, number>();
   private recapTimer: ReturnType<typeof setInterval> | null = null;
-  /** The session file the host currently owns (null when none is open). */
-  get activeSessionFile(): string | null {
-    return this.runtime?.session?.sessionFile ?? null;
+  /**
+   * Bump an entry's lifecycle counter. Strictly increasing and NOT
+   * wall-clock: the release/dispose TOCTOU guard snapshots it across an
+   * await, so any concurrent use of the runtime (read, prompt, view) makes
+   * the release abort. Retention never orders by recency (R1/R9).
+   */
+  private touchEntry(entry: SessionEntry): void {
+    entry.lifecycleVersion += 1;
+  }
+
+  /** Every project this host knows about — explicit, never inferred from a
+   *  "current session" (thread/subagent scans and other discovery use it). */
+  private knownProjectCwds(): Set<string> {
+    const cwds = new Set<string>(this.projectRuntimes.keys());
+    for (const key of this.executionByCwd.keys()) cwds.add(key);
+    for (const entry of this.sessions.values()) cwds.add(entry.cwd);
+    cwds.add(this.bootstrapCwd);
+    return cwds;
+  }
+
+  /** Installed-runtime probes (never navigate, never auto-open). */
+  hasSessionRuntime(sessionFile: string): boolean {
+    return this.findEntry(sessionFile) !== undefined;
+  }
+
+  sessionCwdFor(sessionFile: string): string | null {
+    return this.findEntry(sessionFile)?.cwd ?? null;
+  }
+
+  isSessionStreaming(sessionFile: string): boolean {
+    return this.findEntry(sessionFile)?.runtime.session.isStreaming ?? false;
+  }
+
+  // ── Execution ownership (src/execution.ts) ──────────────────────────────
+  // I1: ONE top-level execution session per project. This map is the backend
+  // source of truth; there is no second, weaker "which session is current"
+  // answer anywhere in the host (C3/C5).
+  // I3: view-side navigation never touches these maps.
+  private readonly executionByCwd = new Map<string, string>();
+  private readonly executionGenerationByCwd = new Map<string, number>();
+
+  /** The installed entry owning this project's execution slot. Derived from
+   *  the slot itself (never a scan that picks an arbitrary session) and
+   *  keyed by the normalized project cwd (R1/R7). */
+  private entryForProject(cwd: string): SessionEntry | null {
+    const file = this.executionByCwd.get(projectKey(cwd));
+    return file ? this.sessions.get(file) ?? null : null;
+  }
+
+  /** Retained entry currently owning this project's execution. A mapping
+   *  whose runtime is gone is invariant corruption (R3): heal it, but say so
+   *  loudly so tests catch the bug instead of trusting lazy cleanup. */
+  executionForCwd(cwd: string): SessionEntry | null {
+    const key = projectKey(cwd);
+    const file = this.executionByCwd.get(key);
+    if (!file) return null;
+    const entry = this.sessions.get(file);
+    if (!entry) {
+      console.warn(`[pideck] execution owner ${file} has no installed runtime (project ${key})`);
+      this.executionByCwd.delete(key);
+      return null;
+    }
+    return entry;
+  }
+
+  /** One definition of execution liveness (I4): everything that means the
+   *  project is still being worked on. The sync half is the same set
+   *  release checks first (streaming, pending UI/approval,
+   *  subagents); the async half adds compaction, threads, and workflow
+   *  runs. isExecutionBusy ⊇ releaseSession, so deactivate can never
+   *  release past busy work. */
+  private syncExecutionBusy(entry: SessionEntry): boolean {
+    if (entry.runtime.session.isStreaming) return true;
+    if (entry.runtime.session.isCompacting) return true;
+    if ([...this.uiRequests.values()].some((p) => p.sessionFile === entry.sessionFile)) return true;
+    if (this.managedSubagents?.hasActiveForSession(entry.sessionId)) return true;
+    return false;
+  }
+
+  async isExecutionBusy(entry: SessionEntry): Promise<boolean> {
+    if (this.syncExecutionBusy(entry)) return true;
+    if (await this.hasActiveThreadsForSession(entry.sessionId).catch(() => false)) return true;
+    if (await this.hasActiveWorkflowRuns(entry.cwd, entry.sessionId)) return true;
+    return false;
+  }
+
+  /** Workflow runs persist under <cwd>/.pi/workflows/runs/*.json with an
+   *  owning sessionId (src/bridge.ts run-state contract). Any run the
+   *  session still owns in a non-terminal state means the project works. */
+  private async hasActiveWorkflowRuns(cwd: string, sessionId: string): Promise<boolean> {
+    try {
+      const dir = join(cwd, ".pi", "workflows", "runs");
+      const files = await fsp.readdir(dir);
+      for (const file of files) {
+        if (!file.endsWith(".json")) continue;
+        try {
+          const rec = wireOf(JSON.parse(await fsp.readFile(join(dir, file), "utf8")));
+          if (!rec || wireStr(rec, "sessionId") !== sessionId) continue;
+          const status = wireStr(rec, "status");
+          if (status === "pending" || status === "running" || status === "paused") return true;
+        } catch {
+          /* unparseable run file: not evidence of activity */
+        }
+      }
+    } catch {
+      /* no runs directory: nothing active */
+    }
+    return false;
+  }
+
+  /**
+   * Acquire (or transfer) this project's execution slot — the ONE top-level
+   * session allowed to execute (I1, I4):
+   *   no owner           → create/resume target (or a fresh session), own it
+   *   owner == target    → no-op, return the owner
+   *   owner idle         → release owner safely, then resume target
+   *   owner busy         → ProjectExecutionBusyError with the owner's identity
+   * Never aborts the owner, never queues the target, never switches on a tab
+   * click, never infers from which session is on screen.
+   * Cross-project calls are independent: activating B while A1 runs is legal.
+   */
+  async activateExecution(
+    cwd: string,
+    sessionFile?: string,
+    opts?: { systemPrompt?: string | null },
+  ): Promise<SessionEntry> {
+    if (!cwd) throw new Error("execution activation requires a project cwd");
+    return this.transferExecution(sessionFile ?? null, cwd, opts);
+  }
+
+  /**
+   * The ONLY path that installs a top-level runtime (R1-R3). Serialized by
+   * PROJECT (not by target session) so two same-project activations inspect
+   * the same state in invocation order and converge on one owner:
+   *
+   *   owner == target  -> same entry, no rebuild/dispose/generation bump
+   *   owner busy       -> typed rejection BEFORE anything is materialized
+   *   build fails      -> old owner still installed and usable
+   *   owner went busy  -> detached candidate disposed, owner preserved
+   *   idle transfer    -> build candidate -> release owner -> install
+   *
+   * The old owner is never aborted, killed, or silently dropped (I4): busy
+   * always surfaces as ProjectExecutionBusyError.
+   */
+  private transferExecution(
+    targetFile: string | null,
+    cwd: string,
+    opts?: { systemPrompt?: string | null },
+  ): Promise<SessionEntry> {
+    const key = projectKey(cwd);
+    return this.enqueueTransition(`project:${key}`, async () => {
+      const owner = this.entryForProject(key);
+      if (owner && targetFile && owner.sessionFile === targetFile) {
+        // Same-owner activation is the Send path: cheap, no rebuild, no
+        // dispose, no generation bump, no ownership push.
+        this.touchEntry(owner);
+        await this.prepareExecutionEntry(owner);
+        // No ownership change → no execution_changed push: the registry is
+        // pushed only when a project's owner or generation actually moves.
+        return owner;
+      }
+      // Busy gate BEFORE materialization: building a runtime for a request
+      // that cannot own the project wastes memory and transiently breaks the
+      // one-hot invariant.
+      if (owner && (await this.isExecutionBusy(owner))) {
+        throw new ProjectExecutionBusyError(owner.sessionFile, owner.sessionId);
+      }
+      // Detached candidate: invisible to requireEntry/executionList/Agents
+      // until installExecutionEntry publishes it. A construction failure
+      // leaves the previous owner completely untouched.
+      const candidate = await this.materializeExecutionRuntime(targetFile, cwd, opts?.systemPrompt);
+      // Recheck immediately before replacement: building is async, and the
+      // old owner may have started a turn, gained an approval, or spawned a
+      // child in the meantime.
+      if (owner && (await this.isExecutionBusy(owner))) {
+        await this.disposeDetachedEntry(candidate);
+        throw new ProjectExecutionBusyError(owner.sessionFile, owner.sessionId);
+      }
+      if (owner && !(await this.releaseOwnerEntry(owner))) {
+        await this.disposeDetachedEntry(candidate);
+        throw new ProjectExecutionBusyError(owner.sessionFile, owner.sessionId);
+      }
+      if (owner && projectKey(owner.cwd) === key) this.executionByCwd.delete(key);
+      this.installExecutionEntry(candidate);
+      this.touchEntry(candidate);
+      await this.prepareExecutionEntry(candidate);
+      this.emitExecutionChanged(candidate.cwd);
+      return candidate;
+    });
+  }
+
+  /** Fire-and-forget ownership notification (activate path only): the
+   *  renderer merges into executionsByCwd by generation and must never
+   *  navigate from this event. Deactivation without a successor stays
+   *  renderer-initiated or reconciles on the next executionList(). */
+  private emitExecutionChanged(cwd: string): void {
+    void this.executionSnapshot(cwd)
+      .then((execution) => {
+        if (execution) this.opts.onExecutionChanged?.(execution);
+      })
+      .catch(() => undefined);
+  }
+
+  /** Give up execution ownership for a project. False when the expected
+   *  owner is gone, someone else owns it, or it went busy — never releases
+   *  anything other than expectedSessionFile. */
+  async deactivateExecution(cwd: string, expectedSessionFile: string): Promise<boolean> {
+    const key = projectKey(cwd);
+    return this.enqueueTransition(`project:${key}`, async () => {
+      const owner = this.entryForProject(key);
+      if (!owner || owner.sessionFile !== expectedSessionFile) {
+        if (this.executionByCwd.get(key) === expectedSessionFile) this.executionByCwd.delete(key);
+        return false;
+      }
+      if (await this.isExecutionBusy(owner)) return false;
+      if (!(await this.releaseOwnerEntry(owner))) return false;
+      // Cold-store the project: the transcript stays on disk, no replacement
+      // runtime is created, and the generation only ever increases.
+      this.executionByCwd.delete(key);
+      return true;
+    });
+  }
+
+  /** Current execution record for one project (renderer rebuilds its
+   *  Record<cwd, ProjectExecution> from these + execution_changed events). */
+  private async buildProjectExecution(cwd: string, entry: SessionEntry): Promise<ProjectExecution> {
+    const streaming = entry.runtime.session.isStreaming;
+    const approvalPending = [...this.uiRequests.values()].some((p) => p.sessionFile === entry.sessionFile);
+    let state = deriveExecutionState({ streaming, approvalPending, waitingForInput: false, failed: false });
+    if (state === "idle" && (await this.isExecutionBusy(entry))) state = "working";
+    return {
+      cwd,
+      sessionFile: entry.sessionFile,
+      sessionId: entry.sessionId,
+      state,
+      streaming,
+      generation: this.executionGenerationByCwd.get(projectKey(cwd)) ?? 0,
+    };
+  }
+
+  /** Backend source of truth for renderer startup/reconnect (commit 2 wires
+   *  this through the transport). */
+  async listProjectExecutions(): Promise<ProjectExecution[]> {
+    const out: ProjectExecution[] = [];
+    for (const cwd of [...this.executionByCwd.keys()]) {
+      const entry = this.executionForCwd(cwd);
+      if (entry) out.push(await this.buildProjectExecution(cwd, entry));
+    }
+    return out;
+  }
+
+  /**
+   * Move this project's execution RUNTIME to a new project cwd while keeping
+   *  the same session file and history (worktrees). The runtime is rebuilt
+   *  under toCwd — services, resource loader, permission cwd, tool contexts
+   *  and model registrations are all cwd-bound and cannot be re-pointed in
+   *  place — and only then is the old one disposed. A failed rebuild leaves
+   *  the source project fully intact (transactional).
+   */
+  async relocateExecution(sessionFile: string, fromCwd: string, toCwd: string): Promise<SessionEntry> {
+    const fromKey = projectKey(fromCwd);
+    const toKey = projectKey(toCwd);
+    if (fromKey === toKey) {
+      const owner = this.entryForProject(fromKey);
+      if (!owner || owner.sessionFile !== sessionFile) throw new Error("only the project's execution session can relocate");
+      return owner;
+    }
+    return this.enqueueTransition(`project:${toKey}`, async () => {
+      const owner = this.entryForProject(fromKey);
+      if (!owner || owner.sessionFile !== sessionFile) {
+        throw new Error("only the project's execution session can relocate");
+      }
+      if (await this.isExecutionBusy(owner)) {
+        throw new ProjectExecutionBusyError(owner.sessionFile, owner.sessionId);
+      }
+      // Build the replacement FIRST: a failure must not strand the source
+      // project without a usable execution session.
+      let candidate: SessionEntry;
+      try {
+        candidate = await this.buildSessionForCwd(sessionFile, toCwd);
+      } catch (err) {
+        throw new Error(`execution relocation failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      this.disposeEntry(owner);
+      this.executionByCwd.delete(fromKey);
+      this.installExecutionEntry(candidate);
+      this.touchEntry(candidate);
+      await this.prepareExecutionEntry(candidate);
+      this.emitExecutionChanged(toCwd);
+      return candidate;
+    });
+  }
+
+  /** Current record for one project's execution slot (post-activation
+   *  snapshots over the transport), or null when nothing owns it. */
+  async executionSnapshot(cwd: string): Promise<ProjectExecution | null> {
+    const entry = this.executionForCwd(cwd);
+    return entry ? this.buildProjectExecution(cwd, entry) : null;
+  }
+
+  /**
+   * Runtime preparation for an owner: restore the project's rollback leaf and
+   * mark the entry used. It publishes NOTHING — no global pointer, no global
+   * cwd, no ready/status event, no requestId, no navigation (C6). Ordering is
+   * provided by the per-project transition queue, not a global sequence.
+   */
+  private async prepareExecutionEntry(entry: SessionEntry): Promise<AgentState> {
+    await this.restoreRollbackLeafFor(entry.runtime.session);
+    this.touchEntry(entry);
+    const state = await this.getStateFor(entry);
+    this.lastMessageAt.set(state.sessionFile ?? entry.sessionFile, Date.now());
+    return state;
+  }
+
+  /** Serialize transitions per session file so unrelated sessions never wait
+   *  on each other; host-wide operations use the "host" chain. */
+  private enqueueTransition<T>(key: string | null | undefined, operation: () => Promise<T>): Promise<T> {
+    const queueKey = key ?? "host";
+    const queue = this.transitionQueues.get(queueKey) ?? Promise.resolve();
+    const result = queue.then(operation, operation);
+    this.transitionQueues.set(queueKey, result.catch(() => undefined));
+    return result;
+  }
+
+  /** Per-project model runtime (see field docs). Creation deduplicated. */
+  private ensureProjectRuntime(cwd: string): Promise<ModelRuntime> {
+    const key = resolve(cwd);
+    let pending = this.projectRuntimes.get(key);
+    if (!pending) {
+      // Catalog and credentials come from the host's agentDir, not the
+      // process-wide one. Without this the agentDir option is half-honoured:
+      // settings and resources follow it while the model catalog does not, so
+      // an isolated host (a test, or the daemon started with
+      // BABYLON_DAEMON_AGENT_DIR) still reads ~/.pi/agent/models.json from
+      // whatever machine it runs on.
+      const agentDir = this.opts.agentDir ?? getAgentDir();
+      pending = ModelRuntime.create({
+        authPath: join(agentDir, "auth.json"),
+        modelsPath: join(agentDir, "models.json"),
+      });
+      this.projectRuntimes.set(key, pending);
+    }
+    return pending;
+  }
+
+  /** Scoped permission controller: session rules evaluate only for their
+   *  owning session; approvals carry the exact session id. */
+  private sessionPermission(entry: SessionEntry): BabylonPermissionController {
+    const controller = this.opts.permission;
+    if (!controller) return allowAllController();
+    return {
+      ...controller,
+      evaluate: (action: AgentAction, _sessionId?: string) => controller.evaluate(action, entry.sessionId),
+      requestApproval: (action: AgentAction, risk: Risk, _sessionId?: string) =>
+        controller.requestApproval(action, risk, entry.sessionId),
+      clearSessionRules: (sessionId?: string) => controller.clearSessionRules(sessionId ?? entry.sessionId),
+      getMode: () => controller.getMode(),
+      listRules: () => controller.listRules(),
+    } as BabylonPermissionController;
+  }
+
+  /** Tool definitions + extension context from the OWNING session runtime.
+   *  Thread control actions execute with the parent session's tools, never
+   *  whatever happens to be executing elsewhere. Falls back to the owning
+   *  runtime only when
+   *  the owner is gone (legacy behavior). */
+  private getSessionTools(sessionId: string | null | undefined): {
+    cwd: string;
+    getToolDefinition: (name: string) => ToolDefinition | undefined;
+    createContext: () => ExtensionContext;
+  } {
+    // Parent identity only — never "whatever else is running" (I8): tool
+    // definition, extension context, and permission cwd all come from the
+    // owning entry.
+    if (!sessionId) throw new Error("thread tool execution requires parent session identity");
+    const entry = this.entryForSessionId(sessionId);
+    if (!entry) throw new Error("thread parent session runtime is unavailable");
+    const session = entry.runtime.session;
+    return {
+      cwd: entry.cwd,
+      getToolDefinition: (name: string) => session.getToolDefinition(name),
+      createContext: () => session.extensionRunner.createContext(),
+    };
   }
 
   private managedSubagents!: ManagedSubagents;
   private threads!: ThreadManager;
+  private trustStore!: ProjectTrustStore;
+  private globalSettings!: SettingsManager;
+  private readonly trustByCwd = new Map<string, boolean>();
+  private createRuntimeFactory: CreateAgentSessionRuntimeFactory | null = null;
   private readonly rollbackPlans = new Map<string, {
     id: string;
     sessionId: string;
@@ -146,10 +786,90 @@ export class PiHost {
     return this.opts.settingsProvider?.saveSettings(patch) ?? defaultSaveSettings(patch);
   }
 
+  /** Rewire event/execution sinks. The daemon attaches its broadcast here so
+   *  thin clients receive live agent streaming (replaces direct opts
+   *  mutation, which cannot cross the private boundary). */
+  attachSinks(sinks: {
+    onEvent: (event: unknown) => void;
+    onExecutionChanged?: (execution: ProjectExecution) => void;
+  }): void {
+    this.opts.onEvent = sinks.onEvent;
+    if (sinks.onExecutionChanged) this.opts.onExecutionChanged = sinks.onExecutionChanged;
+  }
+
+  /**
+   * Test seams: read-only views over host internals for unit tests.
+   * Production code never calls these; they exist so tests can assert
+   * session bookkeeping without reaching through private fields.
+   */
+  testSessions(): Map<string, SessionEntry> {
+    return this.sessions;
+  }
+
+  /** Ownership index, normalized-keyed, for retention assertions. */
+  testExecutionByCwd(): Map<string, string> {
+    return this.executionByCwd;
+  }
+
+  /**
+   * Test-only steady-state assertion (R1-R3): at most one installed entry per
+   * normalized project cwd, every installed entry IS its project's owner,
+   * every owner resolves to exactly that entry, and no file is owned twice.
+   */
+  testAssertRetentionInvariant(): void {
+    const byCwd = new Map<string, SessionEntry[]>();
+    for (const entry of this.sessions.values()) {
+      const key = projectKey(entry.cwd);
+      byCwd.set(key, [...(byCwd.get(key) ?? []), entry]);
+    }
+    for (const [key, entries] of byCwd) {
+      if (entries.length > 1) {
+        throw new Error(`R1 violated: ${entries.length} installed runtimes for project ${key}`);
+      }
+    }
+    const ownedFiles = new Set<string>();
+    for (const entry of this.sessions.values()) {
+      const owner = this.executionByCwd.get(projectKey(entry.cwd));
+      if (owner !== entry.sessionFile) {
+        throw new Error(`R2 violated: ${entry.sessionFile} is installed but ${projectKey(entry.cwd)} owns ${String(owner)}`);
+      }
+      if (ownedFiles.has(entry.sessionFile)) {
+        throw new Error(`R2 violated: ${entry.sessionFile} is installed for two projects`);
+      }
+      ownedFiles.add(entry.sessionFile);
+    }
+    for (const [key, file] of this.executionByCwd) {
+      const entry = this.sessions.get(file);
+      if (!entry) throw new Error(`R3 violated: ${key} owns ${file} with no installed runtime`);
+      if (projectKey(entry.cwd) !== key) {
+        throw new Error(`R3 violated: ${key} owns a runtime built for ${projectKey(entry.cwd)}`);
+      }
+    }
+  }
+
+  /** AgentSession constructions so far (R5/R9: history must not build). */
+  testRuntimeCreationCount(): number {
+    return this.runtimeCreations;
+  }
+
+  testProjectRuntimes(): Map<string, Promise<ModelRuntime>> {
+    return this.projectRuntimes;
+  }
+
+  testUiRequests(): Map<string, { resolve: (r: unknown) => void; reject: (e: Error) => void; sessionFile: string | null; sessionId: string | null }> {
+    return this.uiRequests;
+  }
+
+  /** Drive the ownership-scoped recap sweep deterministically (the timer
+   *  path is too slow/brittle for tests). */
+  testSweepRecap(): Promise<void> {
+    return this.sweepRecap();
+  }
+
   constructor(opts: HostOptions) {
     this.opts = opts;
-    this._cwd = opts.cwd;
-    const stateDir = opts.stateDir ?? join(opts.agentDir ?? getAgentDir(), "pideck-state");
+    this.bootstrapCwd = opts.cwd;
+    const stateDir = opts.stateDir ?? defaultStateDir(opts.agentDir);
     this.snapshots = new SnapshotStore(join(stateDir, "snapshots"));
     this.rollbacks = new RollbackStore(join(stateDir, "rollbacks"));
     this.recaps = new RecapStore(join(stateDir, "recaps"));
@@ -166,60 +886,57 @@ export class PiHost {
     this.recapTimer.unref?.();
   }
 
-  get session(): AgentSession {
-    return this.runtime.session;
-  }
-  get cwd(): string {
-    return this.runtime.cwd ?? this._cwd;
-  }
-
-  /** One-time boot: share the model catalogue, but rebuild every cwd-bound service on replacement. */
+  /** One-time boot: managers plus a warm model runtime for the default
+   *  project. Session runtimes are created only by execution activation and
+   *  live exactly as long as their project's ownership. */
   async start(): Promise<void> {
     const agentDir = this.opts.agentDir ?? getAgentDir();
     const cwd = resolve(this.opts.cwd);
-    this.modelRuntime = await ModelRuntime.create();
     this.managedSubagents = new ManagedSubagents({
       agentDir,
-      modelRuntime: this.modelRuntime,
+      modelRuntime: await this.ensureProjectRuntime(cwd),
+      getModelRuntime: (forCwd: string) => this.ensureProjectRuntime(forCwd),
       onUpdate: () => this.opts.onEvent({ type: "pideck_subagents_changed" }),
       onParentMessage: (record, action, message) => this.notifySubagentParent(record, action, message),
       permission: this.opts.permission,
       hookManager: this.opts.hookManager,
-      onLaunch: (ev) => this.opts.onEvent({ ...ev, sessionId: this.runtime?.session?.sessionId, sessionFile: this.runtime?.session?.sessionFile }),
+      onLaunch: (ev) => this.opts.onEvent({ ...ev }),
     });
     this.threads = new ThreadManager({
-      runTool: async (toolName, args) => {
-        const session = this.runtime.session;
+      runTool: async (toolName, args, sessionId?: string | null) => {
+        const tools = this.getSessionTools(sessionId);
         // Threads execute tools directly (bypassing the agent loop's
         // beforeToolCall hook), so gate them here against the same policy.
         if (this.opts.permission) {
-          const action = mapToolToAction(toolName, args, this.cwd);
+          const action = mapToolToAction(toolName, args, tools.cwd);
           if (action) {
-            const result = this.opts.permission.evaluate(action);
+            const result = this.opts.permission.evaluate(action, sessionId ?? undefined);
             if (result.decision === "deny") {
               throw new Error(result.reason ?? "Blocked by Babylon permission policy");
             }
             if (result.decision === "ask") {
-              const allowed = await this.opts.permission.requestApproval(action, result.risk ?? "uncertain");
+              const allowed = await this.opts.permission.requestApproval(action, result.risk ?? "uncertain", sessionId ?? undefined);
               if (!allowed) throw new Error("Denied by user approval");
             }
           }
         }
-        const tool = session.getToolDefinition(toolName);
+        const tool = tools.getToolDefinition(toolName);
         if (!tool) throw new Error("Threads extension is not available in this session");
         return tool.execute(
           `babylon-thread-${randomUUID()}`,
           args,
           undefined,
           undefined,
-          session.extensionRunner.createContext()
+          tools.createContext()
         );
       },
       onParentMessage: (thread, action, message) => this.notifyThreadParent(thread, action, message),
     });
     const trustStore = new ProjectTrustStore(agentDir);
+    this.trustStore = trustStore;
     const globalSettings = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
-    const trustByCwd = new Map<string, boolean>();
+    this.globalSettings = globalSettings;
+    const trustByCwd = this.trustByCwd;
 
     const createRuntime: CreateAgentSessionRuntimeFactory = async (input) => {
       const runtimeCwd = resolve(input.cwd);
@@ -246,32 +963,96 @@ export class PiHost {
       }
 
       // Settings, resources, extensions, skills, templates, tools and context are
-      // cwd-bound. Reusing them after session replacement makes project A leak
-      // into project B and leaves extension contexts stale. Only ModelRuntime is
-      // process-wide and safe to share.
+      // cwd-bound: every session gets fresh services so project A can never
+      // leak into project B and extension contexts never go stale. Only the
+      // per-project ModelRuntime is shared (extension provider registrations
+      // must stay within their project).
       const settingsManager = SettingsManager.create(runtimeCwd, agentDir, { projectTrusted });
+      const modelRuntime = await this.ensureProjectRuntime(runtimeCwd);
+      const self = this;
+      // Persona overlay for THIS creation only, resolved from the pending
+      // map by session file (never a host global): concurrent creations
+      // each read their own prompt. Stable per bot so provider
+      // prefix-caching is preserved within a bot's sessions.
+      const createdFile = input.sessionManager.getSessionFile() ?? null;
+      const overlay = createdFile ? (self.pendingSystemPrompts.get(createdFile) ?? null) : null;
       const services = await createAgentSessionServices({
         cwd: runtimeCwd,
         agentDir,
         settingsManager,
-        modelRuntime: this.modelRuntime,
+        modelRuntime,
         resourceLoaderOptions: {
+          appendSystemPrompt: [...(overlay ? [overlay] : []), CANVAS_PROMPT],
           extensionsOverride: (base) => ({
             ...base,
             extensions: [
-              ...base.extensions,
+              // An external goal-mode copy would double-inject the system
+              // prompt and double-dispatch follow-ups next to the hardbaked
+              // one below. Drop it from Babylon sessions only; CLI sessions
+              // keep loading whatever the user installed.
+              ...base.extensions.filter((ext) => !isExternalGoalModeExtension(ext)),
               createSnapcompactExtension({
                 archiveStore: this.snapcompact,
                 getMode: () => (this.opts.settingsProvider?.getSettings() ?? defaultGetSettings()).compaction?.mode ?? "summary",
+                // The owning session is registered after creation (getters run
+                // lazily per LLM call); fall back to the owning runtime only for
+                // sessions created before this mapping existed.
                 getModel: () => {
-                  const s = this.runtime?.session;
-                  const m: any = s?.model;
+                  const s = self.sessionForServices.get(services as object);
+                  if (!s) console.warn("[pideck] snapcompact owner session missing (skipping model pin)");
+                  const m = s?.model;
                   if (!m) return null;
                   return { provider: m.provider, id: m.id, input: m.input };
                 },
-                getSessionId: () => this.runtime?.session?.sessionId ?? "",
-                getSessionFile: () => this.runtime?.session?.sessionFile ?? null,
+                getSessionId: () => self.sessionForServices.get(services as object)?.sessionId ?? "",
+                getSessionFile: () => self.sessionForServices.get(services as object)?.sessionFile ?? null,
               } as SnapcompactExtensionOptions),
+              createGoalModeExtension({
+                getCwd: () => runtimeCwd,
+                getSessionId: () => {
+                  const id = self.sessionForServices.get(services as object)?.sessionId ?? "";
+                  return id || null;
+                },
+                isProjectTrusted: () => projectTrusted ?? false,
+                sendFollowUp: (text: string) => {
+                  // Owner-mapped only: a lost mapping SKIPS the follow-up —
+                  // it must never fall through to another session (I8).
+                  const session = self.sessionForServices.get(services as object);
+                  if (!session) {
+                    console.warn("[pideck] goal follow-up missing owning session");
+                    return;
+                  }
+                  void session.sendUserMessage(text, { deliverAs: "followUp" }).catch((err: unknown) =>
+                    console.warn("[pideck] goal follow-up failed:", err instanceof Error ? err.message : err)
+                  );
+                },
+              }),
+              createDesignModeExtension({
+                getCwd: () => runtimeCwd,
+                getSessionId: () => {
+                  const id = self.sessionForServices.get(services as object)?.sessionId ?? "";
+                  return id || null;
+                },
+                captureReview: (opts) => {
+                  // One review round = one capture. The simulator may be
+                  // absent (no browser panel): design mode then escalates in
+                  // plain chat rather than inventing a verdict.
+                  const ctl = self.opts.getSimController?.() ?? null;
+                  if (!ctl) throw new Error("No browser is available to capture the review.");
+                  return ctl.captureReview(opts);
+                },
+                sendFollowUp: (text: string) => {
+                  // Owner-mapped only (same contract as goal follow-ups).
+                  const session = self.sessionForServices.get(services as object);
+                  if (!session) {
+                    console.warn("[pideck] design follow-up missing owning session");
+                    return;
+                  }
+                  void session.sendUserMessage(text, { deliverAs: "followUp" }).catch((err: unknown) =>
+                    console.warn("[pideck] design follow-up failed:", err instanceof Error ? err.message : err)
+                  );
+                },
+              }),
             ],
           }),
         },
@@ -280,12 +1061,8 @@ export class PiHost {
         services,
         sessionManager: input.sessionManager,
         sessionStartEvent: input.sessionStartEvent,
-        customTools: [this.managedSubagents.tool(), createAskQuestionTool(), createBabylonBashTool(runtimeCwd)],
+        customTools: [this.managedSubagents.tool(), createAskQuestionTool(), createBabylonBashTool(runtimeCwd), ...createBrowserTools(() => self.opts.getSimController?.() ?? null), ...createCanvasTools()],
       });
-      try {
-        const hasAsk = !!(result.session as any).getToolDefinition?.("ask_question");
-        console.log(`[Babylon] ask_question registered: ${hasAsk} — tools:`, (() => { try { return (result.session as any).getToolDefinitions?.() ? Object.keys((result.session as any).getToolDefinitions()) : "unknown"; } catch { return "err"; } })());
-      } catch {}
       const out: CreateAgentSessionRuntimeResult = {
         session: result.session,
         services,
@@ -295,30 +1072,239 @@ export class PiHost {
       };
       return out;
     };
+    this.createRuntimeFactory = createRuntime;
 
-    this.runtime = await createAgentSessionRuntime(createRuntime, {
-      cwd,
-      agentDir,
-      // Warming the host must not create a visible empty session on disk.
-      sessionManager: SessionManager.inMemory(cwd),
-    });
-    this.runtime.setBeforeSessionInvalidate(() => {
-      this.unsubscribeEvents?.();
-      this.unsubscribeEvents = null;
-      this.rejectAllUi(new Error("session replaced"));
-    });
-    this.runtime.setRebindSession((session) => this.bindSession(session));
-    await this.bindSession(this.runtime.session);
+    // Warm the default project's model runtime so the first open pays no
+    // catalogue build. No session is created here: sessions are built lazily
+    // per project, and live only as long as that project owns it.
+    await this.ensureProjectRuntime(cwd);
+    // Warm but invisible, the user hasn't opened a session yet.
+    console.log("[pideck] pi host ready (in-process)");
   }
 
-  private async bindSession(session: AgentSession): Promise<void> {
+  /**
+   * Materialize a CANDIDATE execution runtime for sessionFile (or a fresh
+   * session when null). This is NOT a general session cache: the returned
+   * entry is construction state until installExecutionEntry() publishes it —
+   * requireEntry, executionList, and the Agents tree cannot see it before
+   * then. Concurrent builds for the same file share one construction.
+   */
+  private readonly creatingCandidates = new Map<string, Promise<SessionEntry>>();
+  private async materializeExecutionRuntime(
+    sessionFile: string | null,
+    cwd: string,
+    systemPrompt?: string | null,
+  ): Promise<SessionEntry> {
+    if (!sessionFile) {
+      // Fresh session: the file path is known deterministically (reading the
+      // "current session" lookup would be an ownership fallback, I8).
+      const sm = SessionManager.create(cwd, this.opts.sessionsRoot);
+      const file = sm.getSessionFile()!;
+      if (systemPrompt) this.pendingSystemPrompts.set(file, systemPrompt);
+      return this.buildSessionEntry(file, cwd, sm);
+    }
+    const existing = this.sessions.get(sessionFile);
+    if (existing) return existing;
+    // Instance isolation: a file from another instance's store is refused even
+    // when the activation is perfectly well formed. An owned-but-unflushed
+    // canonical path (containment-checked lexically) still resolves, because
+    // the host already holds that exact runtime identity.
+    if (this.opts.sessionsRoot) await this.assertSessionInRoot(sessionFile);
+    let pending = this.creatingCandidates.get(sessionFile);
+    if (!pending) {
+      pending = this.buildSessionFromFile(sessionFile, cwd, systemPrompt).finally(() => {
+        if (this.creatingCandidates.get(sessionFile) === pending) this.creatingCandidates.delete(sessionFile);
+      });
+      this.creatingCandidates.set(sessionFile, pending);
+    }
+    return pending;
+  }
+
+  /** Containment check for every runtime this host materializes from a file. */
+  private async assertSessionInRoot(sessionFile: string): Promise<void> {
+    const root = this.opts.sessionsRoot;
+    if (!root) return;
+    try {
+      await validateSessionPath(root, sessionFile);
+    } catch (error: unknown) {
+      if (!isSessionNotFound(error)) throw error;
+      // Missing on disk is only legitimate for an owned, not-yet-flushed path
+      // that is still inside this instance's root.
+      if (!contained(root, resolve(sessionFile))) {
+        throw new Error("session path is outside this instance's sessions root");
+      }
+    }
+  }
+
+  private async buildSessionFromFile(
+    sessionFile: string,
+    cwd: string,
+    systemPrompt?: string | null,
+  ): Promise<SessionEntry> {
+    if (systemPrompt) this.pendingSystemPrompts.set(sessionFile, systemPrompt);
+    try {
+      return await this.buildSessionForCwd(sessionFile, cwd);
+    } catch (err) {
+      // The session's stored cwd doesn't exist (project moved/deleted).
+      // Ask for a new location and retry with the override, mirroring pi's
+      // interactive-mode prompt. The failed candidate never installed.
+      if (this.isMissingCwdError(err) && this.opts.onMissingCwd) {
+        const replacement = await this.opts.onMissingCwd(sessionFile, cwd);
+        if (replacement) return this.buildSessionForCwd(sessionFile, replacement);
+      }
+      throw err;
+    }
+  }
+
+  private async buildSessionForCwd(sessionFile: string, cwd: string): Promise<SessionEntry> {
+    // Fingerprint BEFORE the read: an external append landing during the
+    // async runtime build must not be recorded as ingested (same race as
+    // the retained-sync path — fail toward a redundant reparse, never a
+    // permanently skipped append).
+    const preRead = await this.fingerprintSessionFile(sessionFile);
+    const sessionManager = SessionManager.open(sessionFile, undefined, cwd);
+    return this.buildSessionEntry(sessionFile, cwd, sessionManager, preRead);
+  }
+
+  /** Builds one DETACHED entry: runtime, services, bindings and subscription,
+   *  but no map entry. installExecutionEntry() publishes it as an owner. */
+  private async buildSessionEntry(sessionFile: string, cwd: string, sessionManager: SessionManager, preReadFingerprint?: DiskFingerprint | null): Promise<SessionEntry> {
+    const factory = this.createRuntimeFactory;
+    if (!factory) throw new Error("pi host not started");
+    let runtime: Awaited<ReturnType<typeof createAgentSessionRuntime>>;
+    try {
+      runtime = await createAgentSessionRuntime(factory, {
+        cwd,
+        agentDir: this.opts.agentDir ?? getAgentDir(),
+        sessionManager,
+      });
+    } finally {
+      // Consumed by the factory above (or failed before use): never leak a
+      // stale overlay into a later creation for the same file.
+      this.pendingSystemPrompts.delete(sessionFile);
+    }
+    // The SDK keeps the built services on the runtime object; register them
+    // so lazily-evaluated closures (snapcompact getters) resolve the owning
+    // session instead of whatever else is running.
+    const services = runtime.services;
+    const entry: SessionEntry = {
+      runtime,
+      services,
+      cwd,
+      sessionId: runtime.session.sessionId,
+      sessionFile,
+      unsubscribe: null,
+      lifecycleVersion: 0,
+    };
+    if (services && typeof services === "object") this.sessionForServices.set(services, runtime.session);
+    this.runtimeCreations += 1;
+    runtime.setBeforeSessionInvalidate(() => {
+      entry.unsubscribe?.();
+      entry.unsubscribe = null;
+      this.rejectSessionUi(entry, new Error("session replaced"));
+    });
+    runtime.setRebindSession((session) => this.bindSession(session, entry));
+    await this.bindSession(runtime.session, entry);
+    // Build this project's rollback shadow index now, not on the first send.
+    // The first authoritative capture on a large worktree hashes the whole
+    // tree, and `prompt()` cannot call the model until it finishes. Warming at
+    // open overlaps that cost with the user reading and typing.
+    this.warmSnapshots(cwd);
+    // Seed from the pre-read fingerprint (or null for fresh sessions whose
+    // file does not exist yet): the first activation with a present file
+    // syncs once and seeds then. Never stat here — a post-build stat would
+    // record an append that raced the build as ingested.
+    entry.diskFingerprint = preReadFingerprint ?? null;
+    return entry;
+  }
+
+  /** Publish a detached candidate as its project's execution owner (R1-R3).
+   *  One coherent commit: the runtime map and the ownership index move
+   *  together, and the per-project generation only ever increases. */
+  private installExecutionEntry(entry: SessionEntry): void {
+    const key = projectKey(entry.cwd);
+    this.sessions.set(entry.sessionFile, entry);
+    this.executionByCwd.set(key, entry.sessionFile);
+    this.executionGenerationByCwd.set(key, (this.executionGenerationByCwd.get(key) ?? 0) + 1);
+  }
+
+  /** Full disposal of an entry that is installed or detached: unsubscribe,
+   *  reject its pending UI, dispose the SDK session, drop permission rules
+   *  and the services mapping, and forget it. */
+  private disposeEntry(entry: SessionEntry): void {
+    entry.unsubscribe?.();
+    entry.unsubscribe = null;
+    this.rejectSessionUi(entry, new Error("session released"));
+    const live = entry.runtime.session;
+    try {
+      live.dispose();
+    } catch {
+      /* ignore */
+    }
+    try {
+      this.opts.permission?.clearSessionRules(live.sessionId);
+    } catch {
+      /* ignore */
+    }
+    // A disposed session's extension callbacks (goal/design/snapcompact) must
+    // not be able to reach the NEXT owner through a stale mapping.
+    if (entry.services && typeof entry.services === "object") this.sessionForServices.delete(entry.services);
+    this.sessions.delete(entry.sessionFile);
+  }
+
+  /** Dispose a candidate that never became an owner. No candidate survives a
+   *  failed, cancelled, or rejected activation. */
+  private async disposeDetachedEntry(entry: SessionEntry): Promise<void> {
+    this.disposeEntry(entry);
+  }
+
+  /** Fire-and-forget warm of a cwd's rollback shadow index. Failures are
+   *  ignored: the turn-start capture stays authoritative and would simply pay
+   *  the cost instead. */
+  private warmSnapshots(cwd: string): void {
+    const key = resolve(cwd);
+    if (this.warmedSnapshotCwds.has(key)) return;
+    this.warmedSnapshotCwds.add(key);
+    void this.snapshots.capture(cwd, { authoritative: true }).catch(() => {
+      // Let a later open retry after a transient failure.
+      this.warmedSnapshotCwds.delete(key);
+    });
+  }
+
+  /** Reject only one session's pending extension-UI promises (release or
+   *  invalidation must never touch another session's dialogs). */
+  private rejectSessionUi(entry: SessionEntry, error: Error): void {
+    for (const [id, pending] of this.uiRequests) {
+      if (pending.sessionFile !== entry.sessionFile) continue;
+      this.uiRequests.delete(id);
+      this.emitUiCancel(id, pending);
+      pending.reject(error);
+    }
+  }
+
+  /** A cancellation is an ADDRESSED event, exactly like its request: the
+   *  renderer drops the dialog/approval for the session that raised it, and
+   *  never guesses which conversation is on screen. */
+  private emitUiCancel(id: string, pending: { sessionId: string | null; sessionFile: string | null }): void {
+    this.opts.onEvent({
+      type: "extension_ui_cancel",
+      id,
+      sessionId: pending.sessionId,
+      sessionFile: pending.sessionFile,
+    });
+  }
+
+  private async bindSession(session: AgentSession, entry: SessionEntry): Promise<void> {
     // Extension UI context: dialogs emit extension_ui_request events and await
     // a response (mirrors RPC's extension_ui_request/response protocol).
-    const dialog = (request: any, pick: (r: any) => any, opts?: any) =>
+    // Every request carries its OWNING session identity (never another
+    // session): concurrent sessions awaiting input stay distinguishable and
+    // responses route by dialog id regardless of what is on screen.
+    const dialog = <T,>(request: Record<string, unknown>, pick: (r: unknown) => T, opts?: ExtensionUIDialogOptions): Promise<T> =>
       new Promise((resolveDialog, rejectDialog) => {
         const id = `ui-${crypto.randomUUID()}`;
         let timeout: NodeJS.Timeout | undefined;
-        const finish = (response: any) => {
+        const finish = (response: unknown) => {
           if (timeout) clearTimeout(timeout);
           resolveDialog(pick(response));
         };
@@ -326,19 +1312,26 @@ export class PiHost {
           if (timeout) clearTimeout(timeout);
           rejectDialog(error);
         };
-        this.uiRequests.set(id, { resolve: finish, reject });
-        this.opts.onEvent({ type: "extension_ui_request", id, ...request, timeout: opts?.timeout });
-        if (typeof opts?.timeout === "number" && opts.timeout > 0) {
+        const pending = {
+          resolve: finish,
+          reject,
+          sessionFile: session.sessionFile ?? null,
+          sessionId: entry.sessionId,
+        };
+        this.uiRequests.set(id, pending);
+        this.opts.onEvent({ type: "extension_ui_request", id, ...request, timeout: opts?.timeout, sessionId: session.sessionId, sessionFile: session.sessionFile ?? null });
+        const timeoutMs = opts?.timeout;
+        if (typeof timeoutMs === "number" && timeoutMs > 0) {
           timeout = setTimeout(() => {
             if (!this.uiRequests.delete(id)) return;
-            this.opts.onEvent({ type: "extension_ui_cancel", id });
+            this.emitUiCancel(id, pending);
             finish({ cancelled: true });
-          }, opts.timeout);
+          }, timeoutMs);
         }
         if (opts?.signal) {
           const abort = () => {
             if (!this.uiRequests.delete(id)) return;
-            this.opts.onEvent({ type: "extension_ui_cancel", id });
+            this.emitUiCancel(id, pending);
             finish({ cancelled: true });
           };
           if (opts.signal.aborted) abort();
@@ -346,51 +1339,69 @@ export class PiHost {
         }
       });
 
-    const uiContext: any = {
+    const uiContext = {
       mode: "rpc",
       hasUI: true,
-      select: (title: string, options: string[], opts?: any) =>
-        dialog({ method: "select", title, options }, (r) =>
-          r && r.cancelled ? undefined : r?.value
-        , opts),
-      confirm: (title: string, message?: string, opts?: any) =>
-        dialog({ method: "confirm", title, message }, (r) => !!r?.confirmed, opts),
-      input: (title: string, opts?: any) =>
-        dialog({ method: "input", title, placeholder: opts?.placeholder }, (r) =>
-          r && r.cancelled ? undefined : r?.value
-        , opts),
-      editor: (title: string, prefill?: string, opts?: any) =>
-        dialog({ method: "editor", title, prefill }, (r) =>
-          r && r.cancelled ? undefined : r?.value
-        , opts),
-      notify: (message: string, typeOrOptions?: any) => {
-        const notifyType =
-          typeof typeOrOptions === "string" ? typeOrOptions : typeOrOptions?.notifyType ?? "info";
+      select: (title: string, options: string[], opts?: ExtensionUIDialogOptions) =>
+        dialog({ method: "select", title, options }, (r) => {
+          const w = wireOf(r);
+          if (!w || w.cancelled) return undefined;
+          return typeof w.value === "string" ? w.value : undefined;
+        }, opts),
+      confirm: (title: string, message: string, opts?: ExtensionUIDialogOptions) =>
+        dialog({ method: "confirm", title, message }, (r) => !!wireOf(r)?.confirmed, opts),
+      input: (title: string, placeholder?: string, opts?: ExtensionUIDialogOptions) =>
+        dialog({ method: "input", title, placeholder }, (r) => {
+          const w = wireOf(r);
+          if (!w || w.cancelled) return undefined;
+          return typeof w.value === "string" ? w.value : undefined;
+        }, opts),
+      editor: (title: string, prefill?: string, opts?: ExtensionUIDialogOptions) =>
+        dialog({ method: "editor", title, prefill }, (r) => {
+          const w = wireOf(r);
+          if (!w || w.cancelled) return undefined;
+          return typeof w.value === "string" ? w.value : undefined;
+        }, opts),
+      notify: (message: string, type?: "info" | "warning" | "error") => {
+        // Stamped like every other request: the renderer shows it as an
+        // addressed notification, never as "whatever is on screen".
         this.opts.onEvent({
           type: "extension_ui_request",
           id: `notify-${crypto.randomUUID()}`,
           method: "notify",
           message,
-          notifyType,
+          notifyType: type ?? "info",
+          sessionId: entry.sessionId,
+          sessionFile: entry.sessionFile,
         });
         return Promise.resolve();
       },
-      setStatus: () => Promise.resolve(),
+      // Headless host: no TUI surface, so interactive-only members are
+      // explicit no-ops (matching the setStatus/setWidget stubs below).
+      onTerminalInput: (_handler: TerminalInputHandler) => () => {},
+      setStatus: (_key: string, _text: string | undefined) => {},
+      setWorkingVisible: (_visible: boolean) => {},
+      setWorkingIndicator: (_options?: WorkingIndicatorOptions) => {},
+      setHiddenThinkingLabel: (_label?: string) => {},
+      pasteToEditor: (_text: string) => {},
       setWidget: () => Promise.resolve(),
       setTitle: () => Promise.resolve(),
+      setEditorText: (_text: string) => {},
       set_editor_text: () => Promise.resolve(),
       setWorkingMessage: () => {},
-      setWorkingIndicator: () => {},
       setFooter: () => {},
       setHeader: () => {},
       setEditorComponent: () => {},
-      setToolsExpanded: () => {},
-      getEditorText: () => "",
+      addAutocompleteProvider: () => {},
+      getEditorComponent: () => undefined,
       getToolsExpanded: () => false,
       getAllThemes: () => [],
       getTheme: () => undefined,
       setTheme: () => ({ success: false as const, error: "not supported" }),
-      custom: () => undefined,
+      setToolsExpanded: () => {},
+      getEditorText: () => "",
+      theme: headlessTheme(),
+      custom: () => Promise.reject(new Error("custom components unavailable in headless mode")),
     };
 
     await session.bindExtensions({
@@ -398,14 +1409,22 @@ export class PiHost {
       mode: "rpc",
       commandContextActions: {
         waitForIdle: () => session.waitForIdle(),
-        newSession: (options: any) => this.newSession(options),
-        fork: async (entryId: string, forkOptions: any) => {
-          const sourceSessionId = this.runtime.session.sessionId;
-          const r = await this.runtime.fork(entryId, forkOptions);
+        // Created without disturbing execution: agent-requested sessions appear
+        // in the session list, but never become a project's owner.
+        // The SDK's newSession contract reports {cancelled}: creation here
+        // never cancels (failures reject instead), matching the previous
+        // runtime behavior where the returned state carried no cancelled flag.
+        newSession: async (options?: NewSessionOptions) => {
+          await this.createSessionIn(entry.cwd, options);
+          return { cancelled: false };
+        },
+        fork: async (entryId: string, forkOptions?: ForkOptions) => {
+          const sourceSessionId = session.sessionId;
+          const r = await entry.runtime.fork(entryId, forkOptions);
           if (!r.cancelled) await this.rollbacks.clearActive(sourceSessionId).catch(() => undefined);
           return { cancelled: r.cancelled };
         },
-        navigateTree: async (targetId: string, options: any) => {
+        navigateTree: async (targetId: string, options?: NavigateTreeOptions) => {
           const sourceSessionId = session.sessionId;
           const previousLeaf = session.sessionManager.getLeafId();
           const r = await session.navigateTree(targetId, options);
@@ -414,64 +1433,81 @@ export class PiHost {
           }
           return { cancelled: r.cancelled };
         },
-        switchSession: (sessionPath: string, options: any) =>
-          this.switchTo(sessionPath, options),
+        // Pi's internal switch is a PRIVATE EXECUTION HANDOFF bound to the
+        // calling entry — never a navigation API and never a host-global cwd
+        // (C8). Never dispose the source from inside this callback: it may be
+        // the very runtime performing the fork.
+        switchSession: async (sessionPath: string, options?: SwitchSessionOptions) => {
+          await this.stageExecutionHandoff(entry, sessionPath, options);
+          return { cancelled: false };
+        },
         reload: async () => {
           await session.reload();
         },
       },
       shutdownHandler: () => {},
-      onError: (err: any) => {
+      onError: (err: ExtensionError) => {
         const msg = err?.error ?? String(err);
         // Lifecycle noise: extension async init (e.g. MCP server startup) that
         // was still in flight when the session was replaced hits pi's stale-ctx
         // guard. The extension self-heals via its own generation guard, so this
-        // is expected during fast session switches — don't surface it as an
+        // is expected during fast session switches, don't surface it as an
         // error toast.
         if (typeof msg === "string" && msg.includes("extension ctx is stale")) return;
-        this.opts.onEvent({ type: "extension_error", extensionPath: err?.extensionPath, event: err?.event, error: msg });
+        this.opts.onEvent({
+          type: "extension_error",
+          extensionPath: err?.extensionPath,
+          event: err?.event,
+          error: msg,
+          // Addressed: an error belongs to the session whose extension failed.
+          sessionId: entry.sessionId,
+          sessionFile: entry.sessionFile,
+        });
       },
     });
-    this.unsubscribeEvents?.();
+    entry.unsubscribe?.();
     if (this.opts.permission) {
-      this.opts.permission.clearSessionRules();
-      installAgentGuards(session.agent as any, {
-        controller: this.opts.permission,
-        cwd: this.cwd,
+      installAgentGuards(session.agent as GuardedAgent, {
+        controller: this.sessionPermission(entry),
+        cwd: entry.cwd,
         hookManager: this.opts.hookManager,
         sessionId: session.sessionId,
         taskId: this.opts.getTaskIdForSessionFile?.(session.sessionFile ?? null),
       });
     } else if (this.opts.hookManager) {
-      installAgentGuards(session.agent as any, {
-        controller: { evaluate: () => ({ decision: "allow" as const }), requestApproval: async () => true, clearSessionRules: () => {}, getMode: () => "auto" as const, listRules: () => [] } as unknown as BabylonPermissionController,
-        cwd: this.cwd,
+      installAgentGuards(session.agent as GuardedAgent, {
+        controller: allowAllController(),
+        cwd: entry.cwd,
         hookManager: this.opts.hookManager,
         sessionId: session.sessionId,
         taskId: this.opts.getTaskIdForSessionFile?.(session.sessionFile ?? null),
       });
     }
 
-    this.unsubscribeEvents = session.subscribe((event) => {
+    entry.unsubscribe = session.subscribe((event) => {
       this.opts.onEvent({ ...event, sessionId: session.sessionId, sessionFile: session.sessionFile });
-      if (event.type === "tool_execution_end" && ((event as any).toolName === "spawn_thread" || (event as any).toolName === "workflow")) {
-        const details = (event as any).result?.details ?? {};
-        const runId = details.threadId ?? details.runId ?? (event as any).toolCallId;
+      if (event.type === "tool_execution_end" && (event.toolName === "spawn_thread" || event.toolName === "workflow")) {
+        // Tool results are model-adjacent data: narrow every field instead
+        // of trusting the wire shape.
+        const details = wireOf(wireOf(event.result)?.details) ?? {};
+        const runId = wireStr(details, "threadId") ?? wireStr(details, "runId") ?? event.toolCallId;
         if (runId) {
-          const status = (event as any).isError ? "failed" : "running";
-          const args = (event as any).args ?? {};
-          const label = args.name?.trim() || args.goal?.trim()?.slice(0, 80) || details.threadId || details.runId || (event as any).toolName;
-          this.opts.onEvent({ type: "babylon_launch_started", runId, runKind: (event as any).toolName === "spawn_thread" ? "thread" : "workflow", label, status: "running", sessionId: session.sessionId, sessionFile: session.sessionFile });
+          const status = event.isError ? "failed" : "running";
+          const args = wireOf(wireOf(event)?.args);
+          const label = wireStr(args, "name")?.trim() || wireStr(args, "goal")?.trim()?.slice(0, 80) || wireStr(details, "threadId") || wireStr(details, "runId") || event.toolName;
+          this.opts.onEvent({ type: "babylon_launch_started", runId, runKind: event.toolName === "spawn_thread" ? "thread" : "workflow", label, status: "running", sessionId: session.sessionId, sessionFile: session.sessionFile });
           if (status === "failed") this.opts.onEvent({ type: "babylon_launch_terminated", runId, status: "failed", sessionId: session.sessionId, sessionFile: session.sessionFile });
         }
       }
       if (event.type === "tool_execution_end") {
-        const toolName = (event as any).toolName ?? (event as any).toolCall?.name ?? "";
+        // args/toolCall ride the wire beyond the SDK's typed surface.
+        const wired = wireOf(event);
+        const toolName = event.toolName ?? wireStr(wireOf(wired?.toolCall), "name") ?? "";
         void this.opts.hookManager?.dispatch(
           "post_tool_use",
           {
             toolName,
-            args: (event as any).args ?? (event as any).result,
+            args: wired?.args ?? event.result,
             sessionId: session.sessionId,
             taskId: this.opts.getTaskIdForSessionFile?.(session.sessionFile ?? null),
           },
@@ -482,7 +1518,7 @@ export class PiHost {
         void this.relayPromotedSubagentReply(session, messageText(event.message));
       }
       if (event.type === "message_end" && event.message?.role === "user" && !session.sessionManager.getSessionName()) {
-        void this.suggestSessionName(session);
+        void this.suggestSessionName(session, event.message);
       }
       if (event.type === "message_end" && event.message) {
         const ts = event.message.timestamp;
@@ -499,22 +1535,29 @@ export class PiHost {
   // persist it via a session_info entry, so the sidebar shows a real name
   // instead of the raw prompt.
   private sessionNaming = new Set<string>();
-  private async suggestSessionName(session: AgentSession): Promise<void> {
+  private async suggestSessionName(session: AgentSession, currentMessage?: unknown): Promise<void> {
     const sessionId = session.sessionId;
     if (this.sessionNaming.has(sessionId)) return;
     this.sessionNaming.add(sessionId);
     try {
       // Under pi >= 0.84.2 the in-memory manager keeps message content out of
-      // getEntries(), so the sample is read from the append-only file.
+      // getEntries(), so the sample is read from the append-only file. The
+      // triggering message is included explicitly: persistence happens after
+      // subscriber notification, so the file can lag one message behind.
       const file = session.sessionFile ?? session.sessionManager.getSessionFile();
-      const { messages } = file ? await readSessionTail(file) : { messages: [] as any[] };
+      const { messages } = file ? await readSessionTail(file) : { messages: [] };
       const userTexts = messages
-        .filter((m: any) => m.role === "user")
-        .map((m: any) => messageText(m))
+        .filter((m) => wireOf(m)?.role === "user")
+        .map((m) => messageText(m))
         .filter((t: string) => t.trim().length > 0);
+      const currentText =
+        wireOf(currentMessage)?.role === "user" ? messageText(currentMessage).trim() : "";
+      if (currentText) userTexts.push(currentText);
       const sample = userTexts.slice(-4).join("\n").slice(0, 1500);
       if (!sample.trim()) return;
-      const title = await this.generateSessionTitle(sample);
+      const namingCwd = session.sessionManager.getCwd?.();
+      if (!namingCwd) return;
+      const title = await this.generateSessionTitle(sample, namingCwd);
       if (!title || session.sessionManager.getSessionName()) return;
       session.sessionManager.appendSessionInfo(title);
       this.opts.onEvent({ type: "pideck_sessions_changed" });
@@ -525,38 +1568,41 @@ export class PiHost {
     }
   }
 
-  private async generateSessionTitle(sample: string): Promise<string | null> {
+  private async generateSessionTitle(sample: string, cwd: string): Promise<string | null> {
     const prompt =
       "You are naming a coding-agent conversation. Reply with ONLY a short title (3-6 words, no quotes, no period) that captures the intent of this conversation:\n\n" +
       sample;
-    const text = await this.askCheap(prompt, 1024);
+    const text = await this.askCheap(prompt, 1024, { cwd });
     if (!text) return null;
-    return text.replace(/^["'“”]+|["'“”]+$/g, "").slice(0, 60);
+    return text.replace(/^["'""]+|["'""]+$/g, "").slice(0, 60);
   }
 
   async generateGitCommitMessage(context: PreparedCommitContext): Promise<GeneratedCommitMessage> {
     const settings = this._getSettings();
     const ref = settings.gitCommitModel ?? DEFAULT_GIT_COMMIT_MODEL;
-    const model = this.modelRuntime.getModel(ref.provider, ref.modelId);
+    const commitCwd = (context as { cwd?: string }).cwd;
+    if (!commitCwd) throw new Error("commit context is missing a project cwd");
+    const modelRuntimeForCommit = await this.modelRuntimeForCwd(commitCwd);
+    const model = modelRuntimeForCommit.getModel(ref.provider, ref.modelId);
     if (!model) {
       throw new Error(
         `Commit model is unavailable: ${ref.provider}/${ref.modelId}. ` +
           `Select an installed model in Settings → Pi → Git commit model.`
       );
     }
-    if (context.fileCount === 0) throw new Error("No staged files to describe — commit context is empty");
+    if (context.fileCount === 0) throw new Error("No staged files to describe, commit context is empty");
     if (context.stagedPatch.trim().length === 0 && context.stagedSummary.trim().length === 0) {
-      throw new Error("Staged patch is empty — nothing to commit");
+      throw new Error("Staged patch is empty, nothing to commit");
     }
 
     const complete = (prompt: string) =>
-      this.modelRuntime.completeSimple(
+      modelRuntimeForCommit.completeSimple(
         model,
-        { messages: [{ role: "user", content: prompt }] } as any,
+        { messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
         { reasoning: "low", maxTokens: 4_096 }
       );
     const read = async (prompt: string): Promise<string> => {
-      let response: any;
+      let response: Awaited<ReturnType<typeof complete>>;
       try {
         response = await complete(prompt);
       } catch (cause) {
@@ -588,37 +1634,43 @@ export class PiHost {
   /** One cheap model call shared by naming and recaps. The model + reasoning
    *  level are configurable (Settings → Pi → Title generation), falling back
    *  to the previous hardcoded cheap model when unset. */
-  private async askCheap(prompt: string, maxTokens: number): Promise<string | null> {
+  private async askCheap(
+    prompt: string,
+    maxTokens: number,
+    opts: { cwd: string; fallbackModel?: AgentSession["model"] }
+  ): Promise<string | null> {
     const settings = this._getSettings();
+    const modelRuntime = await this.modelRuntimeForCwd(opts.cwd);
     const titleModel = settings.titleModel
-      ? this.modelRuntime.getModel(settings.titleModel.provider, settings.titleModel.modelId)
+      ? modelRuntime.getModel(settings.titleModel.provider, settings.titleModel.modelId)
       : undefined;
+    // Explicit caller-provided fallback last — never another project's model.
     const model =
       titleModel ??
-      this.modelRuntime.getModel("opencode-go", "muse-spark-1.2-contributor") ??
-      this.runtime.session.model;
+      modelRuntime.getModel("opencode-go", "muse-spark-1.2-contributor") ??
+      (opts.fallbackModel ?? null);
     if (!model) return null;
-    const reasoning = (settings.titleReasoning as any) || "low";
+    const reasoning = asThinkingLevel(settings.titleReasoning);
     const effectiveMaxTokens = reasoning === "low" ? Math.max(maxTokens, 1024) : maxTokens;
     try {
-      const response = await this.modelRuntime.completeSimple(
+      const response = await modelRuntime.completeSimple(
         model,
-        { messages: [{ role: "user", content: prompt }] } as any,
+        { messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
         { reasoning, maxTokens: effectiveMaxTokens }
       );
       const text = (response?.content ?? [])
-        .map((block: any) => (block?.type === "text" ? block.text ?? "" : ""))
+        .map((block) => (block?.type === "text" ? block.text ?? "" : ""))
         .join("")
         .trim();
       if (text) return text;
       if (response?.stopReason === "length") {
-        const retry = await this.modelRuntime.completeSimple(
+        const retry = await modelRuntime.completeSimple(
           model,
-          { messages: [{ role: "user", content: prompt }] } as any,
+        { messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
           { reasoning: "minimal", maxTokens: Math.max(effectiveMaxTokens, 1024) }
         );
         return (retry?.content ?? [])
-          .map((block: any) => (block?.type === "text" ? block.text ?? "" : ""))
+          .map((block) => (block?.type === "text" ? block.text ?? "" : ""))
           .join("")
           .trim() || null;
       }
@@ -640,42 +1692,45 @@ export class PiHost {
   }
 
   private async sweepRecap(): Promise<void> {
-    const session = this.runtime?.session;
-    const file = session?.sessionFile;
-    if (!file || !session.sessionManager) return;
-    if (session.isStreaming) return;
-    if (this.managedSubagents?.hasAnyActive()) return;
-    if (this.managedSubagents?.hasActiveForSession(session.sessionId)) return;
-    if (await this.hasAnyActiveThreads()) return;
-    if (await this.hasActiveThreadsForSession(session.sessionId)) return;
-    const intervalMs = Number(process.env.PIDECK_RECAP_MS) || RECAP_INTERVAL_MS;
-    const cached = this.lastMessageAt.get(file);
-    if (!cached || Date.now() - cached < intervalMs) return;
-    // Recap timing is not context pressure. Snapcompact is driven by
-    // Pi's real compaction boundary (`session_before_compact`) inside
-    // the snapcompact extension; the recap sweep never builds or stores
-    // a snapcompact archive.
-    await this.maybeRecap(session, file);
+    // Recap follows EXECUTION OWNERS, never the foreground: quiet Project A
+    // recaps while B runs (and while B happens to be viewed).
+    for (const [, ownerFile] of this.executionByCwd) {
+      const entry = this.sessions.get(ownerFile);
+      if (!entry) continue;
+      // One busy child still means the project is working: no recap there
+      // (isExecutionBusy covers streaming, compaction, approvals, subagents,
+      // threads, and workflows for THIS owner only).
+      if (await this.isExecutionBusy(entry)) continue;
+      const session = entry.runtime.session;
+      const file = session.sessionFile ?? ownerFile;
+      const intervalMs = Number(process.env.PIDECK_RECAP_MS) || RECAP_INTERVAL_MS;
+      const cached = this.lastMessageAt.get(file);
+      if (!cached || Date.now() - cached < intervalMs) continue;
+      // Recap timing is not context pressure. Snapcompact is driven by
+      // Pi's real compaction boundary inside the snapcompact extension.
+      await this.maybeRecap(entry);
+    }
   }
 
-  private async maybeRecap(session: AgentSession, file: string): Promise<void> {
+  private async maybeRecap(entry: SessionEntry): Promise<void> {
+    const session = entry.runtime.session;
+    const file = session.sessionFile ?? entry.sessionFile;
     if (this.recapping.has(file)) return;
     if (session.isStreaming) return;
     if (this.managedSubagents?.hasAnyActive()) return;
     if (this.managedSubagents?.hasActiveForSession(session.sessionId)) return;
-    if (await this.hasAnyActiveThreads()) return;
-    if (await this.hasActiveThreadsForSession(session.sessionId)) return;
+    if (await this.isExecutionBusy(entry)) return;
     this.recapping.add(file);
     try {
       // The in-memory session manager keeps message content out of getEntries()
-      // for large sessions, so the delta is read from the append-only file —
+      // for large sessions, so the delta is read from the append-only file ,
       // the same projection the transcript uses, with entryIds attached.
       const { messages } = await readSessionTail(file);
       if (!messages.length) return;
-      const lastMessageAt = messages.reduce(
-        (max, m) => Math.max(max, typeof m?.timestamp === "number" ? m.timestamp : 0),
-        0
-      );
+      const lastMessageAt = messages.reduce<number>((max, m) => {
+        const ts = wireOf(m)?.timestamp;
+        return Math.max(max, typeof ts === "number" ? ts : 0);
+      }, 0);
       if (!lastMessageAt) return;
       const recaps = await this.recaps.recapsFor(file);
       const lastRecapAt = recaps.reduce((max, r) => Math.max(max, Date.parse(r.at) || 0), 0) || null;
@@ -684,7 +1739,7 @@ export class PiHost {
       const delta = pickRecapDelta(messages, recaps[recaps.length - 1]?.coveredEntryId ?? null);
       if (!recapWorthy(delta.messages) || !delta.coveredEntryId) return;
       const deltaText = delta.messages.map((m) => messageText(m)).join("\n").slice(0, 8000);
-      const text = await this.askCheap(buildRecapPrompt(deltaText), 1024);
+      const text = await this.askCheap(buildRecapPrompt(deltaText), 1024, { cwd: entry.cwd, fallbackModel: session.model });
       const line = normalizeRecapText(text ?? "");
       if (!line) return;
       const recap: Recap = {
@@ -721,18 +1776,20 @@ export class PiHost {
   private async relayPromotedSubagentReply(session: AgentSession, text: string): Promise<void> {
     if (!text.trim()) return;
     const identity = [...session.sessionManager.getEntries()].reverse().find(
-      (entry: any) => entry.type === "custom_message" && entry.customType === "babylon_subagent_identity"
-    ) as any;
-    const parentSessionFile = identity?.details?.parentSessionFile;
+      (entry): entry is CustomMessageEntry =>
+        entry.type === "custom_message" && entry.customType === "babylon_subagent_identity"
+    );
+    const details = wireOf(identity?.details);
+    const parentSessionFile = wireStr(details, "parentSessionFile");
     if (typeof parentSessionFile !== "string" || !parentSessionFile || parentSessionFile === session.sessionFile) return;
     try {
       const parent = SessionManager.open(parentSessionFile, undefined, session.sessionManager.getCwd());
-      const label = identity.details?.name ?? identity.details?.runId?.slice?.(0, 8) ?? "subagent";
+      const label = wireStr(details, "name") ?? wireStr(details, "runId")?.slice(0, 8) ?? "subagent";
       parent.appendCustomMessageEntry(
         "babylon_subagent_activity",
         `[Babylon Subagent Activity]\nSubagent ${label} replied:\n\n${text}`,
         true,
-        { runId: identity.details?.runId, action: "reply", message: text }
+        { runId: wireStr(details, "runId"), action: "reply", message: text }
       );
     } catch {
       // Parent may have moved or been deleted; the promoted child remains usable.
@@ -742,22 +1799,26 @@ export class PiHost {
   private rejectAllUi(error: Error): void {
     for (const [id, pending] of this.uiRequests) {
       this.uiRequests.delete(id);
-      this.opts.onEvent({ type: "extension_ui_cancel", id });
+      this.emitUiCancel(id, pending);
       pending.reject(error);
     }
   }
 
-  private enqueueTransition<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.transitionQueue.then(operation, operation);
-    this.transitionQueue = result.catch(() => undefined);
-    return result;
-  }
-
   /** Respond to an extension dialog request (from the renderer). */
-  respondUi(id: string, resp: any): void {
+  respondUi(id: string, resp: unknown): void {
     const p = this.uiRequests.get(id);
     if (p) {
       this.uiRequests.delete(id);
+      // Answered: the gate is open, so the run it gated resumes. Emit the
+      // resolution so the canonical execution feed drops the "approval"
+      // entry (otherwise the Agents dock keeps saying "needs input" after the
+      // user has already answered).
+      this.opts.onEvent({
+        type: "extension_ui_response",
+        id,
+        sessionId: p.sessionId,
+        sessionFile: p.sessionFile,
+      });
       p.resolve(resp);
     }
   }
@@ -767,168 +1828,585 @@ export class PiHost {
   // -------------------------------------------------------------------------
 
   private async ensureSession(): Promise<void> {
-    if (!this.runtime) throw new Error("pi host not started");
+    if (!this.createRuntimeFactory) throw new Error("pi host not started");
   }
 
-  /** Open a session file (or create a new one in cwd). Instant: shared services. */
-  async open(opts: { path?: string; cwd: string; requestId?: number }): Promise<any> {
-    return this.enqueueTransition(async () => {
-    await this.ensureSession();
-    if (opts.path) {
-      if (this.runtime.session.sessionFile === opts.path) {
-        if (!this.runtime.session.isStreaming) this.syncSessionFromDisk(opts.path, opts.cwd);
-      } else {
-        try {
-          // switchSession builds the target SessionManager with a cwd override
-          // and reuses our shared services via createRuntime — ~1ms.
-          await this.runtime.switchSession(opts.path, { cwdOverride: opts.cwd });
-        } catch (err) {
-          // The session's stored cwd doesn't exist (project moved/deleted).
-          // Ask for a new location and retry with the override — mirroring pi's
-          // interactive-mode prompt.
-          if (this.isMissingCwdError(err) && this.opts.onMissingCwd) {
-            const storedCwd = opts.cwd;
-            const replacement = await this.opts.onMissingCwd(opts.path, storedCwd);
-            if (replacement) {
-              await this.runtime.switchSession(opts.path, { cwdOverride: replacement });
-              this._cwd = replacement;
-              await this.restoreActiveRollbackLeaf();
-              const state = await this.getState();
-              this.opts.onStatus({ status: "ready", cwd: replacement, sessionPath: opts.path, requestId: opts.requestId, state });
-              return state;
-            }
-            throw err;
-          }
-          throw err;
-        }
-      }
-    } else {
-      // New session in `cwd`. If the runtime is already there, just reset;
-      // otherwise rebuild a runtime bound to the new cwd.
-      if (this.runtime.cwd === opts.cwd && this.runtime.session.sessionManager.isPersisted()) {
-        await this.runtime.newSession({});
-      } else {
-        // A new SessionManager already has a canonical future path even before
-        // its first flush. Opening that path builds a fresh runtime in the new
-        // cwd without persisting an empty startup session.
-        const sm = SessionManager.create(opts.cwd);
-        await this.runtime.switchSession(sm.getSessionFile()!, { cwdOverride: opts.cwd });
-      }
+  /** Model runtime owning a cwd (for ambient model calls: titles, recaps).
+   *  Falls back to the foreground entry's project when cwd is unknown. */
+  private async modelRuntimeForCwd(cwd: string): Promise<ModelRuntime> {
+    // Strict project lookup: a failure for Project A must never silently
+    // become a model call against Project B (no foreground fallback).
+    if (!cwd) throw new Error("project cwd is required for model runtime");
+    return this.ensureProjectRuntime(cwd);
+  }
+
+  /** Pre-warm a project BEFORE its execution activation: build the rollback
+   *  shadow index and start the project's shared model runtime. Both are
+   *  idempotent and the first activation would do the same work, so this only
+   *  moves the cold cost off the critical path of the first send. */
+  warmProject(cwd: string): { warmed: true } {
+    this.warmSnapshots(cwd);
+    void this.ensureProjectRuntime(cwd).catch(() => undefined);
+    return { warmed: true };
+  }
+
+  /** Pi's switch callback: an EXECUTION HANDOFF, not foregrounding. The
+   *  target becomes this project's owner and the source goes cold. Pi may
+   *  call this from INSIDE `runtime.fork()` while the source call is still
+   *  on the stack, so the source is never disposed from this callback (it
+   *  would destroy the runtime performing the fork) — the handoff is staged
+   *  and finalized by the operation that triggered it. */
+  private async stageExecutionHandoff(
+    source: SessionEntry,
+    sessionPath: string,
+    options?: SwitchSessionOptions & { cwdOverride?: string },
+  ): Promise<AgentState> {
+    // The SOURCE entry defines the project: an internal Pi switch can never
+    // inherit a host-global current cwd (C8).
+    const targetCwd = options?.cwdOverride ?? source.cwd;
+    if (source.sessionFile === sessionPath) {
+      this.touchEntry(source);
+      return this.prepareExecutionEntry(source);
     }
-    this._cwd = opts.cwd;
-    await this.restoreActiveRollbackLeaf();
-    const state = await this.getState();
-    this.lastMessageAt.set(state.sessionFile ?? opts.path ?? opts.cwd, Date.now());
-    this.opts.onStatus({ status: "ready", cwd: opts.cwd, sessionPath: state.sessionFile ?? opts.path, requestId: opts.requestId, state });
+    // Detached first: a busy or failing build never installs anything.
+    const candidate = await this.materializeExecutionRuntime(sessionPath, targetCwd);
+    if (source && (await this.isExecutionBusy(source))) {
+      await this.disposeDetachedEntry(candidate);
+      throw new ProjectExecutionBusyError(source.sessionFile, source.sessionId);
+    }
+    // Transient duplicate (R8): the source stays installed until the
+    // operation that requested the switch returns and finalizes. With no
+    // current owner there is nothing to hand off from — just install.
+    this.installExecutionEntry(candidate);
+    this.touchEntry(candidate);
+    this.pendingHandoff = { source, candidate, targetFile: sessionPath, targetCwd };
+    await this.prepareExecutionEntry(candidate);
+    if (this.sourceOperationDepth === 0) await this.finalizeExecutionHandoff();
+    return this.getStateFor(candidate);
+  }
+
+  /** Converge a staged handoff once the source operation returned. Returns
+   *  the file owning the project afterwards, or null when the handoff was
+   *  abandoned because the source went busy (it keeps the project — its work
+   *  is never aborted). */
+  private async finalizeExecutionHandoff(): Promise<string | null> {
+    const staged = this.pendingHandoff;
+    if (!staged) return null;
+    this.pendingHandoff = null;
+    if (await this.isExecutionBusy(staged.source)) {
+      this.executionByCwd.set(projectKey(staged.source.cwd), staged.source.sessionFile);
+      await this.disposeDetachedEntry(staged.candidate);
+      return null;
+    }
+    await this.releaseOwnerEntry(staged.source);
+    this.installExecutionEntry(staged.candidate);
+    this.emitExecutionChanged(staged.candidate.cwd);
+    return staged.targetFile;
+  }
+
+  /** Drop a staged handoff without transferring ownership (cancel/failure):
+   *  the transient target is disposed and the source keeps the project. */
+  private async abandonExecutionHandoff(): Promise<void> {
+    const staged = this.pendingHandoff;
+    if (!staged) return;
+    this.pendingHandoff = null;
+    this.executionByCwd.set(projectKey(staged.source.cwd), staged.source.sessionFile);
+    await this.disposeDetachedEntry(staged.candidate);
+  }
+
+  /**
+   * Agent-requested new session: a COLD file, never an installed runtime.
+   *  Installing one would immediately violate one-hot retention when the
+   *  agent's own session is this project's owner. If Pi needs a live runtime
+   *  to mint the file, it is built transiently and disposed before we
+   *  return; only the transcript survives.
+   */
+  private async createSessionIn(cwd: string, _options?: NewSessionOptions): Promise<AgentState> {
+    const candidate = await this.materializeExecutionRuntime(null, cwd);
+    const state = await this.getStateFor(candidate);
+    await this.disposeDetachedEntry(candidate);
+    this.opts.onEvent({ type: "pideck_sessions_changed" });
     return state;
-    });
   }
 
   private isMissingCwdError(err: unknown): boolean {
-    return err instanceof Error && (err as any).name === "MissingSessionCwdError";
+    return err instanceof Error && err.name === "MissingSessionCwdError";
   }
 
+  /**
+   * Cheap disk identity of a transcript (one stat, no parse). Null when the
+   * file is missing or unreadable — callers treat that as "unknown, sync".
+   */
+  private async fingerprintSessionFile(file: string): Promise<DiskFingerprint | null> {
+    try {
+      const st = await fsp.stat(file);
+      if (!st.isFile()) return null;
+      return { ino: st.ino, size: st.size, mtimeMs: st.mtimeMs };
+    } catch {
+      return null;
+    }
+  }
+
+  private sameFingerprint(a: DiskFingerprint | null | undefined, b: DiskFingerprint | null | undefined): boolean {
+    // Both missing: still no file, so nothing could have appeared to pull.
+    // (A sync attempt would just throw the missing-file error that the
+    // caller already treats as "live session stands".)
+    if (!a && !b) return true;
+    return !!a && !!b && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs;
+  }
+
+  /**
+   * Pull disk changes for one session WITHOUT foregrounding it. A disk sync
+   * must never emit a global ready: a stale refresh completing after a tab
+   * switch would otherwise rebind the UI to the old session (ready means
+   * "this is now foreground", which sync is not). Callers hydrate the
+   * session they display explicitly from the boolean result. Skips the
+   * reparse when the disk fingerprint is unchanged (still returns true:
+   * the runtime trivially matches disk).
+   */
   async refreshFromDisk(sessionPath: string): Promise<boolean> {
-    return this.enqueueTransition(async () => {
-      await this.ensureSession();
-      if (this.runtime.session.sessionFile !== sessionPath || this.runtime.session.isStreaming) return false;
-      this.syncSessionFromDisk(sessionPath, this.cwd);
-      await this.restoreActiveRollbackLeaf();
-      const state = await this.getState();
-      this.opts.onStatus({ status: "ready", cwd: this.cwd, sessionPath, state });
+    return this.enqueueTransition(sessionPath, async () => {
+      const entry = this.sessions.get(sessionPath);
+      if (!entry || entry.runtime.session.isStreaming) return false;
+      const fp = await this.fingerprintSessionFile(sessionPath);
+      if (this.sameFingerprint(fp, entry.diskFingerprint)) return true;
+      try {
+        this.syncSessionFromDisk(entry, entry.cwd);
+      } catch (err) {
+        // Unflushed new session: nothing on disk to pull; live state stands.
+        if (!isMissingFileError(err)) throw err;
+      }
+      // Store the fingerprint observed BEFORE the read, not after: an
+      // append racing the read must NOT be recorded as ingested. The next
+      // comparison then mismatches and forces another sync. A stale-read
+      // corner (append landed before open() and was actually included)
+      // costs one redundant reparse — toward extra work, never stale state.
+      entry.diskFingerprint = fp;
+      await this.restoreRollbackLeafFor(entry.runtime.session);
       return true;
     });
   }
 
   /**
-   * Pull append-only changes made by another pi process into the current idle
+   * Pull append-only changes made by another pi process into an idle
    * session without replacing the extension runtime. A full switch would fire
    * session_shutdown and incorrectly stop persistent threads on every TUI write.
    */
-  private syncSessionFromDisk(sessionPath: string, cwdOverride: string): void {
-    const sessionManager = SessionManager.open(sessionPath, undefined, cwdOverride);
+  private syncSessionFromDisk(entry: SessionEntry, cwdOverride: string): void {
+    const sessionManager = SessionManager.open(entry.sessionFile, undefined, cwdOverride);
     const context = sessionManager.buildSessionContext();
-    const session = this.runtime.session;
-    (session as any).sessionManager = sessionManager;
+    const session = entry.runtime.session;
+    // Deliberate swap: the disk state is newer (another pi process wrote
+    // it), so the live session adopts the fresh manager. The field is
+    // readonly in the SDK type, hence the targeted assertion.
+    (session as { sessionManager: SessionManager }).sessionManager = sessionManager;
     session.agent.state.messages = context.messages;
     if (context.model) {
-      const model = this.modelRuntime.getModel(context.model.provider, context.model.modelId);
+      const model = entry.services.modelRuntime.getModel(context.model.provider, context.model.modelId);
       if (model) session.agent.state.model = model;
     }
-    session.agent.state.thinkingLevel = context.thinkingLevel as any;
-  }
-
-  async newSession(opts?: { parentSession?: string }): Promise<any> {
-    return this.enqueueTransition(async () => {
-      await this.ensureSession();
-      await this.runtime.newSession({ parentSession: opts?.parentSession });
-      const state = await this.getState();
-      this.opts.onStatus({ status: "ready", cwd: this.cwd, sessionPath: state.sessionFile, state });
-      return state;
-    });
-  }
-
-  async switchTo(sessionPath: string, options?: any): Promise<any> {
-    return this.enqueueTransition(async () => {
-      await this.ensureSession();
-      const r = await this.runtime.switchSession(sessionPath, options);
-      await this.restoreActiveRollbackLeaf();
-      const state = await this.getState();
-      this.opts.onStatus({ status: "ready", cwd: this.cwd, sessionPath, state });
-      return r;
-    });
+    // The file stores a plain string; only assign it when it names a level
+    // the agent type accepts (a corrupt value must not clobber the live one).
+    const level = context.thinkingLevel;
+    if (
+      level === "off" || level === "minimal" || level === "low" || level === "medium" ||
+      level === "high" || level === "xhigh" || level === "max"
+    ) {
+      session.agent.state.thinkingLevel = level;
+    }
   }
 
   // -------------------------------------------------------------------------
   // Agent commands
   // -------------------------------------------------------------------------
 
-  async prompt(message: string, images?: any[], streamingBehavior?: "steer" | "followUp"): Promise<any> {
-    await this.ensureSession();
-    const sessionAtStart = this.runtime.session;
+  /** Refuse new turns while draining for restart. Idempotent. */
+  beginDrain(): void {
+    this.draining = true;
+  }
+
+  isDraining(): boolean {
+    return this.draining;
+  }
+
+  /** Sessions with live work a restart must not kill: streaming turns,
+   *  turns awaiting approval, and sessions with active subagents. */
+  activeTurnCount(): number {
+    let count = 0;
+    for (const [sessionFile, entry] of this.sessions) {
+      const session = entry?.runtime?.session;
+      if (!session) continue;
+      if (session.isStreaming) {
+        count++;
+      } else if ([...this.uiRequests.values()].some((p) => p.sessionFile === sessionFile)) {
+        count++;
+      } else if (this.managedSubagents?.hasActiveForSession(session.sessionId)) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /** Wait for live turns to finish, up to timeoutMs. True when quiet. */
+  async drainTurns(timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    for (;;) {
+      if (this.activeTurnCount() === 0) return true;
+      if (Date.now() >= deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+
+  async prompt(message: string, images: PromptImage[] | undefined, streamingBehavior: "steer" | "followUp" | undefined, sessionFile: string): Promise<void> {
+    if (this.draining) throw new Error("daemon is draining for restart; please resend in a moment");
+    // Mandatory identity + ownership: a turn may only run in the project's
+    // declared execution session. Missing identity is a protocol error;
+    // retained historical sessions cannot bypass executionActivate (I4/I7).
+    const entry = this.requireExecutionEntry(sessionFile);
+    const sessionAtStart = entry.runtime.session;
     const rollbackAtStart = (await this.rollbacks.load(sessionAtStart.sessionId).catch(() => null))?.active;
     const entriesAtStart = entryDigest(sessionAtStart.sessionManager.getEntries());
     // Mid-stream steer/follow-up messages cannot establish a race-free
     // filesystem boundary. They remain part of the active checkpointed turn.
-    const checkpoint = streamingBehavior ? null : await this.captureTurnStart();
-    const opts: any = {};
+    const checkpoint = streamingBehavior ? null : await this.captureTurnStart(entry);
+    const opts: PromptOptions = {};
     // Snapcompact no longer decorates the user message here. The
     // transient archive projection is injected by the snapcompact
     // extension's `context` handler, which runs before every LLM
     // call. This method only forwards the user-supplied message and
     // images so canonical session records remain untouched.
     try {
-      if (images?.length) opts.images = toPiImages(images);
+      if (images?.length) {
+        // A configured image model reads attached images when the session's
+        // own model has no vision: its description is relayed to the session
+        // instead of the raw image blocks. Otherwise images attach directly.
+        const settings = this._getSettings();
+        const sessionModel = entry.runtime.session.model;
+        const described =
+          shouldRelayImagesThrough(settings.imageModel, sessionModel)
+            ? await this.describeImages(message, images, entry.cwd).catch(() => null)
+            : null;
+        if (described) message = described;
+        else opts.images = toPiImages(images);
+      }
       if (streamingBehavior) opts.streamingBehavior = streamingBehavior;
-      return await this.runtime.session.prompt(message, opts);
+      return await sessionAtStart.prompt(message, opts);
     } finally {
-      if (rollbackAtStart && this.runtime.session.sessionId === rollbackAtStart.sessionId) {
+      if (rollbackAtStart && sessionAtStart.sessionId === rollbackAtStart.sessionId) {
         const continued =
-          entryDigest(this.runtime.session.sessionManager.getEntries()) !== entriesAtStart ||
-          this.runtime.session.sessionManager.getLeafId() !== rollbackAtStart.rollbackLeafId;
+          entryDigest(sessionAtStart.sessionManager.getEntries()) !== entriesAtStart ||
+          sessionAtStart.sessionManager.getLeafId() !== rollbackAtStart.rollbackLeafId;
         if (continued) await this.rollbacks.clearActive(rollbackAtStart.sessionId).catch(() => undefined);
       }
-      if (checkpoint) await this.captureTurnEnd(checkpoint).catch(() => undefined);
+      if (checkpoint) {
+        if ("skipped" in checkpoint) await this.recordTurnSkipped(checkpoint.skipped, entry).catch(() => undefined);
+        else await this.captureTurnEnd(checkpoint, entry).catch(() => undefined);
+      }
     }
   }
-  async steer(message: string): Promise<any> {
-    await this.ensureSession();
-    await this.commitActiveRollback();
-    return this.runtime.session.steer(message);
+  // A configured image model reads attached images (screenshots, diagrams)
+  // when the session's chat model has no vision. The description is appended
+  // to the user message as text so a vision-less chat model still sees the
+  // content; the raw image blocks are not forwarded. Returns null when no
+  // image model is set or the read fails — the caller then falls back to
+  // attaching the images directly.
+  private async describeImages(message: string, images: PromptImage[], cwd: string): Promise<string | null> {
+    const settings = this._getSettings();
+    const imageRef = settings.imageModel;
+    if (!imageRef) return null;
+    const modelRuntime = await this.modelRuntimeForCwd(cwd);
+    const model = modelRuntime.getModel(imageRef.provider, imageRef.modelId);
+    if (!model) return null;
+    try {
+      const response = await modelRuntime.completeSimple(
+        model,
+        {
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: "Describe each attached image in precise detail: what it shows, every visible text string, layout, colors, and anything a coding assistant needs to act on the screenshot or diagram. Be thorough and concrete." },
+                ...(toPiImages(images) ?? []),
+              ],
+              timestamp: Date.now(),
+            },
+          ],
+        },
+        { reasoning: "low", maxTokens: 2048 }
+      );
+      const text = (response?.content ?? [])
+        .map((block) => (block?.type === "text" ? (block.text ?? "") : ""))
+        .join("")
+        .trim();
+      if (!text) return null;
+      return `${message}\n\n[Attached image(s) described by ${imageRef.provider}/${imageRef.modelId}]\n${text}`;
+    } catch {
+      return null;
+    }
   }
-  async followUp(message: string): Promise<any> {
-    await this.ensureSession();
-    await this.commitActiveRollback();
-    return this.runtime.session.followUp(message);
+
+  /**
+   * Reads a sketch: one crop per region, one closed question each, parsed strictly.
+   * Reading a drawing is the job the configured image model already exists for,
+   * so it is the model used here, and a crop that cannot be read becomes a
+   * question rather than a failed compile.
+   */
+  async classifyRegions(
+    cwd: string,
+    crops: { regionId: string; dataUrl: string }[]
+  ): Promise<Record<string, RegionReading>> {
+    const imageRef = this._getSettings().imageModel;
+    if (!imageRef) throw new Error("Set an image model in Settings to have a sketch read.");
+    const modelRuntime = await this.modelRuntimeForCwd(cwd);
+    const model = modelRuntime.getModel(imageRef.provider, imageRef.modelId);
+    if (!model) throw new Error(`${imageRef.provider}/${imageRef.modelId} is not available in this project.`);
+
+    if (!crops.length) console.warn("[canvas] classify called with no crops");
+    const { readings, problems } = await readCrops(crops, async ({ prompt, image }) =>
+      modelRuntime.completeSimple(
+        model,
+        {
+          messages: [{ role: "user", content: [{ type: "text", text: prompt }, { type: "image", ...image }], timestamp: Date.now() }],
+        },
+        { reasoning: "low", maxTokens: 512 }
+      )
+    );
+    // Unreadable is a question for the human, not a broken compile. The reason
+    // still has to be visible, or a classifier that fails every time looks
+    // exactly like a drawing nothing could be made of.
+    for (const problem of problems) console.warn(`[canvas] ${problem.regionId}: ${problem.reason}`);
+    return readings;
   }
-  async abort(): Promise<any> {
-    await this.ensureSession();
-    return this.runtime.session.abort();
+
+  /** Run a `/goal …` control invocation on the ADDRESSED session and return
+   *  the fresh durable state. Control-plane, not a turn: extension commands
+   *  execute immediately inside `session.prompt` and never append a user
+   *  message, so unlike `prompt()` this takes no checkpoint, records no
+   *  rollback receipt, and wakes no shared-chat extras. */
+  async execGoalCommand(sessionFile: string, args: string): Promise<DurableGoalState | null> {
+    if (this.draining) throw new Error("daemon is draining for restart; please resend in a moment");
+    const text = args ? `/goal ${args}` : "/goal";
+    if (!/^\/goal(\s|$)/.test(text)) throw new Error("goal control must be a /goal invocation");
+    // Explicit identity, never the foreground pointer: a cancel issued for
+    // session A must execute on A even if the UI moved to B mid-flight.
+    const entry = this.requireExecutionEntry(sessionFile);
+    await entry.runtime.session.prompt(text, {});
+    return loadSessionGoal(entry.cwd, entry.sessionId);
   }
-  async compact(customInstructions?: string): Promise<any> {
-    return this.enqueueTransition(async () => {
-      await this.ensureSession();
-      const session = this.runtime.session;
+
+  /**
+   * Transactional goal start for an explicitly addressed session: persist
+   * the objective, then run the message as the turn itself (before_agent_
+   * start injects the goal context into that same turn — no synthetic
+   * [Goal Mode Start] follow-up, unlike the `/goal <objective>` command).
+   * Same 4000-char ceiling as the command path.
+   *
+   * Turn failures RETURN normally as `{ goal, started, error }` (never
+   * throw) so the renderer need not infer anything: `started: false` means
+   * the message never became a turn — the persisted goal is rolled back
+   * (previous state restored, fresh starts cleared) and the caller drops
+   * its optimistic row with the goal OFF. `started: true` (abort, mid-turn
+   * model error) means the turn exists with goal context already injected —
+   * the goal stands and the caller keeps row and dot. Only validation,
+   * unknown-session, and transport failures throw.
+   */
+  async beginGoalPrompt(
+    sessionFile: string,
+    objective: string,
+    message: string,
+    images?: PromptImage[],
+    streamingBehavior?: "steer" | "followUp"
+  ): Promise<GoalBeginResult> {
+    const text = objective.trim();
+    if (!text || text.length > 4000) throw new Error("invalid goal objective");
+    const entry = this.requireExecutionEntry(sessionFile);
+    // Mutual exclusion (backend invariant, not just renderer gating): an
+    // active design owns this session's execution model (approval gates).
+    // Goal auto-continuation must never run under it — not from the GUI,
+    // not from stale state, not from a manual /goal command.
+    const blockingDesign = await loadDesignState(entry.cwd, entry.runtime.session.sessionId).catch(() => null);
+    if (blockingDesign && !blockingDesign.done) {
+      throw new Error("a design session is active — end it before starting a goal");
+    }
+    const sid = entry.runtime.session.sessionId;
+    const previous = await loadSessionGoal(entry.cwd, sid).catch(() => null);
+    const digestAtStart = entryDigest(entry.runtime.session.sessionManager.getEntries());
+    const config = await loadGoalModeConfig(entry.cwd, defaultDurableGoalModeConfig(), this.trustByCwd.get(entry.cwd) ?? false);
+    await saveSessionGoal(entry.cwd, sid, createDurableGoalState(text, config));
+    try {
+      await this.prompt(message, images, streamingBehavior, sessionFile);
+    } catch (e) {
+      let started = true;
+      try {
+        started = entryDigest(entry.runtime.session.sessionManager.getEntries()) !== digestAtStart;
+      } catch {
+        started = true;
+      }
+      let goal: DurableGoalState | null = null;
+      if (!started) {
+        try {
+          if (previous) {
+            await saveSessionGoal(entry.cwd, sid, previous);
+            goal = previous;
+          } else {
+            await clearSessionGoal(entry.cwd, sid);
+          }
+        } catch {
+          /* restoration is best-effort; the outcome below still reports */
+        }
+      } else {
+        goal = await loadSessionGoal(entry.cwd, entry.runtime.session.sessionId).catch(() => null);
+      }
+      return { goal, started, error: errorMessage(e, "goal turn failed") };
+    }
+    return { goal: await loadSessionGoal(entry.cwd, entry.runtime.session.sessionId).catch(() => null), started: true, error: null };
+  }
+  /**
+   * Run a `/design …` control invocation on an explicitly addressed session
+   * (same contract as `execGoalCommand`): the extension command runs,
+   * follow-ups dispatch, and the fresh design state is read back. Bare
+   * `/design` only reports. Path-addressed like every other GUI control —
+   * the foreground may move before the backend handles the click.
+   */
+  async designGetArtifact(
+    sessionFile: string,
+    kind: DesignArtifactKind
+  ): Promise<DesignArtifact> {
+    if (this.draining) throw new Error("daemon is draining for restart; please resend in a moment");
+    const entry = this.requireExecutionEntry(sessionFile);
+    const design = await loadDesignState(entry.cwd, entry.sessionId);
+    if (!design) throw new Error("No design session.");
+    return readDesignArtifact(entry.cwd, design, kind);
+  }
+
+  /**
+   * Approve an artifact the user actually read, bound to that exact revision.
+   * The file may have been rewritten since the review surface opened it —
+   * approving unseen text is the bug this refuses.
+   */
+  async designApproveArtifact(
+    sessionFile: string,
+    kind: DesignArtifactKind,
+    revision: string
+  ): Promise<DesignStatus> {
+    if (this.draining) throw new Error("daemon is draining for restart; please resend in a moment");
+    const entry = this.requireExecutionEntry(sessionFile);
+    const design = await loadDesignState(entry.cwd, entry.sessionId);
+    if (!design) throw new Error("No design session.");
+    if (kind === "direction" && !design.briefApproved) {
+      throw new Error("The brief must be approved before the design direction.");
+    }
+    // Throws DesignArtifactChangedError when the text moved under the user.
+    await approveDesignArtifact(entry.cwd, design, kind, revision);
+    const next = { ...design, [approvedFlagFor(kind)]: true } as DesignState;
+    await saveDesignState(entry.cwd, entry.sessionId, next);
+    // Approve and continue: the next stage starts now, as an internal follow-up
+    // on the OWNING session — never a synthetic user message.
+    const session = entry.runtime.session;
+    void session
+      .sendUserMessage(
+        kind === "brief"
+          ? [
+              "[Design] The brief is approved.",
+              `Begin the direction stage for "${next.subject}": read the approved brief at ${next.briefPath}, derive the design direction (EXTEND, EVOLVE or RETHINK) from it and the repository, and write ${next.directionPath} per the design playbook.`,
+            ].join("\n")
+          : [
+              "[Design] The design direction is approved.",
+              `Begin the build stage for "${next.subject}" per the design playbook (target: ${next.target}).`,
+            ].join("\n"),
+        { deliverAs: "followUp" }
+      )
+      .catch((err: unknown) => {
+        console.warn(`[pideck] design approval follow-up failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
+    return { design: next, stage: stageOfState(entry.cwd, next), maxRounds: JUDGE_MAX_ROUNDS };
+  }
+
+  async execDesignCommand(sessionFile: string, args: string): Promise<DesignStatus> {
+    if (this.draining) throw new Error("daemon is draining for restart; please resend in a moment");
+    const text = args ? `/design ${args}` : "/design";
+    if (!/^\/design(\s|$)/.test(text)) throw new Error("design control must be a /design invocation");
+    const entry = this.requireExecutionEntry(sessionFile);
+    await entry.runtime.session.prompt(text, {});
+    const design = await loadDesignState(entry.cwd, entry.sessionId);
+    return { design, stage: stageOfState(entry.cwd, design), maxRounds: JUDGE_MAX_ROUNDS };
+  }
+
+  /**
+   * Transactional design start for an explicitly addressed session: persist
+   * the subject, then run the message as the first interview turn itself
+   * (before_agent_start injects the elicit playbook into that same turn —
+   * no snapshot-at-click, no "Untitled design" state, no synthetic turn).
+   * Overwrites any previous state (including done); on pre-start failure
+   * the previous state is restored, on started-turn failure the design
+   * stands. Same digest-compensation contract as beginGoalPrompt.
+   */
+  async beginDesignPrompt(
+    sessionFile: string,
+    subject: string,
+    message: string,
+    images?: PromptImage[],
+    streamingBehavior?: "steer" | "followUp"
+  ): Promise<DesignBeginResult> {
+    const text = subject.trim().slice(0, 4000);
+    if (!text) throw new Error("invalid design subject");
+    const entry = this.requireExecutionEntry(sessionFile);
+    // Mutual exclusion, mirrored: an active goal (paused or not) owns this
+    // session's execution model. Designing under it would interleave
+    // approval gates with autonomous continuation turns.
+    const blockingGoal = await loadSessionGoal(entry.cwd, entry.runtime.session.sessionId).catch(() => null);
+    if (blockingGoal?.active) {
+      throw new Error("a goal is active — stop it before starting a design");
+    }
+    const sid = entry.runtime.session.sessionId;
+    const previous = await loadDesignState(entry.cwd, sid).catch(() => null);
+    const digestAtStart = entryDigest(entry.runtime.session.sessionManager.getEntries());
+    await saveDesignState(entry.cwd, sid, createDesignState(text, slugFor(text)));
+    try {
+      await this.prompt(message, images, streamingBehavior, sessionFile);
+    } catch (e) {
+      let started = true;
+      try {
+        started = entryDigest(entry.runtime.session.sessionManager.getEntries()) !== digestAtStart;
+      } catch {
+        started = true;
+      }
+      let design: DesignState | null = null;
+      if (!started) {
+        try {
+          if (previous) {
+            await saveDesignState(entry.cwd, sid, previous);
+            design = previous;
+          } else {
+            await clearDesignState(entry.cwd, sid);
+          }
+        } catch {
+          /* restoration is best-effort; the outcome below still reports */
+        }
+      } else {
+        design = await loadDesignState(entry.cwd, entry.runtime.session.sessionId).catch(() => null);
+      }
+      return {
+        design,
+        stage: stageOfState(entry.cwd, design),
+        started,
+        error: errorMessage(e, "design turn failed"),
+        maxRounds: JUDGE_MAX_ROUNDS,
+      };
+    }
+    const design = await loadDesignState(entry.cwd, entry.runtime.session.sessionId).catch(() => null);
+    return { design, stage: stageOfState(entry.cwd, design), started: true, error: null, maxRounds: JUDGE_MAX_ROUNDS };
+  }
+  /** Abort one session's run. Explicit execution identity — never the
+   *  foreground pointer (I8); other sessions keep running untouched. */
+  async abort(sessionFile: string): Promise<void> {
+    const entry = this.requireExecutionEntry(sessionFile);
+    return entry.runtime.session.abort();
+  }
+  async compact(sessionFile: string, customInstructions?: string): Promise<CompactionResult> {
+    const entry = this.requireExecutionEntry(sessionFile);
+    return this.enqueueTransition(entry.sessionFile, async () => {
+      const session = entry.runtime.session;
       // Manual compact also refreshes the snapcompact archive so a user
       // who clicks Compact and selects "snapcompact" strategy sees a
       // current archive on the next prompt. Non-destructive: the
@@ -940,20 +2418,22 @@ export class PiHost {
       try {
         return await session.compact(customInstructions);
       } finally {
-        if (entryDigest(session.sessionManager.getEntries()) !== before) await this.commitActiveRollback();
+        if (entryDigest(session.sessionManager.getEntries()) !== before) {
+          await this.commitActiveRollback(session.sessionId);
+        }
       }
     });
   }
 
-  private async moveToExactLeaf(targetId: string | null): Promise<void> {
-    const session = this.runtime.session;
+  private async moveToExactLeaf(entry: SessionEntry, targetId: string | null): Promise<void> {
+    const session = entry.runtime.session;
     const manager = session.sessionManager;
     if (targetId === null) {
       manager.resetLeaf();
       session.agent.state.messages = manager.buildSessionContext().messages;
       return;
     }
-    const target = manager.getEntry(targetId) as any;
+    const target = manager.getEntry(targetId);
     if (!target) throw new Error("The saved history position no longer exists");
     // navigateTree treats a user entry as an editor target and moves to its
     // parent. An old leaf can itself be a user entry after an interrupted turn,
@@ -968,8 +2448,7 @@ export class PiHost {
     if (manager.getLeafId() !== targetId) throw new Error("Pi did not restore the expected history position");
   }
 
-  private async restoreActiveRollbackLeaf(): Promise<void> {
-    const session = this.runtime.session;
+  private async restoreRollbackLeafFor(session: AgentSession): Promise<void> {
     const ledger = await this.rollbacks.load(session.sessionId).catch(() => null);
     const active = ledger?.active;
     if (!active || session.sessionFile !== active.sessionFile) return;
@@ -983,29 +2462,99 @@ export class PiHost {
     session.agent.state.messages = manager.buildSessionContext().messages;
   }
 
-  private async captureTurnStart(): Promise<{
+  private async captureTurnStart(entry: SessionEntry): Promise<{
     sessionId: string;
     sessionFile: string;
     beforeLeafId: string | null;
     beforeEntryIds: Set<string>;
     before: SnapshotCapture;
-  } | null> {
-    const session = this.runtime.session;
+  } | { skipped: string } | null> {
+    const session = entry.runtime.session;
     const sessionFile = session.sessionFile ?? session.sessionManager.getSessionFile();
-    if (!sessionFile || session.isStreaming) return null;
+    if (!sessionFile) return { skipped: "the session had no file yet" };
+    if (session.isStreaming) return { skipped: "a response was already streaming" };
     // The pre-turn checkpoint is the rollback boundary: it MUST reflect the
     // worktree at this instant, so it is an authoritative capture that reads
     // Git/FS directly and never trusts the eventually-consistent watcher.
-    const before = await this.snapshots.capture(this.cwd, { authoritative: true }).catch(() => null);
-    if (!before) return null;
+    const before = await this.snapshots.capture(entry.cwd, { authoritative: true }).catch(() => null);
+    if (!before) return { skipped: "the pre-turn snapshot failed" };
     const entries = session.sessionManager.getEntries();
     return {
       sessionId: session.sessionId,
       sessionFile,
       beforeLeafId: session.sessionManager.getLeafId(),
-      beforeEntryIds: new Set(entries.map((entry: any) => entry.id)),
+      beforeEntryIds: new Set(entries.map((entry) => entry.id)),
       before,
     };
+  }
+
+  /** A turn that never opened a checkpoint still leaves a receipt, so readers
+   *  can tell "by design" from "broken". Attaches to the latest user message,
+   *  which is the turn's own message in the common case. */
+  private async recordTurnSkipped(reason: string, entry: SessionEntry): Promise<void> {
+    const session = entry.runtime.session;
+    const sessionFile = session.sessionFile ?? session.sessionManager.getSessionFile();
+    if (!sessionFile) return;
+    const entries = session.sessionManager.getEntries();
+    const users = entries.filter((entry) => entry?.type === "message" && entry.message?.role === "user");
+    const user = users[users.length - 1];
+    if (!user?.id) return;
+    await this.rollbacks.recordTurnOutcome({
+      receipt: {
+        sessionId: session.sessionId,
+        sessionFile,
+        userEntryId: user.id,
+        outcome: "skipped",
+        reason,
+        createdAt: new Date().toISOString(),
+      },
+    });
+  }
+
+  private async recordTurnFailed(
+    start: { sessionId: string; sessionFile: string },
+    userId: string | undefined,
+    reason: string
+  ): Promise<void> {
+    if (!userId) return;
+    await this.rollbacks.recordTurnOutcome({
+      receipt: {
+        sessionId: start.sessionId,
+        sessionFile: start.sessionFile,
+        userEntryId: userId,
+        outcome: "failed",
+        reason,
+        createdAt: new Date().toISOString(),
+      },
+    });
+  }
+
+  /**
+   * Test seams for the turn-checkpoint pair (private in production).
+   * Integration tests drive them directly to simulate agent turns.
+   * captureTurnStart can also report {skipped} or null (no session yet);
+   * the seam surfaces that so tests assert the real contract.
+   */
+  async testCaptureTurnStart(sessionFile: string): Promise<{
+    sessionId: string;
+    sessionFile: string;
+    beforeLeafId: string | null;
+    beforeEntryIds: Set<string>;
+    before: SnapshotCapture;
+  } | { skipped: string } | null> {
+    return this.captureTurnStart(this.requireExecutionEntry(sessionFile));
+  }
+
+  async testCaptureTurnEnd(start: {
+    sessionId: string;
+    sessionFile: string;
+    beforeLeafId: string | null;
+    beforeEntryIds: Set<string>;
+    before: SnapshotCapture;
+  }, sessionFile: string): Promise<void> {
+    // Explicit identity (like prompt(sessionFile)): the turn belongs to its
+    // owning session even if the foreground moved while it ran.
+    return this.captureTurnEnd(start, this.requireEntry(sessionFile));
   }
 
   private async captureTurnEnd(start: {
@@ -1014,24 +2563,58 @@ export class PiHost {
     beforeLeafId: string | null;
     beforeEntryIds: Set<string>;
     before: SnapshotCapture;
-  }): Promise<void> {
-    const session = this.runtime.session;
+  }, entry: SessionEntry): Promise<void> {
+    try {
+      await this.captureTurnEndInner(start, entry);
+    } catch (error) {
+      console.warn("[pideck] turn checkpoint failed:", error instanceof Error ? error.message : error);
+    }
+  }
+
+  private async captureTurnEndInner(start: {
+    sessionId: string;
+    sessionFile: string;
+    beforeLeafId: string | null;
+    beforeEntryIds: Set<string>;
+    before: SnapshotCapture;
+  }, entry: SessionEntry): Promise<void> {
+    const session = entry.runtime.session;
     const sessionFile = session.sessionFile ?? session.sessionManager.getSessionFile();
-    if (session.sessionId !== start.sessionId || sessionFile !== start.sessionFile) return;
-    const entries = session.sessionManager.getEntries() as any[];
+    const entries = session.sessionManager.getEntries();
     const user = entries.find(
       (entry) => !start.beforeEntryIds.has(entry.id) && entry.type === "message" && entry.message?.role === "user"
     );
+    if (session.sessionId !== start.sessionId || sessionFile !== start.sessionFile) {
+      await this.recordTurnFailed(start, user?.id, "the session moved to another conversation mid-turn");
+      return;
+    }
     const finalLeafId = session.sessionManager.getLeafId();
-    if (!user || !finalLeafId) return;
+    if (!user || !finalLeafId) {
+      await this.recordTurnFailed(start, user?.id, "the turn recorded no new user message or position");
+      return;
+    }
     // The post-turn snapshot must also be authoritative. `prepareRollback`
     // restores files only for the paths in `changedPaths`, which is derived
     // from this snapshot; a watcher-backed capture that missed the agent's
     // edit would yield an incomplete diff and leave the change in place after
     // a rollback. Reading Git/FS directly guarantees a complete diff.
-    const after = await this.snapshots.capture(this.cwd, { authoritative: true }).catch(() => null);
-    if (!after || after.root !== start.before.root) return;
-    const changedPaths = await this.snapshots.changedFiles(this.cwd, start.before.tree, after.tree);
+    // Entry-scoped like the pre-turn capture: the turn belongs to this
+    // session's project even if the foreground moved while it ran.
+    const after = await this.snapshots.capture(entry.cwd, { authoritative: true }).catch(() => null);
+    if (!after || after.root !== start.before.root) {
+      await this.recordTurnFailed(
+        start,
+        user.id,
+        !after ? "the post-turn snapshot failed" : "the project root moved mid-turn"
+      );
+      return;
+    }
+    // Bookkeeping (the engine's own `.pi/state` logs) mutates as a side
+    // effect of running tools, so without this filter every tool-using turn
+    // — even a purely read-only one — would report "files changed".
+    const changedPaths = (await this.snapshots.changedFiles(entry.cwd, start.before.tree, after.tree)).filter(
+      (path) => !isBookkeepingPath(path)
+    );
     const exclusions = changedExclusions(start.before.excluded, after.excluded);
     if (changedPaths.length > 5000) exclusions.push("More than 5,000 files changed in one turn");
     const checkpoint: TurnCheckpoint = {
@@ -1047,7 +2630,17 @@ export class PiHost {
       exclusions,
       createdAt: new Date().toISOString(),
     };
-    await this.rollbacks.addCheckpoint(checkpoint);
+    await this.rollbacks.recordTurnOutcome({
+      checkpoint,
+      receipt: {
+        sessionId: start.sessionId,
+        sessionFile: start.sessionFile,
+        userEntryId: user.id,
+        outcome: "checkpointed",
+        reason: "checkpoint recorded",
+        createdAt: checkpoint.createdAt,
+      },
+    });
     // Real checkpoint lifecycle → Babylon event stream (renderer maps this to
     // checkpoint.created). Ids only; never checkpoint contents.
     this.opts.onEvent({
@@ -1063,9 +2656,9 @@ export class PiHost {
     });
   }
 
-  private async commitActiveRollback(): Promise<void> {
-    const sessionId = this.runtime?.session?.sessionId;
-    if (!sessionId) return;
+  private async commitActiveRollback(sessionId: string): Promise<void> {
+    // Explicit id from the caller — no foreground fallback (I8): every
+    // production call site already holds its own session identity.
     await this.rollbacks.clearActive(sessionId).catch(() => undefined);
   }
 
@@ -1073,11 +2666,16 @@ export class PiHost {
   // State
   // -------------------------------------------------------------------------
 
-  async getState(): Promise<any> {
-    await this.ensureSession();
-    const s = this.runtime.session;
+  async getState(sessionFile: string): Promise<AgentState> {
+    // Mandatory identity: no ambient "whatever is foregrounded" read (I8).
+    return this.getStateFor(this.requireEntry(sessionFile));
+  }
+
+  async getStateFor(entry: SessionEntry): Promise<AgentState> {
+    const s = entry.runtime.session;
+    const model = toAgentModel(s.model as RuntimeModelLike | null | undefined);
     return {
-      model: s.model ?? null,
+      model,
       thinkingLevel: s.thinkingLevel,
       isStreaming: s.isStreaming,
       isCompacting: s.isCompacting,
@@ -1089,46 +2687,58 @@ export class PiHost {
       pendingMessageCount: 0,
     };
   }
-  async getMessages(): Promise<any[]> {
-    await this.ensureSession();
-    const messages = this.runtime.session.messages;
-    const userEntries = this.runtime.session.sessionManager
+  async getMessages(sessionFile: string): Promise<unknown[]> {
+    // Live-runtime projection for a known session; cold transcripts use the
+    // disk transcript/window reads instead.
+    const entry = this.requireEntry(sessionFile);
+    const messages = entry.runtime.session.messages;
+    const userEntries = entry.runtime.session.sessionManager
       .getBranch()
-      .filter((entry: any) => entry.type === "message" && entry.message?.role === "user");
+      .filter(
+        (entry): entry is SessionMessageEntry => entry.type === "message" && entry.message?.role === "user"
+      );
     let userIndex = 0;
-    return messages.map((message: any) => {
+    return messages.map((message) => {
       if (message?.role !== "user") return clampToolOutput(message);
       const entry = userEntries[userIndex++];
       return entry ? clampToolOutput({ ...message, entryId: entry.id }) : clampToolOutput(message);
     });
   }
-  async getToolOutput(toolCallId: string): Promise<{ content: string; truncated: boolean }> {
-    const file = this.runtime.session.sessionFile;
-    if (!file) throw new Error("No session file for the active session");
-    return readToolOutput(file, toolCallId);
+  async getToolOutput(sessionFile: string, toolCallId: string): Promise<{ content: string; truncated: boolean }> {
+    // Cold-capable: output lives in the transcript file, no runtime needed
+    // (I2). Addressed so expanding B never reads A's identically-named call.
+    if (!sessionFile) throw new Error("sessionFile is required");
+    return readToolOutput(sessionFile, toolCallId);
   }
-  async getStats(): Promise<any> {
-    await this.ensureSession();
-    return this.runtime.session.getSessionStats();
+  async getStats(sessionFile: string): Promise<SessionStats> {
+    const entry = this.requireEntry(sessionFile);
+    return toSessionStats(entry.runtime.session.getSessionStats());
   }
-  async getCommands(): Promise<Array<{ name: string; description?: string; argumentHint?: string; source: string }>> {
-    await this.ensureSession();
-    const extensionCommands = this.runtime.session.extensionRunner.getRegisteredCommands().map((command) => ({
+  async getCommands(sessionFile: string): Promise<CommandInfo[]> {
+    const entry = this.requireEntry(sessionFile);
+    const session = entry.runtime.session;
+    const services = entry.services;
+    const extensionCommands: CommandInfo[] = session.extensionRunner.getRegisteredCommands().map((command) => ({
       name: command.invocationName,
       description: command.description,
       source: "extension",
     }));
-    const prompts = this.runtime.services.resourceLoader.getPrompts().prompts.map((prompt) => ({
+    const prompts: CommandInfo[] = services.resourceLoader.getPrompts().prompts.map((prompt: PromptLike) => ({
       name: prompt.name,
       description: prompt.description,
       argumentHint: prompt.argumentHint,
       source: "prompt",
     }));
-    const skills = this.runtime.services.resourceLoader.getSkills().skills.map((skill) => ({
-      name: `skill:${skill.name}`,
-      description: skill.description,
-      source: "skill",
-    }));
+    const skills = mergeSkillEntries(
+      services.resourceLoader.getSkills().skills.map((skill: SkillLike): CommandInfo => ({
+        name: `skill:${skill.name}`,
+        description: skill.description,
+        source: "skill",
+      })),
+      // User skills pi's loader misses, filters, or hasn't picked up yet.
+      // Same list shape, so `/`, `$`, and palette stay consistent.
+      readUserSkillEntries().map((skill) => ({ ...skill, source: "skill" as const }))
+    );
     const seen = new Set<string>();
     return [...extensionCommands, ...prompts, ...skills].filter((command) => {
       if (seen.has(command.name)) return false;
@@ -1136,31 +2746,44 @@ export class PiHost {
       return true;
     });
   }
-  async getModels(): Promise<any[]> {
-    await this.ensureSession();
-    const available = await this.runtime.services.modelRuntime.getAvailable();
+  async getModels(cwd: string): Promise<AgentModel[]> {
+    // PROJECT-addressed (not session): ModelRuntime is per-cwd and project
+    // extensions affect registration; never another session's services.
+    const modelRuntime = await this.ensureProjectRuntime(cwd);
+    const available = await modelRuntime.getAvailable();
     const overrides = this._getSettings().contextWindowOverrides ?? {};
     return [...available].map((m) => {
       const key = `${m.provider}/${m.id}`;
       const override = overrides[key];
-      return typeof override === "number" && override > 0 ? { ...m, contextWindow: override } : m;
-    }) as any[];
+      const mapped = toAgentModel(m as RuntimeModelLike | null | undefined) ?? { provider: String(m.provider), id: String(m.id) };
+      if (typeof override === "number" && override > 0) mapped.contextWindow = override;
+      return mapped;
+    });
   }
-  async setModel(provider: string, modelId: string): Promise<any> {
-    return this.enqueueTransition(async () => {
-      await this.ensureSession();
-      const model = this.runtime.services.modelRuntime.getModel(provider, modelId);
+  async setModel(sessionFile: string, provider: string, modelId: string): Promise<{ model: unknown }> {
+    const entry = this.requireExecutionEntry(sessionFile);
+    return this.enqueueTransition(entry.sessionFile, async () => {
+      const model = entry.services.modelRuntime.getModel(provider, modelId);
       if (!model) throw new Error(`Model not found: ${provider}/${modelId}`);
-      await this.runtime.session.setModel(model);
-      await this.commitActiveRollback();
+      await entry.runtime.session.setModel(model);
+      await this.commitActiveRollback(entry.runtime.session.sessionId);
       return { model };
     });
   }
-  async setThinking(level: string): Promise<any> {
-    return this.enqueueTransition(async () => {
-      await this.ensureSession();
-      this.runtime.session.setThinkingLevel(level as any);
-      await this.commitActiveRollback();
+  async setThinking(sessionFile: string, level: string): Promise<unknown> {
+    const entry = this.requireExecutionEntry(sessionFile);
+    return this.enqueueTransition(entry.sessionFile, async () => {
+      // The settings/UI surface only offers valid levels, but the daemon
+      // forwards raw strings: validate before handing one to the session.
+      const validated = level;
+      if (
+        validated !== "off" && validated !== "minimal" && validated !== "low" && validated !== "medium" &&
+        validated !== "high" && validated !== "xhigh" && validated !== "max"
+      ) {
+        throw new Error(`Unknown thinking level: ${level}`);
+      }
+      entry.runtime.session.setThinkingLevel(validated);
+      await this.commitActiveRollback(entry.runtime.session.sessionId);
       return {};
     });
   }
@@ -1172,68 +2795,210 @@ export class PiHost {
   async setSettings(patch: Partial<PiSettings>): Promise<PiSettings> {
     return this._saveSettings(patch);
   }
-  async getThinkingLevels(): Promise<string[]> {
-    await this.ensureSession();
+  async getThinkingLevels(sessionFile: string): Promise<string[]> {
+    const entry = this.requireEntry(sessionFile);
     try {
-      const levels = (this.runtime.session as any).getAvailableThinkingLevels?.();
-      return Array.isArray(levels) ? levels : [];
+      // Newer SDKs expose per-model levels; older ones do not.
+      const session = entry.runtime.session as AgentSession & { getAvailableThinkingLevels?: () => unknown };
+      const levels = session.getAvailableThinkingLevels?.();
+      return Array.isArray(levels) && levels.every((l: unknown): l is string => typeof l === "string") ? levels : [];
     } catch {
       return [];
     }
   }
-  async setSessionName(name: string): Promise<any> {
-    return this.enqueueTransition(async () => {
-      await this.ensureSession();
-      this.runtime.session.setSessionName(name);
-      await this.commitActiveRollback();
+  async setSessionName(sessionFile: string, name: string): Promise<unknown> {
+    // Metadata rename needs the retained runtime, not execution ownership
+    // (renameSession is the richer path-addressed API; this stays for
+    // compatibility until the facade cleanup).
+    const entry = this.requireEntry(sessionFile);
+    return this.enqueueTransition(entry.sessionFile, async () => {
+      entry.runtime.session.setSessionName(name);
+      await this.commitActiveRollback(entry.runtime.session.sessionId);
       return {};
     });
+  }
+
+  /** Retained entry by file, tolerant of spelling (canonical vs lexical). */
+  private findEntry(sessionFile: string): SessionEntry | undefined {
+    return (
+      this.sessions.get(sessionFile) ??
+      [...this.sessions.values()].find((entry) => resolve(entry.sessionFile) === resolve(sessionFile))
+    );
+  }
+
+  /** "This retained runtime exists." Mutators never auto-open: runtime
+   *  creation/ownership transfer belongs to executionActivate alone, so a
+   *  cold historical path rejects instead of becoming a hidden activation. */
+  private requireEntry(sessionFile: string): SessionEntry {
+    if (!sessionFile) throw new Error("sessionFile is required");
+    const entry = this.findEntry(sessionFile);
+    if (!entry) throw new Error("Session runtime is not available");
+    this.touchEntry(entry);
+    return entry;
+  }
+
+  /** "This retained runtime is the project's execution session" — the guard
+   *  every runtime MUTATION uses. Path-addressing alone is not enough:
+   *  otherwise a viewed historical session could be explicitly targeted
+   *  while another session owns/does project work and still mutate state. */
+  private requireExecutionEntry(sessionFile: string): SessionEntry {
+    const entry = this.requireEntry(sessionFile);
+    // Normalized key: a lexical cwd variant must resolve to the same slot
+    // (R7), so this guard cannot disagree with installation.
+    const owner = this.executionByCwd.get(projectKey(entry.cwd));
+    if (!owner || resolve(owner) !== resolve(entry.sessionFile)) {
+      throw new Error("This session is not the project's execution session");
+    }
+    return entry;
+  }
+
+  /**
+   * Rename any session by file — foreground, installed owner, or never-opened.
+   * Retained sessions go through the live runtime (same append + rollback
+   * commit as setSessionName, entry-scoped so the live manager stays
+   * coherent). Never-opened sessions get a session_info entry appended via
+   * a short-lived manager: no runtime is created and the foreground never
+   * moves. Throws for unknown (not on disk, not owned) paths.
+   */
+  async renameSession(sessionFile: string, name: string): Promise<unknown> {
+    if (typeof name !== "string" || name.length < 1 || name.length > 500) throw new Error("invalid session name");
+    const retained = this.findEntry(sessionFile);
+    if (retained) {
+      const file = retained.sessionFile;
+      return this.enqueueTransition(file, async () => {
+        await this.ensureSession();
+        const live = this.sessions.get(file) ?? retained;
+        live.runtime.session.setSessionName(name);
+        await this.commitActiveRollback(live.runtime.session.sessionId);
+        return {};
+      });
+    }
+    let target = sessionFile;
+    if (this.opts.sessionsRoot) {
+      try {
+        target = await validateSessionPath(this.opts.sessionsRoot, sessionFile);
+      } catch (error: unknown) {
+        if (!isSessionNotFound(error)) throw error;
+        // Owned but unflushed (canonical future path): resolve lexically,
+        // still containment-checked — same fallback as open().
+        const lexical = resolve(sessionFile);
+        if (!contained(this.opts.sessionsRoot, lexical) || !this.findEntry(lexical)) throw error;
+        target = lexical;
+      }
+    }
+    const raced = this.findEntry(target);
+    if (raced) {
+      const file = raced.sessionFile;
+      return this.enqueueTransition(file, async () => {
+        await this.ensureSession();
+        const live = this.sessions.get(file) ?? raced;
+        live.runtime.session.setSessionName(name);
+        await this.commitActiveRollback(live.runtime.session.sessionId);
+        return {};
+      });
+    }
+    // SessionManager.open tolerates missing files (in-memory manager), so
+    // verify existence here: renaming a path with nothing behind it must
+    // fail loudly, not resolve vacuously.
+    if ((await this.fingerprintSessionFile(target)) === null) {
+      throw new SessionNotFoundError(target);
+    }
+    const manager = SessionManager.open(target, undefined, undefined);
+    manager.appendSessionInfo(name);
+    return {};
   }
 
   // -------------------------------------------------------------------------
   // History, rollback, branching and worktrees
   // -------------------------------------------------------------------------
 
-  async getHistory(): Promise<any> {
-    await this.ensureSession();
-    const session = this.runtime.session;
-    const manager = session.sessionManager;
+  /**
+   * Read context for history/tree/turn projections: prefers the retained
+   * runtime, otherwise opens the transcript manager alone — no AgentSession
+   * (I2: viewing a cold session never materializes a runtime).
+   */
+  private async sessionReadContext(sessionFile: string): Promise<{
+    entry: SessionEntry | null;
+    sessionId: string;
+    cwd: string;
+    manager: SessionManager;
+  }> {
+    if (!sessionFile) throw new Error("sessionFile is required");
+    const retained = this.findEntry(sessionFile);
+    if (retained) {
+      const session = retained.runtime.session;
+      return { entry: retained, sessionId: session.sessionId, cwd: retained.cwd, manager: session.sessionManager };
+    }
+    const manager = SessionManager.open(sessionFile, undefined, undefined);
+    const header = await readSessionHeader(sessionFile);
+    const cwd = wireStr(header ?? undefined, "cwd") ?? resolve(dirname(sessionFile));
+    return { entry: null, sessionId: manager.getSessionId(), cwd, manager };
+  }
+
+  private entryReadContext(entry: SessionEntry) {
+    const session = entry.runtime.session;
+    return { entry, sessionId: session.sessionId, cwd: entry.cwd, manager: session.sessionManager };
+  }
+
+  private async historyProjection(ctx: {
+    entry: SessionEntry | null;
+    sessionId: string;
+    cwd: string;
+    manager: SessionManager;
+  }): Promise<HistoryProjection> {
+    const { entry, sessionId, cwd, manager } = ctx;
     const rows = flattenSessionTree(manager.getTree());
-    const ledger = await this.rollbacks.load(session.sessionId).catch(() => ({ version: 1 as const, checkpoints: [], active: undefined }));
+    const ledger: Ledger = await this.rollbacks.load(sessionId).catch(() => ({ version: 1 as const, checkpoints: [], active: undefined }));
     let active = ledger.active;
     let undoAvailable = false;
     let undoReason: string | undefined;
+    const currentSessionFile = entry?.runtime.session.sessionFile ?? manager.getSessionFile();
+    const streaming = entry?.runtime.session.isStreaming ?? false;
     if (active) {
       const stale =
-        session.sessionFile !== active.sessionFile ||
+        currentSessionFile !== active.sessionFile ||
         manager.getLeafId() !== active.rollbackLeafId ||
         entryDigest(manager.getEntries()) !== active.entryDigest;
       if (stale) {
-        await this.rollbacks.clearActive(session.sessionId).catch(() => undefined);
+        await this.rollbacks.clearActive(sessionId).catch(() => undefined);
         active = undefined;
-      } else if (session.isStreaming) undoReason = "Finish or stop the active response before undoing rollback";
+      } else if (streaming) undoReason = "Finish or stop the active response before undoing rollback";
       else undoAvailable = true;
     }
     return projectHistory({
       rows,
       leafId: manager.getLeafId(),
       checkpoints: ledger.checkpoints,
-      gitAvailable: await this.snapshots.available(this.cwd),
-      streaming: session.isStreaming,
+      receipts: ledger.receipts,
+      gitAvailable: await this.snapshots.available(cwd),
+      streaming,
       activeRollback: active,
       undoAvailable,
       undoReason,
     });
   }
 
-  async getTurnChanges(entryId: string): Promise<any> {
-    await this.ensureSession();
-    const session = this.runtime.session;
-    const ledger = await this.rollbacks.load(session.sessionId).catch(() => ({ version: 1 as const, checkpoints: [], active: undefined }));
+  async getHistory(sessionFile: string): Promise<HistoryProjection> {
+    return this.historyProjection(await this.sessionReadContext(sessionFile));
+  }
+
+  /** Entry-scoped alias for queued bodies that already hold their target. */
+  private getHistoryFor(entry: SessionEntry): Promise<HistoryProjection> {
+    return this.historyProjection(this.entryReadContext(entry));
+  }
+
+  /** Entry-scoped alias for queued bodies that already hold their target. */
+  private moveToExactLeafFor(entry: SessionEntry, targetId: string | null): Promise<void> {
+    return this.moveToExactLeaf(entry, targetId);
+  }
+
+  async getTurnChanges(sessionFile: string, entryId: string): Promise<TurnChanges> {
+    const ctx = await this.sessionReadContext(sessionFile);
+    const ledger: Ledger = await this.rollbacks.load(ctx.sessionId).catch(() => ({ version: 1 as const, checkpoints: [], active: undefined }));
     const checkpoint = ledger.checkpoints.find((item) => item.userEntryId === entryId);
-    if (!checkpoint) throw new Error("No filesystem checkpoint was recorded for this turn");
+    if (!checkpoint) throw new Error(missingCheckpointReason(ledger.receipts, entryId));
     if (!checkpoint.complete) throw new Error("This filesystem checkpoint is incomplete");
-    const files = await this.snapshots.turnChanges(this.cwd, checkpoint.beforeTree, checkpoint.afterTree);
+    const files = await this.snapshots.turnChanges(ctx.cwd, checkpoint.beforeTree, checkpoint.afterTree);
     const totals = files.reduce(
       (acc, file) => {
         acc.files += 1;
@@ -1246,47 +3011,59 @@ export class PiHost {
     return { userEntryId: entryId, files, totals, exclusions: checkpoint.exclusions };
   }
 
-  async getTurnFileDiff(entryId: string, path: string): Promise<any> {
-    await this.ensureSession();
-    const session = this.runtime.session;
-    const ledger = await this.rollbacks.load(session.sessionId).catch(() => ({ version: 1 as const, checkpoints: [], active: undefined }));
+  async getTurnFileDiff(sessionFile: string, entryId: string, path: string): Promise<TurnFileDiff> {
+    const ctx = await this.sessionReadContext(sessionFile);
+    const ledger: Ledger = await this.rollbacks.load(ctx.sessionId).catch(() => ({ version: 1 as const, checkpoints: [], active: undefined }));
     const checkpoint = ledger.checkpoints.find((item) => item.userEntryId === entryId);
-    if (!checkpoint) throw new Error("No filesystem checkpoint was recorded for this turn");
+    if (!checkpoint) throw new Error(missingCheckpointReason(ledger.receipts, entryId));
     if (!checkpoint.complete) throw new Error("This filesystem checkpoint is incomplete");
-    return this.snapshots.fileDiff(this.cwd, checkpoint.beforeTree, checkpoint.afterTree, path);
+    return this.snapshots.fileDiff(ctx.cwd, checkpoint.beforeTree, checkpoint.afterTree, path);
   }
 
-  async prepareRollback(userEntryId: string): Promise<any> {
-    await this.ensureSession();
-    const session = this.runtime.session;
+  async prepareRollback(sessionFile: string, userEntryId: string): Promise<RollbackPlan> {
+    const entry = this.requireExecutionEntry(sessionFile);
+    const session = entry.runtime.session;
     if (session.isStreaming) throw new Error("Finish or stop the active response before rolling back");
     if (!session.sessionFile) throw new Error("Send at least one message before rolling back");
     const ledger = await this.rollbacks.load(session.sessionId);
     if (ledger.active) throw new Error("Undo or continue from the active rollback first");
-    const branch = session.sessionManager.getBranch() as any[];
-    const users = branch.filter((entry) => entry.type === "message" && entry.message?.role === "user");
+    const branch = session.sessionManager.getBranch();
+    const users = branch.filter(
+      (entry): entry is SessionMessageEntry => entry.type === "message" && entry.message?.role === "user"
+    );
     const targetIndex = users.findIndex((entry) => entry.id === userEntryId);
     if (targetIndex < 0) throw new Error("The selected turn is not on the active path");
     const checkpointByUser = new Map(ledger.checkpoints.map((checkpoint) => [checkpoint.userEntryId, checkpoint]));
     const selected = users.slice(targetIndex);
-    const checkpoints = selected.map((entry) => checkpointByUser.get(entry.id));
-    if (checkpoints.some((checkpoint) => !checkpoint)) throw new Error("No filesystem checkpoint was recorded for this turn");
-    if (checkpoints.some((checkpoint) => !checkpoint!.complete)) throw new Error("This filesystem checkpoint is incomplete");
+    // Resolve every selected turn to its checkpoint up front: a missing one
+    // throws the user-facing reason here instead of failing halfway through
+    // the restore below.
+    const checkpoints: TurnCheckpoint[] = selected.map((entry) => {
+      const checkpoint = checkpointByUser.get(entry.id);
+      if (!checkpoint) throw new Error(missingCheckpointReason(ledger.receipts, entry.id));
+      return checkpoint;
+    });
+    if (checkpoints.some((checkpoint) => !checkpoint.complete)) throw new Error("This filesystem checkpoint is incomplete");
+    const target = users[targetIndex];
+    if (!target) throw new Error("The selected turn is not on the active path");
     const previousLeafId = session.sessionManager.getLeafId();
     if (!previousLeafId) throw new Error("No active session position");
     // The redo snapshot is what an "undo" later restores from. If it is stale
     // (watcher hadn't fired when the user clicked Rollback), undo will silently
     // revert to the wrong content. Destructive, so authoritative.
-    const redo = await this.snapshots.capture(this.cwd, { authoritative: true });
+    const redo = await this.snapshots.capture(entry.cwd, { authoritative: true });
     if (!redo) throw new Error("Rollback requires a Git project");
     const restoreMap: Record<string, string> = Object.create(null);
     for (const checkpoint of checkpoints as TurnCheckpoint[]) {
       for (const path of checkpoint.changedPaths) {
+        // Legacy checkpoints may still list bookkeeping admitted before the
+        // capture skip existed; rollback restores project content, never
+        // the engine's own logs.
+        if (isBookkeepingPath(path)) continue;
         if (!Object.hasOwn(restoreMap, path)) restoreMap[path] = checkpoint.beforeTree;
       }
     }
-    const changes = await this.snapshots.preview(this.cwd, redo.tree, restoreMap);
-    const target = users[targetIndex];
+    const changes = await this.snapshots.preview(entry.cwd, redo.tree, restoreMap);
     const plan = {
       id: randomUUID(),
       sessionId: session.sessionId,
@@ -1319,36 +3096,47 @@ export class PiHost {
     };
   }
 
-  async commitRollback(planId: string): Promise<any> {
-    return this.enqueueTransition(async () => {
-      await this.ensureSession();
-      const plan = this.rollbackPlans.get(planId);
-      if (!plan || Date.now() - plan.createdAt > 10 * 60_000) throw new Error("The rollback preview expired; review it again");
-      const session = this.runtime.session;
+  async commitRollback(planId: string): Promise<{ editorText: string; history: HistoryProjection }> {
+    // Key on the plan's own session, not the foreground: the plan was
+    // prepared against that session and the body below refuses to run
+    // against any other.
+    const plan = this.rollbackPlans.get(planId);
+    // The plan carries its session identity — it IS the addressed
+    // capability. No foreground fallback: a plan for a session that lost
+    // execution ownership must fail before any file is touched.
+    if (!plan || Date.now() - plan.createdAt > 10 * 60_000) throw new Error("The rollback preview expired; review it again");
+    const key = plan.sessionFile;
+    return this.enqueueTransition(key, async () => {
+      const livePlan = this.rollbackPlans.get(planId);
+      if (!livePlan || Date.now() - livePlan.createdAt > 10 * 60_000) throw new Error("The rollback preview expired; review it again");
+      const entry = this.requireExecutionEntry(livePlan.sessionFile);
+      const session = entry.runtime.session;
       const manager = session.sessionManager;
       if (session.isStreaming) throw new Error("Finish or stop the active response before rolling back");
-      if (session.sessionId !== plan.sessionId || session.sessionFile !== plan.sessionFile) throw new Error("The active session changed");
-      if (manager.getLeafId() !== plan.expectedLeafId || entryDigest(manager.getEntries()) !== plan.entryDigest) {
+      if (session.sessionId !== livePlan.sessionId || session.sessionFile !== livePlan.sessionFile) throw new Error("The active session changed");
+      if (manager.getLeafId() !== livePlan.expectedLeafId || entryDigest(manager.getEntries()) !== livePlan.entryDigest) {
         throw new Error("The session changed; review the rollback again");
       }
       // Drift guard. A stale cache would compare equal to the redo snapshot
       // and let the restore overwrite the user's manual edit. Destructive, so
       // authoritative.
-      const current = await this.snapshots.capture(this.cwd, { authoritative: true });
-      if (!current || current.tree !== plan.redo.tree) throw new Error("Project files changed; review the rollback again");
-      await this.snapshots.restore(this.cwd, plan.restoreMap);
+      const current = await this.snapshots.capture(entry.cwd, { authoritative: true });
+      if (!current || current.tree !== livePlan.redo.tree) throw new Error("Project files changed; review the rollback again");
+      await this.snapshots.restore(entry.cwd, livePlan.restoreMap);
       let navigated = false;
       try {
-        const target = manager.getEntry(plan.targetUserEntryId) as any;
-        let editorText = plan.editorText;
-        if (manager.getLeafId() === plan.targetUserEntryId && target?.type === "message" && target.message?.role === "user") {
+        const target = manager.getEntry(livePlan.targetUserEntryId);
+        let editorText = livePlan.editorText;
+        const targetWire = wireOf(target);
+        const targetMessage = wireOf(targetWire?.message);
+        if (manager.getLeafId() === livePlan.targetUserEntryId && targetWire?.type === "message" && wireStr(targetMessage, "role") === "user") {
           // Pi's navigateTree short-circuits when target === leaf before applying
           // its user-message "move to parent and edit" semantics.
-          if (target.parentId === null) manager.resetLeaf();
-          else manager.branch(target.parentId);
+          if (targetWire.parentId === null) manager.resetLeaf();
+          else if (typeof targetWire.parentId === "string") manager.branch(targetWire.parentId);
           session.agent.state.messages = manager.buildSessionContext().messages;
         } else {
-          const result = await session.navigateTree(plan.targetUserEntryId, { summarize: false });
+          const result = await session.navigateTree(livePlan.targetUserEntryId, { summarize: false });
           if (result.cancelled) throw new Error("Rollback was cancelled by an extension");
           editorText = result.editorText ?? editorText;
         }
@@ -1359,38 +3147,38 @@ export class PiHost {
         }
         const active: ActiveRollback = {
           version: 1,
-          sessionId: plan.sessionId,
-          sessionFile: plan.sessionFile,
-          targetUserEntryId: plan.targetUserEntryId,
+          sessionId: livePlan.sessionId,
+          sessionFile: livePlan.sessionFile,
+          targetUserEntryId: livePlan.targetUserEntryId,
           rollbackLeafId,
-          previousLeafId: plan.expectedLeafId,
+          previousLeafId: livePlan.expectedLeafId,
           entryDigest: entryDigest(manager.getEntries()),
-          redoTree: plan.redo.tree,
-          restoreMap: plan.restoreMap,
-          restoredPaths: Object.keys(plan.restoreMap),
-          abandonedUserEntryIds: plan.abandonedUserEntryIds,
+          redoTree: livePlan.redo.tree,
+          restoreMap: livePlan.restoreMap,
+          restoredPaths: Object.keys(livePlan.restoreMap),
+          abandonedUserEntryIds: livePlan.abandonedUserEntryIds,
           editorText,
           createdAt: new Date().toISOString(),
           state: "active",
         };
-        await this.rollbacks.setActive(plan.sessionId, active);
+        await this.rollbacks.setActive(livePlan.sessionId, active);
         this.rollbackPlans.delete(planId);
-        return { editorText: active.editorText, history: await this.getHistory() };
+        return { editorText: active.editorText, history: await this.getHistoryFor(entry) };
       } catch (error) {
         if (navigated) {
-          await this.moveToExactLeaf(plan.expectedLeafId).catch(() => undefined);
+          await this.moveToExactLeafFor(entry, livePlan.expectedLeafId).catch(() => undefined);
         }
-        const redoMap = Object.fromEntries(Object.keys(plan.restoreMap).map((path) => [path, plan.redo.tree]));
-        await this.snapshots.restore(this.cwd, redoMap).catch(() => undefined);
+        const redoMap = Object.fromEntries(Object.keys(livePlan.restoreMap).map((path) => [path, livePlan.redo.tree]));
+        await this.snapshots.restore(entry.cwd, redoMap).catch(() => undefined);
         throw error;
       }
     });
   }
 
-  async undoRollback(): Promise<any> {
-    return this.enqueueTransition(async () => {
-      await this.ensureSession();
-      const session = this.runtime.session;
+  async undoRollback(sessionFile: string): Promise<{ history: HistoryProjection }> {
+    const entry = this.requireExecutionEntry(sessionFile);
+    return this.enqueueTransition(entry.sessionFile, async () => {
+      const session = entry.runtime.session;
       const manager = session.sessionManager;
       const ledger = await this.rollbacks.load(session.sessionId);
       const active = ledger.active;
@@ -1403,67 +3191,121 @@ export class PiHost {
       // Undo restores the redo tree. The drift check below must see the real
       // current worktree; a stale cache could report no drift and let the
       // restore silently overwrite a manual edit made after the rollback.
-      const current = await this.snapshots.capture(this.cwd, { authoritative: true });
+      const current = await this.snapshots.capture(entry.cwd, { authoritative: true });
       if (!current) throw new Error("Rollback snapshots are unavailable");
-      const drift = await this.snapshots.preview(this.cwd, current.tree, active.restoreMap);
+      const drift = await this.snapshots.preview(entry.cwd, current.tree, active.restoreMap);
       if (drift.length) {
         await this.rollbacks.clearActive(session.sessionId);
         throw new Error("Undo rollback is no longer available because restored files changed");
       }
       const redoMap = Object.fromEntries(active.restoredPaths.map((path) => [path, active.redoTree]));
-      await this.snapshots.restore(this.cwd, redoMap);
+      await this.snapshots.restore(entry.cwd, redoMap);
       let navigated = false;
       try {
-        await this.moveToExactLeaf(active.previousLeafId);
+        await this.moveToExactLeaf(entry, active.previousLeafId);
         navigated = true;
         await this.rollbacks.clearActive(session.sessionId);
-        return { history: await this.getHistory() };
+        return { history: await this.getHistoryFor(entry) };
       } catch (error) {
         if (navigated) {
-          await this.moveToExactLeaf(active.rollbackLeafId).catch(() => undefined);
+          await this.moveToExactLeaf(entry, active.rollbackLeafId).catch(() => undefined);
         }
-        await this.snapshots.restore(this.cwd, active.restoreMap).catch(() => undefined);
+        await this.snapshots.restore(entry.cwd, active.restoreMap).catch(() => undefined);
         throw error;
       }
     });
   }
 
-  async getTree(): Promise<any> {
-    await this.ensureSession();
-    const sm = this.runtime.session.sessionManager;
-    return { rows: flattenSessionTree(sm.getTree()), leafId: sm.getLeafId() };
+  async getTree(sessionFile: string): Promise<{ rows: SessionTreeRow[]; leafId: string | null }> {
+    const { manager } = await this.sessionReadContext(sessionFile);
+    return { rows: flattenSessionTree(manager.getTree()), leafId: manager.getLeafId() };
   }
-  async getForkMessages(): Promise<any[]> {
-    await this.ensureSession();
-    return this.runtime.session.getUserMessagesForForking();
+  async getForkMessages(sessionFile: string): Promise<{ entryId: string; text: string }[]> {
+    return this.requireEntry(sessionFile).runtime.session.getUserMessagesForForking();
   }
-  async fork(entryId: string): Promise<any> {
-    return this.enqueueTransition(async () => {
-      await this.ensureSession();
-      const sourceSessionId = this.runtime.session.sessionId;
-      const r = await this.runtime.fork(entryId);
+  async fork(sessionFile: string, entryId: string): Promise<{ text?: string; cancelled?: boolean }> {
+    const entry = this.requireExecutionEntry(sessionFile);
+    return this.enqueueTransition(entry.sessionFile, async () => {
+      const sourceSessionId = entry.runtime.session.sessionId;
+      // Branching inside the current session must not move ownership; only
+      // an actual Pi switch to another session path triggers a handoff.
+      this.sourceOperationDepth += 1;
+      let r: { selectedText?: string; cancelled?: boolean };
+      try {
+        r = await entry.runtime.fork(entryId);
+      } finally {
+        this.sourceOperationDepth -= 1;
+      }
+      if (r.cancelled) await this.abandonExecutionHandoff();
+      else await this.finalizeExecutionHandoff();
       if (!r.cancelled) await this.rollbacks.clearActive(sourceSessionId).catch(() => undefined);
       return { text: r.selectedText, cancelled: r.cancelled };
     });
   }
-  async clone(): Promise<any> {
-    return this.enqueueTransition(async () => {
-      await this.ensureSession();
-      const sourceSessionId = this.runtime.session.sessionId;
-      const leafId = this.runtime.session.sessionManager.getLeafId();
+  /**
+   * Clone (session-level fork). Pi's switch request is the handoff signal:
+   * on success the CLONE becomes this project's execution owner and the
+   * source goes cold; on cancel the transient clone is disposed and the
+   * source keeps the project. Source + clone are never both installed when
+   * this returns (R1/R8), and the target file is reported explicitly.
+   */
+  async clone(sessionFile: string): Promise<{ cancelled?: boolean; sessionFile?: string }> {
+    const entry = this.requireExecutionEntry(sessionFile);
+    return this.enqueueTransition(entry.sessionFile, async () => {
+      const sourceSessionId = entry.runtime.session.sessionId;
+      const leafId = entry.runtime.session.sessionManager.getLeafId();
       if (!leafId) throw new Error("no current entry selected");
-      const r = await this.runtime.fork(leafId, { position: "at" });
-      if (!r.cancelled) await this.rollbacks.clearActive(sourceSessionId).catch(() => undefined);
-      return { cancelled: r.cancelled };
+      this.sourceOperationDepth += 1;
+      let r: { cancelled?: boolean };
+      try {
+        r = await entry.runtime.fork(leafId, { position: "at" });
+      } finally {
+        this.sourceOperationDepth -= 1;
+      }
+      if (r.cancelled) {
+        await this.abandonExecutionHandoff();
+        return { cancelled: true };
+      }
+      const ownerFile = await this.finalizeExecutionHandoff();
+      if (!ownerFile) return { cancelled: true };
+      await this.rollbacks.clearActive(sourceSessionId).catch(() => undefined);
+      return { cancelled: false, sessionFile: ownerFile };
     });
   }
 
-  async controlThread(action: "steer" | "follow-up" | "stop", threadId: string, message?: string): Promise<any> {
-    return this.threads.control(this.cwd, action, threadId, message);
+  /** Resolve the retained runtime owning a session id (threads, subagents,
+   *  and approvals route by this, never by foreground). */
+  private entryForSessionId(sessionId: string | null | undefined): SessionEntry | null {
+    if (!sessionId) return null;
+    for (const entry of this.sessions.values()) {
+      if (entry.runtime.session.sessionId === sessionId) return entry;
+    }
+    return null;
+  }
+
+  /** Locate a thread's project by scanning known projects for its state
+   *  file (thread records don't carry cwd). Cheap: few projects, cached
+   *  readState misses. */
+  private async findThreadCwd(threadId: string): Promise<string> {
+    // Explicit project set: thread records carry no cwd, and no "current
+    // session" gets a vote (I8/C5).
+    for (const cwd of this.knownProjectCwds()) {
+      try {
+        const state = await this.threads.readState(cwd, threadId);
+        if (state) return cwd;
+      } catch {
+        /* try next */
+      }
+    }
+    throw new Error("Thread not found");
+  }
+
+  async controlThread(action: "steer" | "follow-up" | "stop", threadId: string, message?: string): Promise<ThreadState> {
+    return this.threads.control(await this.findThreadCwd(threadId), action, threadId, message);
   }
 
   async promoteThread(threadId: string): Promise<{ sessionFile: string; cwd: string; parentSessionFile: string | null }> {
-    return this.threads.promote(this.cwd, threadId);
+    return this.threads.promote(await this.findThreadCwd(threadId), threadId);
   }
 
   private async notifyThreadParent(
@@ -1471,133 +3313,257 @@ export class PiHost {
     action: "steer" | "follow-up" | "stop",
     message?: string
   ): Promise<void> {
-    if (!thread.parentSessionId || thread.parentSessionId !== this.runtime.session.sessionId) return;
+    if (!thread.parentSessionId) return;
+    const parent = this.entryForSessionId(thread.parentSessionId);
+    if (!parent) return;
     const label = thread.name ?? thread.threadId.slice(0, 8);
     const content =
       action === "stop"
         ? `[Babylon Thread Activity]\nThread ${label} was stopped from Activity.`
         : `[Babylon Thread Activity]\nThe user sent this ${action === "steer" ? "steering message" : "follow-up"} to thread ${label}:\n\n${message}`;
-    await this.runtime.session.sendCustomMessage({
+    await parent.runtime.session.sendCustomMessage({
       customType: "babylon_thread_activity",
       content,
-      display: true,
+      // CLI-invisible: pi renders custom messages only when display is true.
+      // Babylon reads these by customType (see src/store.ts), old and new.
+      display: false,
       details: { threadId: thread.threadId, action, message },
     });
   }
 
   /** Milestone-watching notifications: the main agent learns when a thread
-   *  reaches a checkpoint, blocks, or finishes — without polling. */
-  async notifyThreadEvent(thread: { threadId: string; name: string | null; parentSessionId?: string | null }, event: any): Promise<void> {
-    if (!thread.parentSessionId || thread.parentSessionId !== this.runtime.session.sessionId) return;
+   *  reaches a checkpoint, blocks, or finishes, without polling. */
+  async notifyThreadEvent(thread: { threadId: string; name: string | null; parentSessionId?: string | null }, event: ThreadEvent): Promise<void> {
+    if (!thread.parentSessionId) return;
+    const parent = this.entryForSessionId(thread.parentSessionId);
+    if (!parent) return;
     const label = thread.name ?? thread.threadId.slice(0, 8);
     let content: string;
-    if (event?.type === "milestone") {
+    // Launch-card status lives beside the content: only terminal events
+    // carry one, so it is computed inside the narrowed branch.
+    let launchStatus: "failed" | "stopped" | "completed" | undefined;
+    if (event.type === "milestone") {
       const name = event.milestone?.name ?? "checkpoint";
-      content = `[Babylon Thread Activity]\nThread ${label} reached a milestone — ${name}${event.milestone?.note ? `: ${event.milestone.note}` : ""}`;
-    } else if (event?.type === "blocked") {
+      content = `[Babylon Thread Activity]\nThread ${label} reached a milestone, ${name}${event.milestone?.note ? `: ${event.milestone.note}` : ""}`;
+      launchStatus = undefined;
+    } else if (event.type === "blocked") {
       content = `[Babylon Thread Activity]\nThread ${label} is blocked${event.blocker ? `: ${event.blocker}` : ""}.`;
+      launchStatus = undefined;
     } else {
-      const done = event?.status === "failed" ? "failed" : event?.status === "stopped" ? "was stopped" : "completed";
+      const done = event.status === "failed" ? "failed" : event.status === "stopped" ? "was stopped" : "completed";
       content = `[Babylon Thread Activity]\nThread ${label} ${done}.`;
+      launchStatus = event.status === "failed" ? "failed" : event.status === "stopped" ? "stopped" : event.status === "completed" ? "completed" : undefined;
     }
-    await this.runtime.session.sendCustomMessage({
+    await parent.runtime.session.sendCustomMessage({
       customType: "babylon_thread_activity",
       content,
-      display: true,
-      details: { threadId: thread.threadId, ...event },
+      // CLI-invisible (see above); Babylon reads by customType.
+      display: false,
+      details: { ...event },
     });
     // Custom messages emit no renderer event on their own; deliver a
     // message_start so the line appears in the visible chat immediately.
+    // Stamped with the PARENT identity so background parents accumulate it
+    // in the right transcript instead of the foreground one.
+    const parentSession = parent.runtime.session;
     this.opts.onEvent({
       type: "message_start",
-      message: { role: "custom", customType: "babylon_thread_activity", content, display: true },
+      message: { role: "custom", customType: "babylon_thread_activity", content, display: false },
+      sessionId: parentSession.sessionId,
+      sessionFile: parentSession.sessionFile ?? null,
+    });
+    // Live status + log for the matching LaunchCard in the parent chat:
+    // babylon_thread_activity pings update the card instead of a stray line.
+    this.opts.onEvent({
+      type: "babylon_launch_update",
+      runId: thread.threadId,
+      runKind: "thread",
+      log: content,
+      status: launchStatus,
+      sessionId: parentSession.sessionId,
+      sessionFile: parentSession.sessionFile,
     });
   }
 
   private async notifySubagentParent(record: ManagedSubagentRecord, action: SubagentParentEvent, message?: string): Promise<void> {
-    if (!record.parentSessionId || record.parentSessionId !== this.runtime.session.sessionId) return;
+    if (!record.parentSessionId) return;
+    const parent = this.entryForSessionId(record.parentSessionId);
+    if (!parent) return;
     const label = record.name ?? record.runId.slice(0, 8);
     const content = action === "stop"
       ? `[Babylon Subagent Activity]\nSubagent ${label} was stopped from Activity.`
       : action === "reply"
         ? `[Babylon Subagent Activity]\nSubagent ${label} replied:\n\n${message}`
         : `[Babylon Subagent Activity]\nThe user sent this ${action === "steer" ? "steering message" : "follow-up"} to subagent ${label}:\n\n${message}`;
-    await this.runtime.session.sendCustomMessage({
+    await parent.runtime.session.sendCustomMessage({
       customType: "babylon_subagent_activity",
       content,
-      display: true,
+      // CLI-invisible (see babylon_thread_activity above); Babylon reads by customType.
+      display: false,
       details: { runId: record.runId, action, message },
+    });
+    // Surface custom messages in the visible chat (they emit no renderer event).
+    // Stamped with the parent identity for correct background accumulation.
+    const parentSession = parent.runtime.session;
+    this.opts.onEvent({
+      type: "message_start",
+      message: { role: "custom", customType: "babylon_subagent_activity", content, display: false },
+      sessionId: parentSession.sessionId,
+      sessionFile: parentSession.sessionFile ?? null,
+    });
+    // Live status + log for the matching LaunchCard in the parent chat.
+    this.opts.onEvent({
+      type: "babylon_launch_update",
+      runId: record.runId,
+      runKind: "subagent",
+      log: content,
+      status: action === "stop" ? "stopped" : undefined,
+      sessionId: parentSession.sessionId,
+      sessionFile: parentSession.sessionFile,
+    });
+  }
+
+  /** Room turn presence for the renderer ("@x is thinking…"). Carries the
+   *  live session identity so stale-session filtering keeps working. */
+  emitRoomEvent(sessionFile: string, ev: Record<string, unknown> & { type: string }): void {
+    // Stamped with the EMITTING session, never the foreground one (I8).
+    const entry = this.findEntry(sessionFile);
+    this.opts.onEvent({
+      ...ev,
+      sessionId: entry?.sessionId ?? null,
+      sessionFile: entry?.sessionFile ?? sessionFile,
+    });
+  }
+
+  /**
+   * Bot-to-bot relay line in the live session: an attributed, display-only
+   * custom message (same channel as subagent/thread activity) plus the live
+   * event the renderer needs to show it without a refresh. Never fakes a
+   * user or assistant turn, the transcript stays truthful about who spoke.
+   */
+  async postBotMessage(originSessionFile: string, content: string, details?: Record<string, unknown>): Promise<void> {
+    // Attributed relay into the ORIGIN conversation: explicit entry, not
+    // execution-gated (display-side line in the parent chat) and never
+    // foreground-derived.
+    const entry = this.requireEntry(originSessionFile);
+    await entry.runtime.session.sendCustomMessage({
+      customType: "babylon_bot_message",
+      content,
+      // CLI-invisible (see babylon_thread_activity above); Babylon reads by customType.
+      display: false,
+      details: details ?? {},
     });
     // Surface custom messages in the visible chat (they emit no renderer event).
     this.opts.onEvent({
       type: "message_start",
-      message: { role: "custom", customType: "babylon_subagent_activity", content, display: true },
+      message: { role: "custom", customType: "babylon_bot_message", content, display: false },
+      sessionId: entry.sessionId,
+      sessionFile: entry.sessionFile,
     });
   }
 
-  async controlSubagent(action: SubagentControlAction, runId: string, message?: string): Promise<any> {
-    return this.managedSubagents.control(this.cwd, action, runId, message);
+  /** Cheap-model summary call for explicit handoff authoring (never the auto sweep). */
+  async summarizeHandoff(cwd: string, promptText: string): Promise<string | null> {
+    if (!cwd) throw new Error("handoff summarization requires a project cwd");
+    return this.askCheap(promptText, 4096, { cwd });
   }
 
-  async promoteSubagent(runId: string): Promise<{ sessionFile: string; cwd: string; parentSessionFile: string | null }> {
-    return this.managedSubagents.promote(this.cwd, runId);
+  /** Install a handoff summary as a native compaction boundary in the live chat.
+   *  Refuses when the live session moved on or is mid-turn, honesty over convenience. */
+  async consumeHandoff(liveFile: string, summary: string, estimatedTokensBefore: number): Promise<void> {
+    return this.enqueueTransition(liveFile, async () => {
+      // Mutates the live conversation: execution owner only (I4).
+      const entry = this.requireExecutionEntry(liveFile);
+      if (entry.runtime.session.isStreaming) throw new Error("Wait for the live turn to finish first");
+      const leafId = entry.runtime.session.sessionManager.getLeafId();
+      entry.runtime.session.sessionManager.appendCompaction(summary, leafId ?? "", estimatedTokensBefore, {
+        kind: "babylon-handoff",
+      });
+    });
+  }
+
+  /** Handoff-consumed presence for the renderer card. Same agent-events channel. */
+  emitHandoffEvent(sessionFile: string, ev: Record<string, unknown> & { type: string }): void {
+    const entry = this.findEntry(sessionFile);
+    this.opts.onEvent({
+      ...ev,
+      sessionId: entry?.sessionId ?? null,
+      sessionFile: entry?.sessionFile ?? sessionFile,
+    });
+  }
+
+  /** Locate a subagent run's project by run id (records don't carry the
+   *  lookup, run dirs do). Control actions address runs, never the
+   *  foreground project. */
+  private async findSubagentCwd(runId: string): Promise<string> {
+    const cwds = this.knownProjectCwds();
+    for (const cwd of cwds) {
+      try {
+        await fsp.access(join(cwd, ".pi", "state", "subagents", "runs", runId));
+        return cwd;
+      } catch {
+        /* try next */
+      }
+    }
+    throw new Error("Subagent run not found");
+  }
+
+  async controlSubagent(action: SubagentControlAction, runId: string, message?: string): Promise<ManagedSubagentRecord> {
+    return this.managedSubagents.control(await this.findSubagentCwd(runId), action, runId, message);
+  }  async promoteSubagent(runId: string): Promise<{ sessionFile: string; cwd: string; parentSessionFile: string | null }> {
+    return this.managedSubagents.promote(await this.findSubagentCwd(runId), runId);
   }
 
   private async hasActiveThreadsForSession(sessionId: string): Promise<boolean> {
-    try {
-      const dir = join(this.cwd, ".pi", "state", "threads");
-      const entries: any[] = (await (fsp as any).readdir(dir, { withFileTypes: true }).catch(() => [])) as any[];
-      for (const entry of entries) {
-        if (!entry.isDirectory?.()) continue;
-        const path = join(dir, entry.name, "thread.json");
-        try {
-          const raw = await fsp.readFile(path, "utf8");
-          const state = JSON.parse(raw);
-          if (state?.parentSessionId !== sessionId) continue;
-          const status = state?.status as string | undefined;
-          if (status && !["completed", "failed", "stopped"].includes(status)) return true;
-        } catch {}
-      }
-    } catch {}
+    // Scan every known project: threads belong to their parent session, not
+    // to whichever project the UI happens to be looking at.
+    for (const cwd of this.knownProjectCwds()) {
+      try {
+        const dir = join(cwd, ".pi", "state", "threads");
+        const entries = await fsp.readdir(dir, { withFileTypes: true }).catch(() => []);
+        for (const entry of entries) {
+          if (!entry.isDirectory?.()) continue;
+          const path = join(dir, entry.name, "thread.json");
+          try {
+            const raw = await fsp.readFile(path, "utf8");
+            const state: unknown = JSON.parse(raw);
+            if (wireStr(wireOf(state), "parentSessionId") !== sessionId) continue;
+            const status = wireStr(wireOf(state), "status");
+            if (status && !["completed", "failed", "stopped"].includes(status)) return true;
+          } catch {}
+        }
+      } catch {}
+    }
     return false;
   }
 
-  private async hasAnyActiveThreads(): Promise<boolean> {
-    try {
-      const dir = join(this.cwd, ".pi", "state", "threads");
-      const entries: any[] = (await (fsp as any).readdir(dir, { withFileTypes: true }).catch(() => [])) as any[];
-      for (const entry of entries) {
-        if (!entry.isDirectory?.()) continue;
-        const path = join(dir, entry.name, "thread.json");
-        try {
-          const raw = await fsp.readFile(path, "utf8");
-          const state = JSON.parse(raw);
-          const status = state?.status as string | undefined;
-          if (status && !["completed", "failed", "stopped"].includes(status)) return true;
-        } catch {}
-      }
-    } catch {}
-    return false;
-  }
 
   /** Deliver newly-introduced diagnostics to the active Pi session as visible context.
    *  Bounded to 20 items; uses a custom message so the model can repair post-edit
    *  failures without being interrupted or prompted automatically. */
-  async notifyDiagnostics(diagnostics: Array<{ file: string; line: number; character: number; severity: string; message: string; source?: string; code?: string | number }>): Promise<void> {
-    if (!diagnostics.length) return;
+  async notifyDiagnostics(cwd: string, diagnostics: PiDiagnostic[]): Promise<void> {
+    if (!diagnostics.length || !cwd) return;
+    // Delivered to the PROJECT's execution owner (or nothing): diagnostics
+    // for a quiet project must never be injected into whichever session
+    // happens to be foregrounded.
+    const entry = this.executionForCwd(cwd);
+    if (!entry) return;
     const bounded = diagnostics.slice(0, 20);
     const lines = bounded.map((d) => `${d.file}:${d.line}:${d.character} [${d.severity}]${d.source ? ` (${d.source}${d.code ? `/${d.code}` : ""})` : ""} ${d.message}`);
     const content = `[Babylon Diagnostics]\nNew problems detected:\n${lines.join("\n")}`;
     try {
-      await this.runtime.session.sendCustomMessage({
+      await entry.runtime.session.sendCustomMessage({
         customType: "babylon_diagnostics",
         content,
-        display: true,
+        // CLI-invisible (see babylon_thread_activity above); Babylon reads by customType.
+        display: false,
         details: { diagnostics: bounded },
-      } as unknown as Parameters<(typeof this.runtime.session)["sendCustomMessage"]>[0]);
+      });
       this.opts.onEvent({
         type: "message_start",
-        message: { role: "custom", customType: "babylon_diagnostics", content, display: true },
+        message: { role: "custom", customType: "babylon_diagnostics", content, display: false },
+        sessionId: entry.sessionId,
+        sessionFile: entry.sessionFile,
       });
     } catch {
       // Best-effort; diagnostics should never break the session.
@@ -1609,13 +3575,54 @@ export class PiHost {
     // Stop the recursive fs.watch watchers before anything else; leaving them
     // running leaks file descriptors for every tracked worktree.
     this.snapshots.dispose();
-    await this.managedSubagents?.dispose().catch(() => undefined);
-    this.unsubscribeEvents?.();
-    this.unsubscribeEvents = null;
     try {
-      await this.runtime?.dispose();
+      this.rollbacks.close();
     } catch {
       /* ignore */
     }
+    await this.managedSubagents?.dispose().catch(() => undefined);
+    for (const entry of this.sessions.values()) {
+      entry.unsubscribe?.();
+      entry.unsubscribe = null;
+      try {
+        await entry.runtime.session.dispose();
+      } catch {
+        /* ignore */
+      }
+    }
+    this.sessions.clear();
+    this.creatingCandidates.clear();
+    this.pendingHandoff = null;
+    this.transitionQueues.clear();
+  }
+
+  /** Release the project's CURRENT owner from inside an ownership
+   *  transition (or the Pi handoff finalizer). Same liveness gate, but the
+   *  ownership check is bypassed because the caller owns the slot. */
+  private async releaseOwnerEntry(entry: SessionEntry): Promise<boolean> {
+    return this.releaseInstalledEntry(entry);
+  }
+
+  private async releaseInstalledEntry(entry: SessionEntry): Promise<boolean> {
+    const sessionFile = entry.sessionFile;
+    const session = entry.runtime.session;
+    if (session.isStreaming) return false;
+    if ([...this.uiRequests.values()].some((p) => p.sessionFile === sessionFile)) return false;
+    if (this.managedSubagents?.hasActiveForSession(session.sessionId)) return false;
+    // TOCTOU guard: the thread scan awaits, and the session may be
+    // addressed (or start streaming) while it runs. Snapshot the lifecycle
+    // counter now, revalidate after — any concurrent use aborts the release
+    // rather than pulling a live runtime from under its user.
+    const observedVersion = entry.lifecycleVersion;
+    if (await this.hasActiveThreadsForSession(session.sessionId).catch(() => false)) return false;
+    // Final synchronous revalidation: no await may follow these checks
+    // before disposal begins.
+    if (this.sessions.get(sessionFile) !== entry) return false;
+    if (entry.lifecycleVersion !== observedVersion) return false;
+    if (entry.runtime.session.isStreaming) return false;
+    if ([...this.uiRequests.values()].some((p) => p.sessionFile === sessionFile)) return false;
+    if (this.managedSubagents?.hasActiveForSession(entry.sessionId)) return false;
+    this.disposeEntry(entry);
+    return true;
   }
 }

@@ -11,8 +11,9 @@ import type { AttentionRegistry } from "./attention";
 import type { CompletionContract } from "./completion-contracts";
 import { createAttentionRegistry } from "./attention";
 import { createHookRegistry, type HookRegistry } from "./hooks";
-import { createModelRolesState, type ModelRolesState } from "./model-roles";
+import { createModelRolesState, type ModelRolesState, type RoleName } from "./model-roles";
 import { createTaskRegistry, type TaskRegistry } from "./tasks";
+import { isArrayOf, isPlainObject, isRecordOf, isString, wireOf } from "./lib/wire";
 
 export const RUNTIME_VERSION = 1;
 
@@ -56,34 +57,72 @@ export function snapshotRuntime(state: RuntimeState): string {
   return JSON.stringify(state);
 }
 
-function validTasks(v: unknown): v is TaskRegistry {
-  return !!v && typeof v === "object" && (v as TaskRegistry).tasks != null && typeof (v as TaskRegistry).tasks === "object";
+/** Every registry guard below verifies the shape it claims: a corrupt snapshot
+ *  falls back to an empty registry instead of failing deep inside a caller.
+ *  Enum membership (task status, attention type) is intentionally unchecked —
+ *  classifiers degrade unknown values to idle, so a novel string is data, not
+ *  corruption. Entry types derive from the registries via indexed access so
+ *  the guards can't drift from the contracts. */
+type TaskEntry = TaskRegistry["tasks"][string];
+type AttentionEntry = AttentionRegistry["items"][string];
+type HookEntry = HookRegistry["hooks"][string];
+type RoleEntry = NonNullable<ModelRolesState["roles"][RoleName]>;
+type ContractEntry = CompletionContract;
+
+function isTaskEntry(v: unknown): v is TaskEntry {
+  return isPlainObject(v) && typeof v.id === "string" && typeof v.title === "string" && typeof v.status === "string";
 }
-function validAttention(v: unknown): v is AttentionRegistry {
-  return !!v && typeof v === "object" && (v as AttentionRegistry).items != null && typeof (v as AttentionRegistry).items === "object";
-}
-function validHooks(v: unknown): v is HookRegistry {
+function isAttentionEntry(v: unknown): v is AttentionEntry {
   return (
-    !!v &&
-    typeof v === "object" &&
-    (v as HookRegistry).hooks != null &&
-    Array.isArray((v as HookRegistry).order)
+    isPlainObject(v) &&
+    typeof v.id === "string" &&
+    typeof v.title === "string" &&
+    typeof v.createdAt === "number" &&
+    typeof v.resolved === "boolean"
   );
 }
+function isHookEntry(v: unknown): v is HookEntry {
+  return isPlainObject(v) && typeof v.id === "string" && typeof v.event === "string" && typeof v.enabled === "boolean";
+}
+function isRoleEntry(v: unknown): v is RoleEntry {
+  // Role configs are all-optional: presence as an object is the whole claim.
+  return isPlainObject(v);
+}
+function isContractEntry(v: unknown): v is ContractEntry {
+  return (
+    isPlainObject(v) &&
+    typeof v.id === "string" &&
+    typeof v.title === "string" &&
+    Array.isArray(v.checks)
+  );
+}
+function validTasks(v: unknown): v is TaskRegistry {
+  return isRecordOf(wireOf(v)?.["tasks"], isTaskEntry);
+}
+function validAttention(v: unknown): v is AttentionRegistry {
+  return isRecordOf(wireOf(v)?.["items"], isAttentionEntry);
+}
+function validHooks(v: unknown): v is HookRegistry {
+  const wire = wireOf(v);
+  if (!wire) return false;
+  if (!isArrayOf(wire["order"], isString)) return false;
+  return isRecordOf(wire["hooks"], isHookEntry);
+}
 function validRoles(v: unknown): v is ModelRolesState {
-  return !!v && typeof v === "object" && (v as ModelRolesState).roles != null && typeof (v as ModelRolesState).roles === "object";
+  return isRecordOf(wireOf(v)?.["roles"], isRoleEntry);
 }
 function validContracts(v: unknown): v is Record<string, CompletionContract> {
-  return !!v && typeof v === "object" && !Array.isArray(v);
+  return isRecordOf(v, isContractEntry);
 }
 
 export function restoreRuntime(json: string): RuntimeState {
-  const parsed = JSON.parse(json) as Partial<RuntimeState>;
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+  const parsed: unknown = JSON.parse(json);
+  if (!isPlainObject(parsed)) {
     throw new Error("Cannot restore runtime: input is not a runtime object");
   }
-  if (parsed.version !== RUNTIME_VERSION) {
-    throw new Error(`Cannot restore runtime version ${parsed.version}; expected ${RUNTIME_VERSION}`);
+  const wire = parsed;
+  if (wire["version"] !== RUNTIME_VERSION) {
+    throw new Error(`Cannot restore runtime version ${String(wire["version"])}; expected ${RUNTIME_VERSION}`);
   }
   const base = createRuntime();
   // Build from an explicit allow-list so unknown/tampered keys cannot leak onto
@@ -91,10 +130,10 @@ export function restoreRuntime(json: string): RuntimeState {
   // rejected cleanly instead of failing deep inside a later caller.
   return {
     version: RUNTIME_VERSION,
-    tasks: validTasks(parsed.tasks) ? parsed.tasks : base.tasks,
-    attention: validAttention(parsed.attention) ? parsed.attention : base.attention,
-    hooks: validHooks(parsed.hooks) ? parsed.hooks : base.hooks,
-    roles: validRoles(parsed.roles) ? parsed.roles : base.roles,
-    contracts: validContracts(parsed.contracts) ? parsed.contracts : base.contracts,
+    tasks: validTasks(wire["tasks"]) ? wire["tasks"] : base.tasks,
+    attention: validAttention(wire["attention"]) ? wire["attention"] : base.attention,
+    hooks: validHooks(wire["hooks"]) ? wire["hooks"] : base.hooks,
+    roles: validRoles(wire["roles"]) ? wire["roles"] : base.roles,
+    contracts: validContracts(wire["contracts"]) ? wire["contracts"] : base.contracts,
   };
 }

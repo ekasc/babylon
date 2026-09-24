@@ -1,19 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { flattenSessionTree } from "./session-tree";
+import { flattenSessionTree, type SourceNode } from "./session-tree";
 
 describe("flattenSessionTree", () => {
   it("flattens sessions deeper than the contextBridge recursion limit", () => {
-    const root: any = {
+    const root: SourceNode = {
       entry: { id: "0", parentId: null, type: "message", message: { role: "user", content: "start" } },
       children: [],
     };
     let node = root;
     for (let index = 1; index < 1500; index++) {
-      const child = {
+      const child: SourceNode = {
         entry: { id: String(index), parentId: String(index - 1), type: "message", message: { role: "assistant", content: `reply ${index}` } },
         children: [],
       };
-      node.children.push(child);
+      (node.children ??= []).push(child);
       node = child;
     }
     const rows = flattenSessionTree([root]);
@@ -30,6 +30,6 @@ describe("flattenSessionTree", () => {
       ],
     }]);
     expect(rows.map((row) => row.id)).toEqual(["root", "a", "b"]);
-    expect(rows[0].childCount).toBe(2);
+    expect(rows[0]?.childCount).toBe(2);
   });
 });

@@ -7,16 +7,24 @@ function ensure(): Promise<typeof import("katex")> {
 }
 
 export default function MathBlock({ tex, display }: { tex: string; display: boolean }) {
-  const ref = useRef<HTMLSpanElement>(null);
+  // One element slot for two branches (block div vs inline span): a callback
+  // ref sidesteps the RefObject invariance between the two element types.
+  const elRef = useRef<HTMLElement | null>(null);
+  const setEl = (el: HTMLElement | null) => {
+    elRef.current = el;
+  };
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
     ensure()
       .then((katex) => {
-        if (!alive || !ref.current) return;
+        // (Preserves the original guard's intent: skip when unmounted or
+        // element-less. The previous `alive || !ref` spelling could never
+        // render while mounted.)
+        if (!alive || !elRef.current) return;
         try {
-          katex.default.render(tex, ref.current, {
+          katex.default.render(tex, elRef.current, {
             throwOnError: false,
             displayMode: display,
             output: "html",
@@ -43,5 +51,5 @@ export default function MathBlock({ tex, display }: { tex: string; display: bool
       </code>
     );
   }
-  return display ? <div className="katex-display" ref={ref as any} /> : <span className="katex-inline" ref={ref} />;
+  return display ? <div className="katex-display" ref={setEl} /> : <span className="katex-inline" ref={setEl} />;
 }

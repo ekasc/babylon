@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { ModalDialog } from "../components/ui/Dialog";
 
 // Promise-based local dialogs sharing the DialogHost surface vocabulary.
 // Host-driven extension dialogs flow through the store; these are renderer-
@@ -68,63 +69,32 @@ export function PromptHost() {
 
 function PromptCard({ request }: { request: Pending }) {
   const [value, setValue] = useState(request.kind === "input" ? (request.prefill ?? "") : "");
-  const cardRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const cancel = () => settle(request, request.kind === "input" ? null : false);
 
+  // Select prefilled text once the input mounts; Base UI owns focus,
+  // Escape, Tab trapping, and focus restoration via ModalDialog.
   useEffect(() => {
-    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    requestAnimationFrame(() => {
-      if (request.kind === "input") {
-        inputRef.current?.focus();
-        if (request.prefill) inputRef.current?.select();
-      } else {
-        cardRef.current?.querySelector<HTMLElement>("button")?.focus();
-      }
-    });
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        cancel();
-      } else if (e.key === "Tab" && cardRef.current) {
-        const focusable = [
-          ...cardRef.current.querySelectorAll<HTMLElement>("button, input, textarea"),
-        ];
-        if (!focusable.length) return;
-        const first = focusable[0];
-        const last = focusable[focusable.length - 1];
-        if (e.shiftKey && document.activeElement === first) {
-          e.preventDefault();
-          last.focus();
-        } else if (!e.shiftKey && document.activeElement === last) {
-          e.preventDefault();
-          first.focus();
-        }
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      previousFocus?.focus();
-    };
+    if (request.kind !== "input" || !request.prefill) return;
+    const id = requestAnimationFrame(() => inputRef.current?.select());
+    return () => cancelAnimationFrame(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [request]);
 
   const confirmLabel = request.kind === "input" ? (request.confirmLabel ?? "Save") : (request.confirmLabel ?? "Confirm");
 
   return (
-    <div className="fade-in fixed inset-0 z-50 grid place-items-center bg-[var(--scrim)] p-6" onMouseDown={cancel}>
-      <div
-        ref={cardRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="prompt-title"
-        className="modal-surface w-full max-w-md p-5"
-        onMouseDown={(e) => e.stopPropagation()}
-      >
+    <ModalDialog
+      onClose={cancel}
+      backdropClassName="fade-in fixed inset-0 z-[70] bg-[var(--scrim)]"
+      viewportClassName="fixed inset-0 z-[70] grid place-items-center p-6"
+      popupClassName="modal-surface w-full max-w-md p-5"
+      ariaLabelledBy="prompt-title"
+      initialFocus={request.kind === "input" ? inputRef : undefined}
+    >
         <h2 id="prompt-title" className="text-[14px] font-semibold tracking-tight">{request.title}</h2>
-        {request.message && <p className="mt-1 whitespace-pre-wrap text-[12.5px] text-dim">{request.message}</p>}
+        {request.message && <p className="mt-1 whitespace-pre-wrap text-[13px] text-dim">{request.message}</p>}
         <div className="mt-4 flex flex-col gap-3">
           {request.kind === "input" && (
             <input
@@ -137,7 +107,7 @@ function PromptCard({ request }: { request: Pending }) {
             />
           )}
           <div className="flex justify-end gap-2">
-            <button onClick={cancel} className="rounded-lg border border-line px-3 py-1.5 text-[12.5px]">
+            <button onClick={cancel} className="rounded-lg border border-line px-3 py-1.5 text-[13px]">
               Cancel
             </button>
             <button
@@ -147,7 +117,7 @@ function PromptCard({ request }: { request: Pending }) {
                   : settle(request, true)
               }
               disabled={request.kind === "input" && !value.trim()}
-              className={`rounded-lg px-3 py-1.5 text-[12.5px] font-semibold ${
+              className={`rounded-lg px-3 py-1.5 text-[13px] font-semibold ${
                 request.kind === "confirm" && request.danger ? "bg-err text-white" : "bg-accent text-bg"
               }`}
             >
@@ -155,7 +125,6 @@ function PromptCard({ request }: { request: Pending }) {
             </button>
           </div>
         </div>
-      </div>
-    </div>
+    </ModalDialog>
   );
 }

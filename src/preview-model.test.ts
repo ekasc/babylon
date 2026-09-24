@@ -1,27 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
-  createPreviewRegistry,
   detectServerFromCommand,
-  listServers,
-  registerServer,
-  removeServer,
-  updateServer,
-  type PreviewRegistry,
+  inferFramework,
 } from "./preview-model";
 
-describe("preview registry", () => {
-  it("registers and lists a server with a localhost url", () => {
-    const r = registerServer(createPreviewRegistry(), { id: "s1", port: 5173, framework: "vite" });
-    expect(r.servers.s1).toMatchObject({ url: "http://localhost:5173", port: 5173, framework: "vite" });
-    expect(listServers(r)).toHaveLength(1);
-  });
-
-  it("updates and removes immutably", () => {
-    let r = registerServer(createPreviewRegistry(), { id: "s1", port: 3000 });
-    r = updateServer(r, "s1", { state: "running" });
-    expect(r.servers.s1.state).toBe("running");
-    r = removeServer(r, "s1");
-    expect(listServers(r)).toHaveLength(0);
+describe("inferFramework", () => {
+  it("labels framework commands and ignores lookalikes", () => {
+    expect(inferFramework("vite --port 4173")).toBe("vite");
+    expect(inferFramework("next dev")).toBe("next");
+    expect(inferFramework("pnpm dev")).toBeUndefined();
+    expect(inferFramework("git checkout next")).toBeUndefined();
+    expect(inferFramework("ls -la")).toBeUndefined();
   });
 });
 

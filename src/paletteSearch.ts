@@ -28,7 +28,7 @@ export const DEFAULT_LIMITS: PaletteSearchLimits = {
   commandLimitEmpty: 8,
 };
 
-interface SessionEntry {
+interface PaletteSessionEntry {
   key: string;
   cwd: string;
   session: SessionMeta;
@@ -37,12 +37,12 @@ interface SessionEntry {
 }
 
 export interface PaletteIndex {
-  sessions: SessionEntry[];
+  sessions: PaletteSessionEntry[];
   commands: CommandInfo[];
 }
 
 export function buildPaletteIndex(groups: ProjectGroup[], commands: CommandInfo[]): PaletteIndex {
-  const sessions: SessionEntry[] = [];
+  const sessions: PaletteSessionEntry[] = [];
   for (const group of groups) {
     for (const session of group.sessions) {
       sessions.push({

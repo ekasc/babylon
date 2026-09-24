@@ -12,8 +12,10 @@ import {
   createEnvelope,
   parseEnvelope,
   serializeEnvelope,
+  toPayload,
   type ProtocolEnvelope,
   type ProtocolMessageType,
+  type ProtocolPayload,
 } from "./daemon-protocol";
 import { createFrameDecoder, encodeFrame } from "./daemon-transport";
 
@@ -29,6 +31,10 @@ export class DaemonRequestError extends Error {
 
 export interface DaemonClientOptions {
   listen: { socketPath: string } | { port: number; host?: string };
+  /** Bearer token for TCP mode (`daemon.auth` handshake on every connect).
+   *  Accepts a provider so rotated files are re-read on reconnect. Omit for
+   *  Unix-socket mode, which keeps filesystem-permission trust. */
+  token?: string | (() => string | undefined);
   /** false disables reconnection. Defaults to capped exponential backoff. */
   reconnect?: { initialDelayMs?: number; maxDelayMs?: number } | false;
   requestTimeoutMs?: number;
@@ -40,7 +46,7 @@ export interface DaemonClientOptions {
 }
 
 export interface DaemonClient {
-  request(type: ProtocolMessageType, payload: unknown, timeoutMs?: number): Promise<ProtocolEnvelope>;
+  request(type: ProtocolMessageType, payload: ProtocolPayload, timeoutMs?: number): Promise<ProtocolEnvelope>;
   onEvent(handler: (envelope: ProtocolEnvelope) => void): () => void;
   /** Subscribe to socket-level connect/disconnect transitions. Callers use this
    *  for transient liveness (`daemonConnected`); authoritative runtime ownership
@@ -150,13 +156,41 @@ export function connectDaemonClient(options: DaemonClientOptions): DaemonClient 
     const decoder = createFrameDecoder();
 
     next.on("connect", () => {
-      attempt = 0;
-      live = next;
-      for (const waiter of connectionWaiters.splice(0)) {
-        clearTimeout(waiter.timer);
-        waiter.resolve(next);
+      const markLive = () => {
+        attempt = 0;
+        live = next;
+        for (const waiter of connectionWaiters.splice(0)) {
+          clearTimeout(waiter.timer);
+          waiter.resolve(next);
+        }
+        for (const handler of connectionHandlers) handler("connected");
+      };
+      const token = typeof options.token === "function" ? options.token() : options.token;
+      if (!token) {
+        markLive();
+        return;
       }
-      for (const handler of connectionHandlers) handler("connected");
+      // TCP mode: authenticate before the connection counts as live, so no
+      // request can slip out ahead of the handshake.
+      const envelope = createEnvelope("request", "daemon.auth", { token });
+      const timer = setTimeout(() => {
+        pending.delete(envelope.id);
+        next.destroy();
+      }, CONNECTION_TIMEOUT_MS);
+      timer.unref();
+      pending.set(envelope.id, {
+        resolve: () => {
+          clearTimeout(timer);
+          markLive();
+        },
+        reject: () => {
+          clearTimeout(timer);
+          pending.delete(envelope.id);
+          next.destroy();
+        },
+        timer,
+      });
+      next.write(encodeFrame(serializeEnvelope(envelope)));
     });
     next.on("data", (chunk: Buffer) => {
       let frames: string[];

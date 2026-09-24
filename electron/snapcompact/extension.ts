@@ -2,14 +2,14 @@
 // real compaction boundary (`session_before_compact`) and the
 // transient context projection event (`context`).
 
-import { randomUUID } from "node:crypto";
-import type { CompactionResult, Extension, SourceInfo } from "@earendil-works/pi-coding-agent";
+import { createSyntheticSourceInfo, type CompactionResult, type ContextEvent, type Extension, type ExtensionContext, type SessionBeforeCompactEvent, type SessionCompactEvent } from "@earendil-works/pi-coding-agent";
 import { buildArchive, ArchiveBudgetError } from "./build";
 import { modelSupportsImages, profileForModel } from "./model-profiles";
 import { pickStrategy } from "./strategy";
 import { ArchiveStore, ArchiveIntegrityError } from "./archive-store";
 import type { SnapcompactArchive } from "./types";
 import { applySubstitution } from "./renderer";
+import { wireArr, wireOf, wireStr } from "../../src/store";
 
 interface PiImageContent {
   type: "image";
@@ -19,8 +19,8 @@ interface PiImageContent {
 
 interface SnapcompactCompactionPreparation {
   firstKeptEntryId: string;
-  messagesToSummarize: any[];
-  turnPrefixMessages: any[];
+  messagesToSummarize: unknown[];
+  turnPrefixMessages: unknown[];
   tokensBefore: number;
 }
 
@@ -32,7 +32,7 @@ export interface SnapcompactExtensionOptions {
   getSessionFile?: () => string | null;
 }
 
-function buildProjectionMessages(archive: SnapcompactArchive, profile: { imageTokenEstimate: number; id: string }): { messages: any[]; dictionaryText: string } {
+function buildProjectionMessages(archive: SnapcompactArchive, profile: { imageTokenEstimate: number; id: string }): { messages: unknown[]; dictionaryText: string } {
   const symbols = archive.symbols;
   const dictionaryText = symbols.length
     ? symbols.map((s) => `${s.id}=${s.value}`).join("\n")
@@ -72,7 +72,7 @@ function buildProjectionMessages(archive: SnapcompactArchive, profile: { imageTo
 }
 
 function buildMinimalExtension(): Extension {
-  const sourceInfo: SourceInfo = { kind: "inline", identifier: "snapcompact" } as any;
+  const sourceInfo = createSyntheticSourceInfo("<snapcompact-inline>", { source: "snapcompact", scope: "temporary", origin: "package" });
   return {
     path: "<snapcompact-inline>",
     resolvedPath: "<snapcompact-inline>",
@@ -89,12 +89,12 @@ function buildMinimalExtension(): Extension {
 }
 
 function deriveSessionFile(opts: SnapcompactExtensionOptions): string {
-  const f = (opts as any).getSessionFile?.();
+  const f = opts.getSessionFile?.();
   if (typeof f === "string" && f) return f;
   return `session://${opts.getSessionId()}`;
 }
 
-function findSnapcompactCompactionEntry(sessionManager: any): any | null {
+function findSnapcompactCompactionEntry(sessionManager: ExtensionContext["sessionManager"] | undefined): unknown | null {
   if (!sessionManager) return null;
   try {
     // Only the active branch matters. buildContextEntries returns
@@ -102,13 +102,11 @@ function findSnapcompactCompactionEntry(sessionManager: any): any | null {
     // (compaction-aware, branch-following). Never fall back to
     // getEntries() which scans all branches and would contaminate
     // branch B with branch A's archive.
-    const entries: any[] = typeof sessionManager.buildContextEntries === "function"
-      ? sessionManager.buildContextEntries()
-      : [];
+    const entries = sessionManager.buildContextEntries();
     for (let i = entries.length - 1; i >= 0; i--) {
-      const e = entries[i];
-      if (e?.type === "compaction" && e.fromHook === true && e.details?.snapcompactGeneration) {
-        return e;
+      const e = wireOf(entries[i]);
+      if (e?.type === "compaction" && e.fromHook === true && wireStr(wireOf(e.details), "snapcompactGeneration")) {
+        return entries[i];
       }
     }
   } catch { /* fall through */ }
@@ -120,8 +118,29 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
   let pendingFirstKeptReparentId: string | null = null;
 
   ext.handlers.set("session_before_compact", [
-    async (event: any, ctx: any) => {
-      const preparation: SnapcompactCompactionPreparation = event.preparation;
+    async (...args: unknown[]) => {
+      const event = args[0] as SessionBeforeCompactEvent;
+      const ctx = args[1] as ExtensionContext;
+      // The SDK owns this payload shape; validate the fields the build
+      // reads so a malformed preparation fails loudly instead of
+      // archiving the wrong slice of history.
+      const rawPrep = wireOf(event.preparation);
+      const firstKeptEntryId = wireStr(rawPrep, "firstKeptEntryId");
+      const messagesToSummarize = wireArr(rawPrep, "messagesToSummarize");
+      const turnPrefixMessages = wireArr(rawPrep, "turnPrefixMessages");
+      const tokensBefore = wireOf(rawPrep)?.tokensBefore;
+      if (
+        firstKeptEntryId === undefined || messagesToSummarize === undefined ||
+        turnPrefixMessages === undefined || typeof tokensBefore !== "number"
+      ) {
+        throw new Error("snapcompact: malformed compaction preparation");
+      }
+      const preparation: SnapcompactCompactionPreparation = {
+        firstKeptEntryId,
+        messagesToSummarize,
+        turnPrefixMessages,
+        tokensBefore,
+      };
       const model = opts.getModel();
       const mode = opts.getMode();
       const hasMessages = [...(preparation.messagesToSummarize ?? []), ...(preparation.turnPrefixMessages ?? [])].length > 0;
@@ -143,9 +162,9 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
       // active branch, not a cross-branch scan.
       let previousArchive: SnapcompactArchive | null = null;
       try {
-        const prevEntry = findSnapcompactCompactionEntry(ctx?.sessionManager);
-        if (prevEntry?.details?.snapcompactGeneration) {
-          const prevGen = String(prevEntry.details.snapcompactGeneration);
+        const prevEntry = wireOf(findSnapcompactCompactionEntry(ctx?.sessionManager));
+        const prevGen = wireStr(wireOf(prevEntry?.details), "snapcompactGeneration");
+        if (prevGen) {
           previousArchive = await opts.archiveStore.loadGeneration(deriveSessionFile(opts), prevGen).catch(() => null)
             ?? await opts.archiveStore.load(deriveSessionFile(opts)).catch(() => null);
           if (previousArchive && previousArchive.compactionGenerationId !== prevGen) previousArchive = null;
@@ -160,11 +179,10 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
         // `omittedTrailing:total-budget`.
         const isFirstSnapcompact = !previousArchive;
         const buildProfile = { ...profile, maxSourceChars: 20_000_000 };
-        const getActiveEntries = (sm: any): any[] => {
+        const getActiveEntries = (sm: ExtensionContext["sessionManager"] | undefined): unknown[] => {
           try {
             if (sm?.buildContextEntries) return sm.buildContextEntries();
             if (sm?.getBranch) return sm.getBranch();
-            if (sm?.getEntries) return sm.getEntries();
           } catch {}
           return [];
         };
@@ -176,13 +194,13 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
           // all branches and would contaminate branch B with branch A's
           // history.
           try {
-            const sm: any = (ctx as any)?.sessionManager;
-            const all: any[] = getActiveEntries(sm);
+            const sm = ctx?.sessionManager;
+            const all = getActiveEntries(sm);
             // Find firstKept index and keep only last 10 messages as recent
-            const firstKeptIdx = all.findIndex((e: any) => e?.id === preparation.firstKeptEntryId);
+            const firstKeptIdx = all.findIndex((e) => wireStr(wireOf(e), "id") === preparation.firstKeptEntryId);
             if (firstKeptIdx > 10) {
               const keepFrom = Math.max(0, all.length - 10);
-              const toArchive = all.slice(0, keepFrom).map((e: any) => e?.message).filter(Boolean);
+              const toArchive = all.slice(0, keepFrom).map((e) => wireOf(e)?.message).filter((m) => m !== undefined);
               if (toArchive.length > messages.length) return toArchive;
             }
           } catch {}
@@ -190,9 +208,9 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
         })();
         const effectiveFirstKept = (() => {
           try {
-            const sm: any = (ctx as any)?.sessionManager;
-            const all: any[] = getActiveEntries(sm);
-            if (all.length > 10) return all[all.length - 10].id ?? preparation.firstKeptEntryId;
+            const sm = ctx?.sessionManager;
+            const all = getActiveEntries(sm);
+            if (all.length > 10) return wireStr(wireOf(all[all.length - 10]), "id") ?? preparation.firstKeptEntryId;
           } catch {}
           return preparation.firstKeptEntryId;
         })();
@@ -204,11 +222,11 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
         // Patch preparation for this one build so the resulting compaction's
         // firstKept keeps only ~10 recent, archiving the rest.
         const originalFirstKept = preparation.firstKeptEntryId;
-        (preparation as any).firstKeptEntryId = effectiveFirstKept;
+        preparation.firstKeptEntryId = effectiveFirstKept;
         try {
           result = buildArchive({ sessionId: opts.getSessionId(), sessionFile: deriveSessionFile(opts), messages: buildMessages, profile: buildProfile, previousArchive });
         } finally {
-          (preparation as any).firstKeptEntryId = originalFirstKept;
+          preparation.firstKeptEntryId = originalFirstKept;
         }
       } catch (err) {
         if (err instanceof ArchiveBudgetError) return undefined;
@@ -221,9 +239,9 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
         const sm = ctx?.sessionManager;
         if (sm?.getEntries) {
           referenced = new Set(
-            (sm.getEntries() as any[])
-              .filter((e: any) => e?.type === "compaction" && e.details?.snapcompactGeneration)
-              .map((e: any) => String(e.details.snapcompactGeneration))
+            sm.getEntries()
+              .filter((e) => wireOf(e)?.type === "compaction" && wireStr(wireOf(wireOf(e)?.details), "snapcompactGeneration"))
+              .map((e) => String(wireStr(wireOf(wireOf(e)?.details), "snapcompactGeneration")))
           );
         }
       } catch { /* ignore */ }
@@ -235,18 +253,18 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
       }
       const boundedFallback = (result.archive.textFallback ?? "").slice(0, 4000);
       const summary = `[Snapcompact generation=${result.archive.compactionGenerationId}]\n${boundedFallback}`;
-      const compaction: CompactionResult = {
+      const compaction: CompactionResult<unknown> = {
         summary,
         firstKeptEntryId: pendingFirstKeptReparentId ?? preparation.firstKeptEntryId,
         tokensBefore: preparation.tokensBefore,
-        details: { snapcompactGeneration: result.archive.compactionGenerationId, snapcompactProfile: result.archive.profileId } as any,
+        details: { snapcompactGeneration: result.archive.compactionGenerationId, snapcompactProfile: result.archive.profileId },
       };
       return { compaction };
     },
   ]);
 
   ext.handlers.set("session_compact", [
-    async (event: any, _ctx: any) => {
+    async (..._args: unknown[]) => {
       // No direct SessionManager mutation. The active branch already
       // contains firstKept as an ancestor of the compaction (appendCompaction
       // makes the compaction a child of the previous leaf), so
@@ -259,7 +277,9 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
   ]);
 
   ext.handlers.set("context", [
-    async (event: any, ctx: any) => {
+    async (...args: unknown[]) => {
+      const event = args[0] as ContextEvent;
+      const ctx = args[1] as ExtensionContext;
       const mode = opts.getMode();
       const model = opts.getModel();
       // Single owner for projection as well: delegate to pickStrategy.
@@ -269,9 +289,10 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
       // CompactionSummaryMessage with role:"compactionSummary" and no
       // details).
       const sessionManager = ctx?.sessionManager;
-      const entry = findSnapcompactCompactionEntry(sessionManager);
+      const entry = wireOf(findSnapcompactCompactionEntry(sessionManager));
       if (!entry) return undefined;
-      const generationId = String(entry.details.snapcompactGeneration);
+      const generationId = wireStr(wireOf(entry.details), "snapcompactGeneration");
+      if (!generationId) return undefined;
       const sessionFile = deriveSessionFile(opts);
       const sessionId = opts.getSessionId();
       // Try generation-addressable load first (branch-safe), fallback
@@ -279,7 +300,7 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
       let archive: SnapcompactArchive | null = null;
       try {
         archive = await opts.archiveStore.loadGeneration(sessionFile, generationId);
-      } catch (err: any) {
+      } catch (err: unknown) {
         if (err instanceof ArchiveIntegrityError) return undefined;
         return undefined;
       }
@@ -290,15 +311,11 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
       if (archive.sessionId !== sessionId) return undefined;
       if (archive.version !== 1) return undefined;
       if (archive.frames.length === 0) return undefined;
-      const fb = (archive as any).textFallback as string | undefined;
+      const fb = archive.textFallback;
       const markerIndex = event.messages.findIndex(
-        (m: any) => m?.role === "compactionSummary" && m?.summary === entry.summary,
+        (m) => wireOf(m)?.role === "compactionSummary" && wireStr(wireOf(m), "summary") === wireStr(entry, "summary"),
       );
-      console.log(`[snapcompact] context: markerIndex=${markerIndex} eventMessages=${event.messages.length} entrySummary=${entry.summary.slice(0,60)} fbLen=${fb?.length}`);
-      if (markerIndex < 0) {
-        console.log(`[snapcompact] context: marker not found, event first 3:`, event.messages.slice(0,3).map((m:any)=>({role:m.role, summary:m.summary?.slice(0,30)})));
-        return undefined;
-      }
+      if (markerIndex < 0) return undefined;
       const before = event.messages.slice(0, markerIndex);
       const after = event.messages.slice(markerIndex + 1);
       // If the active branch was compacted with Snapcompact, the durable
@@ -315,7 +332,6 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
         if (!fb) return undefined;
         return { messages: [...before, { role: "user", content: [{ type: "text", text: fb }] }, ...after] };
       }
-      console.log(`[snapcompact] context: found entry ${generationId} archive=${archive.compactionGenerationId} sessionId=${sessionId} archiveSessionId=${archive.sessionId} version=${archive.version} frames=${archive.frames.length} mode=${mode} model=${model?.provider}/${model?.id} input=${(model as any)?.input}`);
       const decision = pickStrategy({
         model,
         mode,
@@ -323,7 +339,6 @@ export function createSnapcompactExtension(opts: SnapcompactExtensionOptions): E
         archiveProducible: true,
         archiveMatchesSession: archive.sessionId === sessionId,
       });
-      console.log(`[snapcompact] context decision: strategy=${decision.strategy} reason=${decision.reason} supportsImages=${modelSupportsImages(model as any)}`);
       if (decision.strategy !== "snapcompact") {
         if (fb) return { messages: [...before, { role: "user", content: [{ type: "text", text: fb }] }, ...after] };
         return undefined;

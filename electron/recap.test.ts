@@ -1,27 +1,31 @@
 import { describe, expect, it } from "vitest";
+import { wireNum, wireOf, wireStr } from "../src/store";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RecapStore } from "./recap-store";
 import {
+  buildHandoffPrompt,
   buildRecapPrompt,
   mergeRecaps,
   mergeRecapsIntoWindow,
+  normalizeHandoffText,
   normalizeRecapText,
   pickRecapDelta,
   recapDue,
   recapWorthy,
   RECAP_INTERVAL_MS,
+  transcriptText,
   type Recap,
 } from "./recap";
 
-function entry(id: string, role: string, text: string, ts: string): any {
+function entry(id: string, role: string, text: string, ts: string): Record<string, unknown> {
   return { id, type: "message", timestamp: ts, message: { role, content: text, timestamp: Date.parse(ts) } };
 }
 
 describe("mergeRecaps interleaving", () => {
   // Regression: when projected messages lacked timestamps, the merge sorted
-  // every recap after every message — a pile of back-to-back "Recap:" lines at
+  // every recap after every message, a pile of back-to-back "Recap:" lines at
   // the tail instead of one recap per turn.
   it("places each recap right after the exchange it summarizes", () => {
     const messages = [
@@ -35,7 +39,7 @@ describe("mergeRecaps interleaving", () => {
       { id: "r2", at: "2026-01-01T11:03:00Z", coveredEntryId: "m4", text: "Recap: two" },
     ];
     const merged = mergeRecaps(messages, recaps);
-    expect(merged.map((m: any) => m.content ?? m.text)).toEqual([
+    expect(merged.map((m) => wireStr(wireOf(m), "content") ?? wireStr(wireOf(m), "text"))).toEqual([
       "turn one",
       "done",
       "Recap: one",
@@ -71,21 +75,21 @@ describe("pickRecapDelta", () => {
 
   it("starts from the previous anchor", () => {
     const { messages: delta, coveredEntryId } = pickRecapDelta(messages, "b");
-    expect(delta.map((m) => m.entryId)).toEqual(["c", "d"]);
+    expect(delta.map((m) => wireStr(wireOf(m), "entryId"))).toEqual(["c", "d"]);
     expect(coveredEntryId).toBe("d");
-    expect(delta[0].role).toBe("user");
+    expect(wireStr(wireOf(delta[0]), "role")).toBe("user");
   });
 
   it("falls back to the most recent window when the anchor is gone", () => {
     const { messages: delta } = pickRecapDelta(messages, "gone-id", 2);
-    expect(delta.map((m) => m.entryId)).toEqual(["c", "d"]);
+    expect(delta.map((m) => wireStr(wireOf(m), "entryId"))).toEqual(["c", "d"]);
   });
 
   it("covers the recent stretch when there is no anchor", () => {
     const { messages: all } = pickRecapDelta(messages, null);
     expect(all).toHaveLength(4);
     const { messages: recent, coveredEntryId } = pickRecapDelta(messages, null, 2);
-    expect(recent.map((m) => m.entryId)).toEqual(["c", "d"]);
+    expect(recent.map((m) => wireStr(wireOf(m), "entryId"))).toEqual(["c", "d"]);
     expect(coveredEntryId).toBe("d");
   });
 });
@@ -125,9 +129,9 @@ describe("mergeRecaps", () => {
 
   it("interleaves recaps by timestamp", () => {
     const merged = mergeRecaps([message(1000), message(3000)], [rec(2000)]);
-    expect(merged.map((m) => m.entryId ?? null)).toEqual([null, "recap:r1", null]);
-    expect(merged[1].customType).toBe("babylon_recap");
-    expect(merged[1].content).toBe("Recap: hi");
+    expect(merged.map((m) => wireStr(wireOf(m), "entryId") ?? null)).toEqual([null, "recap:r1", null]);
+    expect(wireStr(wireOf(merged[1]), "customType")).toBe("babylon_recap");
+    expect(wireStr(wireOf(merged[1]), "content")).toBe("Recap: hi");
   });
 
   it("leaves the window alone when there are no recaps", () => {
@@ -144,7 +148,7 @@ describe("mergeRecapsIntoWindow", () => {
     // Older transcript window (an earlier scroll-up page) with a recap that was
     // generated while this stretch was the live tail.
     const merged = mergeRecapsIntoWindow([message(1000), message(3000)], [rec("r1", 2000), rec("r2", 9000)]);
-    expect(merged.map((m) => (m as any).entryId ?? null)).toEqual([null, "recap:r1", null]);
+    expect(merged.map((m) => wireStr(wireOf(m), "entryId") ?? null)).toEqual([null, "recap:r1", null]);
   });
 
   it("never duplicates a recap across disjoint windows of one scroll-back", () => {
@@ -153,9 +157,9 @@ describe("mergeRecapsIntoWindow", () => {
     const recaps = [rec("r1", 2000), rec("r2", 5500)];
     const inOlder = mergeRecapsIntoWindow(older, recaps);
     const inNewer = mergeRecapsIntoWindow(newer, recaps);
-    expect(inOlder.filter((m) => m.customType === "babylon_recap")).toHaveLength(1);
-    expect(inNewer.filter((m) => m.customType === "babylon_recap")).toHaveLength(1);
-    expect((inNewer[1] as any).entryId).toBe("recap:r2");
+    expect(inOlder.filter((m) => wireStr(wireOf(m), "customType") === "babylon_recap")).toHaveLength(1);
+    expect(inNewer.filter((m) => wireStr(wireOf(m), "customType") === "babylon_recap")).toHaveLength(1);
+    expect(wireStr(wireOf(inNewer[1]), "entryId")).toBe("recap:r2");
   });
 
   it("returns the window untouched when no recap falls inside it", () => {
@@ -184,5 +188,33 @@ describe("RecapStore", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("handoff prompt + transcript projection", () => {
+  it("projects user/assistant text and drops director machinery", () => {
+    const text = transcriptText([
+      { role: "user", content: "fix the login bug" },
+      { role: "user", content: "[Room turn] @brain, respond briefly in your voice to the room above (or reply exactly PASS if you have nothing new)." },
+      { role: "assistant", content: [{ type: "text", text: "done" }, { type: "thinking", thinking: "hmm" }] },
+      { role: "toolResult", content: "noise" },
+    ]);
+    expect(text).toContain("fix the login bug");
+    expect(text).toContain("done");
+    expect(text).not.toContain("Room turn");
+    expect(text).not.toContain("noise");
+  });
+
+  it("builds a structured handoff prompt in the author's voice", () => {
+    const prompt = buildHandoffPrompt("user: hi", { name: "Helper", persona: "Be terse." });
+    expect(prompt).toContain("HANDOFF for Helper");
+    expect(prompt).toContain("## Goal");
+    expect(prompt).toContain("## Open loops");
+    expect(prompt).toContain("Be terse.");
+  });
+
+  it("normalizes handoff markdown with caps", () => {
+    expect(normalizeHandoffText("   ")).toBeNull();
+    expect(normalizeHandoffText("## Goal\n\n\ndone")).toBe("## Goal\n\ndone");
   });
 });

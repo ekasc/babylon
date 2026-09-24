@@ -1,6 +1,7 @@
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { wireOf, wireStr } from "../src/store";
 
-export function createAskQuestionTool(): ToolDefinition<any, any> {
+export function createAskQuestionTool(): ToolDefinition {
   return {
     name: "ask_question",
     label: "Ask Question",
@@ -25,15 +26,18 @@ export function createAskQuestionTool(): ToolDefinition<any, any> {
         },
         placeholder: { type: "string", description: "Placeholder for free-text input when no options are given" },
       },
-    } as any,
-    execute: async (_toolCallId, raw, _signal, onUpdate, ctx: any) => {
+    },
+    execute: async (_toolCallId, raw, _signal, onUpdate, ctx) => {
       console.log("[Babylon] ask_question called", JSON.stringify(raw).slice(0, 500));
-      const question = String((raw as any)?.question ?? "").trim();
+      const question = String(wireStr(wireOf(raw), "question") ?? "").trim();
       if (!question) throw new Error("ask_question: question is required");
-      const rawOptions = (raw as any)?.options;
+      const params = wireOf(raw);
+      const rawOptions = params?.options;
       const options: string[] | null =
-        Array.isArray(rawOptions) && rawOptions.length ? rawOptions.map((o: any) => String(o)).filter(Boolean) : null;
-      const placeholder = typeof (raw as any)?.placeholder === "string" ? (raw as any).placeholder : undefined;
+        Array.isArray(rawOptions) && rawOptions.length
+          ? rawOptions.map((o) => String(o)).filter(Boolean)
+          : null;
+      const placeholder = wireStr(params, "placeholder");
 
       // Surface a lightweight progress hint while the user is deciding.
       onUpdate?.({
@@ -46,7 +50,7 @@ export function createAskQuestionTool(): ToolDefinition<any, any> {
         if (options && options.length) {
           answer = await ctx.ui.select(question, options);
         } else {
-          answer = await ctx.ui.input(question, { placeholder });
+          answer = await ctx.ui.input(question, placeholder);
         }
       } catch (e) {
         throw new Error(`ask_question cancelled: ${e instanceof Error ? e.message : String(e)}`);
@@ -63,5 +67,5 @@ export function createAskQuestionTool(): ToolDefinition<any, any> {
         details: { answer: text, question, options: options ?? undefined },
       };
     },
-  } as ToolDefinition<any, any>;
+  };
 }

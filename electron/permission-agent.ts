@@ -9,6 +9,7 @@
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { existsSync, realpathSync } from "node:fs";
 import { categorizeShellCommand, type AgentAction } from "./permissions";
+import { canvasPath } from "./canvas-store";
 
 /** Canonicalize `path` through symlinks so a workspace symlink pointing outside
  *  the project can't downgrade an out-of-workspace write to a workspace write. */
@@ -77,6 +78,32 @@ export function mapToolToAction(toolName: string, args: unknown, cwd: string): A
     const abs = isAbsolute(path) ? path : resolve(cwd, path);
     const category = resolveInsideWorkspace(abs, cwd) ? "file_write_workspace" : "file_write_outside";
     return { category, paths: [abs], description: `Write ${abs}` };
+  }
+
+  // Canvas scenes resolve to one trapped path, so they inherit the file
+  // policies instead of bypassing them through a new tool name.
+  if (name === "canvas_write") {
+    const scene = typeof a.name === "string" ? a.name : "";
+    const base = typeof a.cwd === "string" && a.cwd ? (a.cwd as string) : cwd;
+    try {
+      const abs = canvasPath(base, scene);
+      const category = resolveInsideWorkspace(abs, base) ? "file_write_workspace" : "file_write_outside";
+      return { category, paths: [abs], description: `Write canvas ${abs}` };
+    } catch {
+      return { category: "file_write_outside", description: "Write canvas (invalid name)" };
+    }
+  }
+  if (name === "canvas_check") {
+    // Pure-text checks touch nothing; file-backed checks read like read.
+    const scene = typeof a.name === "string" ? a.name : undefined;
+    if (!scene) return null;
+    const base = typeof a.cwd === "string" && a.cwd ? (a.cwd as string) : cwd;
+    try {
+      const abs = canvasPath(base, scene);
+      return { category: "file_read", paths: [abs], description: `Check canvas ${abs}` };
+    } catch {
+      return null;
+    }
   }
 
   return null;

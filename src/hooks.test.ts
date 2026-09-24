@@ -18,15 +18,15 @@ describe("hook system", () => {
   it("registers a hook and refuses to overwrite", () => {
     let r: HookRegistry = createHookRegistry();
     r = registerHook(r, hook());
-    expect(r.hooks.h1.event).toBe("pre_tool_use");
+    expect(r.hooks.h1?.event).toBe("pre_tool_use");
     r = registerHook(r, hook({ event: "post_tool_use" }));
-    expect(r.hooks.h1.event).toBe("pre_tool_use");
+    expect(r.hooks.h1?.event).toBe("pre_tool_use");
   });
 
   it("enables and disables without churn", () => {
     let r = registerHook(createHookRegistry(), hook({ enabled: false }));
     r = setHookEnabled(r, "h1", true);
-    expect(r.hooks.h1.enabled).toBe(true);
+    expect(r.hooks.h1?.enabled).toBe(true);
     expect(setHookEnabled(r, "h1", true)).toBe(r); // no-op
     expect(setHookEnabled(r, "missing", true)).toBe(r); // no-op returns same ref
   });

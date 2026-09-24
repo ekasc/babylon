@@ -4,10 +4,10 @@ import { SettingSection } from "./SettingSection";
 import { SettingRow } from "./SettingRow";
 import ModelPicker from "../ModelPicker";
 import { DEFAULT_GIT_COMMIT_PROMPT } from "../../lib/settings-shared";
+import type { AgentModel } from "../../bridge";
 
-export function SettingsGit({ settings, onSave, models }: { settings: PiSettings | null; onSave: (p: Partial<PiSettings>) => void; models: any[] }) {
+export function SettingsGit({ settings, onSave, models }: { settings: PiSettings | null; onSave: (p: Partial<PiSettings>) => void; models: AgentModel[] }) {
   const [draft, setDraft] = useState(settings?.gitCommitPrompt ?? DEFAULT_GIT_COMMIT_PROMPT);
-  const [saving, setSaving] = useState(false);
   useEffect(() => { setDraft(settings?.gitCommitPrompt ?? DEFAULT_GIT_COMMIT_PROMPT); }, [settings?.gitCommitPrompt]);
 
   const gitModel = useMemo(() => {
@@ -18,15 +18,13 @@ export function SettingsGit({ settings, onSave, models }: { settings: PiSettings
 
   const isCustom = draft !== DEFAULT_GIT_COMMIT_PROMPT;
   const commitDraft = (val: string) => {
-    setSaving(true);
     onSave({ gitCommitPrompt: val });
-    setTimeout(() => setSaving(false), 400);
   };
 
   return (
     <div>
-      <h2 className="text-[24px] font-semibold tracking-[-0.02em] text-fg">Git</h2>
-      <p className="text-[15px] leading-6 text-fg/60 mt-2">Commit generation and repository behaviour.</p>
+      <h2 className="text-[20px] font-semibold tracking-[-0.02em] text-fg">Git</h2>
+      <p className="text-[13px] leading-5 text-dim mt-1">Commit generation and repository behaviour.</p>
 
       <SettingSection title="Commit generation" hint="Babylon always applies its built-in structured output and Unslop rules with low reasoning. Your instructions are appended.">
         <SettingRow
@@ -37,7 +35,7 @@ export function SettingsGit({ settings, onSave, models }: { settings: PiSettings
         <div className="mt-4 max-w-[720px]">
           <div className="flex items-center justify-between mb-1.5">
             <label className="text-[12px] font-medium text-dim" htmlFor="git-prompt">Custom instructions</label>
-            <span className="text-[11px] text-dim">{saving ? "Saving…" : isCustom ? "Customized" : "Default"} {isCustom ? <button onClick={() => { setDraft(DEFAULT_GIT_COMMIT_PROMPT); commitDraft(DEFAULT_GIT_COMMIT_PROMPT); }} className="ml-2 text-accent hover:underline">Reset</button> : null}</span>
+            <span className="text-[11px] text-dim">{isCustom ? "Customized" : "Default"} {isCustom ? <button onClick={() => { setDraft(DEFAULT_GIT_COMMIT_PROMPT); commitDraft(DEFAULT_GIT_COMMIT_PROMPT); }} className="ml-2 text-accent hover:underline">Reset</button> : null}</span>
           </div>
           <textarea
             id="git-prompt"
@@ -46,7 +44,7 @@ export function SettingsGit({ settings, onSave, models }: { settings: PiSettings
             onChange={(e) => setDraft(e.target.value)}
             onBlur={() => commitDraft(draft)}
             placeholder={DEFAULT_GIT_COMMIT_PROMPT}
-            className="w-full rounded-md border border-line/40 bg-inset/30 px-3 py-2.5 font-mono text-[12.5px] leading-5 outline-none focus:border-accent focus:bg-bg"
+            className="w-full rounded-[var(--radius-sm)] border border-line/40 bg-inset/30 px-3 py-2.5 text-[13px] leading-5 outline-none focus:border-accent focus:bg-bg"
           />
         </div>
       </SettingSection>
