@@ -300,7 +300,7 @@ export function miniPatch(patch: string, maxLines = 6): string {
  * punchlist) happens here, so every transcript path that renders a tool card
  * gets it — the live view and the history window alike.
  */
-export const ToolCard = memo(function ToolCard({ item, sessionFile = null, cwd = null, onDisclosureToggle }: { item: Extract<ChatItem, { kind: "tool" }>; sessionFile?: string | null; cwd?: string | null; onDisclosureToggle?: () => void }) {
+export const ToolCard = memo(function ToolCard({ item, sessionFile = null, cwd = null, slug = null, onDisclosureToggle }: { item: Extract<ChatItem, { kind: "tool" }>; sessionFile?: string | null; cwd?: string | null; slug?: string | null; onDisclosureToggle?: () => void }) {
   const [open, setOpen] = useState(false);
   const [fullOutput, setFullOutput] = useState<string | null>(null);
   const [outputLoading, setOutputLoading] = useState(false);
@@ -319,7 +319,7 @@ export const ToolCard = memo(function ToolCard({ item, sessionFile = null, cwd =
   // exit code, signal, duration, hints). Surface it via BashCard so the chat
   // shows the actual command chip, not just "bash".
   if (item.name === "design_review" && isDesignReviewDetails(item.details) && item.status !== "running") {
-    return <DesignReviewCard details={item.details} cwd={cwd} />;
+    return <DesignReviewCard details={item.details} cwd={cwd} slug={slug} />;
   }
 
   if (item.name === "bash" && item.babylon?.kind === "babylon_bash") {
@@ -382,7 +382,7 @@ export const ToolCard = memo(function ToolCard({ item, sessionFile = null, cwd =
 });
 
 /** Collapses a run of consecutive tool calls into one summary row. */
-export const ToolGroup = memo(function ToolGroup({ tools, sessionFile = null, cwd = null, onDisclosureToggle }: { tools: Array<Extract<ChatItem, { kind: "tool" }>>; sessionFile?: string | null; cwd?: string | null; onDisclosureToggle?: () => void }) {
+export const ToolGroup = memo(function ToolGroup({ tools, sessionFile = null, cwd = null, slug = null, onDisclosureToggle }: { tools: Array<Extract<ChatItem, { kind: "tool" }>>; sessionFile?: string | null; cwd?: string | null; slug?: string | null; onDisclosureToggle?: () => void }) {
   const [open, setOpen] = useState(false);
   const anyRunning = tools.some((t) => t.status === "running" || t.status === "pending");
   const anyError = tools.some((t) => t.status === "error");
@@ -402,7 +402,7 @@ export const ToolGroup = memo(function ToolGroup({ tools, sessionFile = null, cw
       {open ? (
         <div className="tool-group-list">
           {tools.map((t) => (
-            <ToolCard key={t.key} item={t} sessionFile={sessionFile} cwd={cwd} onDisclosureToggle={onDisclosureToggle} />
+            <ToolCard key={t.key} item={t} sessionFile={sessionFile} cwd={cwd} slug={slug} onDisclosureToggle={onDisclosureToggle} />
           ))}
         </div>
       ) : null}

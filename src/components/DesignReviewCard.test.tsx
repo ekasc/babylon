@@ -22,8 +22,14 @@ const failRound = {
   note: "Hierarchy now matches the direction.",
   escalated: false,
   shots: [
-    { viewport: "iPhone 15 Pro", path: ".babylon/design/x/reviews/round-2/iphone.png", width: 390, height: 844 },
-    { viewport: "Chrome", path: ".babylon/design/x/reviews/round-2/chrome.png", width: 1280, height: 800 },
+    {
+      viewport: "iPhone 15 Pro",
+      path: ".babylon/design/x/reviews/round-2/iphone.png",
+      round: 2,
+      width: 390,
+      height: 844,
+    },
+    { viewport: "Chrome", path: ".babylon/design/x/reviews/round-2/chrome.png", round: 2, width: 1280, height: 800 },
   ],
   at: "2026-09-24T00:00:00.000Z",
 };
@@ -41,10 +47,10 @@ describe("isDesignReviewDetails", () => {
 
 describe("DesignReviewCard", () => {
   it("shows the screenshots, the punchlist and the note together", async () => {
-    vi.spyOn(bridge, "designReviewShot").mockImplementation(async ({ path }) => ({
-      dataUrl: `data:image/png;base64,${path.length}`,
+    vi.spyOn(bridge, "designReviewShot").mockImplementation(async ({ viewport }) => ({
+      dataUrl: `data:image/png;base64,${viewport.length}`,
     }));
-    render(<DesignReviewCard details={failRound} cwd="/repo" />);
+    render(<DesignReviewCard details={failRound} cwd="/repo" slug="x" />);
 
     expect(shown("Design review 2")).toBe(true);
     expect(shown("Needs work")).toBe(true);
@@ -53,26 +59,29 @@ describe("DesignReviewCard", () => {
     expect(shown("CTA wraps below 390px")).toBe(true);
     expect(shown("Hierarchy now matches the direction.")).toBe(true);
     await waitFor(() => expect(document.querySelectorAll("img")).toHaveLength(2));
+    // Addressed by identity, never by path.
     expect(bridge.designReviewShot).toHaveBeenCalledWith({
       cwd: "/repo",
-      path: ".babylon/design/x/reviews/round-2/iphone.png",
+      slug: "x",
+      round: 2,
+      viewport: "iPhone 15 Pro",
     });
   });
 
   it("passes a round without screenshots or notes", () => {
-    render(<DesignReviewCard details={{ round: 1, verdict: "pass", punchlist: [], shots: [] }} cwd="/repo" />);
+    render(<DesignReviewCard details={{ round: 1, verdict: "pass", punchlist: [], shots: [] }} cwd="/repo" slug="x" />);
     expect(shown("Passes")).toBe(true);
     expect(document.querySelectorAll("img")).toHaveLength(0);
   });
 
   it("surfaces escalation when the round budget is spent", () => {
-    render(<DesignReviewCard details={{ ...failRound, round: 3, escalated: true }} cwd="/repo" />);
+    render(<DesignReviewCard details={{ ...failRound, round: 3, escalated: true }} cwd="/repo" slug="x" />);
     expect(shown("round budget reached")).toBe(true);
   });
 
   it("still renders the verdict when a screenshot cannot be read", async () => {
     vi.spyOn(bridge, "designReviewShot").mockRejectedValue(new Error("missing"));
-    render(<DesignReviewCard details={failRound} cwd="/repo" />);
+    render(<DesignReviewCard details={failRound} cwd="/repo" slug="x" />);
     // The label stands in for the image, and nothing throws.
     await waitFor(() => expect(shown("iPhone 15 Pro")).toBeTruthy());
     expect(shown("Needs work")).toBe(true);
@@ -89,9 +98,10 @@ describe("transcript integration", () => {
       name: "design_review",
       status: "done",
       output: "Design review round 2/3: FAIL",
-      details: failRound,
+      // The wire type is a loose record; the card narrows it.
+      details: failRound as unknown as Extract<ChatItem, { kind: "tool" }>["details"],
     };
-    render(<ToolCard item={item} cwd="/repo" />);
+    render(<ToolCard item={item} cwd="/repo" slug="x" />);
     expect(shown("Design review 2")).toBe(true);
     expect(document.querySelector(".tool-row")).toBeNull();
   });
@@ -104,7 +114,7 @@ describe("transcript integration", () => {
       name: "design_review",
       status: "running",
     };
-    render(<ToolCard item={item} cwd="/repo" />);
+    render(<ToolCard item={item} cwd="/repo" slug="x" />);
     expect(document.querySelector(".tool-row")).toBeTruthy();
   });
 
@@ -117,7 +127,7 @@ describe("transcript integration", () => {
       status: "done",
       details: { patch: "diff --git a b" },
     };
-    render(<ToolCard item={item} cwd="/repo" />);
+    render(<ToolCard item={item} cwd="/repo" slug="x" />);
     expect(document.querySelector(".tool-row")).toBeTruthy();
   });
 });

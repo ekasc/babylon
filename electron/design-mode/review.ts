@@ -8,8 +8,10 @@ import type { ReviewBundle } from "../sim-controller";
  *  round per `design_review` call, persisted so it survives a reload. */
 export interface DesignReviewShot {
   viewport: string;
-  /** Repo-relative path, always inside the design directory. */
+  /** Repo-relative path, always inside the design directory. Recorded for
+   *  provenance; readers address the capture by (round, viewport) instead. */
   path: string;
+  round: number;
   width: number;
   height: number;
 }
@@ -23,6 +25,25 @@ export interface DesignReviewRecord {
   /** True once the round budget is spent: the loop escalates by design. */
   escalated: boolean;
   at: string;
+}
+
+/** Locate one recorded capture by its identity (round + viewport) using the
+ *  round's own record as the authority. The caller never supplies a path, so a
+ *  renderer cannot point this at an arbitrary file. */
+export async function reviewShotPath(
+  cwd: string,
+  slug: string,
+  round: number,
+  viewport: string
+): Promise<string> {
+  const record = JSON.parse(
+    await fsp.readFile(join(reviewRoundDir(cwd, slug, round), "review.json"), "utf-8")
+  ) as { shots?: Array<{ viewport?: unknown; path?: unknown }> };
+  const shot = (record.shots ?? []).find((entry) => entry.viewport === viewport);
+  if (!shot || typeof shot.path !== "string") {
+    throw new Error("no such review screenshot");
+  }
+  return shot.path;
 }
 
 /** Review rounds live beside the brief/direction artifacts, one directory per
@@ -79,6 +100,9 @@ export async function persistReviewShots(
     shots.push({
       viewport: shot.viewport,
       path: join(reviewRoundRelPath(slug, round), file),
+      // Carried on the shot so a reader can address the capture by identity
+      // without ever constructing a path.
+      round,
       width: shot.width,
       height: shot.height,
     });

@@ -8,6 +8,7 @@ import {
   persistReviewShots,
   recordDesignReview,
   reviewRoundDir,
+  reviewShotPath,
   reviewSummary,
 } from "./review";
 import { createDesignState, JUDGE_MAX_ROUNDS } from "./store";
@@ -125,6 +126,20 @@ describe("design review rounds", () => {
     expect(record.shots).toEqual([]);
     const log = await readFile(join(cwd, state.logPath), "utf-8");
     expect(log).toContain("no screenshots");
+  });
+
+  it("resolves a capture by identity, not by a caller-supplied path", async () => {
+    const cwd = await makeProject("identity");
+    const state = createDesignState("Sessions UI", "sessions-ui");
+    const shots = await persistReviewShots(cwd, state.slug, 2, bundle());
+    await recordDesignReview({ cwd, state, round: 2, verdict: "fail", punchlist: ["x"], shots });
+
+    // The round's own record is the authority for where a capture lives.
+    expect(await reviewShotPath(cwd, state.slug, 2, "iPhone 15 Pro")).toBe(shots[0]!.path);
+    // An unknown viewport is a miss, not a path to probe.
+    await expect(reviewShotPath(cwd, state.slug, 2, "Firefox")).rejects.toThrow(/no such review screenshot/);
+    // A round that was never recorded cannot be read.
+    await expect(reviewShotPath(cwd, state.slug, 7, "iPhone 15 Pro")).rejects.toThrow();
   });
 
   it("keeps rounds isolated: a later round never overwrites earlier captures", async () => {

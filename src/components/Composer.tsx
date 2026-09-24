@@ -93,7 +93,7 @@ interface Props {
 	onEndDesign?: () => void;
 	/** Clear the design and arm the next send (fresh subject). From the menu. */
 	onRestartDesign?: () => void;
-	/** Pending design approval (brief/brand), if any: one button in the row, never a strip. */
+	/** Pending design approval (brief/direction), if any: one button in the row, never a strip. */
 	/** Pending approval: a label plus what to do when the user asks to review.
 	    The surface itself is a backend-bound read, so it opens in place. */
 	designApproval?: { label: string; onApprove(): void } | null;

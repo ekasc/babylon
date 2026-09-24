@@ -8,7 +8,9 @@ export interface DesignReviewDetails {
   punchlist: string[];
   note?: string;
   escalated?: boolean;
-  shots: Array<{ viewport: string; path: string; width: number; height: number }>;
+  /** `round` is carried on each shot so the renderer can address the capture
+   *  without knowing where it lives on disk. */
+  shots: Array<{ viewport: string; path: string; round: number; width: number; height: number }>;
   at?: string;
 }
 
@@ -26,13 +28,19 @@ export function isDesignReviewDetails(value: unknown): value is DesignReviewDeta
 /** Screenshots are files next to the design artifacts; they load on demand so
  *  a long transcript never holds every capture in memory (or in the session
  *  log, which is why the tool records paths rather than image bytes). */
-function useShot(cwd: string | null, path: string): string | null {
+function useShot(
+  cwd: string | null,
+  slug: string | null,
+  round: number,
+  viewport: string
+): string | null {
   const [url, setUrl] = useState<string | null>(null);
   useEffect(() => {
-    if (!cwd) return;
+    if (!cwd || !slug) return;
     let cancelled = false;
     void bridge
-      .designReviewShot({ cwd, path })
+      // Addressed by identity: the round's record owns the file path.
+      .designReviewShot({ cwd, slug, round, viewport })
       .then((r) => {
         if (!cancelled) setUrl(r.dataUrl);
       })
@@ -42,12 +50,20 @@ function useShot(cwd: string | null, path: string): string | null {
     return () => {
       cancelled = true;
     };
-  }, [cwd, path]);
+  }, [cwd, slug, round, viewport]);
   return url;
 }
 
-function Shot({ cwd, shot }: { cwd: string | null; shot: DesignReviewDetails["shots"][number] }) {
-  const url = useShot(cwd, shot.path);
+function Shot({
+  cwd,
+  slug,
+  shot,
+}: {
+  cwd: string | null;
+  slug: string | null;
+  shot: DesignReviewDetails["shots"][number];
+}) {
+  const url = useShot(cwd, slug, shot.round, shot.viewport);
   return (
     <figure className="m-0 min-w-0 flex-1">
       <div className="overflow-hidden rounded-md border border-line bg-bg-soft">
@@ -79,7 +95,15 @@ function Shot({ cwd, shot }: { cwd: string | null; shot: DesignReviewDetails["sh
 /** The review surface: the screenshots the verdict was made from, next to the
  *  concrete punchlist. This is the loop made tangible — without it, a
  *  multi-round visual review is indistinguishable from ordinary chat. */
-export default function DesignReviewCard({ details, cwd }: { details: DesignReviewDetails; cwd: string | null }) {
+export default function DesignReviewCard({
+  details,
+  cwd,
+  slug,
+}: {
+  details: DesignReviewDetails;
+  cwd: string | null;
+  slug: string | null;
+}) {
   const failed = details.verdict === "fail";
   return (
     <div className="my-2 overflow-hidden rounded-lg border border-line bg-bg-soft/40">
@@ -100,7 +124,7 @@ export default function DesignReviewCard({ details, cwd }: { details: DesignRevi
       {details.shots.length > 0 ? (
         <div className="flex flex-col gap-3 p-3 sm:flex-row">
           {details.shots.map((shot) => (
-            <Shot key={shot.path} cwd={cwd} shot={shot} />
+            <Shot key={`${shot.round}-${shot.viewport}`} cwd={cwd} slug={slug} shot={shot} />
           ))}
         </div>
       ) : null}

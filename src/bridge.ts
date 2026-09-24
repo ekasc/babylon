@@ -628,9 +628,9 @@ export interface Bridge {
   onExecutionChanged(cb: (execution: ProjectExecution) => void): () => void;
   /** Read a session's design state (null when none is set). */
   designGet(sessionId: string, cwd: string): Promise<import("../electron/design-mode/store").DesignStatus>;
-  /** Read one review screenshot as a data URL. The path is validated against
-   *  the project's design directory in the main process. */
-  designReviewShot(opts: { cwd: string; path: string }): Promise<{ dataUrl: string }>;
+  /** Read one review screenshot as a data URL, addressed by its identity (the
+   *  round's own record resolves the file in the main process). */
+  designReviewShot(opts: { cwd: string; slug: string; round: number; viewport: string }): Promise<{ dataUrl: string }>;
   /** Run a `/design …` control invocation; resolves with the fresh design state. */
   designControl(sessionFile: string, args: string): Promise<import("../electron/design-mode/store").DesignStatus>;
   /** Read the artifact under review, with the revision the user would approve. */
@@ -862,6 +862,10 @@ declare global {
  * (`bridgeAvailable`) and fall back to a no-op stub so the app can render a
  * visible, actionable error screen.
  */
+/** The round budget belongs to the backend. With no bridge there is no backend,
+ *  so this is a display placeholder, never a second copy of the real number. */
+const NO_BRIDGE_ROUNDS = 0;
+
 export const bridgeAvailable: boolean = !!window.pideck;
 
 export const bridge: Bridge = window.pideck ?? {
@@ -915,13 +919,13 @@ export const bridge: Bridge = window.pideck ?? {
   relocateExecution: () => Promise.reject(new Error("bridge unavailable")),
   executionDeactivate: () => Promise.resolve(false),
   onExecutionChanged: () => () => {},
-  designGet: () => Promise.resolve({ design: null, stage: "idle" as const, maxRounds: 3 }),
+  designGet: () => Promise.resolve({ design: null, stage: "idle" as const, maxRounds: NO_BRIDGE_ROUNDS }),
   designReviewShot: () => Promise.reject(new Error("bridge unavailable")),
-  designControl: () => Promise.resolve({ design: null, stage: "idle" as const, maxRounds: 3 }),
+  designControl: () => Promise.resolve({ design: null, stage: "idle" as const, maxRounds: NO_BRIDGE_ROUNDS }),
   designGetArtifact: () => Promise.reject(new Error("bridge unavailable")),
-  designApproveArtifact: () => Promise.resolve({ design: null, stage: "idle" as const, maxRounds: 3 }),
+  designApproveArtifact: () => Promise.resolve({ design: null, stage: "idle" as const, maxRounds: NO_BRIDGE_ROUNDS }),
   beginDesignPrompt: () =>
-    Promise.resolve({ design: null, stage: "idle" as const, started: true, error: null, maxRounds: 3 }),
+    Promise.resolve({ design: null, stage: "idle" as const, started: true, error: null, maxRounds: NO_BRIDGE_ROUNDS }),
   refreshSession: () => Promise.resolve(false),
 
   getMessages: () => Promise.resolve([]),

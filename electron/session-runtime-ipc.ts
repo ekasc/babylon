@@ -10,6 +10,7 @@ import type { DaemonClient } from "../src/daemon-client";
 import type { PiHost } from "./pi-host";
 import { loadSessionGoal } from "./goal-mode/store";
 import { designDir, JUDGE_MAX_ROUNDS, loadDesignState, stageOfState, unwrapDesignBeginResult, unwrapDesignResult } from "./design-mode/store";
+import { reviewShotPath } from "./design-mode/review";
 import { unwrapDurableGoalResult, unwrapGoalBeginResult } from "../src/lib/durable-goal";
 import { unwrapExecutionActivateResult, unwrapExecutionDeactivateResult, unwrapExecutionListResult } from "../src/execution";
 
@@ -236,22 +237,29 @@ export function registerSessionRuntimeIpc(
   // back on demand: the transcript keeps only the path, so a session log never
   // carries megabytes of base64. The path is re-validated against the project
   // root here — the renderer is never trusted to have checked it.
-  handle("pideck:design-review-shot", async (_e, opts: { cwd: string; path: string }) => {
-    if (
-      !opts ||
-      typeof opts.cwd !== "string" || opts.cwd.length < 1 || opts.cwd.length > 4096 ||
-      typeof opts.path !== "string" || opts.path.length < 1 || opts.path.length > 4096
-    ) {
-      throw new Error("invalid design review shot");
+  // Semantic by identity, not a path reader: the caller names the round and
+  // viewport, and the round's own record resolves the file. Containment is
+  // still checked, because the record is on disk and could be hand-edited.
+  handle(
+    "pideck:design-review-shot",
+    async (_e, opts: { cwd: string; slug: string; round: number; viewport: string }) => {
+      if (
+        !opts ||
+        typeof opts.cwd !== "string" || opts.cwd.length < 1 || opts.cwd.length > 4096 ||
+        typeof opts.slug !== "string" || !/^[A-Za-z0-9._-]{1,80}$/.test(opts.slug) ||
+        typeof opts.round !== "number" || !Number.isInteger(opts.round) || opts.round < 1 || opts.round > 9999 ||
+        typeof opts.viewport !== "string" || opts.viewport.length < 1 || opts.viewport.length > 200
+      ) {
+        throw new Error("invalid design review shot");
+      }
+      const rel = await reviewShotPath(opts.cwd, opts.slug, opts.round, opts.viewport);
+      if (!contained(designDir(opts.cwd), resolve(opts.cwd, rel))) {
+        throw new Error("design review shot is outside the design directory");
+      }
+      const bytes = await readFile(resolve(opts.cwd, rel));
+      return { dataUrl: `data:image/png;base64,${bytes.toString("base64")}` };
     }
-    // Containment: the file must live under <cwd>/.babylon/design/<slug>/reviews.
-    const expected = join(designDir(opts.cwd));
-    if (!contained(expected, resolve(opts.cwd, opts.path))) {
-      throw new Error("design review shot is outside the design directory");
-    }
-    const bytes = await readFile(resolve(opts.cwd, opts.path));
-    return { dataUrl: `data:image/png;base64,${bytes.toString("base64")}` };
-  });
+  );
   // Read the artifact under review. Semantic, not a file reader: the path comes
   // from the trusted design state and is containment-checked in the backend.
   handle("pideck:design-get-artifact", async (_e, opts: { sessionFile: string; kind: string }) => {

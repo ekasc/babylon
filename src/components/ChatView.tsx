@@ -223,6 +223,9 @@ interface Props {
   /** Project of the viewed conversation. Design review captures are files
    *  under this project, so the block needs it to resolve them. */
   sessionCwd?: string | null;
+  /** Design session slug: review captures are addressed by (slug, round,
+   *  viewport), never by path. */
+  designSlug?: string | null;
 }
 
 /** Stored virtualization latch. */
@@ -270,6 +273,7 @@ export default memo(function ChatView({
   projectName = null,
   sessionKey = null,
   sessionCwd = null,
+  designSlug = null,
   streamResponses = false,
   pinNonce = 0,
 }: Props) {
@@ -962,7 +966,7 @@ export default memo(function ChatView({
                     <AssistantMessage item={entry.item} hideThinking={isRoom || collapsedTerminals.has(entry.index)} />
                   </>
                 ) : entry.item.kind === "tool" ? (
-                  <ToolCard item={entry.item} sessionFile={sessionKey} cwd={sessionCwd} onDisclosureToggle={suspendFollowForDisclosure} />
+                  <ToolCard item={entry.item} sessionFile={sessionKey} cwd={sessionCwd} slug={designSlug} onDisclosureToggle={suspendFollowForDisclosure} />
                 ) : entry.item.kind === "recap" ? (
                   <RecapLine text={entry.item.text} />
                 ) : entry.item.kind === "launch" ? (
@@ -1038,7 +1042,7 @@ export default memo(function ChatView({
                 {hiddenEntriesForFold.map((he) =>
                   he.type === "group" ? (
                     <div key={`h-${he.index}`} className={longChat ? "chat-item chat-item-long" : "chat-item"}>
-                      <ToolGroup tools={he.tools} sessionFile={sessionKey} cwd={sessionCwd} onDisclosureToggle={suspendFollowForDisclosure} />
+                      <ToolGroup tools={he.tools} sessionFile={sessionKey} cwd={sessionCwd} slug={designSlug} onDisclosureToggle={suspendFollowForDisclosure} />
                     </div>
                   ) : (
                     <div ref={trackItemEl(he.item.key)} key={he.item.key} className={longChat ? "chat-item chat-item-long" : "chat-item"}>
@@ -1048,7 +1052,7 @@ export default memo(function ChatView({
                         <SpeakerHead speaker={he.item.speaker} streaming={he.item.streaming} roomHandle={roomHandle} members={roomMembers} isRoom={isRoom} roomName={roomName} showSpeakers={showSpeakers} />
                         <AssistantMessage item={he.item} hideThinking={isRoom} />
                       </>) : he.item.kind === "tool" ? (
-                        <ToolCard item={he.item} sessionFile={sessionKey} cwd={sessionCwd} onDisclosureToggle={suspendFollowForDisclosure} />
+                        <ToolCard item={he.item} sessionFile={sessionKey} cwd={sessionCwd} slug={designSlug} onDisclosureToggle={suspendFollowForDisclosure} />
                       ) : he.item.kind === "recap" ? (
                         <RecapLine text={he.item.text} />
                       ) : he.item.kind === "launch" ? (

@@ -2639,6 +2639,7 @@ export default function App() {
                   projectName={chatProjectName}
                   sessionKey={viewedSessionPath}
                   sessionCwd={viewedCwd}
+                  designSlug={designStatus?.design?.slug ?? null}
                   streamResponses={streamResponses}
                   historyTurns={history.turns}
                   pinNonce={pinNonce}
