@@ -1,13 +1,15 @@
 import type { IpcMainInvokeEvent } from "electron";
 import type { IpcHandle } from "./ipc-handle";
-import { validateSessionPath } from "./session-path";
+import { readFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { contained, validateSessionPath } from "./session-path";
 import type { RuntimeFacade } from "../src/runtime-facade";
 import type { PromptImage } from "../src/bridge";
 import { wireOf, wireStr } from "../src/store";
 import type { DaemonClient } from "../src/daemon-client";
 import type { PiHost } from "./pi-host";
 import { loadSessionGoal } from "./goal-mode/store";
-import { loadDesignState, stageOfState, unwrapDesignBeginResult, unwrapDesignResult } from "./design-mode/store";
+import { designDir, loadDesignState, stageOfState, unwrapDesignBeginResult, unwrapDesignResult } from "./design-mode/store";
 import { unwrapDurableGoalResult, unwrapGoalBeginResult } from "../src/lib/durable-goal";
 import { unwrapExecutionActivateResult, unwrapExecutionDeactivateResult, unwrapExecutionListResult } from "../src/execution";
 
@@ -229,6 +231,26 @@ export function registerSessionRuntimeIpc(
     if (typeof sessionId !== "string" || typeof cwd !== "string") throw new Error("invalid design request");
     const design = await loadDesignState(cwd, sessionId);
     return { design, stage: stageOfState(cwd, design) };
+  });
+  // Review screenshots are written next to the design artifacts and are read
+  // back on demand: the transcript keeps only the path, so a session log never
+  // carries megabytes of base64. The path is re-validated against the project
+  // root here — the renderer is never trusted to have checked it.
+  handle("pideck:design-review-shot", async (_e, opts: { cwd: string; path: string }) => {
+    if (
+      !opts ||
+      typeof opts.cwd !== "string" || opts.cwd.length < 1 || opts.cwd.length > 4096 ||
+      typeof opts.path !== "string" || opts.path.length < 1 || opts.path.length > 4096
+    ) {
+      throw new Error("invalid design review shot");
+    }
+    // Containment: the file must live under <cwd>/.babylon/design/<slug>/reviews.
+    const expected = join(designDir(opts.cwd));
+    if (!contained(expected, resolve(opts.cwd, opts.path))) {
+      throw new Error("design review shot is outside the design directory");
+    }
+    const bytes = await readFile(resolve(opts.cwd, opts.path));
+    return { dataUrl: `data:image/png;base64,${bytes.toString("base64")}` };
   });
   handle("pideck:design-control", async (_e, opts: { sessionFile: string; args: string }) => {
     if (!opts || typeof opts.sessionFile !== "string" || typeof opts.args !== "string" || opts.args.length > 5000) {

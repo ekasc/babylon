@@ -2593,6 +2593,7 @@ export default function App() {
                   showSpeakers={sharedSpeakers}
                   projectName={chatProjectName}
                   sessionKey={viewedSessionPath}
+                  sessionCwd={viewedCwd}
                   streamResponses={streamResponses}
                   historyTurns={history.turns}
                   pinNonce={pinNonce}

@@ -25,21 +25,43 @@ export const BRIEF_TEMPLATE = `# Brief: <subject>
 <web/mobile-web: mobile + desktop minimum, as sim preset ids, e.g. iphone + chrome-laptop. native: device models + OS versions to review on, e.g. iPhone 15 Pro (iOS 18) + Pixel 9 (Android 15)>
 `;
 
-/** Brand skeleton: the visual system, decided and signed off before any
- *  component exists. */
-export const BRAND_TEMPLATE = `# Brand direction: <subject>
+/** Direction skeleton: the design direction, decided and signed off before any
+ *  component exists.
+ *
+ *  Product UI work is not a brand exercise, so this covers layout, components
+ *  and interaction alongside the visual language — and leads with the intent
+ *  that decides how much freedom the work actually has. */
+export const DIRECTION_TEMPLATE = `# Design direction: <subject>
 
-## Tokens
-<color, spacing, radius, shadow values>
+## Intent
+<extend — keep the existing design language | evolve — keep recognizable foundations, change some visual rules | rethink — new direction allowed. One line on what the repository already answers.>
 
-## Type
-<families, scale, roles>
+## Visual language
+<color, surface, elevation, iconography, illustration>
 
-## Rhythm
-<layout grid, density, motion feel>
+## Typography
+<families, scale, roles, measure>
+
+## Spacing & density
+<spacing scale, rhythm, information density>
+
+## Layout hierarchy
+<grid, regions, what leads the eye and in what order>
+
+## Component conventions
+<buttons, inputs, cards, tables, states — and the existing components to reuse rather than reinvent>
+
+## Interaction & motion
+<feedback, transitions, what should feel instant and what should deliberate>
+
+## Responsive behavior
+<breakpoints, what reflows, what stays fixed>
+
+## Existing system to preserve
+<tokens, components, and patterns already in the repo that this work must not invalidate>
 
 ## References
-<palette, reference images, prior art>
+<prior art, screenshots, links>
 `;
 
 export function renderDesignStatus(state: DesignState | null): string {
@@ -68,17 +90,17 @@ export const DESIGN_UNTITLED_SUBJECT = "Untitled design";
 export function renderDesignSystemPrompt(state: DesignState, stage: DesignStage): string {
   const named = state.subject !== DESIGN_UNTITLED_SUBJECT;
   const base = named
-    ? `[Design mode: ${state.subject}] Stage: ${stage}. Brief: ${state.briefPath}. Brand: ${state.brandPath}. Log: ${state.logPath}.`
-    : `[Design mode] Stage: ${stage}. Brief: ${state.briefPath}. Brand: ${state.brandPath}. Log: ${state.logPath}. The user has not named the subject yet — their first message defines it. Never say, write, or echo "untitled".`;
+    ? `[Design mode: ${state.subject}] Stage: ${stage}. Brief: ${state.briefPath}. Design direction: ${state.brandPath}. Log: ${state.logPath}.`
+    : `[Design mode] Stage: ${stage}. Brief: ${state.briefPath}. Design direction: ${state.brandPath}. Log: ${state.logPath}. The user has not named the subject yet — their first message defines it. Never say, write, or echo "untitled".`;
   switch (stage) {
     case "elicit":
       return `${base} Interview the user in plain chat, one question at a time (target first: web, mobile-web, or native). Do not use ask_question dialogs. Do not paste /design commands or template skeletons into chat. Record the target with the design_set_target tool call, then write the brief file and summarize it briefly in chat. Do not build anything yet.`;
     case "brief-confirm":
       return `${base} The brief exists and awaits the user's approval (composer Approve brief button). Summarize it briefly in plain chat, answer questions, revise the file on request. Do not build yet. Never ask the user to type /design commands.`;
     case "brand":
-      return `${base} Propose the brand direction in plain chat, write ${state.brandPath}, and summarize the proposal briefly. The user approves via the composer Approve brand button. Do not use ask_question dialogs. Do not implement anything until the brand is approved.`;
+      return `${base} Propose the design direction in plain chat, write ${state.brandPath}, and summarize the proposal briefly. Read the repository first: when the design system already answers, derive the direction from it and say so instead of inventing a new palette. The user approves via the composer Approve direction button. Do not use ask_question dialogs. Do not implement anything until the direction is approved.`;
     case "build":
-      return `${base} Brief + brand are approved. Implement on a branch/worktree (file writes are permission-governed), then judge: ${state.target === "native" ? "attached simulator screenshots against brief + brand" : "browser_capture_review against brief + brand"}. Pass/fail with a punchlist in plain chat, at most ${JUDGE_MAX_ROUNDS} revise rounds, then escalate in plain chat with captures and punchlist attached. Log every round to ${state.logPath}. Never use ask_question dialogs or /design commands in chat.`;
+      return `${base} Brief + direction are approved. Implement on a branch/worktree (file writes are permission-governed), then judge: ${state.target === "native" ? "attached simulator screenshots against brief + direction" : "browser_capture_review against brief + direction"}. Pass/fail with a punchlist in plain chat, at most ${JUDGE_MAX_ROUNDS} revise rounds, then escalate in plain chat with captures and punchlist attached. Log every round to ${state.logPath}. Never use ask_question dialogs or /design commands in chat.`;
     case "done":
       return `${base} Finished. Answer follow-up questions only.`;
     case "idle":
@@ -89,11 +111,11 @@ export function renderDesignSystemPrompt(state: DesignState, stage: DesignStage)
 /** Judge loop for URL-served targets: the agent captures the page itself. */
 function webBuildBody(state: DesignState): string {
   return [
-    "Implement the approved brief + brand.",
+    "Implement the approved brief + design direction.",
     "- Work on a branch/worktree, never straight onto the user's checkout unless asked.",
     "- File writes are permission-governed; real failures belong in the attention inbox.",
     "- Interruptible and resumable: state lives in the artifacts, so stopping and resuming loses nothing.",
-    `When a build turn lands, judge it: browser_capture_review (viewports from the brief) against brief + brand. Verdicts are thread-visible, never silent: pass/fail with a concrete punchlist.`,
+    `When a build turn lands, judge it: browser_capture_review (viewports from the brief) against brief + direction. Verdicts are thread-visible, never silent: pass/fail with a concrete punchlist.`,
     `Fail feeds one targeted build turn + re-capture. Budget: ${JUDGE_MAX_ROUNDS} rounds, then escalate to the user in plain chat with captures and punchlist attached. Escalation is a designed outcome, not a failure.`,
     `Log every round (captures, verdict, punchlist) to the log path, newest entries on top.`,
     "Failure modes: no server detected (capture errors honestly — fix the serve command, don't fake a bundle), guest crash (browser_navigate to recover), judge inconclusive (escalate).",
@@ -104,11 +126,11 @@ function webBuildBody(state: DesignState): string {
  *  runs on simulator screenshots attached to the conversation. */
 function nativeBuildBody(state: DesignState): string {
   return [
-    "Implement the approved brief + brand in the native project.",
+    "Implement the approved brief + design direction in the native project.",
     "- Work on a branch/worktree, never straight onto the user's checkout unless asked.",
     "- File writes are permission-governed; real failures belong in the attention inbox.",
     "- Interruptible and resumable: state lives in the artifacts, so stopping and resuming loses nothing.",
-    `When a build turn lands, judge it from attached simulator screenshots (device models from the brief) against brief + brand. No screenshots attached yet: ask the user in plain chat to attach them and judge nothing until they arrive — never fake a verdict.`,
+    `When a build turn lands, judge it from attached simulator screenshots (device models from the brief) against brief + direction. No screenshots attached yet: ask the user in plain chat to attach them and judge nothing until they arrive — never fake a verdict.`,
     `Verdicts are thread-visible, never silent: pass/fail with a concrete punchlist. Fail feeds one targeted build turn + fresh screenshots. Budget: ${JUDGE_MAX_ROUNDS} rounds, then escalate to the user in plain chat with the latest screenshots and punchlist attached. Escalation is a designed outcome, not a failure.`,
     `Log every round (which screenshots, verdict, punchlist) to the log path, newest entries on top.`,
     "Failure modes: no screenshots provided (ask, don't guess), build doesn't compile on the target (fix the build, don't judge a stale screen), judge inconclusive (escalate).",
@@ -118,7 +140,7 @@ function nativeBuildBody(state: DesignState): string {
 /** Deprecated: retained for compat/tests only. The GUI mode never injects
  *  this into chat — behavior arrives silently via renderDesignSystemPrompt. */
 export function renderStageFollowUp(state: DesignState, stage: DesignStage): string {
-  const head = `[Design Mode: ${stage}]\nSubject: ${state.subject}\nBrief: ${state.briefPath}\nBrand: ${state.brandPath}\nLog: ${state.logPath}\n`;
+  const head = `[Design Mode: ${stage}]\nSubject: ${state.subject}\nBrief: ${state.briefPath}\nDesign direction: ${state.brandPath}\nLog: ${state.logPath}\n`;
   switch (stage) {
     case "elicit":
       return (
@@ -146,12 +168,13 @@ export function renderStageFollowUp(state: DesignState, stage: DesignStage): str
       return (
         head +
         [
-          `Propose the visual system and write it to ${state.brandPath} using this skeleton:`,
-          BRAND_TEMPLATE,
+          `Propose the design direction and write it to ${state.brandPath} using this skeleton:`,
+          DIRECTION_TEMPLATE,
+          "Derive what the repository already answers (existing tokens, components, patterns) before inventing anything new, and record the intent accordingly.",
           "Cover the brief's target: platform conventions, touch targets, and safe areas for mobile-web/native; viewport behavior for web.",
-          "Then summarize it briefly in plain chat. The user approves via the composer Approve brand button.",
+          "Then summarize it briefly in plain chat. The user approves via the composer Approve direction button.",
           "- Revise on request, present again.",
-          "Do not implement anything until the brand is approved.",
+          "Do not implement anything until the direction is approved.",
           "Never paste /design commands or ask_question dialogs into chat.",
         ].join("\n")
       );

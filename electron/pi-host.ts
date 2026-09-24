@@ -1026,6 +1026,14 @@ export class PiHost implements LocalPiHost {
                   const id = self.sessionForServices.get(services as object)?.sessionId ?? "";
                   return id || null;
                 },
+                captureReview: (opts) => {
+                  // One review round = one capture. The simulator may be
+                  // absent (no browser panel): design mode then escalates in
+                  // plain chat rather than inventing a verdict.
+                  const ctl = self.opts.getSimController?.() ?? null;
+                  if (!ctl) throw new Error("No browser is available to capture the review.");
+                  return ctl.captureReview(opts);
+                },
                 sendFollowUp: (text: string) => {
                   // Owner-mapped only (same contract as goal follow-ups).
                   const session = self.sessionForServices.get(services as object);

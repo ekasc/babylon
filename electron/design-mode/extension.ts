@@ -21,11 +21,27 @@ import {
   parseDesignTarget,
   sanitizedStateFor,
   saveDesignState,
+  JUDGE_MAX_ROUNDS,
   slugFor,
   stageFor,
   type DesignState,
+  type DesignTarget,
 } from "./store";
 import { loadSessionGoal } from "../goal-mode/store";
+import {
+  nextReviewRound,
+  persistReviewShots,
+  recordDesignReview,
+  reviewSummary,
+  type DesignReviewRecord,
+  type DesignReviewShot,
+} from "./review";
+import {
+  parseReviewSelector,
+  parseReviewViewports,
+  requireUrl,
+} from "../sim-tool-helpers";
+import type { ReviewBundle } from "../sim-controller";
 
 /**
  * Babylon's hardbaked design-mode extension: the phased design flow
@@ -60,6 +76,48 @@ export interface DesignModeExtensionDeps {
   /** Kept for interface parity with goal-mode; design mode no longer injects
    *  follow-up chat text (GUI mode stays silent, see above). */
   sendFollowUp(_text: string): void;
+  /** Review capture for URL targets. One call is one review round, so the
+   *  capture and the verdict are recorded together and the screenshots the
+   *  verdict refers to are the ones on disk. */
+  captureReview?: (opts: {
+    url: string;
+    viewports: ReturnType<typeof parseReviewViewports>;
+    readySelector?: string;
+    fullPage?: boolean;
+  }) => Promise<ReviewBundle>;
+}
+
+/** Capture the round's screenshots and persist them beside the record. The
+ *  capture is required for URL targets: a verdict that references a picture
+ *  nobody can look at is not reviewable. */
+async function captureReviewRound(
+  deps: DesignModeExtensionDeps,
+  params: { url?: unknown; viewports?: unknown; readySelector?: unknown; fullPage?: unknown },
+  target: DesignTarget,
+  cwd: string,
+  slug: string,
+  round: number
+): Promise<DesignReviewShot[]> {
+  if (!deps.captureReview) {
+    throw new Error("Review capture is unavailable in this runtime; escalate in plain chat.");
+  }
+  // requireUrl validates the args object (the shape every sim tool passes).
+  const url = requireUrl({ url: params.url }, "design_review");
+  const bundle = await deps.captureReview({
+    url,
+    viewports: parseReviewViewports(params.viewports),
+    ...(parseReviewSelector(params.readySelector) ? { readySelector: parseReviewSelector(params.readySelector)! } : {}),
+    ...(params.fullPage === true ? { fullPage: true } : {}),
+  });
+  void target;
+  return persistReviewShots(cwd, slug, round, bundle);
+}
+
+/** The model sees the same screenshots the record references. */
+async function readReviewShotBase64(cwd: string, relPath: string): Promise<string> {
+  const { readFile } = await import("node:fs/promises");
+  const { join } = await import("node:path");
+  return (await readFile(join(cwd, relPath))).toString("base64");
 }
 
 function artifactExists(cwd: string, relPath: string): boolean {
@@ -298,7 +356,100 @@ export function createDesignModeExtension(deps: DesignModeExtensionDeps): Extens
       description: "App target for the design review path",
     }),
   });
+  // One tool call is one review round: capture, judge, record, surface. The
+  // verdict is structured (not prose in chat) so the transcript can show the
+  // screenshots and the punchlist together, and so the round budget is
+  // enforced by the tool instead of trusted to the model.
+  const reviewParams = Type.Object({
+    verdict: Type.Union([Type.Literal("pass"), Type.Literal("fail")], {
+      description: "Does the current build satisfy the brief and direction?",
+    }),
+    punchlist: Type.Array(Type.String(), {
+      description: "Concrete fixes still required, most important first. Empty when passing.",
+    }),
+    note: Type.Optional(
+      Type.String({ description: "One or two sentences on what the screenshots show." })
+    ),
+    url: Type.Optional(
+      Type.String({ description: "URL to capture. Required for web and mobile-web targets." })
+    ),
+    viewports: Type.Optional(
+      Type.Array(Type.Object({ preset: Type.String(), rotated: Type.Optional(Type.Boolean()) }), {
+        description: "Viewports to capture. Defaults to mobile + desktop.",
+      })
+    ),
+    readySelector: Type.Optional(
+      Type.String({ description: "Selector to wait for before capturing each viewport." })
+    ),
+    fullPage: Type.Optional(Type.Boolean({ description: "Capture the full scrollable page." })),
+  });
+
   const tools = new Map<string, RegisteredTool>([
+    [
+      "design_review",
+      {
+        definition: {
+          name: "design_review",
+          label: "Design review",
+          description:
+            "Review the current build against the approved brief and direction, and record the round. Call once per round, after the build turn lands. For web/mobile-web this captures the page and attaches the screenshots to the verdict; for native, judge the screenshots already attached to the conversation. The review surface in the transcript shows the shots and the punchlist together. Never fake a verdict, and never call this after the round budget is spent — escalate in plain chat instead.",
+          parameters: reviewParams,
+          execute: async (_toolCallId: string, params: Static<typeof reviewParams>): Promise<AgentToolResult<unknown>> => {
+            const at = context();
+            if (!at) throw new Error("No active session for design control.");
+            const state = await loadDesignState(at.cwd, at.sessionId);
+            if (!state) throw new Error("No design session. Start one before reviewing.");
+            if (state.done) throw new Error("This design session is finished.");
+            if (!state.briefApproved || !state.brandApproved) {
+              throw new Error("The brief and design direction must be approved before reviewing.");
+            }
+
+            const round = await nextReviewRound(at.cwd, state.slug);
+            if (round > JUDGE_MAX_ROUNDS) {
+              // The budget is a designed outcome, not a failure: stop judging
+              // and hand the punchlist to the user.
+              throw new Error(
+                `Review budget spent (${JUDGE_MAX_ROUNDS} rounds recorded). Escalate in plain chat with the latest screenshots and punchlist.`
+              );
+            }
+
+            const punchlist = (params.punchlist ?? []).map((p) => String(p).trim()).filter(Boolean).slice(0, 20);
+            if (params.verdict === "pass" && punchlist.length > 0) {
+              throw new Error("A passing review must not carry a punchlist. Either pass, or fail with the fixes.");
+            }
+
+            const shots =
+              state.target === "native"
+                ? []
+                : await captureReviewRound(deps, params, state.target, at.cwd, state.slug, round);
+
+            const record: DesignReviewRecord = await recordDesignReview({
+              cwd: at.cwd,
+              state,
+              round,
+              verdict: params.verdict,
+              punchlist,
+              ...(params.note ? { note: String(params.note) } : {}),
+              shots,
+            });
+
+            // The model judges the same pixels the transcript will show.
+            const images = await Promise.all(
+              shots.map(async (shot) => ({
+                type: "image" as const,
+                data: await readReviewShotBase64(at.cwd, shot.path),
+                mimeType: "image/png" as const,
+              }))
+            );
+            return {
+              content: [{ type: "text", text: reviewSummary(record) }, ...images],
+              details: record,
+            };
+          },
+        },
+        sourceInfo,
+      },
+    ],
     [
       "design_set_target",
       {

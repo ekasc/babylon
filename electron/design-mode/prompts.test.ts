@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   BRIEF_TEMPLATE,
-  BRAND_TEMPLATE,
+  DIRECTION_TEMPLATE,
   DESIGN_UNTITLED_SUBJECT,
   renderDesignStatus,
   renderDesignSystemPrompt,
@@ -11,13 +11,31 @@ import { createDesignState } from "./store";
 
 describe("design prompts", () => {
   const state = createDesignState("Us screen", "us-screen");
-  it("brief and brand templates carry the required sections", () => {
+  it("brief and direction templates carry the required sections", () => {
     for (const section of ["Target", "Scope", "Goals", "Audience", "Required content", "Constraints", "Viewports"]) {
       expect(BRIEF_TEMPLATE).toContain(section);
     }
-    for (const section of ["Tokens", "Type", "Rhythm", "References"]) {
-      expect(BRAND_TEMPLATE).toContain(section);
+    // The direction must cover product UI work, not just a palette: intent,
+    // layout, components and interaction are first-class, not an afterthought.
+    for (const section of [
+      "Intent",
+      "Visual language",
+      "Typography",
+      "Spacing & density",
+      "Layout hierarchy",
+      "Component conventions",
+      "Interaction & motion",
+      "Responsive behavior",
+      "Existing system to preserve",
+      "References",
+    ]) {
+      expect(DIRECTION_TEMPLATE).toContain(section);
     }
+    // The intent vocabulary is the three ways design work actually relates to
+    // an existing system.
+    expect(DIRECTION_TEMPLATE).toContain("extend");
+    expect(DIRECTION_TEMPLATE).toContain("evolve");
+    expect(DIRECTION_TEMPLATE).toContain("rethink");
   });
   it("elicitation happens in plain chat, never via dialogs or commands", () => {
     expect(renderStageFollowUp(state, "elicit")).not.toContain("Use ask_question");
@@ -26,13 +44,16 @@ describe("design prompts", () => {
     expect(renderDesignSystemPrompt(state, "elicit")).toContain("plain chat");
     expect(renderDesignSystemPrompt(state, "elicit")).toContain("Do not build anything yet");
   });
-  it("brand stage gates build on GUI approval", () => {
+  it("direction stage gates build on GUI approval", () => {
     const followUp = renderStageFollowUp(state, "brand");
     expect(followUp).not.toContain("via ask_question");
     expect(followUp).not.toContain("/design approve-brand");
-    expect(followUp).toContain("composer Approve brand");
+    expect(followUp).toContain("composer Approve direction");
+    // Direction is derived from the repo when the repo already answers.
+    expect(followUp).toContain("Derive what the repository already answers");
     expect(followUp).toContain("Do not implement anything");
     expect(renderDesignSystemPrompt(state, "brand")).not.toContain("via ask_question");
+    expect(renderDesignSystemPrompt(state, "brand")).toContain("Read the repository first");
   });
   it("build stage bounds the judge loop and names escalation", () => {
     const followUp = renderStageFollowUp(state, "build");
@@ -52,7 +73,7 @@ describe("design prompts", () => {
   it("system prompt stays compact and silent per stage", () => {
     expect(renderDesignSystemPrompt(state, "elicit")).toContain("Do not build anything yet");
     expect(renderDesignSystemPrompt(state, "elicit")).not.toContain("Use ask_question");
-    expect(renderDesignSystemPrompt(state, "build")).toContain("Brief + brand are approved");
+    expect(renderDesignSystemPrompt(state, "build")).toContain("Brief + direction are approved");
     expect(renderDesignSystemPrompt(state, "build")).not.toContain("via ask_question");
     expect(renderDesignStatus(null)).toContain("/design start");
     expect(renderDesignStatus(state)).toContain("pending");

@@ -131,7 +131,7 @@ export default function SessionFooter({
               designMode === "active" && designStage === "brief-confirm"
                 ? { label: "Approve brief", onApprove: onApproveDesignBrief }
                 : designMode === "active" && designStage === "brand"
-                  ? { label: "Approve brand", onApprove: onApproveDesignBrand }
+                  ? { label: "Approve direction", onApprove: onApproveDesignBrand }
                   : null
             }
           />

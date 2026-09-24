@@ -200,7 +200,7 @@ describe("composer design toggle", () => {
 
   it("shows the stage indicator while active", () => {
     render(<Composer {...baseProps({ onToggleDesign: vi.fn(), designMode: "active", designStage: "brand" })} />);
-    expect(screen.getByRole("button", { name: /Design · Brand/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Design · Direction/ })).toBeTruthy();
     expect(document.querySelector(".composer-surface.is-design-mode")).toBeTruthy();
   });
 
@@ -235,7 +235,7 @@ describe("composer design toggle", () => {
         })}
       />
     );
-    await userEvent.click(screen.getByRole("button", { name: /Design · Brand/ }));
+    await userEvent.click(screen.getByRole("button", { name: /Design · Direction/ }));
     await userEvent.click(screen.getByRole("menuitem", { name: "End design" }));
     expect(onEndDesign).toHaveBeenCalledTimes(1);
     expect(onRestartDesign).not.toHaveBeenCalled();

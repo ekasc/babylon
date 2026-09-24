@@ -109,7 +109,8 @@ function designStageLabel(stage: string): string {
 		case "brief-confirm":
 			return "Brief";
 		case "brand":
-			return "Brand";
+			// Internal stage stays "brand" (persisted contract); users see Direction.
+			return "Direction";
 		case "build":
 			return "Build";
 		default:

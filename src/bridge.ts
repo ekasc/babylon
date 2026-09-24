@@ -628,6 +628,9 @@ export interface Bridge {
   onExecutionChanged(cb: (execution: ProjectExecution) => void): () => void;
   /** Read a session's design state (null when none is set). */
   designGet(sessionId: string, cwd: string): Promise<import("../electron/design-mode/store").DesignStatus>;
+  /** Read one review screenshot as a data URL. The path is validated against
+   *  the project's design directory in the main process. */
+  designReviewShot(opts: { cwd: string; path: string }): Promise<{ dataUrl: string }>;
   /** Run a `/design …` control invocation; resolves with the fresh design state. */
   designControl(sessionFile: string, args: string): Promise<import("../electron/design-mode/store").DesignStatus>;
   /** Transactional design start + first interview turn for an addressed session. */
@@ -909,6 +912,7 @@ export const bridge: Bridge = window.pideck ?? {
   executionDeactivate: () => Promise.resolve(false),
   onExecutionChanged: () => () => {},
   designGet: () => Promise.resolve({ design: null, stage: "idle" as const }),
+  designReviewShot: () => Promise.reject(new Error("bridge unavailable")),
   designControl: () => Promise.resolve({ design: null, stage: "idle" as const }),
   beginDesignPrompt: () => Promise.resolve({ design: null, stage: "idle" as const, started: true, error: null }),
   refreshSession: () => Promise.resolve(false),

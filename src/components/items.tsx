@@ -5,6 +5,7 @@ import { parseSkillRef, skillDisplayBody } from "../lib/skillRef";
 import Markdown from "./Markdown";
 import BashCard from "./BashCard";
 import { CheckIcon, CopyIcon } from "./icons";
+import DesignReviewCard, { isDesignReviewDetails } from "./DesignReviewCard";
 
 /** Hover-reveal icon button copying an assistant reply (text blocks only,
  *  never reasoning). Mirrors CodeBlock's copied feedback. */
@@ -293,7 +294,13 @@ export function miniPatch(patch: string, maxLines = 6): string {
   return out.join("\n");
 }
 
-export const ToolCard = memo(function ToolCard({ item, sessionFile = null, onDisclosureToggle }: { item: Extract<ChatItem, { kind: "tool" }>; sessionFile?: string | null; onDisclosureToggle?: () => void }) {
+/**
+ * A design review round is not a tool call the user needs to inspect: it IS
+ * the review. Rendering it as the first-class block (screenshots beside the
+ * punchlist) happens here, so every transcript path that renders a tool card
+ * gets it — the live view and the history window alike.
+ */
+export const ToolCard = memo(function ToolCard({ item, sessionFile = null, cwd = null, onDisclosureToggle }: { item: Extract<ChatItem, { kind: "tool" }>; sessionFile?: string | null; cwd?: string | null; onDisclosureToggle?: () => void }) {
   const [open, setOpen] = useState(false);
   const [fullOutput, setFullOutput] = useState<string | null>(null);
   const [outputLoading, setOutputLoading] = useState(false);
@@ -311,6 +318,10 @@ export const ToolCard = memo(function ToolCard({ item, sessionFile = null, onDis
   // Babylon wraps the bash tool with a richer metadata payload (command argv,
   // exit code, signal, duration, hints). Surface it via BashCard so the chat
   // shows the actual command chip, not just "bash".
+  if (item.name === "design_review" && isDesignReviewDetails(item.details) && item.status !== "running") {
+    return <DesignReviewCard details={item.details} cwd={cwd} />;
+  }
+
   if (item.name === "bash" && item.babylon?.kind === "babylon_bash") {
     return <BashCard item={item as Extract<typeof item, { babylon: { kind: "babylon_bash" } }>} sessionFile={sessionFile} />;
   }
@@ -371,7 +382,7 @@ export const ToolCard = memo(function ToolCard({ item, sessionFile = null, onDis
 });
 
 /** Collapses a run of consecutive tool calls into one summary row. */
-export const ToolGroup = memo(function ToolGroup({ tools, sessionFile = null, onDisclosureToggle }: { tools: Array<Extract<ChatItem, { kind: "tool" }>>; sessionFile?: string | null; onDisclosureToggle?: () => void }) {
+export const ToolGroup = memo(function ToolGroup({ tools, sessionFile = null, cwd = null, onDisclosureToggle }: { tools: Array<Extract<ChatItem, { kind: "tool" }>>; sessionFile?: string | null; cwd?: string | null; onDisclosureToggle?: () => void }) {
   const [open, setOpen] = useState(false);
   const anyRunning = tools.some((t) => t.status === "running" || t.status === "pending");
   const anyError = tools.some((t) => t.status === "error");
@@ -391,7 +402,7 @@ export const ToolGroup = memo(function ToolGroup({ tools, sessionFile = null, on
       {open ? (
         <div className="tool-group-list">
           {tools.map((t) => (
-            <ToolCard key={t.key} item={t} sessionFile={sessionFile} onDisclosureToggle={onDisclosureToggle} />
+            <ToolCard key={t.key} item={t} sessionFile={sessionFile} cwd={cwd} onDisclosureToggle={onDisclosureToggle} />
           ))}
         </div>
       ) : null}
