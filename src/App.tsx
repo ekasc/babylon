@@ -38,7 +38,7 @@ import {
 } from "./lib/view-navigation";
 import type { ProjectExecution } from "./execution";
 import { clampHard, clampWithRubberband } from "./lib/gesture-math";
-import { resolveSendTarget } from "./lib/send-target";
+import { performSend, type SendExecutionDeps, type SendStage } from "./lib/send-execution";
 import Sidebar from "./components/Sidebar";
 import { useTheme } from "./components/hooks/useTheme";
 import { useRollback } from "./components/hooks/useRollback";
@@ -1647,125 +1647,107 @@ export default function App() {
     },
     [viewedSessionPath, status.sessionPath, toast]
   );
+  // Session metadata lookup for Send's busy-owner toast (the canonical
+  // sessionTitle helper below is declared after send, so resolve inline —
+  // module-level resolveSessionTitle has no TDZ problem in the deps list).
+  const sessionByPath = useMemo(() => buildSessionByPath(groups), [groups]);
+
+  // Send = acquire project execution ownership, then execute one turn in
+  // the session captured AT SUBMISSION (src/lib/send-execution.ts). The
+  // legacy warmup (openSession ready / requestId / liveReadyRef) is gone:
+  // executionActivate IS the warmup, and navigation after submission is
+  // presentation state — it never re-targets a submitted send (I7/I8).
   const send = useCallback(
     async (text: string, images?: Attachment[], streamingBehavior?: "steer" | "followUp"): Promise<boolean> => {
       const hasContent = Boolean(text.trim() || images?.length);
+      // Execution identity captured at submission — validated immediately,
+      // never re-resolved from view state after an await (I7/I8).
+      const target = viewedPathRef.current;
+      const cwd = activeCwdRef.current;
+      const rollbackOptimistic = () => {
+        if (hasContent) dispatch({ type: "local-user-rollback", text });
+      };
       try {
-        // Echo the message immediately. Waiting for the session to warm before
-        // showing it makes a cold open read as a freeze: nothing appears until
-        // the turn finally starts. The optimistic row is rolled back below if
-        // the wait or the send fails.
+        // Echo the message immediately so a cold start reads as responsive.
+        // The optimistic row is rolled back by whichever attempt fails.
         if (hasContent) {
           dispatch({
             type: "local-user",
             text,
             images: images?.map((image) => `data:${image.mimeType};base64,${image.data}`),
           });
-          // Sending re-engages follow deterministically: the ChatView pins
-          // to the new row instead of relying on append-path gates.
           setPinNonce((n) => n + 1);
         }
         if (history.activeRollback) {
           setHistory((current) => ({ ...current, activeRollback: undefined }));
         }
-        // Epoch at send start: the prompt target below resolves from the
-        // live ref AFTER the warmup wait, and this guard rejects the send
-        // if a newer switch started in between.
-        const sendEpoch = epochRef.current;
-        // If the agent is still warming, wait only for the matching open request.
-        // A ready/error from an older serialized switch must not release this send.
-        if (!liveReadyRef.current) {
-          const expectedEpoch = epochRef.current;
-          const requestId = latestRequestRef.current;
-          setPreparingTurn(true);
-          try {
-            await new Promise<void>((resolve, reject) => {
-              let off: (() => void) | null = null;
-              const timeout = setTimeout(() => {
-                off?.();
-                reject(new Error("session warmup timed out"));
-              }, 15000);
-              off = bridge.onStatus((s) => {
-                if (expectedEpoch !== epochRef.current) {
-                  clearTimeout(timeout);
-                  off?.();
-                  reject(new Error("session changed before the message could be sent"));
-                  return;
-                }
-                if (s.status === "ready") {
-                  // Warmup waits for OUR open request only. A mismatched id
-                  // is a newer open (ours is superseded and, with backend
-                  // latest-wins, will never emit); an undefined id is a
-                  // foreign activation (extension/worktree foregrounding
-                  // emits requestId-less readies). Either way this is not
-                  // the session the send is warming up for — reject instead
-                  // of resolving against the wrong session (or hanging to
-                  // the 15s timeout waiting for a ready that never comes).
-                  if (s.requestId !== requestId) {
-                    clearTimeout(timeout);
-                    off?.();
-                    reject(new Error("session changed before the message could be sent"));
-                    return;
-                  }
-                  clearTimeout(timeout);
-                  off?.();
-                  resolve();
-                } else if (s.status === "exited" || s.status === "error") {
-                  clearTimeout(timeout);
-                  off?.();
-                  reject(new Error(s.message ?? "session failed to open"));
-                }
-              });
-            });
-          } finally {
-            setPreparingTurn(false);
-          }
+        if (!target || !cwd) {
+          // No submitted identity yet (fresh session still activating, or
+          // no project selected): fail fast instead of guessing.
+          rollbackOptimistic();
+          toast("info", "The session isn't ready yet — try again in a moment");
+          return false;
         }
-        if (activeGroup && !streamingBehavior) {
-          // Group room: the driver sends the message and runs serial member
-          // turns in the same session. Text only, attachments stay in 1:1s.
-          if (images?.length) {
-            dispatch({ type: "local-user-rollback", text });
-            toast("info", "Images stay in 1:1 chats, rooms take text for now");
-            return false;
-          }
-          const room = await bridge.groupSend(activeGroup.id, text);
-          if (room.stopped) toast("info", "Room rounds stopped");
+        // Room attachments: text-only for now. Pre-flight — a doomed send
+        // never acquires execution ownership.
+        if (activeGroup && !streamingBehavior && images?.length) {
+          rollbackOptimistic();
+          toast("info", "Images stay in 1:1 chats, rooms take text for now");
+          return false;
+        }
+        const mappedImages = images?.map((a) => ({ type: "image" as const, data: a.data, mimeType: a.mimeType }));
+        const deps: SendExecutionDeps = {
+          bridge,
+          setPreparingTurn,
+          onActivated: (execution) => setExecutionsByCwd((prev) => mergeExecution(prev, execution)),
+          rollbackOptimistic,
+          hydrateIfRollback: () => {
+            if (history.activeRollback) void hydrate();
+          },
+          busyToast: (busySessionFile) => toast("info", `${resolveSessionTitle(sessionByPath, busySessionFile)} is still working`),
+          activationFailedToast: (e) => toast("error", errorMessage(e, "send failed")),
+          roomGroupId: activeGroup && !streamingBehavior ? activeGroup.id : null,
+          goalArmed,
+          designArmed,
+          onGoalSubmit: () => {
+            setGoalArmed(false);
+            setGoalPendingObjective(text);
+          },
+          onDesignSubmit: () => {
+            setDesignArmed(false);
+            setDesignPendingSubject(text);
+          },
+          viewedPathRef,
+        };
+        let stage: SendStage;
+        try {
+          stage = await performSend(deps, { cwd, target, text, images: mappedImages, streamingBehavior });
+        } catch (e) {
+          // Turn-phase transport failure: performSend already rolled the
+          // optimistic row back; only surface + settle pending displays.
+          setGoalPendingObjective(null);
+          setDesignPendingSubject(null);
+          toast("error", errorMessage(e, "send failed"));
+          return false;
+        }
+        if (stage.stage === "activation-failed" || stage.stage === "busy") {
+          // Reactions (rollback/hydrate/toast) ran inside performSend.
+          return false;
+        }
+        if (stage.stage === "group") {
+          if (stage.room.stopped) toast("info", "Room rounds stopped");
           if (history.activeRollback) await hydrate();
           return true;
         }
-        // Explicit identity resolved AFTER the warmup wait above (see
-        // resolveSendTarget): the render closure's paths may still point
-        // at the previous session, so the live ref is authoritative.
-        const target = resolveSendTarget(sendEpoch, epochRef.current, viewedPathRef.current);
-        const mappedImages = images?.map((a) => ({ type: "image", data: a.data, mimeType: a.mimeType }));
-        if (goalArmed) {
-          // Armed Goal mode: this message IS the goal. One transactional op
-          // persists the objective and runs the turn itself. The outcome
-          // envelope says whether the turn started: pre-start failures roll
-          // the optimistic row back with the goal OFF, while a started turn
-          // (abort, mid-turn model error) keeps row and dot with the run
-          // error surfaced — the backend kept the injected goal.
-          setGoalArmed(false);
-          setGoalPendingObjective(text);
-          let result;
-          try {
-            result = await bridge.beginGoalPrompt(target, text, text, mappedImages, streamingBehavior);
-          } catch (e) {
-            // Transport/startup failure: nothing was sent, goal untouched.
-            setGoalPendingObjective(null);
-            if (hasContent) dispatch({ type: "local-user-rollback", text });
-            toast("error", errorMessage(e, "could not start goal"));
-            if (history.activeRollback) void hydrate();
-            return false;
-          }
+        if (stage.stage === "goal") {
+          // Envelope semantics unchanged: pre-start failures roll the row
+          // back with the goal OFF; started turns keep row + dot.
           setGoalPendingObjective(null);
-          // Session-bound: a switch mid-turn must not file A's goal into
-          // B's display (B refreshes on its own open).
+          const result = stage.result;
           if (result.goal && viewedPathRef.current === target) setDurableGoal(result.goal);
           if (result.error) {
             if (!result.started) {
-              if (hasContent) dispatch({ type: "local-user-rollback", text });
+              rollbackOptimistic();
               if (history.activeRollback) void hydrate();
             }
             toast("error", result.error);
@@ -1774,34 +1756,15 @@ export default function App() {
           if (history.activeRollback) await hydrate();
           return true;
         }
-        if (designArmed) {
-          // Armed Design mode: this message IS the subject. One transactional
-          // op persists it and runs the first interview turn itself — same
-          // envelope contract as goals (pre-start failures roll back with
-          // the subject OFF, started turns keep row and stage indicator).
-          // Goal and Design arming are mutually exclusive in the UI, so at
-          // most one branch can be armed here.
-          setDesignArmed(false);
-          setDesignPendingSubject(text);
-          let designResult;
-          try {
-            designResult = await bridge.beginDesignPrompt(target, text, text, mappedImages, streamingBehavior);
-          } catch (e) {
-            setDesignPendingSubject(null);
-            if (hasContent) dispatch({ type: "local-user-rollback", text });
-            toast("error", errorMessage(e, "could not start design"));
-            if (history.activeRollback) void hydrate();
-            return false;
-          }
+        if (stage.stage === "design") {
           setDesignPendingSubject(null);
-          // Same session binding as goals: never file a switched-away
-          // session's design into the visible one.
+          const designResult = stage.result;
           if (designResult.design && viewedPathRef.current === target) {
             setDesignStatus({ design: designResult.design, stage: designResult.stage });
           }
           if (designResult.error) {
             if (!designResult.started) {
-              if (hasContent) dispatch({ type: "local-user-rollback", text });
+              rollbackOptimistic();
               if (history.activeRollback) void hydrate();
             }
             toast("error", designResult.error);
@@ -1810,26 +1773,20 @@ export default function App() {
           if (history.activeRollback) await hydrate();
           return true;
         }
-        await bridge.prompt(
-          text,
-          mappedImages,
-          streamingBehavior,
-          target
-        );
-        // Real transition: the host accepted the prompt. Ownership is the live
-        // session's runtime id; no message id is fabricated when absent.
+        // Ordinary prompt accepted: the host owns the turn.
         if (history.activeRollback) await hydrate();
         return true;
       } catch (e) {
-        if (hasContent) dispatch({ type: "local-user-rollback", text });
+        // Defensive: performSend owns rollback for its failures; this only
+        // surfaces anything thrown outside it (echo/validation plumbing).
+        setGoalPendingObjective(null);
+        setDesignPendingSubject(null);
         toast("error", errorMessage(e, "send failed"));
         if (history.activeRollback) void hydrate();
         return false;
       }
     },
-    // No session-path deps: the prompt target resolves from viewedPathRef
-    // after the warmup wait, never from the render closure.
-    [history.activeRollback, hydrate, toast, activeGroup, goalArmed, setDurableGoal, designArmed]
+    [history.activeRollback, hydrate, toast, activeGroup, goalArmed, setDurableGoal, designArmed, sessionByPath]
   );
 
   const abort = useCallback(async () => {
@@ -1953,7 +1910,6 @@ export default function App() {
   // Per-session liveness is dead: runtimeByPath (above) owns it now.
 
   // ---- Spaces / Agents / Tabs nav model ----
-  const sessionByPath = useMemo(() => buildSessionByPath(groups), [groups]);
   // Space-scoped surfaces (Activity agents) attribute a session file to its project.
   const resolveSessionCwd = useCallback(
     (file: string | null | undefined) => (file ? (sessionByPath.get(file)?.cwd ?? null) : null),
