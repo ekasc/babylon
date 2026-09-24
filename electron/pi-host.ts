@@ -484,7 +484,7 @@ export class PiHost implements LocalPiHost {
    *   owner idle         → release owner safely, then resume target
    *   owner busy         → ProjectExecutionBusyError with the owner's identity
    * Never aborts the owner, never queues the target, never switches on a tab
-   * click (navigation calls open(), not this), never infers from foreground.
+   * click, never infers from which session is on screen.
    * Cross-project calls are independent: activating B while A1 runs is legal.
    */
   async activateExecution(
@@ -737,7 +737,7 @@ export class PiHost implements LocalPiHost {
     getToolDefinition: (name: string) => ToolDefinition | undefined;
     createContext: () => ExtensionContext;
   } {
-    // Parent identity only — never "whatever is foregrounded" (I8): tool
+    // Parent identity only — never "whatever else is running" (I8): tool
     // definition, extension context, and permission cwd all come from the
     // owning entry.
     if (!sessionId) throw new Error("thread tool execution requires parent session identity");
@@ -988,7 +988,7 @@ export class PiHost implements LocalPiHost {
                 archiveStore: this.snapcompact,
                 getMode: () => (this.opts.settingsProvider?.getSettings() ?? defaultGetSettings()).compaction?.mode ?? "summary",
                 // The owning session is registered after creation (getters run
-                // lazily per LLM call); fall back to foreground only for
+                // lazily per LLM call); fall back to the owning runtime only for
                 // sessions created before this mapping existed.
                 getModel: () => {
                   const s = self.sessionForServices.get(services as object);
@@ -1082,7 +1082,7 @@ export class PiHost implements LocalPiHost {
   ): Promise<SessionEntry> {
     if (!sessionFile) {
       // Fresh session: the file path is known deterministically (reading the
-      // foreground pointer back would be an ownership fallback, I8).
+      // "current session" lookup would be an ownership fallback, I8).
       const sm = SessionManager.create(cwd, this.opts.sessionsRoot);
       const file = sm.getSessionFile()!;
       if (systemPrompt) this.pendingSystemPrompts.set(file, systemPrompt);
@@ -1170,7 +1170,7 @@ export class PiHost implements LocalPiHost {
     }
     // The SDK keeps the built services on the runtime object; register them
     // so lazily-evaluated closures (snapcompact getters) resolve the owning
-    // session instead of whatever happens to be foregrounded.
+    // session instead of whatever else is running.
     const services = runtime.services;
     const entry: SessionEntry = {
       runtime,
@@ -1282,7 +1282,7 @@ export class PiHost implements LocalPiHost {
   private async bindSession(session: AgentSession, entry: SessionEntry): Promise<void> {
     // Extension UI context: dialogs emit extension_ui_request events and await
     // a response (mirrors RPC's extension_ui_request/response protocol).
-    // Every request carries its OWNING session identity (never the foreground
+    // Every request carries its OWNING session identity (never another
     // session): concurrent sessions awaiting input stay distinguishable and
     // responses route by dialog id regardless of what is on screen.
     const dialog = <T,>(request: Record<string, unknown>, pick: (r: unknown) => T, opts?: ExtensionUIDialogOptions): Promise<T> =>
@@ -1348,12 +1348,16 @@ export class PiHost implements LocalPiHost {
           return typeof w.value === "string" ? w.value : undefined;
         }, opts),
       notify: (message: string, type?: "info" | "warning" | "error") => {
+        // Stamped like every other request: the renderer shows it as an
+        // addressed notification, never as "whatever is on screen".
         this.opts.onEvent({
           type: "extension_ui_request",
           id: `notify-${crypto.randomUUID()}`,
           method: "notify",
           message,
           notifyType: type ?? "info",
+          sessionId: entry.sessionId,
+          sessionFile: entry.sessionFile,
         });
         return Promise.resolve();
       },
@@ -1390,8 +1394,8 @@ export class PiHost implements LocalPiHost {
       mode: "rpc",
       commandContextActions: {
         waitForIdle: () => session.waitForIdle(),
-        // Created without disturbing the foreground: agent-requested sessions
-        // appear in the session list; only explicit user opens foreground.
+        // Created without disturbing execution: agent-requested sessions appear
+        // in the session list, but never become a project's owner.
         // The SDK's newSession contract reports {cancelled}: creation here
         // never cancels (failures reject instead), matching the previous
         // runtime behavior where the returned state carried no cancelled flag.
@@ -1435,7 +1439,15 @@ export class PiHost implements LocalPiHost {
         // is expected during fast session switches, don't surface it as an
         // error toast.
         if (typeof msg === "string" && msg.includes("extension ctx is stale")) return;
-        this.opts.onEvent({ type: "extension_error", extensionPath: err?.extensionPath, event: err?.event, error: msg });
+        this.opts.onEvent({
+          type: "extension_error",
+          extensionPath: err?.extensionPath,
+          event: err?.event,
+          error: msg,
+          // Addressed: an error belongs to the session whose extension failed.
+          sessionId: entry.sessionId,
+          sessionFile: entry.sessionFile,
+        });
       },
     });
     entry.unsubscribe?.();
@@ -1617,7 +1629,7 @@ export class PiHost implements LocalPiHost {
     const titleModel = settings.titleModel
       ? modelRuntime.getModel(settings.titleModel.provider, settings.titleModel.modelId)
       : undefined;
-    // Explicit caller-provided fallback last — never the foreground model.
+    // Explicit caller-provided fallback last — never another project's model.
     const model =
       titleModel ??
       modelRuntime.getModel("opencode-go", "muse-spark-1.2-contributor") ??
@@ -2766,7 +2778,7 @@ export class PiHost implements LocalPiHost {
   }
 
   /**
-   * Rename any session by file — foreground, retained-idle, or never-opened.
+   * Rename any session by file — foreground, installed owner, or never-opened.
    * Retained sessions go through the live runtime (same append + rollback
    * commit as setSessionName, entry-scoped so the live manager stays
    * coherent). Never-opened sessions get a session_info entry appended via

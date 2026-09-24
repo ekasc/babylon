@@ -39,6 +39,33 @@ describe("runtime health binding", () => {
     rerender();
   });
 
+  it("strips identity smuggled through the REAL subscription path", () => {
+    // The production hook, not just the policy: an IPC payload carrying a
+    // session/cwd must not survive into renderer state.
+    let publish!: (s: RuntimeStatus) => void;
+    const { result } = renderHook(() =>
+      useRuntimeHealth({
+        subscribe: (cb) => {
+          publish = cb;
+          return () => undefined;
+        },
+      })
+    );
+    act(() => publish({ status: "ready", sessionFile: "/a.json", cwd: "/p" } as unknown as RuntimeStatus));
+    expect(result.current).toEqual({ status: "ready" });
+  });
+
+  it("keeps ONE subscription when callers build fresh deps objects each render", () => {
+    // App creates a new deps object every render; resubscribing on that
+    // identity would churn the health listener constantly.
+    const subscribe = vi.fn(() => () => undefined);
+    const onError = vi.fn();
+    const { rerender } = renderHook(() => useRuntimeHealth({ subscribe, onError }));
+    rerender();
+    rerender();
+    expect(subscribe).toHaveBeenCalledTimes(1);
+  });
+
   it("derives health from the daemon connection when one is wired", () => {
     let connected!: (v: boolean) => void;
     const { result } = renderHook(() =>
@@ -138,6 +165,34 @@ describe("runtime event planning", () => {
       ctx()
     );
     expect(plan.settleSessionIds).toEqual(["sid-a"]);
+  });
+});
+
+describe("extension notifications and errors are addressed events", () => {
+  it("dispatches a stamped extension notify to the viewed conversation", () => {
+    // PiHost stamps these now; the planner must accept them like any other
+    // addressed event, or user-visible extension notices vanish.
+    const plan = planRuntimeEvents(
+      [ev({ type: "extension_ui_request", method: "notify", message: "HELLO", sessionFile: "/b.json", sessionId: "sid-b" })],
+      ctx({ viewedSessionPath: "/b.json", hasViewedSession: true })
+    );
+    expect(plan.dispatch).toHaveLength(1);
+  });
+
+  it("dispatches a stamped extension error to the viewed conversation", () => {
+    const plan = planRuntimeEvents(
+      [ev({ type: "extension_error", error: "boom", sessionFile: "/b.json", sessionId: "sid-b" })],
+      ctx({ viewedSessionPath: "/b.json", hasViewedSession: true })
+    );
+    expect(plan.dispatch).toHaveLength(1);
+  });
+
+  it("still drops unstamped ones — identity is required", () => {
+    const plan = planRuntimeEvents(
+      [ev({ type: "extension_ui_request", method: "notify", message: "HELLO" })],
+      ctx({ viewedSessionPath: "/b.json", hasViewedSession: true })
+    );
+    expect(plan.dispatch).toEqual([]);
   });
 });
 

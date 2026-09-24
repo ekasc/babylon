@@ -19,6 +19,10 @@ describe("PiHost resource and command integration", () => {
     await mkdir(join(agentDir, "prompts"), { recursive: true });
     await mkdir(cwd, { recursive: true });
     await writeFile(
+      join(agentDir, "extensions", "boom.ts"),
+      `export default function (pi) { pi.registerCommand("boom", { description: "fail on purpose", handler: async () => { throw new Error("BOOM_FROM_EXTENSION"); } }); }\n`,
+    );
+    await writeFile(
       join(agentDir, "extensions", "hello.ts"),
       `export default function (pi) { pi.registerCommand("hello", { description: "hello test", handler: async (_args, ctx) => ctx.ui.notify("HELLO_FROM_EXTENSION", "info") }); }\n`
     );
@@ -47,7 +51,27 @@ describe("PiHost resource and command integration", () => {
 
     expect(host.testSessions().get(sessionFile)!.runtime.session.getToolDefinition("subagent")).toBeDefined();
     await host.prompt("/hello", undefined, undefined, sessionFile);
-    expect(events).toEqual(expect.arrayContaining([expect.objectContaining({ type: "extension_ui_request", method: "notify", message: "HELLO_FROM_EXTENSION" })]));
+    // A notification is an ADDRESSED event: the renderer only shows it for the
+    // session it came from, so it must carry that identity.
+    const notify = events.find(
+      (e) => e.type === "extension_ui_request" && (e as { message?: string }).message === "HELLO_FROM_EXTENSION"
+    ) as { sessionId?: string; sessionFile?: string | null } | undefined;
+    expect(notify).toBeDefined();
+    const entry = host.testSessions().get(sessionFile)!;
+    expect(notify?.sessionId).toBe(entry.sessionId);
+    expect(notify?.sessionFile).toBe(entry.sessionFile);
+
+    // An extension failure is addressed too: it belongs to the session whose
+    // extension threw, not to "whatever the user is looking at".
+    events.length = 0;
+    await host.prompt("/boom", undefined, undefined, sessionFile).catch(() => undefined);
+    const failure = events.find((e) => e.type === "extension_error") as
+      | { error?: string; sessionId?: string; sessionFile?: string | null }
+      | undefined;
+    expect(failure).toBeDefined();
+    expect(failure?.error).toContain("BOOM_FROM_EXTENSION");
+    expect(failure?.sessionId).toBe(entry.sessionId);
+    expect(failure?.sessionFile).toBe(entry.sessionFile);
     await host.dispose();
   }, 20_000);
 

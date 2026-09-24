@@ -21,7 +21,7 @@ export function registerWorktreeIpc(
     getRuntime: () => RuntimeFacade;
     /** Resolve the project that OWNS an addressed session file. Execution
      *  mutations are identified by ownership, never by UI focus. */
-    ownerCwdFor: (sessionFile: string) => string | null;
+    ownerCwdFor: (sessionFile: string) => Promise<string | null>;
     isDaemonOwned: () => boolean;
     daemonOnly: () => DaemonClient | null;
     requireDaemonClient: () => DaemonClient;
@@ -56,7 +56,11 @@ export function registerWorktreeIpc(
         ? await daemonTaskBySessionFile(file)
         : taskManager.findBySessionFile(file);
       const parentSession = wireStr(header ?? undefined, "parentSession") ?? task?.parentSessionFile;
-      const cwd = wireStr(header ?? undefined, "cwd") ?? task?.cwd ?? (file ? ownerCwdFor(file) : null) ?? getFocusedCwd();
+      const cwd =
+        wireStr(header ?? undefined, "cwd") ??
+        task?.cwd ??
+        (file ? await ownerCwdFor(file) : null) ??
+        getFocusedCwd();
       const g = cwd ? await gitInfo(cwd) : { isRepo: false };
       return {
         isWorktree: !!parentSession,
@@ -89,7 +93,7 @@ export function registerWorktreeIpc(
       // The mutation's identity is the ADDRESSED session: its owning project
       // comes from execution ownership, so a UI focus change mid-operation
       // can never retarget the clone/relocation (C3/C7).
-      const originalCwd = ownerCwdFor(originalPath);
+      const originalCwd = await ownerCwdFor(originalPath);
       if (!originalCwd) {
         throw new Error("that session is not this host's execution session — return to the live session first");
       }
@@ -234,7 +238,7 @@ export function registerWorktreeIpc(
       const originalCwd =
         wireStr(originalHeader ?? undefined, "cwd") ??
         task?.cwd ??
-        ownerCwdFor(originalPath);
+        (await ownerCwdFor(originalPath));
       if (!originalCwd) {
         throw new Error("cannot resolve the original chat's project — return to the live session first");
       }

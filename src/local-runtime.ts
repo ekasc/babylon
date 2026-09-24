@@ -111,6 +111,7 @@ export function createLocalRuntime(opts: {
     async abort(sessionFile: string) { return piHost.abort(sessionFile); },
     async goalControl(f: string, a: string) { return piHost.execGoalCommand(f, a); },
     async executionList() { return piHost.listProjectExecutions(); },
+    async executionCwdFor(sessionFile) { return piHost.sessionCwdFor(sessionFile); },
     async executionActivate(cwd, sessionFile, opts) {
       try {
         await piHost.activateExecution(cwd, sessionFile, opts);

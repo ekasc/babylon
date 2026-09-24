@@ -188,22 +188,28 @@ export function registerBotsIpc(
       .map((mid) => botStore.get(mid))
       .filter((b): b is NonNullable<typeof b> => !!b);
     if (members.length < 2) throw new Error("A group needs at least 2 bots");
-    if (!group.projectHash) {
-      // One-time anchor for pre-project groups; same fallback chain as cwd below.
-      const anchorCwd = groupAnchorCwd(group, botStore.list()) ?? getFocusedCwd() ?? homedir();
-      try {
-        botStore.updateGroup(group.id, { projectHash: projectHashForCwd(anchorCwd) });
-        broadcastGroups();
-      } catch {
-        // Anchor persists on the next open instead.
-      }
-    }
-    const cwd =
-      group.cwd && group.cwd.length > 0
+    // THE project, resolved once and then persisted. UI focus is only ever the
+    // last resort on a first open; after that the group's own cwd is the
+    // identity, so a later send can never retarget it (C2/C3).
+    const resolvedCwd =
+      (group.cwd && group.cwd.length > 0
         ? group.cwd
         : members[0]?.cwd && members[0].cwd.length > 0
           ? members[0].cwd!
-          : requestedCwd ?? getFocusedCwd() ?? homedir();
+          : requestedCwd ??
+            groupAnchorCwd(group, botStore.list()) ??
+            getFocusedCwd()) ?? homedir();
+    const cwd = resolvedCwd;
+    if (group.cwd !== cwd || !group.projectHash) {
+      // Persist BOTH keys from the SAME cwd, so projectHash and the executed
+      // project can never disagree.
+      try {
+        botStore.updateGroup(group.id, { cwd, projectHash: projectHashForCwd(cwd) });
+        broadcastGroups();
+      } catch {
+        // Identity persists on the next open instead; this call still runs.
+      }
+    }
     const path = await resolveCanonicalSessionFile(group.mainSessionFile);
     // Same contract as bot open: claim execution (with the room overlay as a
     // creation argument) so a busy owner rejects BEFORE a room runtime is
@@ -406,7 +412,10 @@ export function registerBotsIpc(
         throw new Error("Return to the live session first");
       }
       // Run the target turn in the target's canonical chat.
-      const targetCwd = target.cwd && target.cwd.length > 0 ? target.cwd : getFocusedCwd() || homedir();
+      // The relay already carries an explicit project (originCwd). An unpinned
+      // target bot therefore runs THERE — never in whichever Space happens to
+      // be focused while the turn runs (C2).
+      const targetCwd = target.cwd && target.cwd.length > 0 ? target.cwd : originCwd;
       const targetHash = projectHashForCwd(targetCwd);
       const targetPath = await resolveCanonicalSessionFile(botChatForProject(target, targetHash));
       const targetClaim = await getRuntime().executionActivate(targetCwd, targetPath ?? undefined, {

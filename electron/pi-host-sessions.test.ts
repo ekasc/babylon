@@ -1018,7 +1018,7 @@ describe("PiHost.renameSession", () => {
     return file;
   };
 
-  it("renames a retained-idle session without moving the foreground", async () => {
+  it("renames a installed owner session without moving the foreground", async () => {
     const a = await makeProject("rename-a");
     const b = await makeProject("rename-b");
     const { host } = makeHost(a.cwd, a.agentDir);

@@ -604,6 +604,9 @@ function applyProjectFocus(cwd: string): void {
  *  ownership is untouched — a project can keep running un-focused. */
 function clearProjectFocus(): void {
   focusedCwd = "";
+  // LSP must stop reporting the project the user just left, not keep serving
+  // its diagnostics in the background.
+  void lspManager.setActiveProject(null).catch(() => undefined);
 }
 
 function updateActivityBridge(cwd: string): void {
@@ -907,9 +910,11 @@ function registerIpc(): void {
 
   registerWorktreeIpc(handle, {
     getRuntime,
-    ownerCwdFor: (sessionFile) => {
+    // Runtime-owner aware: the daemon owns the runtime in daemon mode, and the
+    // registry answers there just as the local host does. Never UI focus.
+    ownerCwdFor: async (sessionFile) => {
       try {
-        return getHost().sessionCwdFor(sessionFile);
+        return await getRuntime().executionCwdFor(sessionFile);
       } catch {
         return null;
       }

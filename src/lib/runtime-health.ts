@@ -6,6 +6,7 @@
  */
 import { useEffect, useState } from "react";
 import type { RuntimeStatus } from "../bridge";
+import { applyRuntimeStatus } from "./app-orchestration";
 
 export interface RuntimeHealthDeps {
   /** Subscribe to health updates (bridge.onRuntimeStatus). */
@@ -18,22 +19,29 @@ export interface RuntimeHealthDeps {
 export function useRuntimeHealth(deps: RuntimeHealthDeps): RuntimeStatus {
   const [status, setStatus] = useState<RuntimeStatus>({ status: "starting" });
 
+  // Depend on the STABLE callbacks, not on the deps object: App builds a fresh
+  // object every render, and re-subscribing on identity churn would drop and
+  // re-add the health listener on every single render.
+  const { subscribe, subscribeConnection, onError } = deps;
   useEffect(() => {
-    const off = deps.subscribe((next) => {
-      setStatus(next);
-      if (next.status === "error" && next.message) deps.onError?.(next.message);
+    const off = subscribe((next) => {
+      // Normalized through the same policy the tests pin: health is rebuilt
+      // field by field, so nothing smuggled in can become view state.
+      const outcome = applyRuntimeStatus(status, next);
+      setStatus(outcome.status);
+      if (outcome.errorMessage) onError?.(outcome.errorMessage);
     });
     return off;
-  }, [deps]);
+  }, [subscribe, onError]);
 
   useEffect(() => {
-    if (!deps.subscribeConnection) return;
-    return deps.subscribeConnection((connected) => {
+    if (!subscribeConnection) return;
+    return subscribeConnection((connected) => {
       setStatus((prev) =>
         connected ? { status: "ready" } : prev.status === "error" ? prev : { status: "starting" }
       );
     });
-  }, [deps]);
+  }, [subscribeConnection]);
 
   return status;
 }

@@ -63,9 +63,9 @@ export interface LocalPiHost {
   warmProject(cwd: string): { warmed: boolean };
   hasSessionRuntime(sessionFile: string): boolean;
   sessionCwdFor(sessionFile: string): string | null;
+  listProjectExecutions(): Promise<import("./execution").ProjectExecution[]>;
   /** Run a `/goal …` control invocation without opening a turn; returns the fresh durable goal. */
   execGoalCommand(sessionFile: string, args: string): Promise<DurableGoalState | null>;
-  listProjectExecutions(): Promise<import("./execution").ProjectExecution[]>;
   executionSnapshot(cwd: string): Promise<import("./execution").ProjectExecution | null>;
   activateExecution(cwd: string, sessionFile?: string, opts?: { systemPrompt?: string | null }): Promise<import("../electron/pi-host").SessionEntry>;
   relocateExecution(sessionFile: string, fromCwd: string, toCwd: string): Promise<import("../electron/pi-host").SessionEntry>;

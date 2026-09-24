@@ -85,6 +85,11 @@ export interface RuntimeFacade {
   /** Current execution records for every project slot (renderer rebuilds its
    *  Record<cwd, ProjectExecution> on startup/reconnect). */
   executionList(): Promise<import("./execution").ProjectExecution[]>;
+  /** The project that OWNS this session file, or null when the file is not an
+   *  installed execution runtime. Works in daemon mode (answered from the
+   *  execution registry) so identity never depends on a local host or on UI
+   *  focus. */
+  executionCwdFor(sessionFile: string): Promise<string | null>;
   /** Acquire/transfer a project's execution slot; busy owners come back as a
    *  structured envelope (errors do not survive message-only transports). */
   executionActivate(cwd: string, sessionFile?: string, opts?: { systemPrompt?: string | null }): Promise<import("./execution").ExecutionActivateResult>;

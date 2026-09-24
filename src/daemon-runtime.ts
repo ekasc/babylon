@@ -291,6 +291,12 @@ export function createDaemonRuntime(client: DaemonClient): RuntimeFacade {
       const res = await client.request("pi.executionList", {});
       return unwrapExecutionListResult(res.payload, "pi.executionList");
     },
+    // No local PiHost exists in daemon mode, so ownership is answered by the
+    // daemon's own execution registry — the same authority the renderer uses.
+    async executionCwdFor(sessionFile) {
+      const list = await this.executionList();
+      return list.find((execution) => execution.sessionFile === sessionFile)?.cwd ?? null;
+    },
     async executionActivate(cwd, sessionFile, opts) {
       const res = await client.request("pi.executionActivate", { cwd, sessionFile, systemPrompt: opts?.systemPrompt ?? null });
       return unwrapExecutionActivateResult(res.payload, "pi.executionActivate");

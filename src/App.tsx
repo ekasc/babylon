@@ -471,7 +471,7 @@ export default function App() {
   });
 
   // Stable identity so the memoized Sidebar does not re-render every frame.
-  // Path-addressed: renames foreground, retained-idle, and never-opened
+  // Path-addressed: renames foreground, installed owner, and never-opened
   // sessions alike — the backend resolves ownership, no need to open first.
   // Prefill comes from the rename target, never the visible header.
   const renameSession = useCallback(
@@ -975,7 +975,7 @@ export default function App() {
           : Promise.resolve<HistoryProjection>({ turns: [], leafId: null, hasBranches: false }),
       ]);
       // Ownership: epoch alone does not exclude requestId-less activations
-      // (extension/worktree foregrounding emits ready without bumping it),
+      // (a background execution change without bumping it),
       // so the session path must match too — otherwise a stale hydrate
       // writes another session's messages/state/history over the screen.
       if (expectedEpoch !== epochRef.current || hydratePath !== viewedPathRef.current) return;
@@ -1149,7 +1149,7 @@ export default function App() {
   // nothing is created and nothing is deleted. Defined up here so openSession
   // can land on a newly selected space when its remembered session is gone
   // instead of restoring the previous view. Landing is navigation: it
-  // invalidates the epoch, request id, and switch generation so an in-flight
+  // invalidates the epoch, in-flight view switch generation so an in-flight
   // open's late ready cannot resurrect its session over the landing page.
   // Renderer execution registry: hydrated from executionList() on startup
   // and reconnect, updated ONLY by execution_changed pushes (stale
