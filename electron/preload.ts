@@ -24,15 +24,15 @@ const api: Bridge = {
   botsCreate: (input) => ipcRenderer.invoke("pideck:bots-create", input),
   botsUpdate: (id: string, patch) => ipcRenderer.invoke("pideck:bots-update", id, patch),
   botsDelete: (id: string): Promise<{ removed: boolean }> => ipcRenderer.invoke("pideck:bots-delete", id),
-  botsOpen: (id: string): Promise<{ sessionFile: string | null; bot: Bot }> =>
-    ipcRenderer.invoke("pideck:bots-open", id),
+  botsOpen: (id: string, cwd: string): Promise<{ sessionFile: string | null; cwd: string; bot: Bot }> =>
+    ipcRenderer.invoke("pideck:bots-open", id, cwd),
   onBotsUpdate: (cb) => on("pideck:bots-update", cb),
   groupsList: () => ipcRenderer.invoke("pideck:groups-list"),
   groupsCreate: (input) => ipcRenderer.invoke("pideck:groups-create", input),
   groupsUpdate: (id: string, patch) => ipcRenderer.invoke("pideck:groups-update", id, patch),
   groupsDelete: (id: string): Promise<{ removed: boolean }> => ipcRenderer.invoke("pideck:groups-delete", id),
-  groupsOpen: (id: string): Promise<{ sessionFile: string | null; group: BotGroup }> =>
-    ipcRenderer.invoke("pideck:groups-open", id),
+  groupsOpen: (id: string, cwd: string): Promise<{ sessionFile: string | null; cwd: string; group: BotGroup }> =>
+    ipcRenderer.invoke("pideck:groups-open", id, cwd),
   onGroupsUpdate: (cb) => on("pideck:groups-update", cb),
   groupSend: (groupId: string, text: string) =>
     ipcRenderer.invoke("pideck:group-send", groupId, text),

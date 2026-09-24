@@ -84,12 +84,16 @@ export async function viewSession(
   // Stash the current view so a failed switch can stay put instead of
   // stranding the user on Home.
   const prevPath = d.viewedPathRef.current;
+  // The cwd travels with the path: restoring one without the other would
+  // leave Send capturing a project that does not own the transcript.
+  const prevCwd = d.viewedCwdRef.current;
   const prevMessages = d.loadedMessagesRef.current;
   const prevOffset = d.earliestOffsetRef.current;
   const prevCanLoadMore = prevOffset != null && prevOffset > 0;
   const rollback = (): void => {
     if (prevPath) {
       d.viewedPathRef.current = prevPath;
+      d.viewedCwdRef.current = prevCwd;
       d.setViewedSessionPath(prevPath);
       d.loadedMessagesRef.current = prevMessages;
       d.earliestOffsetRef.current = prevOffset;
@@ -97,6 +101,7 @@ export async function viewSession(
       if (prevMessages.length) d.rebuildTranscript(prevMessages);
     } else {
       d.hasSessionRef.current = false;
+      d.viewedCwdRef.current = null;
       d.setHasSession(false);
     }
   };

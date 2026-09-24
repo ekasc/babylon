@@ -101,14 +101,19 @@ export function registerBotsIpc(
     return { removed };
   });
 
-  handle("pideck:bots-open", async (_e, id: string, requestId?: number) => {
+  handle("pideck:bots-open", async (_e, id: string, requestedCwd: string) => {
     if (typeof id !== "string") throw new Error("invalid bot id");
     if (isDaemonOwned()) throw new Error("Bot chats need the local runtime (turn off the daemon to use Bots)");
     if (getHostReady()) await getHostReady();
     const bot = botStore.get(id);
     if (!bot) throw new Error("Bot not found");
+    if (typeof requestedCwd !== "string" || requestedCwd.length < 1 || requestedCwd.length > 4096) {
+      throw new Error("bots-open requires a project");
+    }
     const botPrompt = buildBotSystemPrompt(bot, botStore.list());
-    const cwd = bot.cwd && bot.cwd.length > 0 ? bot.cwd : getFocusedCwd() || homedir();
+    // The renderer resolved the project; the backend uses THAT one, so the
+    // claim and the viewed project can never disagree.
+    const cwd = bot.cwd && bot.cwd.length > 0 ? bot.cwd : requestedCwd;
     const projectHash = projectHashForCwd(cwd);
     // Per-project chat first, legacy canonical second (owned-or-on-disk).
     const path = await resolveCanonicalSessionFile(botChatForProject(bot, projectHash));
@@ -131,7 +136,7 @@ export function registerBotsIpc(
       }
     }
     taskManager.resumeForSession(sessionFile);
-    return { sessionFile, bot: botStore.get(id) };
+    return { sessionFile, cwd, bot: botStore.get(id) };
   });
 
   // -------------------------------------------------------------------------
@@ -173,7 +178,10 @@ export function registerBotsIpc(
 
   /** Ensure the room session is live with the group overlay; create the
    *  canonical file on first open. Returns the room file (possibly unflushed). */
-  async function ensureGroupRoom(groupId: string): Promise<{ sessionFile: string; group: NonNullable<ReturnType<BotStore["getGroup"]>>; members: NonNullable<ReturnType<BotStore["get"]>>[] }> {
+  async function ensureGroupRoom(
+    groupId: string,
+    requestedCwd?: string
+  ): Promise<{ sessionFile: string; cwd: string; group: NonNullable<ReturnType<BotStore["getGroup"]>>; members: NonNullable<ReturnType<BotStore["get"]>>[] }> {
     const group = botStore.getGroup(groupId);
     if (!group) throw new Error("Group not found");
     const members = group.memberIds
@@ -190,7 +198,12 @@ export function registerBotsIpc(
         // Anchor persists on the next open instead.
       }
     }
-    const cwd = group.cwd && group.cwd.length > 0 ? group.cwd : members[0]?.cwd && members[0].cwd.length > 0 ? members[0].cwd! : getFocusedCwd() || homedir();
+    const cwd =
+      group.cwd && group.cwd.length > 0
+        ? group.cwd
+        : members[0]?.cwd && members[0].cwd.length > 0
+          ? members[0].cwd!
+          : requestedCwd ?? getFocusedCwd() ?? homedir();
     const path = await resolveCanonicalSessionFile(group.mainSessionFile);
     // Same contract as bot open: claim execution (with the room overlay as a
     // creation argument) so a busy owner rejects BEFORE a room runtime is
@@ -204,15 +217,18 @@ export function registerBotsIpc(
       broadcastGroups();
     }
     taskManager.resumeForSession(sessionFile);
-    return { sessionFile, group: botStore.getGroup(groupId)!, members };
+    return { sessionFile, cwd, group: botStore.getGroup(groupId)!, members };
   }
 
-  handle("pideck:groups-open", async (_e, id: string) => {
+  handle("pideck:groups-open", async (_e, id: string, requestedCwd: string) => {
     if (typeof id !== "string") throw new Error("invalid group id");
     if (isDaemonOwned()) throw new Error("Group rooms need the local runtime (turn off the daemon to use Bots)");
     if (getHostReady()) await getHostReady();
-    const { sessionFile, group } = await ensureGroupRoom(id);
-    return { sessionFile, group };
+    if (typeof requestedCwd !== "string" || requestedCwd.length < 1 || requestedCwd.length > 4096) {
+      throw new Error("groups-open requires a project");
+    }
+    const { sessionFile, group, cwd } = await ensureGroupRoom(id, requestedCwd);
+    return { sessionFile, cwd, group };
   });
 
   handle("pideck:group-send", async (_e, groupId: string, text: string) => {

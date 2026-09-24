@@ -602,7 +602,7 @@ export class PiHost implements LocalPiHost {
       sessionId: entry.sessionId,
       state,
       streaming,
-      generation: this.executionGenerationByCwd.get(cwd) ?? 0,
+      generation: this.executionGenerationByCwd.get(projectKey(cwd)) ?? 0,
     };
   }
 
@@ -729,7 +729,8 @@ export class PiHost implements LocalPiHost {
 
   /** Tool definitions + extension context from the OWNING session runtime.
    *  Thread control actions execute with the parent session's tools, never
-   *  whatever happens to be foregrounded. Falls back to foreground only when
+   *  whatever happens to be executing elsewhere. Falls back to the owning
+   *  runtime only when
    *  the owner is gone (legacy behavior). */
   private getSessionTools(sessionId: string | null | undefined): {
     cwd: string;
@@ -879,7 +880,8 @@ export class PiHost implements LocalPiHost {
   }
 
   /** One-time boot: managers plus a warm model runtime for the default
-   *  project. Sessions are created lazily per open and retained. */
+   *  project. Session runtimes are created only by execution activation and
+   *  live exactly as long as their project's ownership. */
   async start(): Promise<void> {
     const agentDir = this.opts.agentDir ?? getAgentDir();
     const cwd = resolve(this.opts.cwd);
@@ -1059,7 +1061,7 @@ export class PiHost implements LocalPiHost {
 
     // Warm the default project's model runtime so the first open pays no
     // catalogue build. No session is created here: sessions are built lazily
-    // per open and retained independently afterwards.
+    // per project, and live only as long as that project owns it.
     await this.ensureProjectRuntime(cwd);
     // Warm but invisible, the user hasn't opened a session yet.
     console.log("[pideck] pi host ready (in-process)");
@@ -1260,9 +1262,21 @@ export class PiHost implements LocalPiHost {
     for (const [id, pending] of this.uiRequests) {
       if (pending.sessionFile !== entry.sessionFile) continue;
       this.uiRequests.delete(id);
-      this.opts.onEvent({ type: "extension_ui_cancel", id });
+      this.emitUiCancel(id, pending);
       pending.reject(error);
     }
+  }
+
+  /** A cancellation is an ADDRESSED event, exactly like its request: the
+   *  renderer drops the dialog/approval for the session that raised it, and
+   *  never guesses which conversation is on screen. */
+  private emitUiCancel(id: string, pending: { sessionId: string | null; sessionFile: string | null }): void {
+    this.opts.onEvent({
+      type: "extension_ui_cancel",
+      id,
+      sessionId: pending.sessionId,
+      sessionFile: pending.sessionFile,
+    });
   }
 
   private async bindSession(session: AgentSession, entry: SessionEntry): Promise<void> {
@@ -1283,20 +1297,26 @@ export class PiHost implements LocalPiHost {
           if (timeout) clearTimeout(timeout);
           rejectDialog(error);
         };
-        this.uiRequests.set(id, { resolve: finish, reject, sessionFile: session.sessionFile ?? null, sessionId: entry.sessionId });
+        const pending = {
+          resolve: finish,
+          reject,
+          sessionFile: session.sessionFile ?? null,
+          sessionId: entry.sessionId,
+        };
+        this.uiRequests.set(id, pending);
         this.opts.onEvent({ type: "extension_ui_request", id, ...request, timeout: opts?.timeout, sessionId: session.sessionId, sessionFile: session.sessionFile ?? null });
         const timeoutMs = opts?.timeout;
         if (typeof timeoutMs === "number" && timeoutMs > 0) {
           timeout = setTimeout(() => {
             if (!this.uiRequests.delete(id)) return;
-            this.opts.onEvent({ type: "extension_ui_cancel", id });
+            this.emitUiCancel(id, pending);
             finish({ cancelled: true });
           }, timeoutMs);
         }
         if (opts?.signal) {
           const abort = () => {
             if (!this.uiRequests.delete(id)) return;
-            this.opts.onEvent({ type: "extension_ui_cancel", id });
+            this.emitUiCancel(id, pending);
             finish({ cancelled: true });
           };
           if (opts.signal.aborted) abort();
@@ -1752,7 +1772,7 @@ export class PiHost implements LocalPiHost {
   private rejectAllUi(error: Error): void {
     for (const [id, pending] of this.uiRequests) {
       this.uiRequests.delete(id);
-      this.opts.onEvent({ type: "extension_ui_cancel", id });
+      this.emitUiCancel(id, pending);
       pending.reject(error);
     }
   }
@@ -2131,7 +2151,7 @@ export class PiHost implements LocalPiHost {
     return readings;
   }
 
-  /** Run a `/goal …` control invocation on the foreground session and return
+  /** Run a `/goal …` control invocation on the ADDRESSED session and return
    *  the fresh durable state. Control-plane, not a turn: extension commands
    *  execute immediately inside `session.prompt` and never append a user
    *  message, so unlike `prompt()` this takes no checkpoint, records no
@@ -2641,7 +2661,7 @@ export class PiHost implements LocalPiHost {
   }
   async getModels(cwd: string): Promise<AgentModel[]> {
     // PROJECT-addressed (not session): ModelRuntime is per-cwd and project
-    // extensions affect registration; never the foreground session's services.
+    // extensions affect registration; never another session's services.
     const modelRuntime = await this.ensureProjectRuntime(cwd);
     const available = await modelRuntime.getAvailable();
     const overrides = this._getSettings().contextWindowOverrides ?? {};
@@ -2736,7 +2756,9 @@ export class PiHost implements LocalPiHost {
    *  while another session owns/does project work and still mutate state. */
   private requireExecutionEntry(sessionFile: string): SessionEntry {
     const entry = this.requireEntry(sessionFile);
-    const owner = this.executionByCwd.get(entry.cwd);
+    // Normalized key: a lexical cwd variant must resolve to the same slot
+    // (R7), so this guard cannot disagree with installation.
+    const owner = this.executionByCwd.get(projectKey(entry.cwd));
     if (!owner || resolve(owner) !== resolve(entry.sessionFile)) {
       throw new Error("This session is not the project's execution session");
     }

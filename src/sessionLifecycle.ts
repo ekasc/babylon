@@ -1,23 +1,21 @@
 export interface SessionEventContext {
-  /** The session whose transcript is on screen. */
-  viewedSessionId: string | null;
+  /** The conversation whose transcript is on screen. */
+  viewedSessionPath: string | null;
   /** True while a VIEW switch is still in flight. */
   switching: boolean;
 }
 
 /**
- * Agent events are session-local. An event may enter the viewed transcript
- * only when it belongs to the viewed session and no view switch is in flight:
- * an event from a background owner updates ITS bookkeeping (handled
- * separately) and never the conversation on screen.
+ * Transcript acceptance, by PATH. The caller has already resolved the event's
+ * own identity (its `sessionFile`, or its `sessionId` through the session
+ * index); an event may enter the viewed transcript only when that path IS the
+ * viewed one and no view switch is in flight. An event whose path could not be
+ * resolved is dropped rather than guessed at.
  */
-import type { AgentEvent } from "./bridge";
-
-export function shouldAcceptEvent(event: AgentEvent, context: SessionEventContext): boolean {
-  if (!event || typeof event !== "object") return false;
+export function shouldAcceptEvent(eventPath: string | null, context: SessionEventContext): boolean {
   if (context.switching) return false;
-  if (typeof event.sessionId !== "string") return false;
-  return context.viewedSessionId !== null && event.sessionId === context.viewedSessionId;
+  if (context.viewedSessionPath === null) return false;
+  return eventPath != null && eventPath === context.viewedSessionPath;
 }
 
 export interface AgentLiveness {

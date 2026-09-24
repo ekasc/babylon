@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   applyRuntimeStatus,
+  projectFocusTarget,
   groupChatCwd,
+  isViewedEvent,
   projectSettingsCwd,
   reconnectExecutions,
 } from "./app-orchestration";
@@ -79,5 +81,23 @@ describe("reconnect keeps every project owner", () => {
 
     // Nothing viewed, nothing to hydrate.
     expect(reconnectExecutions(owners, null).rehydratePath).toBeNull();
+  });
+});
+
+describe("view-scoped event side effects", () => {
+  it("apply only to the event that names the viewed conversation", () => {
+    expect(isViewedEvent("/b.json", "/b.json")).toBe(true);
+    // A settles in the background while B is on screen: no viewed-side work.
+    expect(isViewedEvent("/a.json", "/b.json")).toBe(false);
+    // Landing: nothing is viewed, so nothing is view-scoped.
+    expect(isViewedEvent("/a.json", null)).toBe(false);
+    expect(isViewedEvent(null, "/b.json")).toBe(false);
+  });
+});
+
+describe("project focus target", () => {
+  it("is the active Space, and null clears it", () => {
+    expect(projectFocusTarget("/p")).toBe("/p");
+    expect(projectFocusTarget(null)).toBeNull();
   });
 });

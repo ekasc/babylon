@@ -74,3 +74,16 @@ export function reconnectExecutions(
     rehydratePath: viewedSessionPath && owned.has(viewedSessionPath) ? viewedSessionPath : null,
   };
 }
+
+/** Is this event's own path the conversation on screen? View-scoped side
+ *  effects (state refresh, resync, transcript dispatch) apply only then; a
+ *  background owner's event must never touch the viewed conversation. */
+export function isViewedEvent(eventPath: string | null, viewedSessionPath: string | null): boolean {
+  return eventPath != null && viewedSessionPath != null && eventPath === viewedSessionPath;
+}
+
+/** The project the desktop should treat as focused: the UI's active Space, and
+ *  nothing else. `null` is meaningful — it clears focus. */
+export function projectFocusTarget(activeSpace: string | null): string | null {
+  return activeSpace;
+}

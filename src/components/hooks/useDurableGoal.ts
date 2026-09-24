@@ -6,7 +6,7 @@ import type { DurableGoalState } from "../../lib/durable-goal";
 /**
  * The session's durable goal (hardbaked goal-mode extension state) as App
  * state: refresh reads the state file for a session, control runs a `/goal …`
- * invocation on the foreground session and adopts the fresh state it
+ * invocation on the addressed session and adopts the fresh state it
  * returns. Refreshes are guarded by target so a session switch mid-flight
  * can never file another session's goal here.
  */

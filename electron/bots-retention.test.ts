@@ -136,7 +136,7 @@ describe("C10 retention: bot and group opens claim execution", () => {
       Object.defineProperty(host.testSessions().get(owner)!.runtime.session, "isStreaming", { value: true, configurable: true });
       const createdBefore = host.testRuntimeCreationCount();
 
-      await expect(h.invoke("pideck:bots-open", bot.id)).rejects.toThrow(/busy/);
+      await expect(h.invoke("pideck:bots-open", bot.id, p.cwd)).rejects.toThrow(/busy/);
       // Nothing was built: the busy owner is still the only runtime.
       expect(h.compatOpen).not.toHaveBeenCalled();
       expect(host.testRuntimeCreationCount()).toBe(createdBefore);
@@ -204,7 +204,7 @@ describe("C10 retention: bot and group opens claim execution", () => {
       const previous = SessionManager.create(p.cwd).getSessionFile()!;
       await host.activateExecution(p.cwd, previous);
 
-      const result = (await h.invoke("pideck:bots-open", bot.id)) as { sessionFile: string };
+      const result = (await h.invoke("pideck:bots-open", bot.id, p.cwd)) as { sessionFile: string };
       expect(result.sessionFile).toBeTruthy();
       expect(h.compatOpen).not.toHaveBeenCalled();
       // The bot chat took the slot: the previous runtime is gone, exactly one
@@ -235,7 +235,7 @@ describe("C10 retention: bot and group opens claim execution", () => {
       Object.defineProperty(host.testSessions().get(owner)!.runtime.session, "isStreaming", { value: true, configurable: true });
       const createdBefore = host.testRuntimeCreationCount();
 
-      await expect(h.invoke("pideck:groups-open", group.id)).rejects.toThrow(/busy/);
+      await expect(h.invoke("pideck:groups-open", group.id, p.cwd)).rejects.toThrow(/busy/);
       expect(h.compatOpen).not.toHaveBeenCalled();
       expect(host.testRuntimeCreationCount()).toBe(createdBefore);
       expect(host.testSessions().size).toBe(1);
@@ -257,7 +257,7 @@ describe("C10 retention: bot and group opens claim execution", () => {
       const group = botStore.createGroup({ name: "pair", memberIds: [one.id, two.id], cwd: p.cwd });
       const h = makeHarness(host, botStore, new ProjectSettingsStore(join(p.state, "projects")), p.state, p.cwd);
 
-      const result = (await h.invoke("pideck:groups-open", group.id)) as { sessionFile: string };
+      const result = (await h.invoke("pideck:groups-open", group.id, p.cwd)) as { sessionFile: string };
       expect(h.compatOpen).not.toHaveBeenCalled();
       expect(host.testSessions().size).toBe(1);
       expect(host.testExecutionByCwd().get(p.cwd)).toBe(result.sessionFile);

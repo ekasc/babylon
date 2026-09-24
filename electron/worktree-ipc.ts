@@ -19,6 +19,9 @@ export function registerWorktreeIpc(
   handle: Handle,
   deps: {
     getRuntime: () => RuntimeFacade;
+    /** Resolve the project that OWNS an addressed session file. Execution
+     *  mutations are identified by ownership, never by UI focus. */
+    ownerCwdFor: (sessionFile: string) => string | null;
     isDaemonOwned: () => boolean;
     daemonOnly: () => DaemonClient | null;
     requireDaemonClient: () => DaemonClient;
@@ -31,6 +34,7 @@ export function registerWorktreeIpc(
 ): void {
   const {
     getRuntime,
+    ownerCwdFor,
     isDaemonOwned,
     daemonOnly,
     requireDaemonClient,
@@ -52,7 +56,7 @@ export function registerWorktreeIpc(
         ? await daemonTaskBySessionFile(file)
         : taskManager.findBySessionFile(file);
       const parentSession = wireStr(header ?? undefined, "parentSession") ?? task?.parentSessionFile;
-      const cwd = wireStr(header ?? undefined, "cwd") ?? task?.cwd ?? getFocusedCwd();
+      const cwd = wireStr(header ?? undefined, "cwd") ?? task?.cwd ?? (file ? ownerCwdFor(file) : null) ?? getFocusedCwd();
       const g = cwd ? await gitInfo(cwd) : { isRepo: false };
       return {
         isWorktree: !!parentSession,
@@ -82,7 +86,13 @@ export function registerWorktreeIpc(
         throw new Error("no persisted session to worktree yet, send at least one message first");
       }
       const originalPath = before.sessionFile;
-      const originalCwd = getFocusedCwd();
+      // The mutation's identity is the ADDRESSED session: its owning project
+      // comes from execution ownership, so a UI focus change mid-operation
+      // can never retarget the clone/relocation (C3/C7).
+      const originalCwd = ownerCwdFor(originalPath);
+      if (!originalCwd) {
+        throw new Error("that session is not this host's execution session — return to the live session first");
+      }
       let gitWorktree: { path: string; branch: string; baseBranch?: string } | null = null;
       let gitRoot: string | undefined;
 
@@ -219,8 +229,15 @@ export function registerWorktreeIpc(
     const cleanup = async () => {
       // Leaving the worktree is an execution hand-back: the original session
       // becomes the project's owner again (its runtime is rebuilt under the
-      // original cwd, never merely foregrounded).
-      const originalCwd = wireStr(header ?? undefined, "cwd") ?? getFocusedCwd();
+      // original cwd, never by changing what the UI shows).
+      const originalHeader = await readSessionHeader(originalPath);
+      const originalCwd =
+        wireStr(originalHeader ?? undefined, "cwd") ??
+        task?.cwd ??
+        ownerCwdFor(originalPath);
+      if (!originalCwd) {
+        throw new Error("cannot resolve the original chat's project — return to the live session first");
+      }
       await getRuntime().executionActivate(originalCwd, originalPath);
 
       let gitRemoved = false;
@@ -236,10 +253,9 @@ export function registerWorktreeIpc(
         await fsp.rm(file);
       }
 
-      const origHeader = await readSessionHeader(originalPath);
       // The renderer views the returned session explicitly; nothing here
       // navigates or reports readiness (items 140-141).
-      return { originalPath, kept: opts.keep, gitRemoved, sessionFile: originalPath, cwd: wireStr(origHeader ?? undefined, "cwd") ?? originalCwd };
+      return { originalPath, kept: opts.keep, gitRemoved, sessionFile: originalPath, cwd: originalCwd };
     };
 
     if (task) {

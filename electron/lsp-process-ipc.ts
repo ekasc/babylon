@@ -19,8 +19,9 @@ export function registerLspProcessIpc(
     getHost: () => PiHost | null;
     isDaemonOwned: () => boolean;
     requireDaemonClient: () => DaemonClient;
-    daemonActiveSessionFileStrict: (client: DaemonClient) => Promise<string | null>;
+
     daemonTaskBySessionFileStrict: (client: DaemonClient, file: string | null | undefined) => Promise<Task | undefined>;
+    daemonTaskBySessionIdStrict: (client: DaemonClient, sessionId: string | null | undefined) => Promise<Task | undefined>;
     daemonClientTasksStrict: (client: DaemonClient) => Promise<Task[]>;
     getWindow: () => BrowserWindow | null;
   },
@@ -32,8 +33,8 @@ export function registerLspProcessIpc(
     getHost,
     isDaemonOwned,
     requireDaemonClient,
-    daemonActiveSessionFileStrict,
-    daemonTaskBySessionFileStrict,
+      daemonTaskBySessionFileStrict,
+    daemonTaskBySessionIdStrict,
     daemonClientTasksStrict,
     getWindow,
   } = deps;
@@ -72,8 +73,13 @@ export function registerLspProcessIpc(
       // from the local TaskManager (which is empty in daemon mode) would
       // produce an ownerless process that the daemon knows nothing about.
       const client = requireDaemonClient();
-      const activeFile = await daemonActiveSessionFileStrict(client);
-      const activeTask = await daemonTaskBySessionFileStrict(client, activeFile);
+      // Ownership comes from the request's EXPLICIT session identity; there
+      // is no "current session" to guess (C3).
+      const requestedOwnerSession =
+        typeof (opts as { ownerSession?: unknown })?.ownerSession === "string"
+          ? (opts as { ownerSession: string }).ownerSession.slice(0, 500)
+          : undefined;
+      const activeTask = await daemonTaskBySessionIdStrict(client, requestedOwnerSession);
       if (activeTask) {
         const proc = processManager.spawn({ command, cwd, owner: activeTask.id, ownerSession: activeTask.sessionId });
         await client.request("task.updated", { id: activeTask.id, patch: { terminalIds: [...(activeTask.terminalIds ?? []), proc.id] } }).catch(() => {});

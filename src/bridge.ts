@@ -573,13 +573,15 @@ export interface Bridge {
   botsCreate(input: NewBotInput): Promise<Bot>;
   botsUpdate(id: string, patch: BotPatch): Promise<Bot>;
   botsDelete(id: string): Promise<{ removed: boolean }>;
-  botsOpen(id: string): Promise<{ sessionFile: string | null; bot: Bot }>;
+  /** Claims the bot's project execution session. `cwd` is resolved by the
+   *  renderer, so the backend claim and the viewed project are the same one. */
+  botsOpen(id: string, cwd: string): Promise<{ sessionFile: string | null; cwd: string; bot: Bot }>;
   onBotsUpdate(cb: (bots: Bot[]) => void): () => void;
   groupsList(): Promise<BotGroup[]>;
   groupsCreate(input: NewGroupInput): Promise<BotGroup>;
   groupsUpdate(id: string, patch: { name?: string; memberIds?: string[]; cwd?: string }): Promise<BotGroup>;
   groupsDelete(id: string): Promise<{ removed: boolean }>;
-  groupsOpen(id: string): Promise<{ sessionFile: string | null; group: BotGroup }>;
+  groupsOpen(id: string, cwd: string): Promise<{ sessionFile: string | null; cwd: string; group: BotGroup }>;
   onGroupsUpdate(cb: (groups: BotGroup[]) => void): () => void;
   /** Room round driver: sends text, then runs serial member turns (≤3 rounds,
    *  ≤10 turns). Resolves when the room settles or stops. */
@@ -603,7 +605,7 @@ export interface Bridge {
   handoffConsume(handoffId: string, liveFile: string): Promise<{ consumedInto: string }>;
 
   prompt(message: string, images: PromptImage[] | undefined, streamingBehavior: "steer" | "followUp" | undefined, sessionFile: string): Promise<unknown>;
-  /** Abort one session's run (defaults to the foreground session). Other
+  /** Abort one addressed session's run. Other
    *  sessions keep running untouched. */
   abort(sessionFile: string): Promise<unknown>;
   /** Read a session's durable goal (null when none is set). */

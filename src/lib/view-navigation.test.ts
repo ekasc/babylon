@@ -61,7 +61,7 @@ function makeDeps(overrides: Partial<ViewNavigationDeps> = {}) {
     bridge,
     ...overrides,
   };
-  return { bridge, deps, viewedSessionIdRef: { current: null as string | null } };
+  return { bridge, deps };
 }
 
 const neverActivated = (bridge: ReturnType<typeof makeDeps>["bridge"]) => {
@@ -107,24 +107,43 @@ describe("viewSession is disk-only (I2/I3)", () => {
   });
 
   it("3: a running A survives viewing B, and A's events cannot enter B's transcript", async () => {
-    const { bridge, deps, viewedSessionIdRef } = makeDeps();
+    const { bridge, deps } = makeDeps();
     const a = execution("/p", "/s/a", { state: "working", streaming: true });
     let registry = indexExecutions([a]);
-    // A owns the project; the view starts on A.
-    viewedSessionIdRef.current = a.sessionId;
 
     await viewSession("/s/b", "/p", deps);
 
     // The viewed session is now B: the transcript guard rejects A's stream,
     // while A keeps running in the execution registry.
-    viewedSessionIdRef.current = "sid-b";
     registry = mergeExecution(registry, { ...a, generation: 2, streaming: true });
     expect(registry["/p"]?.state).toBe("working");
-    const aStreamEvent = { sessionId: a.sessionId, type: "message_update" } as unknown as AgentEvent;
+    // A's stream belongs to A, not to the B now on screen.
     expect(
-      shouldAcceptEvent(aStreamEvent, { viewedSessionId: viewedSessionIdRef.current, switching: false })
+      shouldAcceptEvent("/s/a", { viewedSessionPath: "/s/b", switching: false })
     ).toBe(false);
+    expect(
+      shouldAcceptEvent("/s/b", { viewedSessionPath: "/s/b", switching: false })
+    ).toBe(true);
     neverActivated(bridge);
+  });
+
+  it("a failed view restores BOTH the previous path and its project", async () => {
+    // Regression: rolling back a failed switch must restore the path AND the
+    // cwd, or Send would capture a project that does not own the transcript.
+    const { bridge, deps } = makeDeps();
+    deps.viewedPathRef.current = "/s/a";
+    deps.viewedCwdRef.current = "/p1";
+    deps.setViewedSessionPath("/s/a");
+    deps.hasSessionRef.current = true;
+    deps.setHasSession(true);
+    bridge.getSessionMessages.mockRejectedValue(new Error("disk gone"));
+
+    const out = await viewSession("/s/b", "/p2", deps);
+
+    expect(out.status).toBe("failed");
+    out.rollback();
+    expect(deps.viewedPathRef.current).toBe("/s/a");
+    expect(deps.viewedCwdRef.current).toBe("/p1");
   });
 
   it("4: rapid A→B→A: the latest view wins and the stale disk load never commits", async () => {

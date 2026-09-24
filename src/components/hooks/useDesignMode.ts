@@ -6,7 +6,7 @@ import type { DesignStatus } from "../../../electron/design-mode/store";
 /**
  * The session's design mode (hardbaked design-mode extension state) as App
  * state: refresh reads the state file for a session, control runs a
- * `/design …` invocation on the foreground session and adopts the fresh
+ * `/design …` invocation on the addressed session and adopts the fresh
  * status it returns. Refreshes are guarded by target so a session switch
  * mid-flight can never file another session's design state here.
  */

@@ -23,9 +23,19 @@ export function registerSessionRuntimeIpc(
     requireDaemonClient: () => DaemonClient;
     driveSharedChatExtras: (sessionFile: string, userText: string) => Promise<void>;
     applyProjectFocus: (cwd: string) => void;
+    clearProjectFocus: () => void;
   },
 ): void {
-  const { sessionsRoot, getRuntime, getHost, isDaemonOwned, requireDaemonClient, driveSharedChatExtras, applyProjectFocus } = deps;
+  const {
+    sessionsRoot,
+    getRuntime,
+    getHost,
+    isDaemonOwned,
+    requireDaemonClient,
+    driveSharedChatExtras,
+    applyProjectFocus,
+    clearProjectFocus,
+  } = deps;
   handle("pideck:prompt", async (_e, message: string, images?: unknown[], streamingBehavior?: string, sessionFile?: string | null) => {
     if (typeof message !== "string" || message.length > 2_000_000) throw new Error("invalid prompt payload");
     if (streamingBehavior !== undefined && streamingBehavior !== "steer" && streamingBehavior !== "followUp") {
@@ -70,7 +80,7 @@ export function registerSessionRuntimeIpc(
   });
   handle("pideck:abort", async (_e, opts?: { sessionFile?: string }) => {
     // Mandatory execution identity: null/empty is a protocol error, never a
-    // foreground fallback.
+    // implicit fallback.
     if (!opts || typeof opts.sessionFile !== "string" || opts.sessionFile.length < 1 || opts.sessionFile.length > 4096) {
       throw new Error("sessionFile is required");
     }
@@ -110,7 +120,12 @@ export function registerSessionRuntimeIpc(
   // Which project the DESKTOP UI is focused on (LSP/activity/git scope). It is
   // never execution ownership and never a task-resume trigger (item 118).
   handle("pideck:project-focus", (_e, cwd: string | null) => {
-    if (cwd === null) return { focused: false };
+    if (cwd === null) {
+      // No Space selected means no focused project: forget the previous one so
+      // LSP/activity display cannot stay pinned to it.
+      clearProjectFocus();
+      return { focused: false };
+    }
     if (typeof cwd !== "string" || cwd.length < 1 || cwd.length > 4096) throw new Error("invalid project focus");
     applyProjectFocus(cwd);
     return { focused: true };

@@ -70,6 +70,7 @@ describe("project focus is an explicit, separate operation", () => {
     // C6/J: activation is execution-only. The UI's project focus is its own
     // operation, driven by activeSpace — never a side effect of a claim.
     const applyProjectFocus = vi.fn();
+    const clearProjectFocus = vi.fn();
     const executionActivate = vi.fn(async () => ({
       ok: true as const,
       execution: {
@@ -93,6 +94,7 @@ describe("project focus is an explicit, separate operation", () => {
         requireDaemonClient: (() => null) as unknown as Parameters<typeof registerSessionRuntimeIpc>[1]["requireDaemonClient"],
         driveSharedChatExtras: async () => undefined,
         applyProjectFocus,
+        clearProjectFocus,
       })
     );
 
@@ -103,6 +105,14 @@ describe("project focus is an explicit, separate operation", () => {
     // The renderer moves focus explicitly, and only that moves it.
     await handlers.get("pideck:project-focus")!(null, "/p");
     expect(applyProjectFocus).toHaveBeenCalledWith("/p");
+
+    // No Space selected CLEARS focus: the desktop must not stay pinned to
+    // the project the user just left.
+    applyProjectFocus.mockClear();
+    const cleared = await handlers.get("pideck:project-focus")!(null, null);
+    expect(cleared).toEqual({ focused: false });
+    expect(clearProjectFocus).toHaveBeenCalledTimes(1);
+    expect(applyProjectFocus).not.toHaveBeenCalled();
   });
 });
 
@@ -116,6 +126,7 @@ describe("session-runtime-ipc abort/getState identity", () => {
       requireDaemonClient: (() => null) as unknown as Parameters<typeof registerSessionRuntimeIpc>[1]["requireDaemonClient"],
       driveSharedChatExtras: async () => undefined,
     applyProjectFocus: () => undefined,
+    clearProjectFocus: () => undefined,
     })
   );
 

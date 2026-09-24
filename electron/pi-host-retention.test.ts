@@ -562,3 +562,69 @@ describe("C10 retention: tabs are views, not runtimes", () => {
     }
   }, 60_000);
 });
+
+describe("C11: addressed events and normalized ownership keys", () => {
+  it("a rejected dialog emits extension_ui_cancel WITH its session identity", async () => {
+    const a = await makeProject("cancel-stamp");
+    const events: Array<Record<string, unknown>> = [];
+    const host = new PiHost({
+      cwd: a.cwd,
+      agentDir: a.agentDir,
+      stateDir: join(a.agentDir, "pideck-state"),
+      onEvent: (event) => events.push(event as unknown as Record<string, unknown>),
+    });
+    await host.start();
+    try {
+      const fileA = await makeSessionFile(a.cwd);
+      const entry = await host.activateExecution(a.cwd, fileA);
+      // Stand in for a pending dialog, exactly as the UI layer records it.
+      const pending = { sessionId: entry.sessionId, sessionFile: entry.sessionFile };
+      host.testUiRequests().set("ui-1", {
+        resolve: () => undefined,
+        reject: () => undefined,
+        sessionId: pending.sessionId,
+        sessionFile: pending.sessionFile,
+      });
+      events.length = 0;
+
+      (host as unknown as { rejectAllUi(error: Error): void }).rejectAllUi(new Error("gone"));
+
+      const cancel = events.find((e) => e.type === "extension_ui_cancel");
+      expect(cancel).toBeDefined();
+      // Unattributed cancellations are dropped by the renderer, so the stamp
+      // is what makes the dialog actually close.
+      expect(cancel?.sessionId).toBe(entry.sessionId);
+      expect(cancel?.sessionFile).toBe(entry.sessionFile);
+    } finally {
+      await host.dispose();
+    }
+  }, 60_000);
+
+  it("ownership guards survive a lexically-spelled project path", async () => {
+    const a = await makeProject("key-normalize");
+    const { host } = makeHost(a.cwd, a.agentDir);
+    await host.start();
+    try {
+      const fileA = await makeSessionFile(a.cwd);
+      // Activate THROUGH the lexical spelling. The entry records the cwd it
+      // was given, while ownership is indexed by the normalized key (R7) —
+      // so an unnormalized guard lookup would now disagree with installation.
+      // A genuinely lexical spelling: resolve() folds it to a.cwd, but the
+      // raw string is what an unnormalized guard would look up.
+      const lexical = `${a.cwd}/./`;
+      await host.activateExecution(lexical, fileA);
+      expect(host.testExecutionByCwd().get(a.cwd)).toBe(fileA);
+      expect(host.testExecutionByCwd().has(lexical)).toBe(false);
+      expect(host.executionForCwd(a.cwd)?.sessionFile).toBe(fileA);
+      // A mutation addressed to the owner passes the ownership gate: it may
+      // still fail on its own terms (no API key in this fixture), but never
+      // with an ownership error.
+      await expect(host.prompt("hi", undefined, undefined, fileA)).rejects.not.toThrow(
+        /execution session/
+      );
+      host.testAssertRetentionInvariant();
+    } finally {
+      await host.dispose();
+    }
+  }, 60_000);
+});

@@ -41,7 +41,7 @@ export function registerSessionsIpc(
     if (typeof opts.name !== "string" || opts.name.length < 1 || opts.name.length > 500) {
       throw new Error("invalid session name");
     }
-    // Path-addressed: works for foreground, retained-idle, and never-opened
+    // Path-addressed: works for the execution owner and for never-opened
     // sessions alike — no need to open the chat first. PiHost resolves and
     // validates; the index touch republishes the list with the new name.
     const result = await getRuntime().renameSession(opts.path, opts.name);

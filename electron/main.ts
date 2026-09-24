@@ -179,7 +179,9 @@ function requestApproval(action: AgentAction, risk: Risk, sessionId?: string): P
       resolve(false);
     }, timeoutMs);
     pendingApprovals.set(id, { action, risk, resolve, timer, sessionId: sessionId ?? null });
-    win?.webContents.send("pideck:approval-requested", { id, action, risk });
+    // Identity travels WITH the request: the renderer must never guess which
+    // conversation is waiting (C3).
+    win?.webContents.send("pideck:approval-requested", { id, action, risk, sessionId: sessionId ?? null });
   });
 }
 
@@ -237,7 +239,7 @@ function resolveApproval(id: string, choice: "allow_once" | "allow_session" | "a
 }
 let workflowsBridge: WorkflowsBridgeLike | null = null;
 /** Process-wide activity observation: live projects keep their own bridge,
- *  idle ones are pruned with frozen snapshots. Navigation only foregrounds;
+ *  idle ones are pruned with frozen snapshots. Navigation only changes focus;
  *  it never destroys tracking (see ActivityRegistry). */
 let activityRegistry: ActivityRegistry | null = null;
 const sessionIndex = new SessionIndex(sessionsRoot());
@@ -535,26 +537,17 @@ async function daemonTaskBySessionFileStrict(
   return tasks.find((t) => t.sessionFile === file);
 }
 
-/** Active session file of the daemon-owned PiHost (daemon mode only). */
-async function daemonActiveSessionFile(): Promise<string | null> {
-  const client = daemonOnly();
-  if (!client) return null;
-  try {
-    const res = await client.request("pi.getState", {});
-    const sessionFile = (res.payload as { sessionFile?: string } | null)?.sessionFile;
-    return typeof sessionFile === "string" && sessionFile.length > 0 ? sessionFile : null;
-  } catch {
-    return null;
-  }
+/** The daemon task that owns an explicitly named session, if any. Task
+ *  ownership is looked up by identity, never by "whatever is running". */
+async function daemonTaskBySessionIdStrict(
+  client: import("../src/daemon-client").DaemonClient,
+  sessionId: string | null | undefined
+): Promise<import("../src/tasks").Task | undefined> {
+  if (!sessionId) return undefined;
+  const tasks = await daemonClientTasksStrict(client);
+  return tasks.find((t) => t.sessionId === sessionId);
 }
 
-/** Strict variant of `daemonActiveSessionFile`: takes a required live
- *  client and propagates request failures. */
-async function daemonActiveSessionFileStrict(client: import("../src/daemon-client").DaemonClient): Promise<string | null> {
-  const res = await client.request("pi.getState", {});
-  const sessionFile = (res.payload as { sessionFile?: string } | null)?.sessionFile;
-  return typeof sessionFile === "string" && sessionFile.length > 0 ? sessionFile : null;
-}
 const agentEvents = new AgentEventBuffer((events) => {
   win?.webContents.send("pideck:agent-events", events);
 });
@@ -604,6 +597,13 @@ function applyProjectFocus(cwd: string): void {
   updateActivityBridge(cwd);
   // LSP: set active project; failures are best-effort (e.g. cwd deleted).
   void lspManager.setActiveProject(cwd).catch(() => undefined);
+}
+
+/** With no Space selected, nothing is focused: drop the project so LSP and the
+ *  activity bridge stop reporting the one the user just left. Execution
+ *  ownership is untouched — a project can keep running un-focused. */
+function clearProjectFocus(): void {
+  focusedCwd = "";
 }
 
 function updateActivityBridge(cwd: string): void {
@@ -893,6 +893,7 @@ function registerIpc(): void {
     requireDaemonClient,
     driveSharedChatExtras,
     applyProjectFocus,
+    clearProjectFocus,
   });
   registerGitIpc(handle, { getRuntime });
 
@@ -906,6 +907,13 @@ function registerIpc(): void {
 
   registerWorktreeIpc(handle, {
     getRuntime,
+    ownerCwdFor: (sessionFile) => {
+      try {
+        return getHost().sessionCwdFor(sessionFile);
+      } catch {
+        return null;
+      }
+    },
     isDaemonOwned,
     daemonOnly,
     requireDaemonClient,
@@ -939,8 +947,8 @@ function registerIpc(): void {
     getHost: () => host,
     isDaemonOwned,
     requireDaemonClient,
-    daemonActiveSessionFileStrict,
     daemonTaskBySessionFileStrict,
+    daemonTaskBySessionIdStrict,
     daemonClientTasksStrict,
     getWindow: () => win,
   });
