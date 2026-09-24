@@ -39,6 +39,7 @@ import {
 import type { ProjectExecution } from "./execution";
 import { clampHard, clampWithRubberband } from "./lib/gesture-math";
 import { performSend, type SendExecutionDeps, type SendStage } from "./lib/send-execution";
+import { performCloseTab } from "./lib/close-tab";
 import {
   deriveComposerExecutionAccess,
   deriveViewedStreaming,
@@ -86,7 +87,6 @@ import {
 import {
   activeSpaceStore,
   addNavTab,
-  closeNavTab,
   pickSpaceTab,
   spacesStore,
   tabsStore,
@@ -455,12 +455,9 @@ export default function App() {
     // Settled work leaves tabs and pins behind (like archive drops its pin).
     // Persistence is owned by the versioned setters; no direct writes here.
     setPinnedOrder((prev) => (prev.includes(path) ? prev.filter((p) => p !== path) : prev));
-    const cwd = runtimeByPath[path]?.cwd;
-    setNavTabs((prev) => {
-      if (!prev.tabs.some((t) => t.path === path)) return prev;
-      return { ...prev, tabs: prev.tabs.filter((t) => t.path !== path) };
-    });
-    if (path === viewedPathRef.current && cwd) closeTab(path);
+    // closeTab owns the whole transition once: removal + activeBySpace
+    // repair + same-Space fallback navigation when it was the viewed tab.
+    closeTab(path);
   });
   const unsettleSession = useEffectEvent((path: string) => {
     setSettled((prev) => {
@@ -1364,45 +1361,26 @@ export default function App() {
   const removeSpace = useCallback((cwd: string) => {
     setSpaces((prev) => prev.filter((c) => c !== cwd));
   }, []);
-  // Explicit tab close: the tab goes away, the session stays on disk and in
-  // history. Closing the active tab falls back to its neighbor (then a pinned
-  // session, then landing). Idle runtimes are released (listeners/resources
-  // freed); live work is never evicted by closing its tab.
+  // Tab close is pure navigation. Session history and execution lifetime
+  // are independent; even the execution-owner tab may be closed while work
+  // continues (I5). Closing may mutate navTabs, navigate the view within
+  // the same Space, or show landing — never a runtime call, never a
+  // registry change.
   const closeTab = useEffectEvent((path: string) => {
-    const { tabs, fallback } = closeNavTab(navTabs.tabs, path);
-    setNavTabs((prev) => ({ ...prev, tabs }));
-    const exec = runtimeByPath[path]?.execution ?? "idle";
-    if (exec === "idle" || exec === "failed") {
-      void bridge
-        .releaseSession(path)
-        .then((r) => {
-          // Released runtimes can never emit again: drop the local entry so
-          // no late duplicate can resurrect it.
-          if (r?.released) {
-            setExecutions((prev) => {
-              if (!prev[path]) return prev;
-              const next = { ...prev };
-              delete next[path];
-              return next;
-            });
-          }
-        })
-        .catch(() => undefined);
-    }
-    if (path === viewedPathRef.current) {
-      const pinnedHere = pinnedOrder.filter(
-        (p) => p !== path && !tabs.some((t) => t.path === p) && groups.some((g) => g.sessions.some((s) => s.path === p))
-      );
-      const nextTab = fallback ?? (pinnedHere.length ? (() => {
-        for (const g of groups) {
-          const s = g.sessions.find((x) => x.path === pinnedHere[pinnedHere.length - 1]);
-          if (s) return { path: s.path, cwd: s.cwd };
-        }
-        return null;
-      })() : null);
-      if (nextTab) void viewSession(nextTab.path, nextTab.cwd);
-      else showLanding();
-    }
+    performCloseTab(
+      {
+        navTabs,
+        setNavTabs,
+        viewedPathRef,
+        sessionByPath,
+        pinnedOrder,
+        viewSession,
+        showLanding,
+        bridge,
+        executionsByCwd,
+      },
+      path
+    );
   });
   // Space selection: adopt the project context, then resume its most recently
   // active open tab — or land on the project with no session (never auto-create).
@@ -1965,6 +1943,13 @@ export default function App() {
   // Stream truth for ChatView + Composer: a hidden execution streaming never
   // leaks steer/queue/Stop/follow into another transcript (I3).
   const viewedStreaming = deriveViewedStreaming(viewingExecution, activeStreaming);
+  // Tab-strip execution marker: OWNERSHIP comes from executionsByCwd
+  // (currentExecution), live state from runtimeByPath colors/pulses it —
+  // never the reverse (a busy runtimeByPath entry without ownership is not
+  // an execution tab).
+  const tabExecution = currentExecution
+    ? { path: currentExecution.sessionFile, state: ownerRuntimeState ?? currentExecution.state }
+    : null;
   // Return to live = pure view navigation to the CURRENT owner (I3): the
   // owner already owns execution, this only changes what ChatView shows.
   const returnToExecution = useCallback(() => {
@@ -2546,9 +2531,10 @@ export default function App() {
             {promotedParent ? <button onClick={() => { const parent = promotedParent; setPromotedParent(null); void viewSession(parent.path, parent.cwd); }} title="Back to parent session" className="thread-action thread-action-text">← Parent</button> : null}
             <SessionTabs
               tabs={visibleTabItems}
-              activePath={viewedSessionPath ?? status.sessionPath ?? null}
+              selectedPath={viewedSessionPath}
+              execution={tabExecution}
               attentionByPath={attentionByPath}
-              preparingActive={preparingVisible}
+              preparingSelected={preparingVisible}
               onActivate={(tab) => {
                 setPromotedParent(null);
                 void viewSession(tab.path, tab.cwd);

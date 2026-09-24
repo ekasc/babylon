@@ -14,7 +14,7 @@ const TABS: TabItem[] = [
 function baseProps(overrides: Record<string, unknown> = {}) {
   return {
     tabs: TABS,
-    activePath: "/s/a",
+    selectedPath: "/s/a",
     attentionByPath: new Map(),
     onActivate: vi.fn(),
     onClose: vi.fn(),
@@ -49,7 +49,7 @@ describe("SessionTabs quick-switch", () => {
   it("shows a readiness spinner on the active tab while preparing", () => {
     const { rerender } = render(<SessionTabs {...baseProps({})} />);
     expect(screen.queryByLabelText("Preparing session")).toBeNull();
-    rerender(<SessionTabs {...baseProps({ preparingActive: true })} />);
+    rerender(<SessionTabs {...baseProps({ preparingSelected: true })} />);
     const tab = screen.getByRole("tab", { name: "Alpha" });
     expect(tab.querySelector('[aria-label="Preparing session"]')).not.toBeNull();
   });
@@ -59,5 +59,61 @@ describe("SessionTabs quick-switch", () => {
     // Tabs are title + attention dot + close × only; any svg would be a
     // project icon (this fails if ProjectIcon returns to the strip).
     expect(container.querySelectorAll("svg").length).toBe(0);
+  });
+});
+
+describe("SessionTabs selection vs execution independence", () => {
+  const working = { path: "/s/a", state: "working" as const };
+
+  it("1: selected A + execution A — both treatments on the same tab", () => {
+    render(<SessionTabs {...baseProps({ execution: working })} />);
+    const tab = screen.getByRole("tab", { name: "Alpha" });
+    expect(tab.getAttribute("aria-selected")).toBe("true");
+    expect(tab.querySelector('[aria-label="Agent working"]')).not.toBeNull();
+  });
+
+  it("2: selected B + execution A — selection and ownership never move together", () => {
+    render(<SessionTabs {...baseProps({ selectedPath: "/s/b", execution: working })} />);
+    const a = screen.getByRole("tab", { name: "Alpha" });
+    const b = screen.getByRole("tab", { name: "Beta" });
+    expect(b.getAttribute("aria-selected")).toBe("true");
+    expect(a.getAttribute("aria-selected")).toBe("false");
+    expect(a.querySelector('[aria-label="Agent working"]')).not.toBeNull();
+    expect(b.querySelector('[aria-label="Agent working"]')).toBeNull();
+  });
+
+  it("3: working execution gets the working marker", () => {
+    render(<SessionTabs {...baseProps({ execution: working })} />);
+    expect(screen.getByLabelText("Agent working")).toBeTruthy();
+  });
+
+  it("4: approval execution gets the approval marker (state-driven, not attention)", () => {
+    render(<SessionTabs {...baseProps({ execution: { path: "/s/a", state: "approval" as const } })} />);
+    expect(screen.getByLabelText("Agent needs approval")).toBeTruthy();
+  });
+
+  it("5: execution marker and attention marker coexist on one tab", () => {
+    const attention = new Map([["/s/a", "unread"] as const]);
+    render(<SessionTabs {...baseProps({ execution: working, attentionByPath: attention })} />);
+    const tab = screen.getByRole("tab", { name: "Alpha" });
+    expect(tab.querySelector('[aria-label="Agent working"]')).not.toBeNull();
+    expect(tab.querySelector('[aria-label="Unread"]')).not.toBeNull();
+  });
+
+  it("6: no execution owner → no execution indicator anywhere", () => {
+    render(<SessionTabs {...baseProps()} />);
+    expect(screen.queryByLabelText("Agent working")).toBeNull();
+    expect(screen.queryByLabelText("Agent waiting")).toBeNull();
+    expect(screen.queryByLabelText("Agent needs approval")).toBeNull();
+    expect(screen.queryByLabelText("Execution session")).toBeNull();
+  });
+
+  it("7: clicking the executing-but-not-selected tab activates it (execution ≠ selected)", () => {
+    const onActivate = vi.fn();
+    render(<SessionTabs {...baseProps({ selectedPath: "/s/b", execution: working, onActivate })} />);
+    expect(screen.getByRole("tab", { name: "Alpha" }).getAttribute("aria-selected")).toBe("false");
+    fireEvent.click(screen.getByRole("tab", { name: "Alpha" }));
+    expect(onActivate).toHaveBeenCalledTimes(1);
+    expect(onActivate).toHaveBeenCalledWith(TABS[0]);
   });
 });

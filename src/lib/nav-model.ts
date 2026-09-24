@@ -20,6 +20,8 @@ export interface NavTab {
 
 export interface NavTabsBlob {
   tabs: NavTab[];
+  /** Remembered VIEWED tab per Space (last open/selected session of that
+   *  project) — never execution ownership. */
   activeBySpace: Record<string, string>;
 }
 
@@ -113,16 +115,35 @@ export function addNavTab(tabs: NavTab[], cwd: string, path: string, cap = 24): 
   return next;
 }
 
-/** Remove a tab; the session itself is untouched. Returns tabs + fallback. */
-export function closeNavTab(
-  tabs: NavTab[],
-  path: string
-): { tabs: NavTab[]; fallback: NavTab | null } {
-  const index = tabs.findIndex((t) => t.path === path);
-  if (index === -1) return { tabs, fallback: null };
-  const next = tabs.filter((t) => t.path !== path);
-  const fallback = next[Math.min(index, next.length - 1)] ?? null;
-  return { tabs: next, fallback };
+export interface CloseTabResult {
+  state: NavTabsBlob;
+  closed: NavTab | null;
+  fallback: NavTab | null;
+}
+
+/**
+ * Remove a tab (session untouched) with SPACE-SCOPED fallback: among the
+ * closed tab's own project tabs, prefer the right neighbor, else the left —
+ * never a tab from another Space (global interleaving is preserved as
+ * stored; only the fallback choice is project-local). Atomically repairs
+ * activeBySpace when the remembered viewed tab of that Space was the one
+ * closed (→ fallback, or the key is deleted). Other Spaces' entries are
+ * byte-for-byte untouched.
+ */
+export function closeSpaceTab(state: NavTabsBlob, path: string): CloseTabResult {
+  const closed = state.tabs.find((t) => t.path === path) ?? null;
+  if (!closed) return { state, closed: null, fallback: null };
+  const index = state.tabs.findIndex((t) => t.path === path);
+  const tabs = state.tabs.filter((t) => t.path !== path);
+  const right = state.tabs.slice(index + 1).find((t) => t.cwd === closed.cwd) ?? null;
+  const left = state.tabs.slice(0, index).reverse().find((t) => t.cwd === closed.cwd) ?? null;
+  const fallback = right ?? left;
+  const activeBySpace = { ...state.activeBySpace };
+  if (activeBySpace[closed.cwd] === closed.path) {
+    if (fallback) activeBySpace[closed.cwd] = fallback.path;
+    else delete activeBySpace[closed.cwd];
+  }
+  return { state: { tabs, activeBySpace }, closed, fallback };
 }
 
 export function pickSpaceTab(tabs: NavTab[], activeBySpace: Record<string, string>, cwd: string): NavTab | null {
