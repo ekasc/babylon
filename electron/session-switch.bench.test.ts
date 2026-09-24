@@ -165,15 +165,15 @@ describe("session-switch bench", () => {
           await fn();
           hydrationMs[name] = performance.now() - t0;
         };
-        await timed("getMessages", () => host.getMessages());
-        await timed("getState", () => host.getState());
-        await timed("getStats", () => host.getStats());
-        await timed("getHistory", () => host.getHistory());
-        await timed("getCommands", () => host.getCommands());
-        await timed("getModels", () => host.getModels());
+        await timed("getMessages", () => host.getMessages(fileA));
+        await timed("getState", () => host.getState(fileA));
+        await timed("getStats", () => host.getStats(fileA));
+        await timed("getHistory", () => host.getHistory(fileA));
+        await timed("getCommands", () => host.getCommands(fileA));
+        await timed("getModels", () => host.getModels(cwd));
         const tree: { rows: SessionTreeRow[]; leafId: string | null } = { rows: [], leafId: null };
         await timed("getTree", async () => {
-          const t = await host.getTree();
+          const t = await host.getTree(fileA);
           tree.rows = t.rows;
           tree.leafId = t.leafId;
         });

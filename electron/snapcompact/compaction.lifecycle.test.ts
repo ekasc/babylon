@@ -89,16 +89,18 @@ describe("snapcompact lifecycle regression (real PiHost.compact)", () => {
     await host.switchTo(sessionFile, { cwdOverride: cwd });
     // Addressed mutators require execution ownership of the target chat.
     await host.activateExecution(cwd, sessionFile);
+    const entry = host.testSessions().get(sessionFile)!;
+    const session = entry.runtime.session;
 
     // Ensure vision model with context window and fake auth so Pi's compact does not require real LLM
-    const model = host.session.model!;
+    const model = session.model!;
     expect(model).toBeDefined();
     // The default model (gpt-5.5) already supports images; ensure we have a fake key for the provider
-    await host.services.modelRuntime.setRuntimeApiKey(model!.provider, "sk-fake-test-lifecycle");
+    await entry.services.modelRuntime.setRuntimeApiKey(model!.provider, "sk-fake-test-lifecycle");
 
     saveSettings({ compaction: { mode: "snapcompact" } });
 
-    const sm = host.session.sessionManager;
+    const sm = session.sessionManager;
 
     // Build enough history: 70 pairs ~ 140 messages + header, each ~2k chars
     for (let i = 0; i < 70; i++) {
@@ -128,8 +130,8 @@ describe("snapcompact lifecycle regression (real PiHost.compact)", () => {
     });
 
     // Sync agent state so getSessionStats reflects the full history before compact
-    (host.session.agent.state as { messages: unknown }).messages = sm.buildSessionContext().messages;
-    const beforeStats = host.session.getSessionStats();
+    (session.agent.state as { messages: unknown }).messages = sm.buildSessionContext().messages;
+    const beforeStats = session.getSessionStats();
     expect(beforeStats.contextUsage!.percent).not.toBeNull();
     expect(beforeStats.contextUsage!.tokens).toBeGreaterThan(10000);
     const beforeTokens = beforeStats.contextUsage!.tokens;
@@ -167,7 +169,7 @@ describe("snapcompact lifecycle regression (real PiHost.compact)", () => {
     expect(ctxEntries.length).toBeLessThan(branch.length);
 
     // 6. Immediately after compact, contextUsage percent is null
-    const afterStats = host.session.getSessionStats();
+    const afterStats = session.getSessionStats();
     expect(afterStats.contextUsage!.percent).toBeNull();
     expect(afterStats.contextUsage!.tokens).toBeNull();
 
@@ -182,18 +184,20 @@ describe("snapcompact lifecycle regression (real PiHost.compact)", () => {
     const host2 = new PiHost({ cwd, agentDir, stateDir, onEvent: () => {}, onStatus: () => {} });
     await host2.start();
     await host2.open({ cwd, path: sessionFile });
+    const entry2 = host2.testSessions().get(sessionFile)!;
+    const session2 = entry2.runtime.session;
     // Re-apply fake key for the reopened host's model (may be same provider)
-    const model2 = host2.session.model ?? model;
+    const model2 = session2.model ?? model;
     if (model2) {
-      await host2.services.modelRuntime.setRuntimeApiKey(model2.provider, "sk-fake-test-lifecycle-2");
+      await entry2.services.modelRuntime.setRuntimeApiKey(model2.provider, "sk-fake-test-lifecycle-2");
     }
-    const freshStats = host2.session.getSessionStats();
+    const freshStats = session2.getSessionStats();
     expect(freshStats.contextUsage!.percent).toBeNull();
     expect(freshStats.contextUsage!.tokens).toBeNull();
 
     // 8. After mocked post-compaction assistant response with usage, context reflects new compacted context
     const newUsage = { input: 800, output: 400, cacheRead: 0, cacheWrite: 0, totalTokens: 1200, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
-    host2.session.sessionManager.appendMessage({
+    session2.sessionManager.appendMessage({
       role: "assistant",
       content: [{ type: "text", text: "post compact reply" }],
       provider: model2!.provider,
@@ -203,8 +207,8 @@ describe("snapcompact lifecycle regression (real PiHost.compact)", () => {
       stopReason: "stop",
       timestamp: Date.now(),
     });
-    (host2.session.agent.state as { messages: unknown }).messages = host2.session.sessionManager.buildSessionContext().messages;
-    const postStats = host2.session.getSessionStats();
+    (session2.agent.state as { messages: unknown }).messages = session2.sessionManager.buildSessionContext().messages;
+    const postStats = session2.getSessionStats();
     expect(postStats.contextUsage!.percent).not.toBeNull();
     expect(postStats.contextUsage!.tokens).not.toBeNull();
     expect(postStats.contextUsage!.tokens).toBeLessThan(beforeTokens!);

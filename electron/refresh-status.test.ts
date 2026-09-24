@@ -45,7 +45,7 @@ describe("PiHost refreshFromDisk status contract", () => {
       expect(hit).toBe(true);
       expect(statuses).toHaveLength(0);
       expect(host.activeSessionFile).toBe(foregroundBefore);
-      expect((await host.getState()).sessionFile).toBe(file);
+      expect((await host.getState(file!)).sessionFile).toBe(file);
     } finally {
       await host.dispose();
     }

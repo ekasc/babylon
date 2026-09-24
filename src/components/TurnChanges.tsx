@@ -14,15 +14,15 @@ function kindClass(kind: TurnFileChange["kind"]): string {
   return kind === "added" ? "text-ok" : kind === "deleted" ? "text-err" : "text-accent";
 }
 
-function FileRow({ change, entryId }: { change: TurnFileChange; entryId: string }) {
+function FileRow({ change, entryId, sessionFile }: { change: TurnFileChange; entryId: string; sessionFile: string | null }) {
   const [open, setOpen] = useState(false);
   const [diff, setDiff] = useState<TurnFileDiff | null>(null);
 
   useEffect(() => {
-    if (!open || diff) return;
+    if (!open || diff || !sessionFile) return;
     let cancelled = false;
     bridge
-      .getTurnFileDiff(entryId, change.path)
+      .getTurnFileDiff(sessionFile, entryId, change.path)
       .then((result) => {
         if (!cancelled) setDiff(result);
       })
@@ -30,7 +30,7 @@ function FileRow({ change, entryId }: { change: TurnFileChange; entryId: string 
     return () => {
       cancelled = true;
     };
-  }, [open, diff, entryId, change.path]);
+  }, [open, diff, entryId, change.path, sessionFile]);
 
   return (
     <div className="border-b border-line/60 last:border-b-0">
@@ -71,7 +71,7 @@ function FileRow({ change, entryId }: { change: TurnFileChange; entryId: string 
   );
 }
 
-export const TurnChanges = memo(function TurnChanges({ turn, isLatest }: { turn: HistoryTurn; isLatest: boolean }) {
+export const TurnChanges = memo(function TurnChanges({ turn, isLatest, sessionFile }: { turn: HistoryTurn; isLatest: boolean; sessionFile: string | null }) {
   const changed = turn.changedCount > 0;
   const [open, setOpen] = useState(isLatest && changed && turn.changedCount <= AUTO_EXPAND_FILE_LIMIT);
   const [data, setData] = useState<{ files: TurnFileChange[]; totals: { files: number; additions: number; deletions: number }; exclusions: string[] } | null>(null);
@@ -84,11 +84,11 @@ export const TurnChanges = memo(function TurnChanges({ turn, isLatest }: { turn:
   // "loading changes…" forever: the fetch path (daemon socket, shadow
   // repo) can fail transiently while the checkpoint itself is fine.
   useEffect(() => {
-    if (data) return;
+    if (data || !sessionFile) return;
     let cancelled = false;
     setLoadError(null);
     bridge
-      .getTurnChanges(turn.entryId)
+      .getTurnChanges(sessionFile, turn.entryId)
       .then((result) => {
         if (!cancelled) setData(result);
       })
@@ -98,7 +98,7 @@ export const TurnChanges = memo(function TurnChanges({ turn, isLatest }: { turn:
     return () => {
       cancelled = true;
     };
-  }, [data, turn.entryId, attempt]);
+  }, [data, turn.entryId, attempt, sessionFile ]);
 
   const files = data?.files ?? [];
   const totals = data?.totals ?? { files: turn.changedCount, additions: 0, deletions: 0 };
@@ -147,7 +147,7 @@ export const TurnChanges = memo(function TurnChanges({ turn, isLatest }: { turn:
           ) : (
             <>
               {files.map((change) => (
-                <FileRow key={change.path} change={change} entryId={turn.entryId} />
+                <FileRow key={change.path} change={change} entryId={turn.entryId} sessionFile={sessionFile} />
               ))}
               {data?.exclusions.length ? (
                 <p className="px-3 py-1.5 text-[11px] text-dim">{data.exclusions.join(" · ")}</p>

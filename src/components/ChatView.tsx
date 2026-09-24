@@ -935,10 +935,10 @@ export default memo(function ChatView({
     return entry.type === "group" ? (
       <Fragment key={`g-${entry.index}`}>
         <div className={longChat ? "chat-item chat-item-long" : "chat-item"}>
-          <ToolGroup tools={entry.tools} onDisclosureToggle={suspendFollowForDisclosure} />
+          <ToolGroup tools={entry.tools} sessionFile={sessionKey} onDisclosureToggle={suspendFollowForDisclosure} />
         </div>
         {cards.get(entry.index) ? (
-          <TurnChanges turn={cards.get(entry.index)!} isLatest={latestChanged?.entryId === cards.get(entry.index)!.entryId} />
+          <TurnChanges turn={cards.get(entry.index)!} isLatest={latestChanged?.entryId === cards.get(entry.index)!.entryId} sessionFile={sessionKey} />
         ) : null}
       </Fragment>
     ) : (
@@ -958,7 +958,7 @@ export default memo(function ChatView({
                     <AssistantMessage item={entry.item} hideThinking={isRoom || collapsedTerminals.has(entry.index)} />
                   </>
                 ) : entry.item.kind === "tool" ? (
-                  <ToolCard item={entry.item} onDisclosureToggle={suspendFollowForDisclosure} />
+                  <ToolCard item={entry.item} sessionFile={sessionKey} onDisclosureToggle={suspendFollowForDisclosure} />
                 ) : entry.item.kind === "recap" ? (
                   <RecapLine text={entry.item.text} />
                 ) : entry.item.kind === "launch" ? (
@@ -1034,7 +1034,7 @@ export default memo(function ChatView({
                 {hiddenEntriesForFold.map((he) =>
                   he.type === "group" ? (
                     <div key={`h-${he.index}`} className={longChat ? "chat-item chat-item-long" : "chat-item"}>
-                      <ToolGroup tools={he.tools} onDisclosureToggle={suspendFollowForDisclosure} />
+                      <ToolGroup tools={he.tools} sessionFile={sessionKey} onDisclosureToggle={suspendFollowForDisclosure} />
                     </div>
                   ) : (
                     <div ref={trackItemEl(he.item.key)} key={he.item.key} className={longChat ? "chat-item chat-item-long" : "chat-item"}>
@@ -1044,7 +1044,7 @@ export default memo(function ChatView({
                         <SpeakerHead speaker={he.item.speaker} streaming={he.item.streaming} roomHandle={roomHandle} members={roomMembers} isRoom={isRoom} roomName={roomName} showSpeakers={showSpeakers} />
                         <AssistantMessage item={he.item} hideThinking={isRoom} />
                       </>) : he.item.kind === "tool" ? (
-                        <ToolCard item={he.item} onDisclosureToggle={suspendFollowForDisclosure} />
+                        <ToolCard item={he.item} sessionFile={sessionKey} onDisclosureToggle={suspendFollowForDisclosure} />
                       ) : he.item.kind === "recap" ? (
                         <RecapLine text={he.item.text} />
                       ) : he.item.kind === "launch" ? (
@@ -1062,7 +1062,7 @@ export default memo(function ChatView({
           </>
         ) : null}
         {!foldForUser || !isCollapsed ? (cards.get(entry.index) ? (
-          <TurnChanges turn={cards.get(entry.index)!} isLatest={latestChanged?.entryId === cards.get(entry.index)!.entryId} />
+          <TurnChanges turn={cards.get(entry.index)!} isLatest={latestChanged?.entryId === cards.get(entry.index)!.entryId} sessionFile={sessionKey} />
         ) : null) : null}
       </Fragment>
     );

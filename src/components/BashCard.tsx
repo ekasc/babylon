@@ -7,10 +7,11 @@ type BashBabylon = Extract<NonNullable<Extract<ChatItem, { kind: "tool" }>["baby
 type BashItem = Extract<ChatItem, { kind: "tool" }> & { babylon: BashBabylon };
 
 interface BashCardProps {
+  sessionFile?: string | null;
   item: BashItem;
 }
 
-export default memo(function BashCard({ item }: BashCardProps) {
+export default memo(function BashCard({ item, sessionFile = null }: BashCardProps) {
   const [open, setOpen] = useState(false);
   const [fullOutput, setFullOutput] = useState<string | null>(null);
   const b = item.babylon;
@@ -44,9 +45,9 @@ export default memo(function BashCard({ item }: BashCardProps) {
   };
 
   const fetchFull = () => {
-    if (fullOutput != null) return;
+    if (fullOutput != null || !sessionFile) return;
     bridge
-      .getToolOutput(item.toolCallId)
+      .getToolOutput(sessionFile, item.toolCallId)
       .then((r) => setFullOutput(r.content))
       .catch(() => undefined);
   };

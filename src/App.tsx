@@ -742,7 +742,8 @@ export default function App() {
       }
       toast("info", "Pi runtime reconnected");
       setExecutions((prev) => reconcileAfterReconnect(prev, viewedPathRef.current));
-      bridge.getState().then(setAgentState).catch(() => undefined);
+      const reconnectPath = viewedPathRef.current;
+      if (reconnectPath) bridge.getState(reconnectPath).then(setAgentState).catch(() => undefined);
       bridge
         .activityList()
         .then(setActivity)
@@ -796,11 +797,13 @@ export default function App() {
       // A newer switch started while syncing, or the foreground moved on:
       // the data below belongs to the old session — drop it, never bind.
       if (expectedEpoch !== epochRef.current || expectedPath !== viewedPathRef.current) return;
+      // Addressed reads: with no viewed session there is nothing to bind.
+      if (!expectedPath) return;
       const [msgs, st, statsData, nextHistory] = await Promise.all([
-        bridge.getMessages(),
-        bridge.getState(),
-        bridge.getStats(),
-        bridge.getHistory(),
+        bridge.getMessages(expectedPath),
+        bridge.getState(expectedPath),
+        bridge.getStats(expectedPath),
+        bridge.getHistory(expectedPath),
       ]);
       if (expectedEpoch !== epochRef.current || expectedPath !== viewedPathRef.current) return;
       dispatch({ type: "rebuild", messages: msgs });
@@ -969,7 +972,10 @@ export default function App() {
         // Reflect engine-side state changes (model/thinking toggles, /fast,
         // session renames) in the status bar without waiting for the next
         // model/thinking/compact round-trip.
-        if (stateChanged) bridge.getState().then(setAgentState).catch(() => {});
+        if (stateChanged) {
+          const statePath = viewedPathRef.current;
+          if (statePath) bridge.getState(statePath).then(setAgentState).catch(() => {});
+        }
         if (needsResync) void resyncFromSource({ skipRefresh: true });
       }),
     [resyncFromSource, resolveRuntimePath, markUnread, refreshDurableGoal]
@@ -983,12 +989,15 @@ export default function App() {
     const cachedModels = hydrateCwd != null ? modelsCacheRef.current.get(hydrateCwd) : undefined;
     try {
       const [msgs, ms, commandData, st, statsData, nextHistory] = await Promise.all([
-        bridge.getMessages(),
-        cachedModels ?? bridge.getModels().catch(() => null),
-        bridge.getCommands().catch(() => null),
-        bridge.getState(),
-        bridge.getStats(),
-        bridge.getHistory(),
+        hydratePath ? bridge.getMessages(hydratePath) : Promise.resolve([]),
+        cachedModels ??
+          (hydrateCwd != null ? bridge.getModels(hydrateCwd).catch(() => null) : Promise.resolve(null)),
+        hydratePath ? bridge.getCommands(hydratePath).catch(() => null) : Promise.resolve(null),
+        hydratePath ? bridge.getState(hydratePath) : Promise.resolve(null),
+        hydratePath ? bridge.getStats(hydratePath) : Promise.resolve(null),
+        hydratePath
+          ? bridge.getHistory(hydratePath)
+          : Promise.resolve<HistoryProjection>({ turns: [], leafId: null, hasBranches: false }),
       ]);
       // Ownership: epoch alone does not exclude requestId-less activations
       // (extension/worktree foregrounding emits ready without bumping it),
@@ -1008,7 +1017,7 @@ export default function App() {
       // Commands are intentionally uncached: registrations belong to the
       // runtime instance, and backend eviction/recreation is invisible here.
       setCommands(commandData ?? []);
-      if (!commandData?.length) {
+      if (!commandData?.length && hydratePath) {
         const retryEpoch = expectedEpoch;
         const retryPath = hydratePath;
         let attempts = 6;
@@ -1018,7 +1027,7 @@ export default function App() {
           await new Promise<void>((r) => setTimeout(r, 400));
           if (retryEpoch !== epochRef.current || retryPath !== viewedPathRef.current) return;
           try {
-            const refreshed = await bridge.getCommands();
+            const refreshed = await bridge.getCommands(retryPath);
             if (retryEpoch !== epochRef.current || retryPath !== viewedPathRef.current) return;
             if (refreshed?.length) {
               setCommands(refreshed);
@@ -1052,11 +1061,11 @@ export default function App() {
       const cachedLevels = levelsKeyFor != null ? levelsCacheRef.current.get(levelsKeyFor) : undefined;
       if (cachedLevels !== undefined) {
         setThinkingLevels(cachedLevels);
-      } else {
+      } else if (hydratePath) {
         const levelsEpoch = expectedEpoch;
         const levelsPath = hydratePath;
         void bridge
-          .getThinkingLevels()
+          .getThinkingLevels(levelsPath)
           .then((levels) => {
             if (levelsEpoch !== epochRef.current || levelsPath !== viewedPathRef.current) return;
             if (levelsKeyFor != null && levels != null) levelsCacheRef.current.set(levelsKeyFor, levels);
@@ -2457,6 +2466,7 @@ export default function App() {
       <Suspense fallback={null}>
       <SettingsPage
         models={models}
+        projectCwd={activeSpace ?? status.cwd ?? null}
         agentState={agentState}
         theme={themePref}
         themeId={themeId}
@@ -2744,6 +2754,7 @@ export default function App() {
                 <SimSidebar />
               ) : activeTab?.feature === "branches" ? (
                 <BranchPanel
+                  sessionFile={viewedSessionPath ?? status.sessionPath ?? null}
                   onClose={() => {
                     if (activeSideTab) closeSideTab(activeSideTab);
                   }}

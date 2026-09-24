@@ -4,6 +4,8 @@ import { FlaskIcon, ChevronIcon } from "./icons";
 
 interface Props {
   onClose(): void;
+  /** Viewed session this pane reads history for (null: nothing viewed). */
+  sessionFile: string | null;
   refreshToken: number;
   onRollback(entryId: string): void;
   onUndoRollback(): void;
@@ -11,16 +13,21 @@ interface Props {
   toast(type: "info" | "warning" | "error", text: string): void;
 }
 
-export default function BranchPanel({ onClose, refreshToken, onRollback, onUndoRollback, onForkCurrent, toast }: Props) {
+export default function BranchPanel({ onClose, sessionFile, refreshToken, onRollback, onUndoRollback, onForkCurrent, toast }: Props) {
   const [history, setHistory] = useState<HistoryProjection>({ turns: [], leafId: null, hasBranches: false });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [folded, setFolded] = useState(false);
 
   useEffect(() => {
+    if (!sessionFile) {
+      setHistory({ turns: [], leafId: null, hasBranches: false });
+      setLoading(false);
+      return;
+    }
     let active = true;
     setLoading(true);
-    bridge.getHistory()
+    bridge.getHistory(sessionFile)
       .then((value) => {
         if (!active) return;
         setHistory(value);
@@ -29,7 +36,7 @@ export default function BranchPanel({ onClose, refreshToken, onRollback, onUndoR
       .catch((error) => toast("error", error?.message ?? "failed to load session history"))
       .finally(() => active && setLoading(false));
     return () => { active = false; };
-  }, [refreshToken, toast]);
+  }, [refreshToken, toast, sessionFile]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => event.key === "Escape" && onClose();

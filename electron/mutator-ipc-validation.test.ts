@@ -51,6 +51,18 @@ describe("runtime-ipc addressed identity validation", () => {
     await expect(handlers.get("pideck:set-session-name")!(null, "", "New")).rejects.toThrow(/sessionFile is required/);
     expect(unreachableRuntime).not.toHaveBeenCalled();
   });
+
+  it("addressed reads reject a missing sessionFile before touching the runtime", async () => {
+    await expect(handlers.get("pideck:get-commands")!(null)).rejects.toThrow(/sessionFile is required/);
+    await expect(handlers.get("pideck:get-commands")!(null, "")).rejects.toThrow(/sessionFile is required/);
+    await expect(handlers.get("pideck:get-tree")!(null, "")).rejects.toThrow(/sessionFile is required/);
+    await expect(handlers.get("pideck:get-history")!(null, undefined)).rejects.toThrow(/sessionFile is required/);
+    await expect(handlers.get("pideck:get-thinking-levels")!(null, "")).rejects.toThrow(/sessionFile is required/);
+    await expect(handlers.get("pideck:get-fork-messages")!(null, "")).rejects.toThrow(/sessionFile is required/);
+    await expect(handlers.get("pideck:turn-changes")!(null, "", "e1")).rejects.toThrow(/sessionFile is required/);
+    await expect(handlers.get("pideck:get-models")!(null, "")).rejects.toThrow(/invalid project path/);
+    expect(unreachableRuntime).not.toHaveBeenCalled();
+  });
 });
 
 describe("session-runtime-ipc abort/getState identity", () => {
@@ -72,13 +84,23 @@ describe("session-runtime-ipc abort/getState identity", () => {
     expect(unreachableRuntime).not.toHaveBeenCalled();
   });
 
-  it("getState validates a supplied sessionFile but allows the legacy unaddressed read", async () => {
-    await expect(handlers.get("pideck:get-state")!(null, { sessionFile: "" })).rejects.toThrow(/invalid session file/);
+  it("prompt and session-scoped reads reject a missing sessionFile", async () => {
+    await expect(handlers.get("pideck:prompt")!(null, "hi")).rejects.toThrow(/session file/);
+    await expect(handlers.get("pideck:prompt")!(null, "hi", undefined, undefined, null)).rejects.toThrow(/session file/);
+    await expect(handlers.get("pideck:prompt")!(null, "hi", undefined, undefined, "")).rejects.toThrow(/session file/);
+    await expect(handlers.get("pideck:get-messages")!(null)).rejects.toThrow(/invalid session file/);
+    await expect(handlers.get("pideck:get-messages")!(null, "")).rejects.toThrow(/invalid session file/);
+    await expect(handlers.get("pideck:get-stats")!(null, "")).rejects.toThrow(/invalid session file/);
     expect(unreachableRuntime).not.toHaveBeenCalled();
-    // Unaddressed read is still allowed (read-side cleanup is a later commit)
-    // — it reaches the runtime on purpose.
+  });
+
+  it("getState requires an addressed sessionFile (never a foreground fallback)", async () => {
+    await expect(handlers.get("pideck:get-state")!(null, { sessionFile: "" })).rejects.toThrow(/get-state requires/);
+    await expect(handlers.get("pideck:get-state")!(null, {})).rejects.toThrow(/get-state requires/);
+    await expect(handlers.get("pideck:get-state")!(null)).rejects.toThrow(/get-state requires/);
+    expect(unreachableRuntime).not.toHaveBeenCalled();
     unreachableRuntime.mockImplementationOnce(() => ({ getState: async () => ({ ok: true }) }));
-    await expect(handlers.get("pideck:get-state")!(null, {})).resolves.toEqual({ ok: true });
+    await expect(handlers.get("pideck:get-state")!(null, { sessionFile: "/tmp/s.jsonl" })).resolves.toEqual({ ok: true });
     expect(unreachableRuntime).toHaveBeenCalledTimes(1);
   });
 });

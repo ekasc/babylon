@@ -18,6 +18,14 @@ async function git(cwd: string, args: string[]): Promise<void> {
   await exec("git", args, { cwd });
 }
 
+/** The retained AgentSession behind a known session file (tests drive the
+ *  session manager directly; production goes through addressed APIs). */
+function sessionOf(host: PiHost, file: string) {
+  const entry = host.testSessions().get(file);
+  if (!entry) throw new Error(`no retained session for ${file}`);
+  return entry.runtime.session;
+}
+
 describe("PiHost rollback integration", () => {
   it("rolls conversation and files back together and can undo the rollback", async () => {
     const root = await mkdtemp(join(tmpdir(), "pideck-rollback-host-"));
@@ -40,16 +48,16 @@ describe("PiHost rollback integration", () => {
     const sessionFile = host.activeSessionFile as string;
     await host.activateExecution(cwd, sessionFile);
 
-    const start = await host.testCaptureTurnStart();
+    const start = await host.testCaptureTurnStart(sessionFile);
     expect(start).not.toBeNull();
     if (!start || "skipped" in start) throw new Error("expected a turn checkpoint");
-    const parentLeafId = host.session.sessionManager.getLeafId();
-    const userEntryId = host.session.sessionManager.appendMessage({
+    const parentLeafId = sessionOf(host, sessionFile).sessionManager.getLeafId();
+    const userEntryId = sessionOf(host, sessionFile).sessionManager.appendMessage({
       role: "user",
       content: [{ type: "text", text: "make the bad change" }],
       timestamp: Date.now(),
     });
-    const assistantEntryId = host.session.sessionManager.appendMessage({
+    const assistantEntryId = sessionOf(host, sessionFile).sessionManager.appendMessage({
       role: "assistant",
       content: [{ type: "text", text: "changed" }],
       api: "test",
@@ -60,9 +68,9 @@ describe("PiHost rollback integration", () => {
       timestamp: Date.now(),
     });
     await writeFile(join(cwd, "file.txt"), "after\n");
-    await host.testCaptureTurnEnd(start);
+    await host.testCaptureTurnEnd(start, sessionFile);
 
-    const history = await host.getHistory();
+    const history = await host.getHistory(sessionFile);
     expect(history.turns).toEqual(expect.arrayContaining([
       expect.objectContaining({ entryId: userEntryId, rollbackAvailable: true }),
     ]));
@@ -72,21 +80,21 @@ describe("PiHost rollback integration", () => {
     const rolled = await host.commitRollback(plan.planId);
     expect(rolled.editorText).toBe("make the bad change");
     expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("before\n");
-    expect(host.session.sessionManager.getLeafId()).toBe(parentLeafId);
-    expect((await host.getHistory()).activeRollback).toMatchObject({ undoAvailable: true });
+    expect(sessionOf(host, sessionFile).sessionManager.getLeafId()).toBe(parentLeafId);
+    expect((await host.getHistory(sessionFile)).activeRollback).toMatchObject({ undoAvailable: true });
     await host.dispose();
 
     const reopened = new PiHost({ cwd, agentDir, stateDir, onEvent: () => undefined, onStatus: () => undefined });
     await reopened.start();
     await reopened.open({ cwd, path: sessionFile });
     await reopened.activateExecution(cwd, sessionFile);
-    expect(reopened.session.sessionManager.getLeafId()).toBe(parentLeafId);
-    expect((await reopened.getHistory()).activeRollback).toMatchObject({ undoAvailable: true });
+    expect(sessionOf(reopened, sessionFile).sessionManager.getLeafId()).toBe(parentLeafId);
+    expect((await reopened.getHistory(sessionFile)).activeRollback).toMatchObject({ undoAvailable: true });
 
     await reopened.undoRollback(sessionFile);
     expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("after\n");
-    expect(reopened.session.sessionManager.getLeafId()).toBe(assistantEntryId);
-    expect((await reopened.getHistory()).activeRollback).toBeUndefined();
+    expect(sessionOf(reopened, sessionFile).sessionManager.getLeafId()).toBe(assistantEntryId);
+    expect((await reopened.getHistory(sessionFile)).activeRollback).toBeUndefined();
     await reopened.dispose();
   }, 30_000);
 
@@ -108,13 +116,15 @@ describe("PiHost rollback integration", () => {
     await host.open({ cwd });
     const isolated = (await import("@earendil-works/pi-coding-agent")).SessionManager.create(cwd, sessionDir);
     await host.switchTo(isolated.getSessionFile()!, { cwdOverride: cwd });
+    const sessionFile = host.activeSessionFile as string;
+    await host.activateExecution(cwd, sessionFile);
     const appendTurn = (text: string) => {
-      const userEntryId = host.session.sessionManager.appendMessage({
+      const userEntryId = sessionOf(host, sessionFile).sessionManager.appendMessage({
         role: "user",
         content: [{ type: "text", text }],
         timestamp: Date.now(),
       });
-      host.session.sessionManager.appendMessage({
+      sessionOf(host, sessionFile).sessionManager.appendMessage({
         role: "assistant",
         content: [{ type: "text", text: "done" }],
         api: "test",
@@ -129,26 +139,26 @@ describe("PiHost rollback integration", () => {
 
     // Turn 1: a real edit plus the guardrail log append every tool call
     // produces. Only the real edit may be recorded or rolled back.
-    const start = await host.testCaptureTurnStart();
+    const start = await host.testCaptureTurnStart(sessionFile);
     if (!start || "skipped" in start) throw new Error("expected a turn checkpoint");
     const u1 = appendTurn("change the file");
     await writeFile(join(cwd, "file.txt"), "after\n");
     await mkdir(join(cwd, ".pi", "state", "guardrails"), { recursive: true });
     await writeFile(join(cwd, ".pi", "state", "guardrails", "decisions.jsonl"), '{"at":1}\n');
-    await host.testCaptureTurnEnd(start);
-    expect((await host.getHistory()).turns.find((t) => t.entryId === u1)?.changedCount).toBe(1);
+    await host.testCaptureTurnEnd(start, sessionFile);
+    expect((await host.getHistory(sessionFile)).turns.find((t) => t.entryId === u1)?.changedCount).toBe(1);
     const sessionFile2 = host.activeSessionFile as string;
     await host.activateExecution(cwd, sessionFile2);
     const plan = await host.prepareRollback(sessionFile2, u1);
     expect(plan.changes.map((c) => c.path)).toEqual(["file.txt"]);
 
     // Turn 2: bookkeeping writes only (the read-only turn). No card.
-    const start2 = await host.testCaptureTurnStart();
+    const start2 = await host.testCaptureTurnStart(sessionFile);
     if (!start2 || "skipped" in start2) throw new Error("expected a turn checkpoint");
     const u2 = appendTurn("read things");
     await writeFile(join(cwd, ".pi", "state", "guardrails", "decisions.jsonl"), '{"at":1}\n{"at":2}\n');
-    await host.testCaptureTurnEnd(start2);
-    expect((await host.getHistory()).turns.find((t) => t.entryId === u2)?.changedCount).toBe(0);
+    await host.testCaptureTurnEnd(start2, sessionFile);
+    expect((await host.getHistory(sessionFile)).turns.find((t) => t.entryId === u2)?.changedCount).toBe(0);
     await host.dispose();
   }, 30_000);
 
@@ -170,16 +180,18 @@ describe("PiHost rollback integration", () => {
     await host.open({ cwd });
     const isolated = (await import("@earendil-works/pi-coding-agent")).SessionManager.create(cwd, sessionDir);
     await host.switchTo(isolated.getSessionFile()!, { cwdOverride: cwd });
+    const sessionFile = host.activeSessionFile as string;
+    await host.activateExecution(cwd, sessionFile);
 
-    const start = await host.testCaptureTurnStart();
+    const start = await host.testCaptureTurnStart(sessionFile);
     expect(start).not.toBeNull();
     if (!start || "skipped" in start) throw new Error("expected a turn checkpoint");
-    const userEntryId = host.session.sessionManager.appendMessage({
+    const userEntryId = sessionOf(host, sessionFile).sessionManager.appendMessage({
       role: "user",
       content: [{ type: "text", text: "make the bad change" }],
       timestamp: Date.now(),
     });
-    const assistantEntryId = host.session.sessionManager.appendMessage({
+    const assistantEntryId = sessionOf(host, sessionFile).sessionManager.appendMessage({
       role: "assistant",
       content: [{ type: "text", text: "changed" }],
       api: "test",
@@ -190,7 +202,7 @@ describe("PiHost rollback integration", () => {
       timestamp: Date.now(),
     });
     await writeFile(join(cwd, "file.txt"), "after\n");
-    await host.testCaptureTurnEnd(start);
+    await host.testCaptureTurnEnd(start, sessionFile);
 
     // Simulate: the agent finished and the file is "after" (call it B). The
     // user now immediately edits to C with no settle() / no wait, and clicks
@@ -204,8 +216,8 @@ describe("PiHost rollback integration", () => {
     await expect(host.commitRollback(plan.planId)).rejects.toThrow(/changed/i);
     expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("manual-C\n");
     // The aborted plan must not have left the active rollback registered.
-    expect((await host.getHistory()).activeRollback).toBeUndefined();
-    expect(host.session.sessionManager.getLeafId()).not.toBe(userEntryId);
+    expect((await host.getHistory(sessionFile)).activeRollback).toBeUndefined();
+    expect(sessionOf(host, sessionFile).sessionManager.getLeafId()).not.toBe(userEntryId);
     void assistantEntryId;
     await host.dispose();
   }, 30_000);
@@ -233,18 +245,20 @@ describe("PiHost rollback integration", () => {
     await host.open({ cwd });
     const isolated = (await import("@earendil-works/pi-coding-agent")).SessionManager.create(cwd, sessionDir);
     await host.switchTo(isolated.getSessionFile()!, { cwdOverride: cwd });
+    const sessionFile = host.activeSessionFile as string;
+    await host.activateExecution(cwd, sessionFile);
 
-    const start = await host.testCaptureTurnStart();
+    const start = await host.testCaptureTurnStart(sessionFile);
     expect(start).not.toBeNull();
     if (!start || "skipped" in start) throw new Error("expected a turn checkpoint");
     expect(start.before.excluded.map((e) => e.path)).toContain("huge.log");
 
-    const userEntryId = host.session.sessionManager.appendMessage({
+    const userEntryId = sessionOf(host, sessionFile).sessionManager.appendMessage({
       role: "user",
       content: [{ type: "text", text: "delete the log" }],
       timestamp: Date.now(),
     });
-    host.session.sessionManager.appendMessage({
+    sessionOf(host, sessionFile).sessionManager.appendMessage({
       role: "assistant",
       content: [{ type: "text", text: "done" }],
       api: "test",
@@ -258,9 +272,9 @@ describe("PiHost rollback integration", () => {
     // "Agent" deletes the oversized untracked file. Babylon cannot
     // restore it, so the post-turn capture must reflect that.
     await rm(huge);
-    await host.testCaptureTurnEnd(start);
+    await host.testCaptureTurnEnd(start, sessionFile);
 
-    const history = await host.getHistory();
+    const history = await host.getHistory(sessionFile);
     const turn = history.turns.find((t) => t.entryId === userEntryId);
     expect(turn).toBeDefined();
     // The deletion of an excluded path must surface as an exclusion
@@ -294,15 +308,15 @@ describe("PiHost rollback integration", () => {
     await host.activateExecution(cwd, sessionFile);
 
     // Real turn → checkpoint → rollback plan against the OWNER session.
-    const start = await host.testCaptureTurnStart();
+    const start = await host.testCaptureTurnStart(sessionFile);
     if (!start || "skipped" in start) throw new Error("expected a turn checkpoint");
-    const userEntryId = host.session.sessionManager.appendMessage({
+    const userEntryId = sessionOf(host, sessionFile).sessionManager.appendMessage({
       role: "user",
       content: [{ type: "text", text: "make the change" }],
       timestamp: Date.now(),
     });
     await writeFile(join(cwd, "file.txt"), "after\n");
-    await host.testCaptureTurnEnd(start);
+    await host.testCaptureTurnEnd(start, sessionFile);
     const plan = await host.prepareRollback(sessionFile, userEntryId);
 
     // Ownership moves: release A, another session owns the project.

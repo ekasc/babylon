@@ -7,6 +7,8 @@ import { projectHashForCwd, type ProjectSettingsStore } from "./project-settings
 import { HandoffStore } from "./handoff-store";
 import { driveRoomTurns, type RoomTurnIO } from "./room-driver";
 import { readSessionTail, type SessionIndex } from "./sessions";
+import { readSessionHeader } from "./session-files";
+import { wireStr } from "../src/store";
 import { buildHandoffPrompt, normalizeHandoffText, transcriptText } from "./recap";
 import { validateSessionPath } from "./session-path";
 import { botChatForProject, botHandle, buildBotSystemPrompt, buildGroupSystemPrompt, groupAnchorCwd, isPassReply, parseBotMentions } from "../src/bots";
@@ -36,7 +38,7 @@ export function registerBotsIpc(
     projectSettingsForCwd: (cwd: string) => { settings: ProjectSettings; hash: string };
     resolveCanonicalSessionFile: (stored: string | null | undefined) => Promise<string | undefined>;
     overlayForSessionFile: (file: string | null | undefined, cwd?: string) => string | null;
-    driveExtrasIO: () => RoomTurnIO;
+    driveExtrasIO: (sessionFile: string) => RoomTurnIO;
     lastAssistantText: (messages: unknown[]) => string;
   },
 ): void {
@@ -220,8 +222,8 @@ export function registerBotsIpc(
     }
     if (isDaemonOwned()) throw new Error("Group rooms need the local runtime (turn off the daemon to use Bots)");
     if (getHostReady()) await getHostReady();
-    if (getHost().isStreaming) throw new Error("The agent is busy, wait for this turn to finish");
     const { group, members, sessionFile } = await ensureGroupRoom(groupId);
+    if (getHost().isSessionStreaming(sessionFile)) throw new Error("The agent is busy, wait for this turn to finish");
     const runtime = getRuntime();
     // The user's message streams like any normal turn.
     await runtime.prompt(text, undefined, undefined, sessionFile);
@@ -245,7 +247,7 @@ export function registerBotsIpc(
     // the turn/round caps still bound ping-pong loops. A drained queue
     // refills for the next round; an all-quiet drain settles the room.
     // Abort (or any turn failure) stops.
-    const result = await driveRoomTurns({ groupId, members, order, io: driveExtrasIO() });
+    const result = await driveRoomTurns({ groupId, members, order, io: driveExtrasIO(sessionFile) });
     return { ...result, sessionFile: group.mainSessionFile };
   });
 
@@ -298,8 +300,10 @@ export function registerBotsIpc(
     const deltaText = transcriptText(messages);
     if (!deltaText.trim()) throw new Error("Nothing to summarize yet, the thread is still fresh");
     if (getHostReady()) await getHostReady();
+    const header = await readSessionHeader(target);
+    const summarizeCwd = wireStr(header ?? undefined, "cwd") ?? getActiveCwd();
     const summary = normalizeHandoffText(
-      (await getHost().summarizeHandoff(buildHandoffPrompt(deltaText, settings.defaultBot))) ?? ""
+      (await getHost().summarizeHandoff(summarizeCwd, buildHandoffPrompt(deltaText, settings.defaultBot))) ?? ""
     );
     if (!summary) throw new Error("Summarization came back empty, try again");
     return handoffStore.append(target, {
@@ -323,12 +327,12 @@ export function registerBotsIpc(
     if (!handoff) throw new Error("Handoff not found");
     const live = await validateSessionPath(sessionsRoot, liveFile);
     if (getHostReady()) await getHostReady();
-    if (getHost().isStreaming) throw new Error("Wait for the live turn to finish first");
+    if (getHost().isSessionStreaming(live)) throw new Error("Wait for the live turn to finish first");
     const estimatedTokensBefore = Math.max(1, Math.round(handoff.sourceChars / 4));
     const estimatedTokensAfter = Math.max(1, Math.round(handoff.summary.length / 4));
     await getHost().consumeHandoff(live, handoff.summary, estimatedTokensBefore);
     await handoffStore.markConsumed(handoffId, live);
-    getHost().emitHandoffEvent({
+    getHost().emitHandoffEvent(live, {
       type: "babylon_handoff_consumed",
       handoffId,
       sourceName: handoff.sourceFile.split("/").pop() ?? handoff.sourceFile,
@@ -364,10 +368,10 @@ export function registerBotsIpc(
     const target = botStore.get(targetId);
     if (!target) throw new Error("Bot not found");
     const from = typeof fromId === "string" ? botStore.get(fromId) : undefined;
-    if (getHost().isStreaming) throw new Error("The agent is busy, wait for this turn to finish");
     const origin = getHost().activeSessionFile;
     if (!origin) throw new Error("Open a chat first, replies need a home");
-    const originCwd = getHost().cwd;
+    const originCwd = getHost().sessionCwdFor(origin);
+    if (!originCwd) throw new Error("Open a project chat first, replies need a home");
     // Run the target turn in the target's canonical chat.
     const targetCwd = target.cwd && target.cwd.length > 0 ? target.cwd : getActiveCwd() || homedir();
     const targetHash = projectHashForCwd(targetCwd);
@@ -392,15 +396,18 @@ export function registerBotsIpc(
         console.warn(`[pideck] bot model pin unavailable (${target.model.provider}/${target.model.modelId}):`, err);
       }
     }
+    if (!targetFile) throw new Error("bot chat has no runtime identity");
+    if (getHost().isSessionStreaming(targetFile)) throw new Error("The agent is busy, wait for this turn to finish");
     const sender = from ? `@${botHandle(from)} (${from.name})` : "you (the human)";
     await getRuntime().prompt(`[DM from ${sender}, reply briefly in your voice, or PASS if nothing to add]\n\n${text}`, undefined, undefined, targetFile);
-    const reply = lastAssistantText(await getRuntime().getMessages());
+    const reply = lastAssistantText(await getRuntime().getMessages(targetFile));
     const pass = isPassReply(reply);
     // Switch home and relay the reply as an attributed activity line.
     await getRuntime().openSession({ path: origin, cwd: originCwd, systemPrompt: overlayForSessionFile(origin, originCwd) });
     if (!pass) {
       const clipped = reply.length > 6000 ? `${reply.slice(0, 6000)}\n… (truncated, full reply lives in @${botHandle(target)}'s chat)` : reply;
       await getHost().postBotMessage(
+        origin,
         `[Babylon Bot Message]\n@${from ? botHandle(from) : "you"} asked @${botHandle(target)}: ${text.length > 500 ? `${text.slice(0, 500)}…` : text}\n\n@${botHandle(target)} replied:\n\n${clipped}`,
         { fromId: from?.id ?? null, targetId, text: text.slice(0, 500) }
       );

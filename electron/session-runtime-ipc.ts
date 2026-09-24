@@ -21,7 +21,7 @@ export function registerSessionRuntimeIpc(
     getHost: () => PiHost;
     isDaemonOwned: () => boolean;
     requireDaemonClient: () => DaemonClient;
-    driveSharedChatExtras: (userText: string) => Promise<void>;
+    driveSharedChatExtras: (sessionFile: string, userText: string) => Promise<void>;
   },
 ): void {
   const { sessionsRoot, getRuntime, getHost, isDaemonOwned, requireDaemonClient, driveSharedChatExtras } = deps;
@@ -30,8 +30,9 @@ export function registerSessionRuntimeIpc(
     if (streamingBehavior !== undefined && streamingBehavior !== "steer" && streamingBehavior !== "followUp") {
       throw new Error("invalid streaming behavior");
     }
-    if (sessionFile !== undefined && sessionFile !== null && typeof sessionFile !== "string") {
-      throw new Error("invalid session file");
+    // Mandatory execution identity: a turn never runs on "whatever is current".
+    if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) {
+      throw new Error("prompt requires a session file");
     }
     let cleanImages: PromptImage[] | undefined;
     if (images !== undefined) {
@@ -51,16 +52,16 @@ export function registerSessionRuntimeIpc(
     }
     if (isDaemonOwned()) {
       const client = requireDaemonClient();
-      const res = await client.request("pi.prompt", { message, images: cleanImages, streamingBehavior, sessionFile: sessionFile ?? undefined });
+      const res = await client.request("pi.prompt", { message, images: cleanImages, streamingBehavior, sessionFile });
       return res.payload;
     }
-    const result = await getRuntime().prompt(message, cleanImages, streamingBehavior, sessionFile ?? undefined);
+    const result = await getRuntime().prompt(message, cleanImages, streamingBehavior, sessionFile);
     // Shared project chats: after the default bot's turn settles, staffed
     // extras speak when asked (or freely when the project opted in). Never on
     // mid-stream steer/follow-up turns, and never loudly, a skipped driver is
     // the common case and must not fail the send.
     if (!streamingBehavior) {
-      await driveSharedChatExtras(message).catch((err) =>
+      await driveSharedChatExtras(sessionFile, message).catch((err) =>
         console.warn("[pideck] shared-chat extras skipped:", err)
       );
     }
@@ -253,18 +254,21 @@ export function registerSessionRuntimeIpc(
     // not a raw pi.getState payload.
     return getRuntime().refreshFromDisk(p);
   });
-  handle("pideck:get-messages", async () => {
+  handle("pideck:get-messages", async (_e, sessionFile: unknown) => {
+    if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) {
+      throw new Error("invalid session file");
+    }
     if (isDaemonOwned()) {
       const client = requireDaemonClient();
-      const res = await client.request("pi.getMessages", {});
+      const res = await client.request("pi.getMessages", { sessionFile });
       return (res.payload as { messages?: unknown[] }).messages ?? [];
     }
-    return getRuntime().getMessages();
+    return getRuntime().getMessages(sessionFile);
   });
   handle("pideck:get-state", async (_e, opts?: { sessionFile?: string }) => {
     const sessionFile = opts?.sessionFile;
-    if (sessionFile !== undefined && (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096)) {
-      throw new Error("invalid session file");
+    if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) {
+      throw new Error("get-state requires { sessionFile }");
     }
     if (isDaemonOwned()) {
       const client = requireDaemonClient();
@@ -273,12 +277,15 @@ export function registerSessionRuntimeIpc(
     }
     return getRuntime().getState(sessionFile);
   });
-  handle("pideck:get-stats", async () => {
+  handle("pideck:get-stats", async (_e, sessionFile: unknown) => {
+    if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) {
+      throw new Error("invalid session file");
+    }
     if (isDaemonOwned()) {
       const client = requireDaemonClient();
-      const res = await client.request("pi.getStats", {});
+      const res = await client.request("pi.getStats", { sessionFile });
       return res.payload;
     }
-    return getRuntime().getStats();
+    return getRuntime().getStats(sessionFile);
   });
 }

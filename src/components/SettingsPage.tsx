@@ -22,6 +22,8 @@ interface Props {
   themeId: ThemeId;
   onThemeIdChange(id: ThemeId): void;
   onClose(): void;
+  /** Project whose model catalogue this page is editing (null: none open). */
+  projectCwd: string | null;
   /** Fired after a settings save lands: lets App invalidate caches derived
    *  from settings (model registry mapping with context-window overrides). */
   onSettingsSaved?(): void;
@@ -60,10 +62,10 @@ export default function SettingsPage(props: Props) {
   useEffect(() => {
     let cancelled = false;
     bridge.getSettings().then((s) => { if (!cancelled) setSettings(s); }).catch(() => undefined);
-    if (!props.models.length) bridge.getModels().then((m) => { if (!cancelled && Array.isArray(m) && m.length) setCatalogue(m); }).catch(() => undefined);
+    if (!props.models.length && props.projectCwd) bridge.getModels(props.projectCwd).then((m) => { if (!cancelled && Array.isArray(m) && m.length) setCatalogue(m); }).catch(() => undefined);
     else setCatalogue(props.models);
     return () => { cancelled = true; };
-  }, [props.models]);
+  }, [props.models, props.projectCwd]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

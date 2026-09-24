@@ -123,7 +123,7 @@ describe("ToolCard full output", () => {
   it("loads and shows the full output", async () => {
     const spy = vi.spyOn(bridge, "getToolOutput").mockResolvedValue({ content: "FULL", truncated: false });
     try {
-      render(<ToolCard item={toolItem()} />);
+      render(<ToolCard item={toolItem()} sessionFile="/tmp/session.jsonl" />);
       fireEvent.click(screen.getByText("test-tool"));
       fireEvent.click(await screen.findByRole("button", { name: "Show full output" }));
       expect(await screen.findByText("FULL")).toBeTruthy();
@@ -135,7 +135,7 @@ describe("ToolCard full output", () => {
   it("reports load failures inline", async () => {
     const spy = vi.spyOn(bridge, "getToolOutput").mockRejectedValue(new Error("gone"));
     try {
-      render(<ToolCard item={toolItem()} />);
+      render(<ToolCard item={toolItem()} sessionFile="/tmp/session.jsonl" />);
       fireEvent.click(screen.getByText("test-tool"));
       fireEvent.click(await screen.findByRole("button", { name: "Show full output" }));
       expect(await screen.findByRole("alert")).toBeTruthy();

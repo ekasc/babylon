@@ -106,6 +106,7 @@ describe("PiHost independent session execution", () => {
     try {
       const fileA = await makeSessionFile(a.cwd);
       await host.open({ path: fileA, cwd: a.cwd });
+      await host.activateExecution(a.cwd, fileA);
       const entry = host.testSessions().get(fileA)!;
       const delivered: string[] = [];
       const promptSpy = vi.spyOn(entry.runtime.session, "prompt").mockImplementation(async (message: string) => {
@@ -137,6 +138,7 @@ describe("PiHost independent session execution", () => {
     try {
       const fileA = await makeSessionFile(a.cwd);
       await host.open({ path: fileA, cwd: a.cwd });
+      await host.activateExecution(a.cwd, fileA);
       const entry = host.testSessions().get(fileA)!;
       const promptSpy = vi.spyOn(entry.runtime.session, "prompt").mockRejectedValue(new Error("pre-start boom"));
       try {
@@ -161,6 +163,7 @@ describe("PiHost independent session execution", () => {
     try {
       const fileA = await makeSessionFile(a.cwd);
       await host.open({ path: fileA, cwd: a.cwd });
+      await host.activateExecution(a.cwd, fileA);
       const entry = host.testSessions().get(fileA)!;
       // The turn started (user message landed) and then died mid-flight —
       // abort, mid-turn model error. Goal context was already injected.
@@ -192,6 +195,7 @@ describe("PiHost independent session execution", () => {
     try {
       const fileA = await makeSessionFile(a.cwd);
       await host.open({ path: fileA, cwd: a.cwd });
+      await host.activateExecution(a.cwd, fileA);
       const entry = host.testSessions().get(fileA)!;
       await saveSessionGoal(a.cwd, entry.sessionId, createDurableGoalState("Old goal", defaultDurableGoalModeConfig()));
       const promptSpy = vi.spyOn(entry.runtime.session, "prompt").mockRejectedValue(new Error("pre-start boom"));
@@ -233,6 +237,7 @@ describe("PiHost independent session execution", () => {
       const fileA = await makeSessionFile(a.cwd);
       const fileB = await makeSessionFile(b.cwd);
       await host.open({ path: fileA, cwd: a.cwd });
+      await host.activateExecution(a.cwd, fileA);
       await host.open({ path: fileB, cwd: b.cwd });
       expect(host.activeSessionFile).toBe(fileB);
       const delivered: string[] = [];
@@ -258,6 +263,7 @@ describe("PiHost independent session execution", () => {
     try {
       const fileA = await makeSessionFile(a.cwd);
       await host.open({ path: fileA, cwd: a.cwd });
+      await host.activateExecution(a.cwd, fileA);
       const entry = host.testSessions().get(fileA)!;
       const delivered: string[] = [];
       const promptSpy = vi.spyOn(entry.runtime.session, "prompt").mockImplementation(async (message: string) => {
@@ -287,6 +293,7 @@ describe("PiHost independent session execution", () => {
     try {
       const fileA = await makeSessionFile(a.cwd);
       await host.open({ path: fileA, cwd: a.cwd });
+      await host.activateExecution(a.cwd, fileA);
       const entry = host.testSessions().get(fileA)!;
       const promptSpy = vi.spyOn(entry.runtime.session, "prompt").mockRejectedValue(new Error("pre-start boom"));
       try {
@@ -310,6 +317,7 @@ describe("PiHost independent session execution", () => {
     try {
       const fileA = await makeSessionFile(a.cwd);
       await host.open({ path: fileA, cwd: a.cwd });
+      await host.activateExecution(a.cwd, fileA);
       const entry = host.testSessions().get(fileA)!;
       const promptSpy = vi.spyOn(entry.runtime.session, "prompt").mockImplementation(async () => {
         entry.runtime.session.sessionManager.appendMessage({ role: "user", content: [{ type: "text", text: "Redesign" }], timestamp: Date.now() });
@@ -350,6 +358,7 @@ describe("PiHost independent session execution", () => {
     try {
       const fileA = await makeSessionFile(a.cwd);
       await host.open({ path: fileA, cwd: a.cwd });
+      await host.activateExecution(a.cwd, fileA);
       const entry = host.testSessions().get(fileA)!;
       // Active design blocks goal starts (backend invariant, not just UI).
       await saveDesignState(a.cwd, entry.sessionId, createDesignState("Redesign", "redesign"));
@@ -374,6 +383,7 @@ describe("PiHost independent session execution", () => {
       const fileA = await makeSessionFile(a.cwd);
       const fileB = await makeSessionFile(b.cwd);
       await host.open({ path: fileA, cwd: a.cwd });
+      await host.activateExecution(a.cwd, fileA);
       await host.open({ path: fileB, cwd: b.cwd });
       expect(host.activeSessionFile).toBe(fileB);
       const delivered: string[] = [];
@@ -427,7 +437,7 @@ describe("PiHost independent session execution", () => {
       await host.activateExecution(b.cwd, fileB);
       // Unknown model fails before touching anything: B keeps its state.
       await expect(host.setModel(fileB, "nope", "missing")).rejects.toThrow(/Model not found/);
-      const stateB = await host.getState();
+      const stateB = await host.getState(fileB);
       expect(stateB.sessionFile).toBe(fileB);
       // Idle aborts resolve without affecting the other runtime.
       await host.abort(fileA);
@@ -437,6 +447,9 @@ describe("PiHost independent session execution", () => {
       const fileA2 = await makeSessionFile(a.cwd);
       await host.open({ path: fileA2, cwd: a.cwd });
       await expect(host.compact(fileA2)).rejects.toThrow(/execution session/);
+      // A turn is a mutation too: a retained same-project non-owner can
+      // never start one, even when it happens to be the viewed session.
+      await expect(host.prompt("hi", undefined, undefined, fileA2)).rejects.toThrow(/execution session/);
       // setModel has the same gate: a non-owner address is rejected, never
       // redirected to whichever session happens to be foreground.
       await expect(host.setModel(fileA2, "nope", "missing")).rejects.toThrow(/execution session/);
@@ -458,6 +471,7 @@ describe("PiHost independent session execution", () => {
       const fileA = await makeSessionFile(a.cwd);
       const fileB = await makeSessionFile(b.cwd);
       await host.open({ path: fileA, cwd: a.cwd });
+      await host.activateExecution(a.cwd, fileA);
       await host.open({ path: fileB, cwd: b.cwd });
       expect(host.activeSessionFile).toBe(fileB);
       const delivered: string[] = [];
@@ -575,6 +589,7 @@ describe("PiHost independent session execution", () => {
       const fileB = await makeSessionFile(b.cwd);
       await host.open({ path: fileA, cwd: a.cwd });
       await host.open({ path: fileB, cwd: b.cwd });
+      await host.activateExecution(b.cwd, fileB);
 
       let releaseGate!: () => void;
       const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
@@ -938,7 +953,8 @@ describe("PiHost independent session execution", () => {
       // checkpoint captures after the fact.
       const capture = vi.spyOn(SnapshotStore.prototype, "capture");
       try {
-        const start = await host.testCaptureTurnStart();
+        await host.activateExecution(b.cwd, fileB);
+        const start = await host.testCaptureTurnStart(fileB);
         if (!start || "skipped" in start) throw new Error("expected a turn checkpoint");
         // The turn's own messages land in B's transcript while it runs.
         const managerB = host.testSessions().get(fileB)!.runtime.session.sessionManager;
@@ -1061,7 +1077,7 @@ describe("drain for restart", () => {
     expect(host.isDraining()).toBe(false);
     host.beginDrain();
     expect(host.isDraining()).toBe(true);
-    await expect(host.prompt("hi")).rejects.toThrow(/draining/);
+    await expect(host.prompt("hi", undefined, undefined, "/tmp/drain.jsonl")).rejects.toThrow(/draining/);
     await host.dispose();
   });
 

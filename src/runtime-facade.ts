@@ -42,17 +42,17 @@ export interface RuntimeFacade {
   // Pi
   openSession(opts: { path?: string; cwd: string; requestId?: number; systemPrompt?: string | null }): Promise<unknown>;
   /** Explicit sessionFile wins over the foreground pointer (send-while-switching). */
-  prompt(message: string, images?: unknown[], streamingBehavior?: string, sessionFile?: string | null): Promise<unknown>;
+  prompt(message: string, images: unknown[] | undefined, streamingBehavior: string | undefined, sessionFile: string): Promise<unknown>;
   abort(sessionFile: string): Promise<unknown>;
   releaseSession?(path: string): Promise<{ released: boolean }>;
-  getState(sessionFile?: string): Promise<AgentState | null>;
-  getMessages(): Promise<unknown[]>;
-  getToolOutput(toolCallId: string): Promise<unknown>;
-  getModels(): Promise<unknown[]>;
+  getState(sessionFile: string): Promise<AgentState | null>;
+  getMessages(sessionFile: string): Promise<unknown[]>;
+  getToolOutput(sessionFile: string, toolCallId: string): Promise<unknown>;
+  getModels(cwd: string): Promise<unknown[]>;
   /** Idempotent pre-warm of a project (rollback shadow + model runtime). */
   warmProject(cwd: string): Promise<unknown>;
   setModel(sessionFile: string, provider: string, modelId: string): Promise<unknown>;
-  getThinkingLevels(): Promise<string[]>;
+  getThinkingLevels(sessionFile: string): Promise<string[]>;
   setThinking(sessionFile: string, level: string): Promise<unknown>;
   getSettings(): Promise<unknown>;
   setSettings(patch: unknown): Promise<unknown>;
@@ -61,28 +61,28 @@ export interface RuntimeFacade {
    *  never-opened files get a session_info append. Never moves foreground. */
   renameSession(sessionFile: string, name: string): Promise<unknown>;
   compact(sessionFile: string, customInstructions?: string): Promise<unknown>;
-  getTree(): Promise<unknown>;
-  getHistory(): Promise<HistoryProjection>;
-  getTurnChanges(entryId: string): Promise<TurnChanges>;
-  getTurnFileDiff(entryId: string, path: string): Promise<TurnFileDiff>;
+  getTree(sessionFile: string): Promise<unknown>;
+  getHistory(sessionFile: string): Promise<HistoryProjection>;
+  getTurnChanges(sessionFile: string, entryId: string): Promise<TurnChanges>;
+  getTurnFileDiff(sessionFile: string, entryId: string, path: string): Promise<TurnFileDiff>;
   prepareRollback(sessionFile: string, entryId: string): Promise<RollbackPlan>;
   commitRollback(planId: string): Promise<{ editorText: string; history: HistoryProjection }>;
   undoRollback(sessionFile: string): Promise<{ history: HistoryProjection }>;
-  getForkMessages(): Promise<unknown[]>;
+  getForkMessages(sessionFile: string): Promise<unknown[]>;
   fork(sessionFile: string, entryId: string): Promise<{ text?: string; cancelled?: boolean }>;
-  clone(sessionFile: string): Promise<{ cancelled?: boolean }>;
+  clone(sessionFile: string): Promise<{ cancelled?: boolean; sessionFile?: string }>;
   generateCommitMessage(context: PreparedCommitContext): Promise<GeneratedCommitMessage>;
   getRecaps(sessionFile: string): Promise<unknown>;
   refreshFromDisk(sessionFile: string): Promise<boolean>;
   switchTo(sessionFile: string): Promise<AgentState>;
   respondUi(id: string, resp: unknown): Promise<void>;
-  getCommands(): Promise<unknown[]>;
-  getActiveSessionFile(): Promise<string | null>;
+  getCommands(sessionFile: string): Promise<unknown[]>;
+
   controlThread(action: "steer" | "follow-up" | "stop", threadId: string, message?: string): Promise<unknown>;
   promoteThread(threadId: string): Promise<unknown>;
   controlSubagent(action: "steer" | "follow-up" | "stop", runId: string, message?: string): Promise<unknown>;
   promoteSubagent(runId: string): Promise<unknown>;
-  getStats(): Promise<unknown>;
+  getStats(sessionFile: string): Promise<unknown>;
   /** Run a `/goal …` control invocation without opening a turn; returns the fresh durable goal. */
   goalControl(sessionFile: string, args: string): Promise<DurableGoalState | null>;
   /** Current execution records for every project slot (renderer rebuilds its

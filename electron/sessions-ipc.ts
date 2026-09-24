@@ -90,15 +90,16 @@ export function registerSessionsIpc(
     return { ...window, messages: mergeRecapsIntoWindow(window.messages, await loadRecaps(target)) };
   });
 
-  handle("pideck:get-tool-output", async (_e, toolCallId: string) => {
+  handle("pideck:get-tool-output", async (_e, sessionFile: unknown, toolCallId: string) => {
+    if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) throw new Error("invalid session file");
     if (typeof toolCallId !== "string" || !/^[a-zA-Z0-9|_\-:.]{1,200}$/.test(toolCallId)) throw new Error("invalid tool call id");
-    return getRuntime().getToolOutput(toolCallId);
+    return getRuntime().getToolOutput(sessionFile, toolCallId);
   });
 
   handle("pideck:delete-session", async (_e, path: string) => {
     const target = await validateSessionPath(sessionsRoot, path);
-    const active = await getRuntime().getActiveSessionFile();
-    if (active === target) {
+    const executions = await getRuntime().executionList();
+    if (executions.some((execution) => execution.sessionFile === target)) {
       throw new Error("Close this chat before deleting it");
     }
     await fsp.rm(target, { force: true });

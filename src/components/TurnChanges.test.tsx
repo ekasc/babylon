@@ -39,17 +39,17 @@ const TURN = {
 
 describe("TurnChanges header totals", () => {
   it("shows real +/- on the collapsed row even when it does not auto-expand", async () => {
-    render(<TurnChanges turn={TURN} isLatest />);
+    render(<TurnChanges turn={TURN} isLatest sessionFile="/tmp/session.jsonl" />);
     const row = screen.getByRole("button");
     expect(row.getAttribute("aria-expanded")).toBe("false");
-    await waitFor(() => expect(getTurnChanges).toHaveBeenCalledWith("e1"));
+    await waitFor(() => expect(getTurnChanges).toHaveBeenCalledWith("/tmp/session.jsonl", "e1"));
     expect(screen.getByText("8 files changed")).toBeTruthy();
     expect(screen.getByText("+5")).toBeTruthy();
     expect(screen.getByText("−3")).toBeTruthy();
   });
 
   it("never shows the placeholder +0 −0 before totals arrive", () => {
-    render(<TurnChanges turn={TURN} isLatest />);
+    render(<TurnChanges turn={TURN} isLatest sessionFile="/tmp/session.jsonl" />);
     expect(screen.queryByText("+0")).toBeNull();
     expect(screen.queryByText("−0")).toBeNull();
   });
@@ -62,15 +62,15 @@ describe("TurnChanges load failure", () => {
 
   it("shows a retryable error instead of spinning on loading forever", async () => {
     getTurnChanges.mockRejectedValueOnce(new Error("snapshot unavailable"));
-    render(<TurnChanges turn={SMALL} isLatest />);
-    await waitFor(() => expect(getTurnChanges).toHaveBeenCalledWith("e2"));
+    render(<TurnChanges turn={SMALL} isLatest sessionFile="/tmp/session.jsonl" />);
+    await waitFor(() => expect(getTurnChanges).toHaveBeenCalledWith("/tmp/session.jsonl", "e2"));
     expect(await screen.findByText("snapshot unavailable")).toBeTruthy();
     expect(screen.queryByText("loading changes…")).toBeNull();
   });
 
   it("retry refetches and renders the file list on success", async () => {
     getTurnChanges.mockRejectedValueOnce(new Error("snapshot unavailable"));
-    render(<TurnChanges turn={SMALL} isLatest />);
+    render(<TurnChanges turn={SMALL} isLatest sessionFile="/tmp/session.jsonl" />);
     const retry = await screen.findByRole("button", { name: /retry/i });
     getTurnChanges.mockResolvedValueOnce({
       userEntryId: "e2",
@@ -81,5 +81,12 @@ describe("TurnChanges load failure", () => {
     fireEvent.click(retry);
     expect(await screen.findByText("src/b.ts")).toBeTruthy();
     expect(screen.queryByText("snapshot unavailable")).toBeNull();
+  });
+});
+
+describe("TurnChanges addressing", () => {
+  it("never fetches changes when no session is addressed", () => {
+    render(<TurnChanges turn={TURN} isLatest={false} sessionFile={null} />);
+    expect(getTurnChanges).not.toHaveBeenCalled();
   });
 });

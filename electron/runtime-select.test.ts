@@ -54,7 +54,7 @@ describe("resolveRuntime", () => {
 
   it("local without a host keeps the early-startup stub for the session basics", async () => {
     const runtime = resolveRuntime(baseDeps({}));
-    await expect(runtime.getMessages()).resolves.toEqual([]);
-    await expect(runtime.getState()).resolves.toEqual({});
+    await expect(runtime.getMessages("/tmp/session.jsonl")).resolves.toEqual([]);
+    await expect(runtime.getState("/tmp/session.jsonl")).resolves.toEqual({});
   });
 });

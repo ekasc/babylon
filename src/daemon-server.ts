@@ -102,7 +102,7 @@ export type DaemonListenOptions =
  */
 export interface DaemonPiHost {
   open(opts: { path?: string; cwd: string; requestId?: number; systemPrompt?: string | null }): Promise<unknown>;
-  prompt(message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp", sessionFile?: string | null): Promise<unknown>;
+  prompt(message: string, images: PromptImage[] | undefined, streamingBehavior: "steer" | "followUp" | undefined, sessionFile: string): Promise<unknown>;
   /** Run a `/goal …` control invocation without opening a turn; returns the fresh durable goal. */
   execGoalCommand(sessionFile: string, args: string): Promise<DurableGoalState | null>;
   listProjectExecutions(): Promise<ProjectExecution[]>;
@@ -118,41 +118,40 @@ export interface DaemonPiHost {
   beginDesignPrompt(sessionFile: string, subject: string, message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp"): Promise<import("../electron/design-mode/store").DesignBeginResult>;
   abort(sessionFile: string): Promise<unknown>;
   respondUi(id: string, resp: unknown): void;
-  notifyDiagnostics(diagnostics: PiDiagnostic[]): Promise<void>;
-  getToolOutput(toolCallId: string): Promise<{ content: string; truncated: boolean }>;
-  getModels(): Promise<AgentModel[]>;
+  notifyDiagnostics(cwd: string, diagnostics: PiDiagnostic[]): Promise<void>;
+  getToolOutput(sessionFile: string, toolCallId: string): Promise<{ content: string; truncated: boolean }>;
+  getModels(cwd: string): Promise<AgentModel[]>;
   warmProject(cwd: string): { warmed: boolean };
   setModel(sessionFile: string, provider: string, modelId: string): Promise<unknown>;
-  getThinkingLevels(): Promise<string[]>;
+  getThinkingLevels(sessionFile: string): Promise<string[]>;
   setThinking(sessionFile: string, level: string): Promise<unknown>;
   getSettings(): Promise<PiSettings>;
   setSettings(patch: Partial<PiSettings>): Promise<PiSettings>;
   setSessionName(sessionFile: string, name: string): Promise<unknown>;
   renameSession(sessionFile: string, name: string): Promise<unknown>;
   compact(sessionFile: string, customInstructions?: string): Promise<unknown>;
-  getTree(): Promise<unknown>;
-  getHistory(): Promise<unknown>;
-  getTurnChanges(entryId: string): Promise<unknown>;
-  getTurnFileDiff(entryId: string, path: string): Promise<unknown>;
+  getTree(sessionFile: string): Promise<unknown>;
+  getHistory(sessionFile: string): Promise<unknown>;
+  getTurnChanges(sessionFile: string, entryId: string): Promise<unknown>;
+  getTurnFileDiff(sessionFile: string, entryId: string, path: string): Promise<unknown>;
   prepareRollback(sessionFile: string, entryId: string): Promise<unknown>;
   commitRollback(planId: string): Promise<unknown>;
   undoRollback(sessionFile: string): Promise<unknown>;
-  getForkMessages(): Promise<unknown[]>;
+  getForkMessages(sessionFile: string): Promise<unknown[]>;
   fork(sessionFile: string, entryId: string): Promise<unknown>;
   clone(sessionFile: string): Promise<unknown>;
   generateGitCommitMessage(context: PreparedCommitContext): Promise<GeneratedCommitMessage>;
   getRecaps(sessionFile: string): Promise<Recap[]>;
   refreshFromDisk(sessionFile: string): Promise<boolean>;
   switchTo(sessionFile: string): Promise<unknown>;
-  readonly activeSessionFile: string | null;
   controlThread(action: "steer" | "follow-up" | "stop", threadId: string, message?: string): Promise<unknown>;
   promoteThread(threadId: string): Promise<{ sessionFile: string; cwd: string; parentSessionFile: string | null }>;
   controlSubagent(action: SubagentControlAction, runId: string, message?: string): Promise<unknown>;
   promoteSubagent(runId: string): Promise<{ sessionFile: string; cwd: string; parentSessionFile: string | null }>;
-  getState(sessionFile?: string): Promise<AgentState>;
-  getMessages(): Promise<unknown[]>;
-  getStats(): Promise<SessionStats>;
-  getCommands(): Promise<CommandInfo[]>;
+  getState(sessionFile: string): Promise<AgentState>;
+  getMessages(sessionFile: string): Promise<unknown[]>;
+  getStats(sessionFile: string): Promise<SessionStats>;
+  getCommands(sessionFile: string): Promise<CommandInfo[]>;
   /** Rewire event/status sinks (daemon broadcast attaches here). */
   attachSinks(sinks: {
     onEvent: (event: unknown) => void;
@@ -714,26 +713,44 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
           switch (request.type) {
             case "pi.getState": {
               const { sessionFile } = request.payload as { sessionFile?: unknown };
-              if (sessionFile !== undefined && (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096)) {
-                send(socket, createEnvelope("response", "error", { error: "pi.getState requires a valid sessionFile" }, request.id));
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) {
+                send(socket, createEnvelope("response", "error", { error: "pi.getState requires { sessionFile }" }, request.id));
                 return;
               }
-              payload = await piHost.getState(sessionFile as string | undefined);
+              payload = await piHost.getState(sessionFile);
               break;
             }
-            case "pi.getMessages":
+            case "pi.getMessages": {
+              const { sessionFile } = request.payload as { sessionFile?: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) {
+                send(socket, createEnvelope("response", "error", { error: "pi.getMessages requires { sessionFile }" }, request.id));
+                return;
+              }
               // The protocol rejects bare array payloads, so array results are
               // wrapped under a named key (same as pi.getCommands).
-              payload = { messages: await piHost.getMessages() };
+              payload = { messages: await piHost.getMessages(sessionFile) };
               break;
-            case "pi.getStats":
-              payload = await piHost.getStats();
+            }
+            case "pi.getStats": {
+              const { sessionFile } = request.payload as { sessionFile?: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) {
+                send(socket, createEnvelope("response", "error", { error: "pi.getStats requires { sessionFile }" }, request.id));
+                return;
+              }
+              payload = await piHost.getStats(sessionFile);
               break;
-            case "pi.getCommands":
+            }
+            case "pi.getCommands": {
+              const { sessionFile } = request.payload as { sessionFile?: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) {
+                send(socket, createEnvelope("response", "error", { error: "pi.getCommands requires { sessionFile }" }, request.id));
+                return;
+              }
               // The thin client's getCommands() reads payload.commands, so the
               // daemon must wrap the array rather than send it bare.
-              payload = { commands: await piHost.getCommands() };
+              payload = { commands: await piHost.getCommands(sessionFile) };
               break;
+            }
             case "pi.openSession": {
               const { path, cwd, requestId, systemPrompt } = request.payload as { path?: string; cwd: string; requestId?: number; systemPrompt?: string | null };
               payload = await piHost.open({ path, cwd, requestId, systemPrompt });
@@ -741,14 +758,17 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
             }
             case "pi.prompt": {
               const { message, images, streamingBehavior, sessionFile } = request.payload as { message: string; images?: unknown; streamingBehavior?: string; sessionFile?: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) {
+                send(socket, createEnvelope("response", "error", { error: "pi.prompt requires { sessionFile }" }, request.id));
+                return;
+              }
               // Narrow the wire string to the union the host accepts rather than
               // asserting it; an unknown value simply means "no streaming mode".
               const behavior = streamingBehavior === "steer" || streamingBehavior === "followUp" ? streamingBehavior : undefined;
-              const target = typeof sessionFile === "string" ? sessionFile : undefined;
               // PiHost.prompt resolves void on success. The envelope payload
               // must stay an object, so ack explicitly instead of forwarding
               // undefined through toPayload (which rejects non-objects).
-              await piHost.prompt(message, toPromptImages(images), behavior, target);
+              await piHost.prompt(message, toPromptImages(images), behavior, sessionFile);
               payload = { ok: true };
               break;
             }
@@ -852,23 +872,33 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
               break;
             }
             case "pi.notifyDiagnostics": {
-              const { diagnostics } = request.payload as { diagnostics: unknown };
-              if (!isPiDiagnostics(diagnostics)) {
-                send(socket, createEnvelope("response", "error", { error: "invalid diagnostics" }, request.id));
+              const { cwd, diagnostics } = request.payload as { cwd?: unknown; diagnostics: unknown };
+              if (typeof cwd !== "string" || cwd.length < 1 || cwd.length > 4096 || !isPiDiagnostics(diagnostics)) {
+                send(socket, createEnvelope("response", "error", { error: "pi.notifyDiagnostics requires { cwd, diagnostics }" }, request.id));
                 return;
               }
-              await piHost.notifyDiagnostics(diagnostics);
+              await piHost.notifyDiagnostics(cwd, diagnostics);
               payload = { ok: true };
               break;
             }
             case "pi.getToolOutput": {
-              const { toolCallId } = request.payload as { toolCallId: string };
-              payload = await piHost.getToolOutput(toolCallId);
+              const { sessionFile, toolCallId } = request.payload as { sessionFile?: unknown; toolCallId: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096 || typeof toolCallId !== "string" || toolCallId.length < 1 || toolCallId.length > 200) {
+                send(socket, createEnvelope("response", "error", { error: "pi.getToolOutput requires { sessionFile, toolCallId }" }, request.id));
+                return;
+              }
+              payload = await piHost.getToolOutput(sessionFile, toolCallId);
               break;
             }
-            case "pi.getModels":
-              payload = { models: await piHost.getModels() };
+            case "pi.getModels": {
+              const { cwd } = request.payload as { cwd?: unknown };
+              if (typeof cwd !== "string" || cwd.length < 1 || cwd.length > 4096) {
+                send(socket, createEnvelope("response", "error", { error: "pi.getModels requires { cwd }" }, request.id));
+                return;
+              }
+              payload = { models: await piHost.getModels(cwd) };
               break;
+            }
             case "pi.warmProject": {
               const { cwd } = request.payload as { cwd: string };
               payload = piHost.warmProject(cwd);
@@ -883,9 +913,15 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
               payload = await piHost.setModel(sessionFile, provider, modelId);
               break;
             }
-            case "pi.getThinkingLevels":
-              payload = { levels: await piHost.getThinkingLevels() };
+            case "pi.getThinkingLevels": {
+              const { sessionFile } = request.payload as { sessionFile?: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) {
+                send(socket, createEnvelope("response", "error", { error: "pi.getThinkingLevels requires { sessionFile }" }, request.id));
+                return;
+              }
+              payload = { levels: await piHost.getThinkingLevels(sessionFile) };
               break;
+            }
             case "pi.setThinking": {
               const { sessionFile, level } = request.payload as { sessionFile?: unknown; level?: unknown };
               if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096 || typeof level !== "string") {
@@ -927,20 +963,40 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
               payload = await piHost.compact(sessionFile, customInstructions as string | undefined);
               break;
             }
-            case "pi.getTree":
-              payload = await piHost.getTree();
+            case "pi.getTree": {
+              const { sessionFile } = request.payload as { sessionFile?: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) {
+                send(socket, createEnvelope("response", "error", { error: "pi.getTree requires { sessionFile }" }, request.id));
+                return;
+              }
+              payload = await piHost.getTree(sessionFile);
               break;
-            case "pi.getHistory":
-              payload = await piHost.getHistory();
+            }
+            case "pi.getHistory": {
+              const { sessionFile } = request.payload as { sessionFile?: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) {
+                send(socket, createEnvelope("response", "error", { error: "pi.getHistory requires { sessionFile }" }, request.id));
+                return;
+              }
+              payload = await piHost.getHistory(sessionFile);
               break;
+            }
             case "pi.getTurnChanges": {
-              const { entryId } = request.payload as { entryId: string };
-              payload = await piHost.getTurnChanges(entryId);
+              const { sessionFile, entryId } = request.payload as { sessionFile?: unknown; entryId: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096 || typeof entryId !== "string" || entryId.length < 1 || entryId.length > 200) {
+                send(socket, createEnvelope("response", "error", { error: "pi.getTurnChanges requires { sessionFile, entryId }" }, request.id));
+                return;
+              }
+              payload = await piHost.getTurnChanges(sessionFile, entryId);
               break;
             }
             case "pi.getTurnFileDiff": {
-              const { entryId, path } = request.payload as { entryId: string; path: string };
-              payload = await piHost.getTurnFileDiff(entryId, path);
+              const { sessionFile, entryId, path } = request.payload as { sessionFile?: unknown; entryId: unknown; path: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096 || typeof entryId !== "string" || entryId.length < 1 || entryId.length > 200 || typeof path !== "string" || path.length < 1 || path.length > 4096) {
+                send(socket, createEnvelope("response", "error", { error: "pi.getTurnFileDiff requires { sessionFile, entryId, path }" }, request.id));
+                return;
+              }
+              payload = await piHost.getTurnFileDiff(sessionFile, entryId, path);
               break;
             }
             case "pi.prepareRollback": {
@@ -966,9 +1022,15 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
               payload = await piHost.undoRollback(sessionFile);
               break;
             }
-            case "pi.getForkMessages":
-              payload = { messages: await piHost.getForkMessages() };
+            case "pi.getForkMessages": {
+              const { sessionFile } = request.payload as { sessionFile?: unknown };
+              if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) {
+                send(socket, createEnvelope("response", "error", { error: "pi.getForkMessages requires { sessionFile }" }, request.id));
+                return;
+              }
+              payload = { messages: await piHost.getForkMessages(sessionFile) };
               break;
+            }
             case "pi.fork": {
               const { sessionFile, entryId } = request.payload as { sessionFile?: unknown; entryId?: unknown };
               if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096 || typeof entryId !== "string" || entryId.length < 1 || entryId.length > 200) {
@@ -1008,10 +1070,6 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
             case "pi.switchTo": {
               const { sessionFile } = request.payload as { sessionFile: string };
               payload = await piHost.switchTo(sessionFile);
-              break;
-            }
-            case "pi.getActiveSessionFile": {
-              payload = { path: piHost.activeSessionFile ?? null };
               break;
             }
             case "pi.controlThread": {

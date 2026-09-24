@@ -66,7 +66,6 @@ function fakePiHost(overrides: Partial<DaemonPiHost>): DaemonPiHost {
     getRecaps: fail("getRecaps"),
     refreshFromDisk: fail("refreshFromDisk"),
     switchTo: fail("switchTo"),
-    activeSessionFile: null,
     controlThread: fail("controlThread"),
     promoteThread: fail("promoteThread"),
     controlSubagent: fail("controlSubagent"),
@@ -276,7 +275,7 @@ describe("babylon daemon server", () => {
     const port = (server.address() as { port: number }).port;
     const socket = await connect(port);
     const r = reader(socket);
-    await request(socket, "pi.getCommands", {});
+    await request(socket, "pi.getCommands", { sessionFile: "/tmp/s.jsonl" });
     const res = await r.next("pi.getCommands");
     expect(res.payload).toEqual({ commands: [{ name: "ls", description: "list", source: "prompt" }] });
   });
@@ -470,16 +469,16 @@ describe("babylon daemon server", () => {
     const socket = await connect(port);
     const r = reader(socket);
 
-    await request(socket, "pi.getMessages", {});
+    await request(socket, "pi.getMessages", { sessionFile: "/tmp/s.jsonl" });
     expect((await r.next("pi.getMessages")).payload).toEqual({ messages: [{ role: "user", content: "hi" }] });
 
-    await request(socket, "pi.getModels", {});
+    await request(socket, "pi.getModels", { cwd: "/tmp/project" });
     expect((await r.next("pi.getModels")).payload).toEqual({ models: [{ provider: "pi", id: "m1" }] });
 
-    await request(socket, "pi.getThinkingLevels", {});
+    await request(socket, "pi.getThinkingLevels", { sessionFile: "/tmp/s.jsonl" });
     expect((await r.next("pi.getThinkingLevels")).payload).toEqual({ levels: ["low", "high"] });
 
-    await request(socket, "pi.getForkMessages", {});
+    await request(socket, "pi.getForkMessages", { sessionFile: "/tmp/s.jsonl" });
     expect((await r.next("pi.getForkMessages")).payload).toEqual({ messages: [{ entryId: "e1" }] });
 
     await request(socket, "pi.getRecaps", { sessionFile: "/tmp/s.jsonl" });
@@ -512,7 +511,7 @@ describe("babylon daemon server", () => {
     const port = (server.address() as { port: number }).port;
     const socket = await connect(port);
     const r = reader(socket);
-    await request(socket, "pi.getMessages", {});
+    await request(socket, "pi.getMessages", { sessionFile: "/tmp/s.jsonl" });
     const res = await r.next("error");
     expect(String((res.payload as { error?: string }).error)).toMatch(/exceeds the transport frame limit/);
     // The socket survives: a dropped connection is what made the client

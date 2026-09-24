@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { Bot, BotGroup } from "../src/bots";
-import type { Bridge, SessionWindow, SimTabState } from "../src/bridge";
+import type { Bridge, PromptImage, SessionWindow, SimTabState } from "../src/bridge";
 import type { SimEmulation } from "../src/lib/simulator";
 
 function on<T>(channel: string, cb: (v: T) => void): () => void {
@@ -15,8 +15,8 @@ const api: Bridge = {
     ipcRenderer.invoke("pideck:get-session-messages", path),
   getSessionWindow: (path: string, endOffset: number, countBytes?: number): Promise<SessionWindow> =>
     ipcRenderer.invoke("pideck:get-session-window", path, endOffset, countBytes),
-  getToolOutput: (toolCallId: string): Promise<{ content: string; truncated: boolean }> =>
-    ipcRenderer.invoke("pideck:get-tool-output", toolCallId),
+  getToolOutput: (sessionFile: string, toolCallId: string): Promise<{ content: string; truncated: boolean }> =>
+    ipcRenderer.invoke("pideck:get-tool-output", sessionFile, toolCallId),
   deleteSession: (path: string): Promise<void> => ipcRenderer.invoke("pideck:delete-session", path),
   pickFolder: (): Promise<string | null> => ipcRenderer.invoke("pideck:pick-folder"),
   openSession: (opts: { path?: string; cwd: string; requestId?: number }): Promise<void> =>
@@ -56,8 +56,8 @@ const api: Bridge = {
   handoffConsume: (handoffId: string, liveFile: string) =>
     ipcRenderer.invoke("pideck:handoff-consume", handoffId, liveFile),
 
-  prompt: (message: string, images?, streamingBehavior?: "steer" | "followUp", sessionFile?: string | null) =>
-    ipcRenderer.invoke("pideck:prompt", message, images, streamingBehavior, sessionFile ?? undefined),
+  prompt: (message: string, images: PromptImage[] | undefined, streamingBehavior: "steer" | "followUp" | undefined, sessionFile: string) =>
+    ipcRenderer.invoke("pideck:prompt", message, images, streamingBehavior, sessionFile),
   abort: (sessionFile: string) => ipcRenderer.invoke("pideck:abort", { sessionFile }),
   goalGet: (sessionId: string, cwd: string) => ipcRenderer.invoke("pideck:goal-get", sessionId, cwd),
   goalControl: (sessionFile: string, args: string) => ipcRenderer.invoke("pideck:goal-control", { sessionFile, args }),
@@ -76,9 +76,9 @@ const api: Bridge = {
     ipcRenderer.invoke("pideck:session:release", path),
   refreshSession: (path: string): Promise<boolean> => ipcRenderer.invoke("pideck:refresh-session", path),
 
-  getMessages: () => ipcRenderer.invoke("pideck:get-messages"),
-  getState: (sessionFile?: string) => ipcRenderer.invoke("pideck:get-state", { sessionFile }),
-  getStats: () => ipcRenderer.invoke("pideck:get-stats"),
+  getMessages: (sessionFile: string) => ipcRenderer.invoke("pideck:get-messages", sessionFile),
+  getState: (sessionFile: string) => ipcRenderer.invoke("pideck:get-state", { sessionFile }),
+  getStats: (sessionFile: string) => ipcRenderer.invoke("pideck:get-stats", sessionFile),
   gitStatus: (cwd: string) => ipcRenderer.invoke("pideck:git-status", cwd),
   gitStatusDetails: (cwd: string) => ipcRenderer.invoke("pideck:git-status-details", cwd),
   gitDiffFile: (cwd: string, file: string): Promise<string> => ipcRenderer.invoke("pideck:git-diff-file", cwd, file),
@@ -101,13 +101,13 @@ const api: Bridge = {
   gitDiscardFile: (cwd: string, file: string): Promise<void> => ipcRenderer.invoke("pideck:git-discard-file", cwd, file),
   gitStageHunk: (cwd: string, file: string, patch: string): Promise<void> => ipcRenderer.invoke("pideck:git-stage-hunk", cwd, file, patch),
   gitDiscardHunk: (cwd: string, file: string, patch: string): Promise<void> => ipcRenderer.invoke("pideck:git-discard-hunk", cwd, file, patch),
-  getModels: () => ipcRenderer.invoke("pideck:get-models"),
+  getModels: (cwd: string) => ipcRenderer.invoke("pideck:get-models", cwd),
   warmProject: (cwd: string) => ipcRenderer.invoke("pideck:warm-project", cwd),
-  getCommands: () => ipcRenderer.invoke("pideck:get-commands"),
+  getCommands: (sessionFile: string) => ipcRenderer.invoke("pideck:get-commands", sessionFile),
   setModel: (sessionFile: string, provider: string, modelId: string) =>
     ipcRenderer.invoke("pideck:set-model", sessionFile, provider, modelId),
   setThinking: (sessionFile: string, level: string) => ipcRenderer.invoke("pideck:set-thinking", sessionFile, level),
-  getThinkingLevels: (): Promise<string[]> => ipcRenderer.invoke("pideck:get-thinking-levels"),
+  getThinkingLevels: (sessionFile: string): Promise<string[]> => ipcRenderer.invoke("pideck:get-thinking-levels", sessionFile),
   listFonts: (): Promise<string[]> => ipcRenderer.invoke("pideck:list-fonts"),
   setSessionName: (sessionFile: string, name: string) => ipcRenderer.invoke("pideck:set-session-name", sessionFile, name),
   renameSession: (path: string, name: string) => ipcRenderer.invoke("pideck:rename-session", { path, name }),
@@ -116,15 +116,15 @@ const api: Bridge = {
   setSettings: (patch) => ipcRenderer.invoke("pideck:set-settings", patch),
 
   // Branching / worktrees
-  getTree: () => ipcRenderer.invoke("pideck:get-tree"),
-  getHistory: () => ipcRenderer.invoke("pideck:get-history"),
-  getTurnChanges: (entryId: string) => ipcRenderer.invoke("pideck:turn-changes", entryId),
-  getTurnFileDiff: (entryId: string, path: string) =>
-    ipcRenderer.invoke("pideck:turn-file-diff", entryId, path),
+  getTree: (sessionFile: string) => ipcRenderer.invoke("pideck:get-tree", sessionFile),
+  getHistory: (sessionFile: string) => ipcRenderer.invoke("pideck:get-history", sessionFile),
+  getTurnChanges: (sessionFile: string, entryId: string) => ipcRenderer.invoke("pideck:turn-changes", sessionFile, entryId),
+  getTurnFileDiff: (sessionFile: string, entryId: string, path: string) =>
+    ipcRenderer.invoke("pideck:turn-file-diff", sessionFile, entryId, path),
   prepareRollback: (sessionFile: string, entryId: string) => ipcRenderer.invoke("pideck:rollback:prepare", sessionFile, entryId),
   commitRollback: (planId: string) => ipcRenderer.invoke("pideck:rollback:commit", planId),
   undoRollback: (sessionFile: string) => ipcRenderer.invoke("pideck:rollback:undo", sessionFile),
-  getForkMessages: () => ipcRenderer.invoke("pideck:get-fork-messages"),
+  getForkMessages: (sessionFile: string) => ipcRenderer.invoke("pideck:get-fork-messages", sessionFile),
   fork: (sessionFile: string, entryId: string) => ipcRenderer.invoke("pideck:fork", sessionFile, entryId),
   clone: (sessionFile: string) => ipcRenderer.invoke("pideck:clone", sessionFile),
   taskList: () => ipcRenderer.invoke("pideck:task-list"),
@@ -145,11 +145,11 @@ const api: Bridge = {
   attentionList: () => ipcRenderer.invoke("pideck:attention-list"),
   attentionResolve: (id: string) => ipcRenderer.invoke("pideck:attention-resolve", id),
   onAttentionUpdate: (cb) => on("pideck:attention-update", cb),
-  worktreeInfo: () => ipcRenderer.invoke("pideck:worktree-info"),
-  worktreeCreate: (opts: { name: string; description?: string; useGit?: boolean }) =>
-    ipcRenderer.invoke("pideck:worktree-create", opts),
-  worktreeExit: (opts: { keep: boolean }) =>
-    ipcRenderer.invoke("pideck:worktree-exit", opts),
+  worktreeInfo: (sessionFile: string) => ipcRenderer.invoke("pideck:worktree-info", sessionFile),
+  worktreeCreate: (opts: { name: string; description?: string; useGit?: boolean }, sessionFile: string) =>
+    ipcRenderer.invoke("pideck:worktree-create", opts, sessionFile),
+  worktreeExit: (opts: { keep: boolean }, sessionFile: string) =>
+    ipcRenderer.invoke("pideck:worktree-exit", opts, sessionFile),
 
   uiRespond: (resp: Record<string, unknown>): Promise<void> =>
     ipcRenderer.invoke("pideck:ui-respond", resp),

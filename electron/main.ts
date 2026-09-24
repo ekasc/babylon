@@ -298,12 +298,11 @@ function overlayForSessionFile(file: string | null | undefined, cwd?: string): s
  *  or the full staff when the project opted into free-speak. Skipped for rooms,
  *  member 1:1s, staff-less projects, and quiet turns with no mentions, so
  *  unstated chats behave byte-for-byte as before. */
-async function driveSharedChatExtras(userText: string): Promise<void> {
-  const file = getHost().activeSessionFile;
-  const cwd = getHost().cwd;
-  if (!file || !cwd) return;
-  if (botStore.findGroupBySessionFile(file)) return;
-  if (botStore.findByProjectSessionFile(file) || botStore.findBySessionFile(file)) return;
+async function driveSharedChatExtras(sessionFile: string, userText: string): Promise<void> {
+  const cwd = getHost().sessionCwdFor(sessionFile);
+  if (!cwd) return;
+  if (botStore.findGroupBySessionFile(sessionFile)) return;
+  if (botStore.findByProjectSessionFile(sessionFile) || botStore.findBySessionFile(sessionFile)) return;
   const settings = projectSettings.get(cwd);
   if (!settings || settings.memberIds.length === 0) return;
   const members = projectTeam(settings.memberIds);
@@ -311,24 +310,24 @@ async function driveSharedChatExtras(userText: string): Promise<void> {
   // Mention routing covers both sides of the just-settled turn: the user's
   // text AND the default bot's reply, so a quoted "@hands take over"
   // handoff actually dispatches instead of sitting inert in the transcript.
-  const assistantText = lastAssistantText(await getRuntime().getMessages());
+  const assistantText = lastAssistantText(await getRuntime().getMessages(sessionFile));
   const order = resolveSharedChatOrder(members, userText, assistantText, settings.freeSpeak === true);
   if (order.length === 0) return;
-  await driveRoomTurns({ groupId: `project:${projectHashForCwd(cwd)}`, members, order, io: driveExtrasIO() });
+  await driveRoomTurns({ groupId: `project:${projectHashForCwd(cwd)}`, members, order, io: driveExtrasIO(sessionFile) });
 }
 
 /** Shared driver IO: serial prompts in the live session with visible presence.
  *  Used by group rooms and shared-chat extras alike. */
-function driveExtrasIO() {
+function driveExtrasIO(sessionFile: string) {
   const runtime = getRuntime();
   return {
     prompt: async (text: string) => {
-      await runtime.prompt(text);
+      await runtime.prompt(text, undefined, undefined, sessionFile);
     },
-    readReply: async () => lastAssistantText(await runtime.getMessages()),
+    readReply: async () => lastAssistantText(await runtime.getMessages(sessionFile)),
     emit: (ev: Record<string, unknown> & { type: string }) => {
       try {
-        getHost().emitRoomEvent(ev);
+        getHost().emitRoomEvent(sessionFile, ev);
       } catch {}
     },
   };
@@ -477,7 +476,7 @@ function requireDaemonClient(): DaemonClient {
 function installDaemonNotifier(client: DaemonClient): void {
   lspManager.setPiNotifier((diagCwd, diagnostics) => {
     if (diagCwd !== activeCwd) return;
-    client.request("pi.notifyDiagnostics", { diagnostics }).catch(() => {});
+    client.request("pi.notifyDiagnostics", { cwd: diagCwd, diagnostics }).catch(() => {});
   });
 }
 
@@ -824,7 +823,7 @@ async function startHost(): Promise<void> {
     lspManager.setPiNotifier((diagCwd, diagnostics) => {
       if (diagCwd !== activeCwd) return;
       try {
-        host!.notifyDiagnostics(diagnostics);
+        host!.notifyDiagnostics(diagCwd, diagnostics);
       } catch {}
     });
     applyCwd(activeCwd);
@@ -1277,7 +1276,7 @@ app.whenReady().then(async () => {
     lspManager.setPiNotifier((diagCwd, diagnostics) => {
       if (diagCwd !== activeCwd) return;
       try {
-        host!.notifyDiagnostics(diagnostics);
+        host!.notifyDiagnostics(diagCwd, diagnostics);
       } catch {}
     });
   }

@@ -293,7 +293,7 @@ export function miniPatch(patch: string, maxLines = 6): string {
   return out.join("\n");
 }
 
-export const ToolCard = memo(function ToolCard({ item, onDisclosureToggle }: { item: Extract<ChatItem, { kind: "tool" }>; onDisclosureToggle?: () => void }) {
+export const ToolCard = memo(function ToolCard({ item, sessionFile = null, onDisclosureToggle }: { item: Extract<ChatItem, { kind: "tool" }>; sessionFile?: string | null; onDisclosureToggle?: () => void }) {
   const [open, setOpen] = useState(false);
   const [fullOutput, setFullOutput] = useState<string | null>(null);
   const [outputLoading, setOutputLoading] = useState(false);
@@ -312,7 +312,7 @@ export const ToolCard = memo(function ToolCard({ item, onDisclosureToggle }: { i
   // exit code, signal, duration, hints). Surface it via BashCard so the chat
   // shows the actual command chip, not just "bash".
   if (item.name === "bash" && item.babylon?.kind === "babylon_bash") {
-    return <BashCard item={item as Extract<typeof item, { babylon: { kind: "babylon_bash" } }>} />;
+    return <BashCard item={item as Extract<typeof item, { babylon: { kind: "babylon_bash" } }>} sessionFile={sessionFile} />;
   }
 
   return (
@@ -345,10 +345,11 @@ export const ToolCard = memo(function ToolCard({ item, onDisclosureToggle }: { i
                 <>
                   <button
                     onClick={() => {
+                      if (!sessionFile) return;
                       setOutputLoading(true);
                       setOutputError(null);
                       bridge
-                        .getToolOutput(item.toolCallId)
+                        .getToolOutput(sessionFile, item.toolCallId)
                         .then((result) => setFullOutput(result.content))
                         .catch((e) => setOutputError(e instanceof Error ? e.message : "couldn't load full output"))
                         .finally(() => setOutputLoading(false));
@@ -370,7 +371,7 @@ export const ToolCard = memo(function ToolCard({ item, onDisclosureToggle }: { i
 });
 
 /** Collapses a run of consecutive tool calls into one summary row. */
-export const ToolGroup = memo(function ToolGroup({ tools, onDisclosureToggle }: { tools: Array<Extract<ChatItem, { kind: "tool" }>>; onDisclosureToggle?: () => void }) {
+export const ToolGroup = memo(function ToolGroup({ tools, sessionFile = null, onDisclosureToggle }: { tools: Array<Extract<ChatItem, { kind: "tool" }>>; sessionFile?: string | null; onDisclosureToggle?: () => void }) {
   const [open, setOpen] = useState(false);
   const anyRunning = tools.some((t) => t.status === "running" || t.status === "pending");
   const anyError = tools.some((t) => t.status === "error");
@@ -390,7 +391,7 @@ export const ToolGroup = memo(function ToolGroup({ tools, onDisclosureToggle }: 
       {open ? (
         <div className="tool-group-list">
           {tools.map((t) => (
-            <ToolCard key={t.key} item={t} onDisclosureToggle={onDisclosureToggle} />
+            <ToolCard key={t.key} item={t} sessionFile={sessionFile} onDisclosureToggle={onDisclosureToggle} />
           ))}
         </div>
       ) : null}

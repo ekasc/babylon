@@ -44,13 +44,19 @@ export function registerRuntimeIpc(
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
   };
-  handle("pideck:get-models", () => getRuntime().getModels());
+  handle("pideck:get-models", async (_e, cwd: unknown) => {
+    if (typeof cwd !== "string" || cwd.length < 1 || cwd.length > 4096) throw new Error("invalid project path");
+    return getRuntime().getModels(cwd);
+  });
   handle("pideck:warm-project", async (_e, cwd: unknown) => {
     if (typeof cwd !== "string" || cwd.length < 1 || cwd.length > 4096) throw new Error("invalid project path");
     await awaitHostReady();
     return getRuntime().warmProject(cwd);
   });
-  handle("pideck:get-commands", () => getRuntime().getCommands());
+  handle("pideck:get-commands", async (_e, sessionFile: unknown) => {
+    const file = requireSessionFile(sessionFile);
+    return getRuntime().getCommands(file);
+  });
   handle("pideck:set-model", async (_e, sessionFile: unknown, provider: string, modelId: string) => {
     const file = requireSessionFile(sessionFile);
     return getRuntime().setModel(file, provider, modelId);
@@ -59,7 +65,10 @@ export function registerRuntimeIpc(
     const file = requireSessionFile(sessionFile);
     return getRuntime().setThinking(file, level);
   });
-  handle("pideck:get-thinking-levels", () => getRuntime().getThinkingLevels());
+  handle("pideck:get-thinking-levels", async (_e, sessionFile: unknown) => {
+    const file = requireSessionFile(sessionFile);
+    return getRuntime().getThinkingLevels(file);
+  });
   handle("pideck:list-fonts", async () => {
     const { promisify } = await import("node:util");
     const pexec = promisify((await import("node:child_process")).exec);
@@ -124,16 +133,24 @@ export function registerRuntimeIpc(
   });
 
   // Branching / worktrees
-  handle("pideck:get-tree", () => getRuntime().getTree());
-  handle("pideck:get-history", () => getRuntime().getHistory());
-  handle("pideck:turn-changes", (_e, entryId: unknown) => {
-    if (typeof entryId !== "string" || entryId.length < 1 || entryId.length > 200) throw new Error("invalid history entry ID");
-    return getRuntime().getTurnChanges(entryId);
+  handle("pideck:get-tree", async (_e, sessionFile: unknown) => {
+    const file = requireSessionFile(sessionFile);
+    return getRuntime().getTree(file);
   });
-  handle("pideck:turn-file-diff", (_e, entryId: unknown, path: unknown) => {
+  handle("pideck:get-history", async (_e, sessionFile: unknown) => {
+    const file = requireSessionFile(sessionFile);
+    return getRuntime().getHistory(file);
+  });
+  handle("pideck:turn-changes", async (_e, sessionFile: unknown, entryId: unknown) => {
+    const file = requireSessionFile(sessionFile);
+    if (typeof entryId !== "string" || entryId.length < 1 || entryId.length > 200) throw new Error("invalid history entry ID");
+    return getRuntime().getTurnChanges(file, entryId);
+  });
+  handle("pideck:turn-file-diff", async (_e, sessionFile: unknown, entryId: unknown, path: unknown) => {
+    const file = requireSessionFile(sessionFile);
     if (typeof entryId !== "string" || entryId.length < 1 || entryId.length > 200) throw new Error("invalid history entry ID");
     if (typeof path !== "string" || path.length < 1 || path.length > 4096) throw new Error("invalid file path");
-    return getRuntime().getTurnFileDiff(entryId, path);
+    return getRuntime().getTurnFileDiff(file, entryId, path);
   });
   handle("pideck:rollback:prepare", async (_e, sessionFile: unknown, entryId: string) => {
     const file = requireSessionFile(sessionFile);
@@ -148,7 +165,10 @@ export function registerRuntimeIpc(
     const file = requireSessionFile(sessionFile);
     return getRuntime().undoRollback(file);
   });
-  handle("pideck:get-fork-messages", () => getRuntime().getForkMessages());
+  handle("pideck:get-fork-messages", async (_e, sessionFile: unknown) => {
+    const file = requireSessionFile(sessionFile);
+    return getRuntime().getForkMessages(file);
+  });
   handle("pideck:fork", async (_e, sessionFile: unknown, entryId: string) => {
     const file = requireSessionFile(sessionFile);
     if (typeof entryId !== "string" || entryId.length < 1 || entryId.length > 200) throw new Error("invalid history entry ID");

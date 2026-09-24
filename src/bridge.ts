@@ -568,7 +568,7 @@ export interface Bridge {
   listSessions(): Promise<ProjectGroup[]>;
   getSessionMessages(path: string): Promise<SessionWindow>;
   getSessionWindow(path: string, endOffset: number, countBytes?: number): Promise<SessionWindow>;
-  getToolOutput(toolCallId: string): Promise<{ content: string; truncated: boolean }>;
+  getToolOutput(sessionFile: string, toolCallId: string): Promise<{ content: string; truncated: boolean }>;
   deleteSession(path: string): Promise<void>;
   pickFolder(): Promise<string | null>;
   openSession(opts: { path?: string; cwd: string; requestId?: number; botId?: string }): Promise<void>;
@@ -601,7 +601,7 @@ export interface Bridge {
   handoffList(sourceFile: string): Promise<Handoff[]>;
   handoffConsume(handoffId: string, liveFile: string): Promise<{ consumedInto: string }>;
 
-  prompt(message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp", sessionFile?: string | null): Promise<unknown>;
+  prompt(message: string, images: PromptImage[] | undefined, streamingBehavior: "steer" | "followUp" | undefined, sessionFile: string): Promise<unknown>;
   /** Abort one session's run (defaults to the foreground session). Other
    *  sessions keep running untouched. */
   abort(sessionFile: string): Promise<unknown>;
@@ -639,9 +639,9 @@ export interface Bridge {
   onCanvasChanged(cb: (event: CanvasChangedEvent) => void): () => void;
   onCanvasScenes(cb: (scenes: CanvasSceneSummary[]) => void): () => void;
 
-  getMessages(): Promise<unknown[]>;
-  getState(sessionFile?: string): Promise<AgentState | null>;
-  getStats(): Promise<SessionStats | null>;
+  getMessages(sessionFile: string): Promise<unknown[]>;
+  getState(sessionFile: string): Promise<AgentState | null>;
+  getStats(sessionFile: string): Promise<SessionStats | null>;
   gitStatus(cwd: string): Promise<GitStatusResult | null>;
   gitStatusDetails(cwd: string): Promise<GitStatusDetails>;
   /** Unified diff of one file's working-tree changes vs HEAD (untracked files diff as all-added). */
@@ -662,29 +662,29 @@ export interface Bridge {
   gitDiscardFile(cwd: string, file: string): Promise<void>;
   gitStageHunk(cwd: string, file: string, patch: string): Promise<void>;
   gitDiscardHunk(cwd: string, file: string, patch: string): Promise<void>;
-  getModels(): Promise<AgentModel[]>;
+  getModels(cwd: string): Promise<AgentModel[]>;
   /** Best-effort pre-warm of a project before its first session. */
   warmProject(cwd: string): Promise<{ warmed: boolean }>;
-  getCommands(): Promise<CommandInfo[]>;
+  getCommands(sessionFile: string): Promise<CommandInfo[]>;
   setModel(sessionFile: string, provider: string, modelId: string): Promise<unknown>;
   setThinking(sessionFile: string, level: string): Promise<unknown>;
-  getThinkingLevels(): Promise<string[]>;
+  getThinkingLevels(sessionFile: string): Promise<string[]>;
   listFonts(): Promise<string[]>;
   setSessionName(sessionFile: string, name: string): Promise<unknown>;
   /** Path-addressed rename (any session, no need to open it first). */
   renameSession(path: string, name: string): Promise<unknown>;
   compact(sessionFile: string, customInstructions?: string): Promise<unknown>;
 
-  getTree(): Promise<{ rows: SessionTreeRow[]; leafId: string | null }>;
-  getHistory(): Promise<HistoryProjection>;
-  getTurnChanges(entryId: string): Promise<TurnChanges>;
-  getTurnFileDiff(entryId: string, path: string): Promise<TurnFileDiff>;
+  getTree(sessionFile: string): Promise<{ rows: SessionTreeRow[]; leafId: string | null }>;
+  getHistory(sessionFile: string): Promise<HistoryProjection>;
+  getTurnChanges(sessionFile: string, entryId: string): Promise<TurnChanges>;
+  getTurnFileDiff(sessionFile: string, entryId: string, path: string): Promise<TurnFileDiff>;
   prepareRollback(sessionFile: string, entryId: string): Promise<RollbackPlan>;
   commitRollback(planId: string): Promise<{ editorText: string; history: HistoryProjection }>;
   undoRollback(sessionFile: string): Promise<{ history: HistoryProjection }>;
-  getForkMessages(): Promise<{ entryId: string; text: string }[]>;
+  getForkMessages(sessionFile: string): Promise<{ entryId: string; text: string }[]>;
   fork(sessionFile: string, entryId: string): Promise<{ text?: string; cancelled?: boolean }>;
-  clone(sessionFile: string): Promise<{ cancelled?: boolean }>;
+  clone(sessionFile: string): Promise<{ cancelled?: boolean; sessionFile?: string }>;
 
   taskList(): Promise<Task[]>;
   taskGet(id: string): Promise<Task | null>;
@@ -701,7 +701,7 @@ export interface Bridge {
   attentionList(): Promise<import("./attention").AttentionRegistry>;
   attentionResolve(id: string): Promise<import("./attention").AttentionRegistry>;
   onAttentionUpdate(cb: (registry: import("./attention").AttentionRegistry) => void): () => void;
-  worktreeInfo(): Promise<{
+  worktreeInfo(sessionFile: string): Promise<{
     isWorktree: boolean;
     sessionFile?: string;
     parentSession?: string;
@@ -709,14 +709,14 @@ export interface Bridge {
     task?: Task;
     git: { isRepo: boolean; root?: string; branch?: string; isLinkedWorktree?: boolean };
   }>;
-  worktreeCreate(opts: { name: string; description?: string; useGit?: boolean }): Promise<{
+  worktreeCreate(opts: { name: string; description?: string; useGit?: boolean }, sessionFile: string): Promise<{
     task: Task;
     taskId: string;
     worktreePath: string;
     originalPath: string;
     gitWorktree?: { path: string; branch: string; baseBranch?: string } | null;
   }>;
-  worktreeExit(opts: { keep: boolean }): Promise<{
+  worktreeExit(opts: { keep: boolean }, sessionFile: string): Promise<{
     originalPath: string;
     kept: boolean;
     gitRemoved: boolean;

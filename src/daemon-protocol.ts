@@ -126,7 +126,6 @@ export const KNOWN_MESSAGE_TYPES = [
   "pi.refreshFromDisk",
   "pi.switchTo",
   "pi.getCommands",
-  "pi.getActiveSessionFile",
   "pi.controlThread",
   "pi.promoteThread",
   "pi.controlSubagent",

@@ -44,9 +44,12 @@ export function registerWorktreeIpc(
     applyCwd,
     sendStatus,
   } = deps;
-  handle("pideck:worktree-info", async () => {
+  handle("pideck:worktree-info", async (_e, sessionFile: unknown) => {
+    if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) {
+      throw new Error("worktree-info requires a session file");
+    }
     try {
-      const state = await getRuntime().getState();
+      const state = await getRuntime().getState(sessionFile);
       const file = state?.sessionFile ?? null;
       const header = file ? await readSessionHeader(file) : null;
       const task = isDaemonOwned()
@@ -70,12 +73,15 @@ export function registerWorktreeIpc(
 
   handle(
     "pideck:worktree-create",
-    async (_e, opts: { name: string; description?: string; useGit?: boolean }) => {
+    async (_e, opts: { name: string; description?: string; useGit?: boolean }, sessionFile: unknown) => {
+      if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) {
+        throw new Error("worktree-create requires a session file");
+      }
       if (!opts || typeof opts.name !== "string" || opts.name.length > 200) throw new Error("invalid worktree name");
       if (opts.description !== undefined && (typeof opts.description !== "string" || opts.description.length > 20_000)) {
         throw new Error("invalid worktree description");
       }
-      const before = await getRuntime().getState();
+      const before = await getRuntime().getState(sessionFile);
       if (!before?.sessionFile) {
         throw new Error("no persisted session to worktree yet, send at least one message first");
       }
@@ -88,12 +94,12 @@ export function registerWorktreeIpc(
       try {
         const cloneRes = await getRuntime().clone(before.sessionFile);
         if (cloneRes?.cancelled) throw new Error("worktree cancelled by extension");
-        worktreePath = (await getRuntime().getState())?.sessionFile ?? undefined;
+        worktreePath = cloneRes?.sessionFile;
         if (!worktreePath || worktreePath === originalPath) throw new Error("clone did not produce a session file");
 
         const safeName = sanitizeWorktreeName(opts.name) || `exp-${Date.now().toString(36)}`;
         await getRuntime().setSessionName(worktreePath, `worktree: ${safeName}`);
-        const afterNameState = await getRuntime().getState();
+        const afterNameState = await getRuntime().getState(worktreePath);
         await ensureClonedSessionFile(worktreePath, originalPath, getActiveCwd(), afterNameState?.sessionId);
         let workCwd = getActiveCwd();
 
@@ -120,12 +126,15 @@ export function registerWorktreeIpc(
         if (opts.description?.trim()) {
           await getRuntime()
             .prompt(
-              `[Experimental worktree "${safeName}"${gitWorktree ? `, git branch ${gitWorktree.branch}` : ""}] ${opts.description.trim()}`
+              `[Experimental worktree "${safeName}"${gitWorktree ? `, git branch ${gitWorktree.branch}` : ""}] ${opts.description.trim()}`,
+              undefined,
+              undefined,
+              worktreePath
             )
             .catch(() => {});
         }
 
-        const state = await getRuntime().getState();
+        const state = await getRuntime().getState(worktreePath);
         if (!state?.sessionId) throw new Error("cloned session has no runtime identity");
         let task: import("../src/tasks").Task;
         if (isDaemonOwned()) {
@@ -184,9 +193,12 @@ export function registerWorktreeIpc(
     }
   );
 
-  handle("pideck:worktree-exit", async (_e, opts: { keep: boolean }) => {
+  handle("pideck:worktree-exit", async (_e, opts: { keep: boolean }, sessionFile: unknown) => {
     if (!opts || typeof opts.keep !== "boolean") throw new Error("invalid worktree exit options");
-    const state = await getRuntime().getState();
+    if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) {
+      throw new Error("worktree-exit requires a session file");
+    }
+    const state = await getRuntime().getState(sessionFile);
     const file = state?.sessionFile;
     if (!file) throw new Error("no active session");
     const header = await readSessionHeader(file);
@@ -219,7 +231,7 @@ export function registerWorktreeIpc(
         await fsp.rm(file);
       }
 
-      const newState = await getRuntime().getState();
+      const newState = await getRuntime().getState(originalPath);
       const origHeader = await readSessionHeader(originalPath);
       applyCwd(wireStr(origHeader ?? undefined, "cwd") ?? getActiveCwd());
       sendStatus("ready", { state: newState, sessionPath: originalPath, cwd: getActiveCwd() });
