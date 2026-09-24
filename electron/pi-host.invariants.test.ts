@@ -200,24 +200,32 @@ describe("projects remain independent", () => {
   }, 60_000);
 });
 
-describe("I3/I8: view never changes ownership", () => {
-  it("open() (today's view path) never registers execution ownership", async () => {
+describe("I3/I8: reading history never installs a runtime", () => {
+  it("open() is an explicit activation; history reads stay cold", async () => {
     const { cwd, agentDir } = await makeProject("view-no-own");
     const { host } = makeHost(cwd, agentDir);
     await host.start();
     try {
       const fileA1 = await makeSessionFile(cwd);
       await host.open({ path: fileA1, cwd });
-      expect(host.testSessions().has(fileA1)).toBe(true);
-      // I3 + I8: viewing created a runtime but zero ownership.
-      expect(host.executionForCwd(cwd)).toBeNull();
-      expect(await host.listProjectExecutions()).toEqual([]);
+      // C10: open()/openSession is the activation entry point — it claims
+      // the project's slot rather than being a silent view.
+      expect(host.testExecutionByCwd().get(cwd)).toBe(fileA1);
+      expect((await host.listProjectExecutions())[0]?.sessionFile).toBe(fileA1);
+
+      // A transcript the user merely reads is disk-only: no runtime is
+      // materialized, so the project's ONE runtime stays the owner.
+      const history = await makeSessionFile(cwd);
+      await expect(host.getState(history)).rejects.toThrow(/runtime is not available/);
+      expect(host.testSessions().size).toBe(1);
+      expect(host.testExecutionByCwd().get(cwd)).toBe(fileA1);
+      host.testAssertRetentionInvariant();
     } finally {
       await host.dispose();
     }
   }, 60_000);
 
-  it("viewing a historical session while the owner runs leaves ownership unchanged", async () => {
+  it("opening a historical session while the owner runs leaves ownership unchanged", async () => {
     const { cwd, agentDir } = await makeProject("view-while-running");
     const { host } = makeHost(cwd, agentDir);
     await host.start();
@@ -226,11 +234,14 @@ describe("I3/I8: view never changes ownership", () => {
       const fileA2 = await makeSessionFile(cwd);
       await host.activateExecution(cwd, fileA1);
       setStreaming(host, fileA1, true);
-      // Spec A4: view A2 while A1 runs → sessions grow, ownership doesn't.
-      await host.open({ path: fileA2, cwd });
-      expect(host.testSessions().size).toBe(2);
+      // A busy owner is never displaced (I4): the request rejects, nothing
+      // is built, and the running turn keeps the project.
+      await expect(host.open({ path: fileA2, cwd })).rejects.toThrow(/project execution busy/);
+      expect(host.testSessions().size).toBe(1);
+      expect(host.testSessions().has(fileA2)).toBe(false);
       expect(host.executionForCwd(cwd)?.sessionFile).toBe(fileA1);
       expect((await host.listProjectExecutions())[0]?.sessionFile).toBe(fileA1);
+      host.testAssertRetentionInvariant();
     } finally {
       await host.dispose();
     }
@@ -238,7 +249,7 @@ describe("I3/I8: view never changes ownership", () => {
 });
 
 describe("I5 backend: release never controls a busy execution", () => {
-  it("releaseSession refuses the busy owner and the slot keeps it", async () => {
+  it("deactivation refuses a busy owner and the slot keeps it", async () => {
     const { cwd, agentDir } = await makeProject("release-busy");
     const { host } = makeHost(cwd, agentDir);
     await host.start();
@@ -246,12 +257,18 @@ describe("I5 backend: release never controls a busy execution", () => {
       const fileA1 = await makeSessionFile(cwd);
       await host.activateExecution(cwd, fileA1);
       setStreaming(host, fileA1, true);
+      // A direct release may never strip a project of its owner at all, and
+      // deactivation refuses while the turn runs.
       expect(await host.releaseSession(fileA1)).toBe(false);
+      expect(await host.deactivateExecution(cwd, fileA1)).toBe(false);
       expect(host.executionForCwd(cwd)?.sessionFile).toBe(fileA1);
       setStreaming(host, fileA1, false);
-      expect(await host.releaseSession(fileA1)).toBe(true);
-      // Released owner's slot is cleaned lazily on the next resolve.
+      // Cold-store: the runtime goes, the project keeps no execution record,
+      // and the transcript stays on disk (R2/R4).
+      expect(await host.deactivateExecution(cwd, fileA1)).toBe(true);
       expect(host.executionForCwd(cwd)).toBeNull();
+      expect(host.testSessions().size).toBe(0);
+      expect(host.testRuntimeCreationCount()).toBe(1);
     } finally {
       await host.dispose();
     }
@@ -283,16 +300,13 @@ describe("deactivateExecution", () => {
 });
 
 describe("execution ownership push (pideck_execution_changed producer)", () => {
-  it("emits on activate and transfer with rising generations; view never emits", async () => {
+  it("emits on activate and transfer with rising generations", async () => {
     const { cwd, agentDir } = await makeProject("push");
     const { host, ownershipPushes } = makeHost(cwd, agentDir);
     await host.start();
     try {
       const fileA1 = await makeSessionFile(cwd);
       const fileA2 = await makeSessionFile(cwd);
-      // I3: plain view (open) produces no ownership push.
-      await host.open({ path: fileA1, cwd });
-      expect(ownershipPushes).toHaveLength(0);
 
       await host.activateExecution(cwd, fileA1);
       await new Promise((r) => setTimeout(r, 20)); // fire-and-forget emit
@@ -300,6 +314,11 @@ describe("execution ownership push (pideck_execution_changed producer)", () => {
       expect(ownershipPushes[0]?.cwd).toBe(cwd);
       expect(ownershipPushes[0]?.sessionFile).toBe(fileA1);
       expect(ownershipPushes[0]?.generation).toBe(1);
+
+      // Re-activating the owner emits no new generation (same-owner no-op).
+      await host.activateExecution(cwd, fileA1);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(ownershipPushes).toHaveLength(1);
 
       // Idle transfer emits the new owner with a higher generation; the
       // renderer merge rejects anything older than what it stored.

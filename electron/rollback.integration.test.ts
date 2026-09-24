@@ -323,13 +323,13 @@ describe("PiHost rollback integration", () => {
     expect(await host.deactivateExecution(cwd, sessionFile)).toBe(true);
     const otherFile = (await import("@earendil-works/pi-coding-agent")).SessionManager.create(cwd, sessionDir).getSessionFile()!;
     await host.activateExecution(cwd, otherFile);
-    // The user re-VIEWS A (its runtime comes back through the view path,
-    // no ownership): the stale Confirm now has a retained runtime but no
-    // execution right — must fail before touching project files.
-    await host.open({ path: sessionFile, cwd });
+    // A is now DISK-ONLY (one runtime per project): the stale Confirm
+    // addresses a session with neither a runtime nor execution rights, and
+    // must fail before touching project files.
+    expect(host.testSessions().has(sessionFile)).toBe(false);
     await writeFile(join(cwd, "file.txt"), "manual-edit\n");
 
-    await expect(host.commitRollback(plan.planId)).rejects.toThrow(/execution session/);
+    await expect(host.commitRollback(plan.planId)).rejects.toThrow(/runtime is not available/);
     expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("manual-edit\n");
     await host.dispose();
   }, 30_000);

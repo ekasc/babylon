@@ -442,21 +442,25 @@ describe("PiHost independent session execution", () => {
       // Idle aborts resolve without affecting the other runtime.
       await host.abort(fileA);
       await host.abort(fileB);
-      // A same-project session that is NOT the owner is rejected outright
-      // (never "mutate foreground", never "mutate the other session").
+      // A new same-project conversation TAKES the slot: A is released
+      // (cold, disk-only) and A2 becomes project a's execution owner.
       const fileA2 = await makeSessionFile(a.cwd);
       await host.open({ path: fileA2, cwd: a.cwd });
-      await expect(host.compact(fileA2)).rejects.toThrow(/execution session/);
-      // A turn is a mutation too: a retained same-project non-owner can
-      // never start one, even when it happens to be the viewed session.
-      await expect(host.prompt("hi", undefined, undefined, fileA2)).rejects.toThrow(/execution session/);
-      // setModel has the same gate: a non-owner address is rejected, never
-      // redirected to whichever session happens to be foreground.
-      await expect(host.setModel(fileA2, "nope", "missing")).rejects.toThrow(/execution session/);
+      expect(host.testExecutionByCwd().get(a.cwd)).toBe(fileA2);
+      expect(host.testSessions().has(fileA)).toBe(false);
+      // Mutations never auto-open or fall back to "whatever is foreground":
+      // the retired address is rejected outright.
+      await expect(host.compact(fileA)).rejects.toThrow(/runtime is not available/);
+      // A turn is a mutation too: a cold historical path can never start one.
+      await expect(host.prompt("hi", undefined, undefined, fileA)).rejects.toThrow(/runtime is not available/);
+      // setModel has the same gate: a cold address is rejected, never
+      // redirected to whichever session happens to own the project.
+      await expect(host.setModel(fileA, "nope", "missing")).rejects.toThrow(/runtime is not available/);
       // Addressing the owner itself proceeds past the ownership gate.
-      await expect(host.compact(fileA)).rejects.toThrow(/Nothing to compact/);
-      const sessions = host.testSessions();
-      expect(sessions.size).toBe(3);
+      await expect(host.compact(fileA2)).rejects.toThrow(/Nothing to compact/);
+      // One installed runtime per project — never a retained non-owner.
+      expect(host.testSessions().size).toBe(2);
+      host.testAssertRetentionInvariant();
     } finally {
       await host.dispose();
     }
@@ -518,15 +522,30 @@ describe("PiHost independent session execution", () => {
     }
   }, 60_000);
 
-  it("releases idle runtimes and refuses live ones", async () => {
+  it("protects the owner from direct release; deactivation is the release path", async () => {
     const a = await makeProject("e");
     const { host } = makeHost(a.cwd, a.agentDir);
     await host.start();
     try {
       const fileA = await makeSessionFile(a.cwd);
       await host.open({ path: fileA, cwd: a.cwd });
-      expect(await host.releaseSession(fileA)).toBe(true);
+      // R3: releaseSession may never strip a project of its execution owner.
+      expect(await host.releaseSession(fileA)).toBe(false);
+      expect(host.testSessions().has(fileA)).toBe(true);
+      expect(host.testExecutionByCwd().get(a.cwd)).toBe(fileA);
+
+      // Deactivation cold-stores the project: the runtime goes, the disk
+      // transcript stays, and no replacement is built (R2/R4).
+      const before = host.testRuntimeCreationCount();
+      expect(await host.deactivateExecution(a.cwd, fileA)).toBe(true);
       expect(host.testSessions().size).toBe(0);
+      expect(host.testExecutionByCwd().has(a.cwd)).toBe(false);
+      expect(host.testRuntimeCreationCount()).toBe(before);
+      host.testAssertRetentionInvariant();
+
+      // With no owner left the same file is releasable/no-op, and unknown
+      // paths are harmless.
+      expect(await host.releaseSession(fileA)).toBe(true);
       expect(await host.releaseSession("/nonexistent.json")).toBe(true);
     } finally {
       await host.dispose();
@@ -545,32 +564,38 @@ describe("PiHost independent session execution", () => {
       await host.open({ path: fileB, cwd: b.cwd });
       expect(host.activeSessionFile).toBe(fileB);
 
-      // Gate the thread scan inside releaseSession(A) so reactivation lands
-      // mid-scan: without post-await revalidation the gated release would
-      // dispose A out from under the fresh foreground.
+      // Gate the thread scan inside deactivateExecution(A) so a concurrent
+      // addressed read lands mid-scan: without post-await lifecycle
+      // revalidation the gated release would dispose A out from under a
+      // caller that is actively reading it.
       let releaseGate!: () => void;
       const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
       let gated = false;
+      let scans = 0;
       const scan = vi
         .spyOn(host as unknown as { hasActiveThreadsForSession: (id: string) => Promise<boolean> }, "hasActiveThreadsForSession")
         .mockImplementation(async () => {
-          if (!gated) {
+          // The first scan is the busy pre-check; the SECOND is the
+          // await-crossing release scan whose post-await revalidation is
+          // under test here.
+          scans += 1;
+          if (scans === 2 && !gated) {
             gated = true;
             await gate;
           }
           return false;
         });
       try {
-        const releasing = host.releaseSession(fileA);
+        const releasing = host.deactivateExecution(a.cwd, fileA);
         await vi.waitFor(() => expect(gated).toBe(true));
-        await host.ensureForeground(fileA);
-        expect(host.activeSessionFile).toBe(fileA);
+        // The read touches A's lifecycle while deactivation is still scanning.
+        const stateA = await host.getState(fileA);
+        expect(stateA.sessionFile).toBe(fileA);
         releaseGate();
-        // Reactivation touched lastUsedAt and the foreground pointer during
-        // the scan: the release must refuse, never dispose a live session.
+        // The release must refuse, never dispose a live runtime.
         expect(await releasing).toBe(false);
         expect(host.testSessions().has(fileA)).toBe(true);
-        expect(host.activeSessionFile).toBe(fileA);
+        expect(host.testExecutionByCwd().get(a.cwd)).toBe(fileA);
       } finally {
         scan.mockRestore();
       }
@@ -594,10 +619,13 @@ describe("PiHost independent session execution", () => {
       let releaseGate!: () => void;
       const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
       let gated = false;
+      let scans = 0;
       const scan = vi
         .spyOn(host as unknown as { hasActiveThreadsForSession: (id: string) => Promise<boolean> }, "hasActiveThreadsForSession")
         .mockImplementation(async () => {
-          if (!gated) {
+          // Gate the release scan (the second one), not the busy pre-check.
+          scans += 1;
+          if (scans === 2 && !gated) {
             gated = true;
             await gate;
           }
@@ -609,15 +637,16 @@ describe("PiHost independent session execution", () => {
         delivered.push(`${entryB.sessionFile}:${message}`);
       });
       try {
-        const releasing = host.releaseSession(fileB);
+        const releasing = host.deactivateExecution(b.cwd, fileB);
         await vi.waitFor(() => expect(gated).toBe(true));
-        // resolveEntry touches lastUsedAt synchronously at prompt start —
+        // The addressed prompt touches B's lifecycle synchronously at start —
         // before isStreaming flips — so the gated release must still abort.
         await host.prompt("hello B", undefined, undefined, fileB);
         releaseGate();
         expect(await releasing).toBe(false);
         expect(delivered).toEqual([`${fileB}:hello B`]);
         expect(host.testSessions().has(fileB)).toBe(true);
+        expect(host.testExecutionByCwd().get(b.cwd)).toBe(fileB);
       } finally {
         scan.mockRestore();
         promptSpy.mockRestore();
@@ -677,24 +706,28 @@ describe("PiHost independent session execution", () => {
         timestamp: Date.now(),
       });
       (managerA as unknown as { _persist: (entry: unknown) => void })._persist(managerA.getEntry(seedAssistantId));
-      // First reactivation seeds the fingerprint from the existing file.
+      // Same-owner activation is a structural no-op: no rebuild, no reparse.
+      openSpy.mockClear();
       await host.open({ path: fileA, cwd: a.cwd });
       expect(host.activeSessionFile).toBe(fileA);
-      openSpy.mockClear();
-      // A → B → A with no disk change: the retained runtime is current, so
-      // activation must not reopen/reparse the transcript.
+      expect(openSpy).not.toHaveBeenCalled();
+      // A → B → A is no different: A never stopped being project a's owner,
+      // so it is never torn down and re-parsed.
       await host.open({ path: fileB, cwd: b.cwd });
       await host.open({ path: fileA, cwd: a.cwd });
       expect(host.activeSessionFile).toBe(fileA);
       expect(openSpy).not.toHaveBeenCalled();
-      // A real change (mtime bump) re-arms the sync on the next activation.
-      await host.open({ path: fileB, cwd: b.cwd });
-      openSpy.mockClear();
+      // An external append is pulled by the EXPLICIT disk sync, never as a
+      // side effect of activation.
       const future = new Date(Date.now() + 30_000);
       await utimes(fileA, future, future);
-      await host.open({ path: fileA, cwd: a.cwd });
-      expect(host.activeSessionFile).toBe(fileA);
+      openSpy.mockClear();
+      expect(await host.refreshFromDisk(fileA)).toBe(true);
       expect(openSpy).toHaveBeenCalled();
+      // An unchanged transcript skips the reparse entirely.
+      openSpy.mockClear();
+      expect(await host.refreshFromDisk(fileA)).toBe(true);
+      expect(openSpy).not.toHaveBeenCalled();
     } finally {
       openSpy.mockRestore();
       await host.dispose();
@@ -730,11 +763,11 @@ describe("PiHost independent session execution", () => {
         timestamp: Date.now(),
       });
       (managerA as unknown as { _persist: (entry: unknown) => void })._persist(managerA.getEntry(seedAssistantId));
-      // Evict so the next open takes the cold creation path, then land an
-      // append DURING the async build (after SessionManager.open read it).
-      // The seed must be the pre-read fingerprint: the raced append then
-      // mismatches on the following activation and re-syncs.
-      expect(await host.releaseSession(fileA)).toBe(true);
+      // Cold-store the project so the next claim takes the cold creation
+      // path, then land an append DURING the async build (after
+      // SessionManager.open read it). The seed must be the pre-read
+      // fingerprint: the raced append then mismatches on the next sync.
+      expect(await host.deactivateExecution(a.cwd, fileA)).toBe(true);
       const raced = new Date(Date.now() + 60_000);
       openSpy.mockImplementationOnce((...args: Parameters<typeof SessionManager.open>) => {
         const manager = origOpen(...args);
@@ -743,10 +776,11 @@ describe("PiHost independent session execution", () => {
       });
       await host.open({ path: fileA, cwd: a.cwd });
       expect(host.activeSessionFile).toBe(fileA);
+      expect(openSpy).toHaveBeenCalled();
+      // The raced append was NOT recorded as ingested: the next sync sees
+      // the mismatch and re-parses instead of going invisible.
       openSpy.mockClear();
-      await host.open({ path: fileB, cwd: b.cwd });
-      await host.open({ path: fileA, cwd: a.cwd });
-      expect(host.activeSessionFile).toBe(fileA);
+      expect(await host.refreshFromDisk(fileA)).toBe(true);
       expect(openSpy).toHaveBeenCalled();
     } finally {
       openSpy.mockRestore();
@@ -783,25 +817,24 @@ describe("PiHost independent session execution", () => {
         timestamp: Date.now(),
       });
       (managerA as unknown as { _persist: (entry: unknown) => void })._persist(managerA.getEntry(seedAssistantId));
-      // Seed the fingerprint, then force a sync during which a second
-      // append lands mid-read (mtime bump inside SessionManager.open).
-      // The stored fingerprint must be the pre-read one, so the raced
-      // append mismatches on the following activation and re-syncs —
-      // never goes invisible.
-      await host.open({ path: fileA, cwd: a.cwd });
+      // Force a sync during which a second append lands mid-read (mtime
+      // bump inside SessionManager.open). The stored fingerprint must be the
+      // pre-read one, so the raced append mismatches on the following sync
+      // and re-parses — never goes invisible.
       await utimes(fileA, new Date(Date.now() + 30_000), new Date(Date.now() + 30_000));
       const raced = new Date(Date.now() + 60_000);
       openSpy.mockImplementationOnce((...args: Parameters<typeof SessionManager.open>) => {
         utimesSync(fileA, raced, raced);
         return origOpen(...args);
       });
-      await host.open({ path: fileB, cwd: b.cwd });
-      await host.open({ path: fileA, cwd: a.cwd });
+      expect(await host.refreshFromDisk(fileA)).toBe(true);
       openSpy.mockClear();
-      await host.open({ path: fileB, cwd: b.cwd });
-      await host.open({ path: fileA, cwd: a.cwd });
-      expect(host.activeSessionFile).toBe(fileA);
+      expect(await host.refreshFromDisk(fileA)).toBe(true);
       expect(openSpy).toHaveBeenCalled();
+      // …and then converges: the following sync has nothing to do.
+      openSpy.mockClear();
+      expect(await host.refreshFromDisk(fileA)).toBe(true);
+      expect(openSpy).not.toHaveBeenCalled();
     } finally {
       openSpy.mockRestore();
       await host.dispose();
@@ -822,8 +855,9 @@ describe("PiHost independent session execution", () => {
 
       // Gate the FIRST rollback-leaf restore (A's activation prep) so B's
       // activation fully completes while A is still awaiting preparation.
-      // ensureForeground/newSession carry no requestId, so a stale ready
-      // from A would be accepted by the renderer — it must never be sent.
+      // A and B live in different projects (independent ownership), so both
+      // activations are in flight at once; a stale ready from A would be
+      // accepted by the renderer — it must never be sent.
       const origLoad = RollbackStore.prototype.load;
       let releaseGate!: () => void;
       const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
@@ -839,10 +873,10 @@ describe("PiHost independent session execution", () => {
         return origLoad.apply(this, args);
       });
       try {
-        const slowA = host.ensureForeground(fileA);
+        const slowA = host.open({ path: fileA, cwd: a.cwd });
         // Let A's activation reach the gated restore before B starts.
         await vi.waitFor(() => expect(gated).toBe(true));
-        await host.ensureForeground(fileB);
+        await host.open({ path: fileB, cwd: b.cwd });
         expect(host.activeSessionFile).toBe(fileB);
         releaseGate();
         await slowA;
@@ -858,8 +892,8 @@ describe("PiHost independent session execution", () => {
     }
   }, 60_000);
 
-  it("evicts oldest idle runtimes past the cap, never the foreground", async () => {
-    const { cwd, agentDir } = await makeProject("evict");
+  it("retains exactly one runtime per project: each activation transfers the slot", async () => {
+    const { cwd, agentDir } = await makeProject("retain");
     const { host } = makeHost(cwd, agentDir);
     await host.start();
     try {
@@ -868,64 +902,45 @@ describe("PiHost independent session execution", () => {
         const file = await makeSessionFile(cwd);
         files.push(file);
         await host.open({ path: file, cwd });
+        // Every open transfers the project's slot: one installed runtime,
+        // owned by the newest file, and every evicted-away file is cold
+        // (disk-only) with zero AgentSession memory (R1/R2/R6).
+        expect(host.testSessions().size).toBe(1);
+        expect(host.testExecutionByCwd().size).toBe(1);
+        expect(host.testExecutionByCwd().get(cwd)).toBe(file);
+        host.testAssertRetentionInvariant();
+        for (const gone of files.slice(0, -1)) {
+          expect(host.testSessions().has(gone)).toBe(false);
+          await expect(host.getState(gone)).rejects.toThrow(/runtime is not available/);
+        }
       }
-      // 11 opens, foreground is the last: 10 idle, cap is 8.
-      await host.evictIdleSessions();
-      const sessions = host.testSessions();
-      expect(sessions.size).toBe(9); // 8 idle + foreground
-      expect(sessions.has(files[files.length - 1]!)).toBe(true);
-      // Oldest idle runtimes evicted first.
-      expect(sessions.has(files[0]!)).toBe(false);
-      expect(sessions.has(files[1]!)).toBe(false);
+      // No LRU cap remains: retention is exactly the owner count.
+      expect(host.testSessions().size).toBe(1);
+      expect(host.testRuntimeCreationCount()).toBe(11);
     } finally {
       await host.dispose();
     }
   }, 120_000);
 
-  it("eviction walks past thread-live candidates to reach idle ones", async () => {
-    const { cwd, agentDir } = await makeProject("evict-threads");
-    const { host } = makeHost(cwd, agentDir);
+  it("retains one runtime per project across many projects", async () => {
+    const projects = [];
+    for (let i = 0; i < 9; i++) projects.push(await makeProject(`retain-many-${i}`));
+    const { host } = makeHost(projects[0]!.cwd, projects[0]!.agentDir);
     await host.start();
     try {
-      // Nine opens: 8 idle + foreground, no overflow, so nothing evicts yet.
-      const files: string[] = [];
-      for (let i = 0; i < 9; i++) {
-        const file = await makeSessionFile(cwd);
-        files.push(file);
-        await host.open({ path: file, cwd });
+      const owners: string[] = [];
+      for (const p of projects) {
+        const file = await makeSessionFile(p.cwd);
+        owners.push(file);
+        await host.open({ path: file, cwd: p.cwd });
+        host.testAssertRetentionInvariant();
       }
-      // Pin live threads onto the two OLDEST sessions: releaseSession must
-      // refuse them, and the sweep must skip over them to evict idle ones
-      // behind them instead of stopping. Directory names use the loop index:
-      // session ids share a time-based prefix, so an id-derived name would
-      // collide and the second pin would overwrite the first.
-      const toPin = files.slice(0, 2);
-      for (const [i, file] of toPin.entries()) {
-        const sessionId = host.testSessions().get(file!)!.sessionId;
-        const dir = join(cwd, ".pi", "state", "threads", `thread-pinned-${i}`);
-        await mkdir(dir, { recursive: true });
-        await writeFile(join(dir, "thread.json"), JSON.stringify({
-          threadId: `thread-pinned-${i}`, status: "running", parentSessionId: sessionId,
-        }));
+      // 9 projects → 9 installed owners, one each, no global cap.
+      expect(host.testSessions().size).toBe(9);
+      expect(host.testExecutionByCwd().size).toBe(9);
+      for (const [i, p] of projects.entries()) {
+        expect(host.testExecutionByCwd().get(p.cwd)).toBe(owners[i]);
       }
-      // Two more opens force overflow; the per-open sweeps and the explicit
-      // one below all see the blocked oldest pair.
-      for (let i = 0; i < 2; i++) {
-        const file = await makeSessionFile(cwd);
-        files.push(file);
-        await host.open({ path: file, cwd });
-      }
-      // Serializes behind any in-flight per-open sweep: deterministic.
-      await host.evictIdleSessions();
-      const after = host.testSessions();
-      expect(after.size).toBe(9); // 8 idle + foreground
-      expect(after.has(files[files.length - 1]!)).toBe(true);
-      // Thread-live oldest survive…
-      expect(after.has(files[0]!)).toBe(true);
-      expect(after.has(files[1]!)).toBe(true);
-      // …so the two next-oldest idle runtimes go instead.
-      expect(after.has(files[2]!)).toBe(false);
-      expect(after.has(files[3]!)).toBe(false);
     } finally {
       await host.dispose();
     }
@@ -1037,8 +1052,11 @@ describe("PiHost.renameSession", () => {
     await host.start();
     try {
       const file = await seedPersistedFile(host, a.cwd);
-      expect(await host.releaseSession(file)).toBe(true);
+      // The seeded file briefly owned the project; cold-storing it leaves
+      // the project with no runtime and no execution record.
+      expect(await host.deactivateExecution(a.cwd, file)).toBe(true);
       expect(host.testSessions().size).toBe(0);
+      expect(host.testExecutionByCwd().size).toBe(0);
       await host.renameSession(file, "Cold chat");
       expect(host.testSessions().size).toBe(0);
       expect(host.activeSessionFile).toBeNull();

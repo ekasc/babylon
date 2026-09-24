@@ -273,7 +273,7 @@ export interface SessionEntry {
   sessionId: string;
   sessionFile: string;
   unsubscribe: (() => void) | null;
-  lastUsedAt: number;
+  lifecycleVersion: number;
   /**
    * Last observed disk identity of the transcript (set on creation and
    * after every sync). Activation skips the full SessionManager.open +
@@ -282,6 +282,16 @@ export interface SessionEntry {
    * (unflushed new sessions have no file yet: always sync).
    */
   diskFingerprint?: DiskFingerprint | null;
+}
+
+/**
+ * The single normalized project key. Every execution-retention structure
+ * (executionByCwd, executionGenerationByCwd, installation checks, one-hot
+ * assertions) is keyed by this, so `/repo`, `/repo/.` and lexical variants
+ * can never create separate execution slots (R1/R7).
+ */
+export function projectKey(cwd: string): string {
+  return resolve(cwd);
 }
 
 /** Cheap disk identity for change detection (stat, not parse). */
@@ -312,9 +322,11 @@ export class PiHost implements LocalPiHost {
    *  registrations must never leak across projects). Created lazily,
    *  creation deduplicated so concurrent opens share one build. */
   private readonly projectRuntimes = new Map<string, Promise<ModelRuntime>>();
-  /** Retained session runtimes keyed by session FILE (stable identity).
-   *  Execution belongs to these entries; foreground selection never owns
-   *  their lifetime. Entries leave only via releaseSession/delete/quit. */
+  /** Installed top-level execution runtimes keyed by session FILE (stable
+   *  identity). NOT a session cache: every entry here is the execution owner
+   *  of its normalized project cwd (R1-R3), so `sessions.size` tracks
+   *  executing projects, not history, tabs or views (R9). Entries leave only
+   *  through an ownership transition, deactivation, or shutdown. */
   private readonly sessions = new Map<string, SessionEntry>();
   /** Set while the host is draining for restart: new turns fail fast. */
   private draining = false;
@@ -328,6 +340,16 @@ export class PiHost implements LocalPiHost {
    *  session exists (snapcompact getters run lazily per LLM call). */
   private readonly sessionForServices = new WeakMap<object, AgentSession>();
   private uiRequests = new Map<string, { resolve: (r: unknown) => void; reject: (e: Error) => void; sessionFile: string | null; sessionId: string | null }>();
+  /** Monotonic count of AgentSession constructions. Tests use it to prove a
+   *  historical view never even transiently built a runtime (R5/R9). */
+  private runtimeCreations = 0;
+  /** A Pi switch requested from inside a fork/switch that has not returned
+   *  yet. The source must survive until then (item 45), and the transient
+   *  target may not outlive it (R8). */
+  private pendingHandoff: { source: SessionEntry; candidate: SessionEntry; targetFile: string; targetCwd: string } | null = null;
+  /** Nesting depth of source operations (fork/clone) that can trigger a Pi
+   *  switch callback; a handoff staged inside one is finalized by them. */
+  private sourceOperationDepth = 0;
   private _cwd: string;
   private readonly snapshots: SnapshotStore;
   private readonly rollbacks: RollbackStore;
@@ -354,14 +376,13 @@ export class PiHost implements LocalPiHost {
 
 
   /**
-   * Mark an entry used. Strictly increasing (never wall-clock-equal): the
-   * eviction TOCTOU guard snapshots recency across an await, and two
-   * touches within the same millisecond must still be distinguishable —
-   * otherwise a prompt starting mid-scan would compare equal and the
-   * release would wrongly proceed.
+   * Bump an entry's lifecycle counter. Strictly increasing and NOT
+   * wall-clock: the release/dispose TOCTOU guard snapshots it across an
+   * await, so any concurrent use of the runtime (read, prompt, view) makes
+   * the release abort. Retention never orders by recency (R1/R9).
    */
   private touchEntry(entry: SessionEntry): void {
-    entry.lastUsedAt = Math.max(Date.now(), entry.lastUsedAt + 1);
+    entry.lifecycleVersion += 1;
   }
 
   /** Every project this host knows about — explicit, never foreground-derived
@@ -395,14 +416,25 @@ export class PiHost implements LocalPiHost {
   private readonly executionByCwd = new Map<string, string>();
   private readonly executionGenerationByCwd = new Map<string, number>();
 
-  /** Retained entry currently owning this project's execution. Clears stale
-   *  mappings (owner runtime gone) lazily and returns null. */
+  /** The installed entry owning this project's execution slot. Derived from
+   *  the slot itself (never a scan that picks an arbitrary session) and
+   *  keyed by the normalized project cwd (R1/R7). */
+  private entryForProject(cwd: string): SessionEntry | null {
+    const file = this.executionByCwd.get(projectKey(cwd));
+    return file ? this.sessions.get(file) ?? null : null;
+  }
+
+  /** Retained entry currently owning this project's execution. A mapping
+   *  whose runtime is gone is invariant corruption (R3): heal it, but say so
+   *  loudly so tests catch the bug instead of trusting lazy cleanup. */
   executionForCwd(cwd: string): SessionEntry | null {
-    const file = this.executionByCwd.get(cwd);
+    const key = projectKey(cwd);
+    const file = this.executionByCwd.get(key);
     if (!file) return null;
     const entry = this.sessions.get(file);
     if (!entry) {
-      this.executionByCwd.delete(cwd);
+      console.warn(`[pideck] execution owner ${file} has no installed runtime (project ${key})`);
+      this.executionByCwd.delete(key);
       return null;
     }
     return entry;
@@ -464,50 +496,81 @@ export class PiHost implements LocalPiHost {
    * click (navigation calls open(), not this), never infers from foreground.
    * Cross-project calls are independent: activating B while A1 runs is legal.
    */
-  async activateExecution(cwd: string, sessionFile?: string): Promise<SessionEntry> {
+  async activateExecution(
+    cwd: string,
+    sessionFile?: string,
+    opts?: { systemPrompt?: string | null },
+  ): Promise<SessionEntry> {
     if (!cwd) throw new Error("execution activation requires a project cwd");
-    const owner = this.executionForCwd(cwd);
-    if (owner && sessionFile && owner.sessionFile === sessionFile) {
-      this.touchEntry(owner);
-      return owner;
-    }
-    if (owner && (await this.isExecutionBusy(owner))) {
-      throw new ProjectExecutionBusyError(owner.sessionFile, owner.sessionId);
-    }
-    let targetFile = sessionFile;
-    let newEntry: SessionEntry | undefined;
-    if (owner) {
-      // Idle transfer: release first. releaseSession has its own TOCTOU
-      // revalidation and refuses if the owner went busy mid-check — report
-      // that as typed busy rather than proceeding (the owner is never
-      // aborted silently, and the mapping keeps pointing at it).
-      const released = await this.releaseSession(owner.sessionFile);
-      if (!released) throw new ProjectExecutionBusyError(owner.sessionFile, owner.sessionId);
-      this.executionByCwd.delete(cwd);
-    }
-    if (targetFile) {
-      await this.open({ path: targetFile, cwd });
-    } else {
-      // Mirror open()'s fresh branch so the created file is known
-      // deterministically: AgentState.sessionFile is undefined for
-      // unflushed sessions, and reading foregroundSessionFile back would be
-      // an ownership fallback (I8) and racy under concurrent opens.
-      const seq = this.claimActivation();
-      const sm = SessionManager.create(cwd, this.opts.sessionsRoot);
-      const file = sm.getSessionFile()!;
-      await this.createSessionRuntimeWithManager(file, cwd, sm);
-      targetFile = file;
-      newEntry = this.sessions.get(file);
-      if (!newEntry) throw new Error("activation failed to materialize the session runtime");
-      await this.activate(newEntry, { cwd, seq });
-    }
-    const entry = newEntry ?? this.sessions.get(targetFile);
-    if (!entry) throw new Error("activation failed to materialize the session runtime");
-    this.executionByCwd.set(cwd, entry.sessionFile);
-    this.executionGenerationByCwd.set(cwd, (this.executionGenerationByCwd.get(cwd) ?? 0) + 1);
-    this.touchEntry(entry);
-    this.emitExecutionChanged(cwd);
-    return entry;
+    return this.transferExecution(sessionFile ?? null, cwd, opts);
+  }
+
+  /**
+   * The ONLY path that installs a top-level runtime (R1-R3). Serialized by
+   * PROJECT (not by target session) so two same-project activations inspect
+   * the same state in invocation order and converge on one owner:
+   *
+   *   owner == target  -> same entry, no rebuild/dispose/generation bump
+   *   owner busy       -> typed rejection BEFORE anything is materialized
+   *   build fails      -> old owner still installed and usable
+   *   owner went busy  -> detached candidate disposed, owner preserved
+   *   idle transfer    -> build candidate -> release owner -> install
+   *
+   * The old owner is never aborted, killed, or silently dropped (I4): busy
+   * always surfaces as ProjectExecutionBusyError.
+   */
+  private transferExecution(
+    targetFile: string | null,
+    cwd: string,
+    opts?: { systemPrompt?: string | null; requestId?: number },
+  ): Promise<SessionEntry> {
+    // Claim the foregrounding sequence at invocation, BEFORE any await:
+    // invocation order is intent order, so a slow cross-project build may
+    // never foreground over a newer open that already committed.
+    const seq = this.claimActivation();
+    const key = projectKey(cwd);
+    return this.enqueueTransition(`project:${key}`, async () => {
+      const owner = this.entryForProject(key);
+      if (owner && targetFile && owner.sessionFile === targetFile) {
+        // Same-owner activation is the Send path: cheap, no rebuild, no
+        // dispose, no generation bump. Compatibility presentation still runs
+        // so the renderer's ready lifecycle is unchanged.
+        this.touchEntry(owner);
+        await this.activate(owner, { cwd: owner.cwd, seq, requestId: opts?.requestId });
+        // No ownership change → no execution_changed push: the registry is
+        // pushed only when a project's owner or generation actually moves.
+        return owner;
+      }
+      // Busy gate BEFORE materialization: building a runtime for a request
+      // that cannot own the project wastes memory and transiently breaks the
+      // one-hot invariant.
+      if (owner && (await this.isExecutionBusy(owner))) {
+        throw new ProjectExecutionBusyError(owner.sessionFile, owner.sessionId);
+      }
+      // Detached candidate: invisible to requireEntry/executionList/Agents
+      // until installExecutionEntry publishes it. A construction failure
+      // leaves the previous owner completely untouched.
+      const candidate = await this.materializeExecutionRuntime(targetFile, cwd, opts?.systemPrompt);
+      // Recheck immediately before replacement: building is async, and the
+      // old owner may have started a turn, gained an approval, or spawned a
+      // child in the meantime.
+      if (owner && (await this.isExecutionBusy(owner))) {
+        await this.disposeDetachedEntry(candidate);
+        throw new ProjectExecutionBusyError(owner.sessionFile, owner.sessionId);
+      }
+      if (owner && !(await this.releaseOwnerEntry(owner))) {
+        await this.disposeDetachedEntry(candidate);
+        throw new ProjectExecutionBusyError(owner.sessionFile, owner.sessionId);
+      }
+      if (owner && projectKey(owner.cwd) === key) this.executionByCwd.delete(key);
+      this.installExecutionEntry(candidate);
+      this.touchEntry(candidate);
+      // Compatibility presentation (foreground pointer + ready status); C11
+      // deletes it once the renderer stops depending on the legacy lifecycle.
+      await this.activate(candidate, { cwd: candidate.cwd, seq, requestId: opts?.requestId });
+      this.emitExecutionChanged(candidate.cwd);
+      return candidate;
+    });
   }
 
   /** Fire-and-forget ownership notification (activate path only): the
@@ -526,17 +589,20 @@ export class PiHost implements LocalPiHost {
    *  owner is gone, someone else owns it, or it went busy — never releases
    *  anything other than expectedSessionFile. */
   async deactivateExecution(cwd: string, expectedSessionFile: string): Promise<boolean> {
-    const ownerFile = this.executionByCwd.get(cwd);
-    if (!ownerFile || ownerFile !== expectedSessionFile) return false;
-    const entry = this.sessions.get(ownerFile);
-    if (!entry) {
-      this.executionByCwd.delete(cwd);
+    const key = projectKey(cwd);
+    return this.enqueueTransition(`project:${key}`, async () => {
+      const owner = this.entryForProject(key);
+      if (!owner || owner.sessionFile !== expectedSessionFile) {
+        if (this.executionByCwd.get(key) === expectedSessionFile) this.executionByCwd.delete(key);
+        return false;
+      }
+      if (await this.isExecutionBusy(owner)) return false;
+      if (!(await this.releaseOwnerEntry(owner))) return false;
+      // Cold-store the project: the transcript stays on disk, no replacement
+      // runtime is created, and the generation only ever increases.
+      this.executionByCwd.delete(key);
       return true;
-    }
-    if (await this.isExecutionBusy(entry)) return false;
-    const released = await this.releaseSession(ownerFile);
-    if (released) this.executionByCwd.delete(cwd);
-    return released;
+    });
   }
 
   /** Current execution record for one project (renderer rebuilds its
@@ -567,6 +633,49 @@ export class PiHost implements LocalPiHost {
     return out;
   }
 
+  /**
+   * Move this project's execution RUNTIME to a new project cwd while keeping
+   *  the same session file and history (worktrees). The runtime is rebuilt
+   *  under toCwd — services, resource loader, permission cwd, tool contexts
+   *  and model registrations are all cwd-bound and cannot be re-pointed in
+   *  place — and only then is the old one disposed. A failed rebuild leaves
+   *  the source project fully intact (transactional).
+   */
+  async relocateExecution(sessionFile: string, fromCwd: string, toCwd: string): Promise<SessionEntry> {
+    const fromKey = projectKey(fromCwd);
+    const toKey = projectKey(toCwd);
+    if (fromKey === toKey) {
+      const owner = this.entryForProject(fromKey);
+      if (!owner || owner.sessionFile !== sessionFile) throw new Error("only the project's execution session can relocate");
+      return owner;
+    }
+    return this.enqueueTransition(`project:${toKey}`, async () => {
+      const owner = this.entryForProject(fromKey);
+      if (!owner || owner.sessionFile !== sessionFile) {
+        throw new Error("only the project's execution session can relocate");
+      }
+      if (await this.isExecutionBusy(owner)) {
+        throw new ProjectExecutionBusyError(owner.sessionFile, owner.sessionId);
+      }
+      // Build the replacement FIRST: a failure must not strand the source
+      // project without a usable execution session.
+      let candidate: SessionEntry;
+      try {
+        candidate = await this.buildSessionForCwd(sessionFile, toCwd);
+      } catch (err) {
+        throw new Error(`execution relocation failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      this.disposeEntry(owner);
+      this.executionByCwd.delete(fromKey);
+      this.installExecutionEntry(candidate);
+      this.touchEntry(candidate);
+      const seq = this.claimActivation();
+      await this.activate(candidate, { cwd: toCwd, seq });
+      this.emitExecutionChanged(toCwd);
+      return candidate;
+    });
+  }
+
   /** Current record for one project's execution slot (post-activation
    *  snapshots over the transport), or null when nothing owns it. */
   async executionSnapshot(cwd: string): Promise<ProjectExecution | null> {
@@ -582,14 +691,6 @@ export class PiHost implements LocalPiHost {
    * holder of the latest number may mutate foreground state.
    */
   private activationSeq = 0;
-
-  /**
-   * Idle runtime retention: live runtimes (streaming, pending UI, active
-   * children) are unlimited, but idle ones past this cap are evicted
-   * oldest-first. Tabs already cap at 24 without releasing runtimes, so
-   * without this every history dive leaks a full runtime until restart.
-   */
-  private static readonly MAX_IDLE_SESSIONS = 8;
 
   /** Claim the activation slot for a foregrounding invocation. Call at
    *  method entry, before any await, so invocation order is intent order. */
@@ -628,54 +729,7 @@ export class PiHost implements LocalPiHost {
     if (!this.isLatestActivation(opts.seq)) return state;
     this.lastMessageAt.set(state.sessionFile ?? entry.sessionFile, Date.now());
     this.opts.onStatus({ status: "ready", cwd: opts.cwd, sessionPath: state.sessionFile ?? entry.sessionFile, requestId: opts.requestId, state });
-    // Never block activation on disposal.
-    void this.evictIdleSessions().catch(() => undefined);
     return state;
-  }
-
-  /** Sync liveness gate for eviction (streaming, pending UI, active
-   *  subagents). Thread liveness is async and rechecked inside
-   *  releaseSession, which refuses live runtimes. */
-  private isEvictable(entry: SessionEntry): boolean {
-    if (entry.sessionFile === this.foregroundSessionFile) return false;
-    if (entry.runtime.session.isStreaming) return false;
-    if ([...this.uiRequests.values()].some((p) => p.sessionFile === entry.sessionFile)) return false;
-    if (this.managedSubagents?.hasActiveForSession(entry.sessionId)) return false;
-    return true;
-  }
-
-  /**
-   * Evict oldest idle runtimes past the cap. Live runtimes are unlimited;
-   * only idle ones count. Serialized across overlapping sweeps (activations
-   * fire-and-forget this, so two sweeps can overlap and must not release
-   * the same entry twice). Public for tests.
-   */
-  async evictIdleSessions(): Promise<void> {
-    const run = this.evictChain.then(
-      () => this.evictIdleSessionsInner(),
-      () => this.evictIdleSessionsInner(),
-    );
-    this.evictChain = run.catch(() => undefined);
-    return run;
-  }
-
-  private evictChain: Promise<unknown> = Promise.resolve();
-
-  private async evictIdleSessionsInner(): Promise<void> {
-    const idle = [...this.sessions.values()]
-      .filter((entry) => this.isEvictable(entry))
-      .sort((a, b) => a.lastUsedAt - b.lastUsedAt);
-    const overflow = idle.length - PiHost.MAX_IDLE_SESSIONS;
-    if (overflow <= 0) return;
-    // Walk the whole candidate list until overflow releases succeed:
-    // releaseSession refuses thread-live runtimes, so stopping at the
-    // first refusal would strand genuinely idle sessions behind them.
-    // A refusal is a no-op, never a kill.
-    let released = 0;
-    for (const entry of idle) {
-      if (released >= overflow) break;
-      if (await this.releaseSession(entry.sessionFile)) released++;
-    }
   }
 
   /** Serialize transitions per session file so unrelated sessions never wait
@@ -796,6 +850,52 @@ export class PiHost implements LocalPiHost {
    */
   testSessions(): Map<string, SessionEntry> {
     return this.sessions;
+  }
+
+  /** Ownership index, normalized-keyed, for retention assertions. */
+  testExecutionByCwd(): Map<string, string> {
+    return this.executionByCwd;
+  }
+
+  /**
+   * Test-only steady-state assertion (R1-R3): at most one installed entry per
+   * normalized project cwd, every installed entry IS its project's owner,
+   * every owner resolves to exactly that entry, and no file is owned twice.
+   */
+  testAssertRetentionInvariant(): void {
+    const byCwd = new Map<string, SessionEntry[]>();
+    for (const entry of this.sessions.values()) {
+      const key = projectKey(entry.cwd);
+      byCwd.set(key, [...(byCwd.get(key) ?? []), entry]);
+    }
+    for (const [key, entries] of byCwd) {
+      if (entries.length > 1) {
+        throw new Error(`R1 violated: ${entries.length} installed runtimes for project ${key}`);
+      }
+    }
+    const ownedFiles = new Set<string>();
+    for (const entry of this.sessions.values()) {
+      const owner = this.executionByCwd.get(projectKey(entry.cwd));
+      if (owner !== entry.sessionFile) {
+        throw new Error(`R2 violated: ${entry.sessionFile} is installed but ${projectKey(entry.cwd)} owns ${String(owner)}`);
+      }
+      if (ownedFiles.has(entry.sessionFile)) {
+        throw new Error(`R2 violated: ${entry.sessionFile} is installed for two projects`);
+      }
+      ownedFiles.add(entry.sessionFile);
+    }
+    for (const [key, file] of this.executionByCwd) {
+      const entry = this.sessions.get(file);
+      if (!entry) throw new Error(`R3 violated: ${key} owns ${file} with no installed runtime`);
+      if (projectKey(entry.cwd) !== key) {
+        throw new Error(`R3 violated: ${key} owns a runtime built for ${projectKey(entry.cwd)}`);
+      }
+    }
+  }
+
+  /** AgentSession constructions so far (R5/R9: history must not build). */
+  testRuntimeCreationCount(): number {
+    return this.runtimeCreations;
   }
 
   testProjectRuntimes(): Map<string, Promise<ModelRuntime>> {
@@ -1024,40 +1124,71 @@ export class PiHost implements LocalPiHost {
   }
 
   /**
-   * Get the retained runtime for a session file, creating it (with its own
-   * services, bindings, and event subscription) on first sight. Concurrent
-   * creations for the same file share one build. Never touches any other
-   * session's runtime: opening B must not abort, invalidate, or rebuild A.
+   * Materialize a CANDIDATE execution runtime for sessionFile (or a fresh
+   * session when null). This is NOT a general session cache: the returned
+   * entry is construction state until installExecutionEntry() publishes it —
+   * requireEntry, executionList, and the Agents tree cannot see it before
+   * then. Concurrent builds for the same file share one construction.
    */
-  private readonly creatingSessions = new Map<string, Promise<SessionEntry>>();
-  private async ensureSessionRuntime(sessionFile: string, cwd: string, systemPrompt?: string | null): Promise<SessionEntry> {
-    const existing = this.sessions.get(sessionFile);
-    if (existing) {
-      this.touchEntry(existing);
-      return existing;
+  private readonly creatingCandidates = new Map<string, Promise<SessionEntry>>();
+  private async materializeExecutionRuntime(
+    sessionFile: string | null,
+    cwd: string,
+    systemPrompt?: string | null,
+  ): Promise<SessionEntry> {
+    if (!sessionFile) {
+      // Fresh session: the file path is known deterministically (reading the
+      // foreground pointer back would be an ownership fallback, I8).
+      const sm = SessionManager.create(cwd, this.opts.sessionsRoot);
+      const file = sm.getSessionFile()!;
+      if (systemPrompt) this.pendingSystemPrompts.set(file, systemPrompt);
+      return this.buildSessionEntry(file, cwd, sm);
     }
-    if (systemPrompt) this.pendingSystemPrompts.set(sessionFile, systemPrompt);
-    let pending = this.creatingSessions.get(sessionFile);
+    const existing = this.sessions.get(sessionFile);
+    if (existing) return existing;
+    let pending = this.creatingCandidates.get(sessionFile);
     if (!pending) {
-      pending = this.createSessionRuntime(sessionFile, cwd).finally(() => {
-        if (this.creatingSessions.get(sessionFile) === pending) this.creatingSessions.delete(sessionFile);
+      pending = this.buildSessionFromFile(sessionFile, cwd, systemPrompt).finally(() => {
+        if (this.creatingCandidates.get(sessionFile) === pending) this.creatingCandidates.delete(sessionFile);
       });
-      this.creatingSessions.set(sessionFile, pending);
+      this.creatingCandidates.set(sessionFile, pending);
     }
     return pending;
   }
 
-  private async createSessionRuntime(sessionFile: string, cwd: string): Promise<SessionEntry> {
+  private async buildSessionFromFile(
+    sessionFile: string,
+    cwd: string,
+    systemPrompt?: string | null,
+  ): Promise<SessionEntry> {
+    if (systemPrompt) this.pendingSystemPrompts.set(sessionFile, systemPrompt);
+    try {
+      return await this.buildSessionForCwd(sessionFile, cwd);
+    } catch (err) {
+      // The session's stored cwd doesn't exist (project moved/deleted).
+      // Ask for a new location and retry with the override, mirroring pi's
+      // interactive-mode prompt. The failed candidate never installed.
+      if (this.isMissingCwdError(err) && this.opts.onMissingCwd) {
+        const replacement = await this.opts.onMissingCwd(sessionFile, cwd);
+        if (replacement) return this.buildSessionForCwd(sessionFile, replacement);
+      }
+      throw err;
+    }
+  }
+
+  private async buildSessionForCwd(sessionFile: string, cwd: string): Promise<SessionEntry> {
     // Fingerprint BEFORE the read: an external append landing during the
     // async runtime build must not be recorded as ingested (same race as
     // the retained-sync path — fail toward a redundant reparse, never a
     // permanently skipped append).
     const preRead = await this.fingerprintSessionFile(sessionFile);
     const sessionManager = SessionManager.open(sessionFile, undefined, cwd);
-    return this.createSessionRuntimeWithManager(sessionFile, cwd, sessionManager, preRead);
+    return this.buildSessionEntry(sessionFile, cwd, sessionManager, preRead);
   }
 
-  private async createSessionRuntimeWithManager(sessionFile: string, cwd: string, sessionManager: SessionManager, preReadFingerprint?: DiskFingerprint | null): Promise<SessionEntry> {
+  /** Builds one DETACHED entry: runtime, services, bindings and subscription,
+   *  but no map entry. installExecutionEntry() publishes it as an owner. */
+  private async buildSessionEntry(sessionFile: string, cwd: string, sessionManager: SessionManager, preReadFingerprint?: DiskFingerprint | null): Promise<SessionEntry> {
     const factory = this.createRuntimeFactory;
     if (!factory) throw new Error("pi host not started");
     let runtime: Awaited<ReturnType<typeof createAgentSessionRuntime>>;
@@ -1083,10 +1214,10 @@ export class PiHost implements LocalPiHost {
       sessionId: runtime.session.sessionId,
       sessionFile,
       unsubscribe: null,
-      lastUsedAt: Date.now(),
+      lifecycleVersion: 0,
     };
     if (services && typeof services === "object") this.sessionForServices.set(services, runtime.session);
-    this.sessions.set(sessionFile, entry);
+    this.runtimeCreations += 1;
     runtime.setBeforeSessionInvalidate(() => {
       entry.unsubscribe?.();
       entry.unsubscribe = null;
@@ -1105,6 +1236,47 @@ export class PiHost implements LocalPiHost {
     // record an append that raced the build as ingested.
     entry.diskFingerprint = preReadFingerprint ?? null;
     return entry;
+  }
+
+  /** Publish a detached candidate as its project's execution owner (R1-R3).
+   *  One coherent commit: the runtime map and the ownership index move
+   *  together, and the per-project generation only ever increases. */
+  private installExecutionEntry(entry: SessionEntry): void {
+    const key = projectKey(entry.cwd);
+    this.sessions.set(entry.sessionFile, entry);
+    this.executionByCwd.set(key, entry.sessionFile);
+    this.executionGenerationByCwd.set(key, (this.executionGenerationByCwd.get(key) ?? 0) + 1);
+  }
+
+  /** Full disposal of an entry that is installed or detached: unsubscribe,
+   *  reject its pending UI, dispose the SDK session, drop permission rules
+   *  and the services mapping, and forget it. */
+  private disposeEntry(entry: SessionEntry): void {
+    entry.unsubscribe?.();
+    entry.unsubscribe = null;
+    this.rejectSessionUi(entry, new Error("session released"));
+    const live = entry.runtime.session;
+    try {
+      live.dispose();
+    } catch {
+      /* ignore */
+    }
+    try {
+      this.opts.permission?.clearSessionRules(live.sessionId);
+    } catch {
+      /* ignore */
+    }
+    // A disposed session's extension callbacks (goal/design/snapcompact) must
+    // not be able to reach the NEXT owner through a stale mapping.
+    if (entry.services && typeof entry.services === "object") this.sessionForServices.delete(entry.services);
+    this.sessions.delete(entry.sessionFile);
+    if (this.foregroundSessionFile === entry.sessionFile) this.foregroundSessionFile = null;
+  }
+
+  /** Dispose a candidate that never became an owner. No candidate survives a
+   *  failed, cancelled, or rejected activation. */
+  private async disposeDetachedEntry(entry: SessionEntry): Promise<void> {
+    this.disposeEntry(entry);
   }
 
   /** Fire-and-forget warm of a cwd's rollback shadow index. Failures are
@@ -1260,11 +1432,12 @@ export class PiHost implements LocalPiHost {
           }
           return { cancelled: r.cancelled };
         },
-        // Extension-requested "switch" is foregrounding, not teardown: ensure
-        // the target runtime exists and report it; the renderer decides what
-        // to display. Other sessions keep running untouched.
+        // Extension/Pi-requested "switch" is an EXECUTION HANDOFF, not
+        // foregrounding: the target becomes this project's owner and the
+        // source goes cold. Never dispose the source from inside this
+        // callback — it may be the very runtime performing the fork.
         switchSession: async (sessionPath: string, options?: SwitchSessionOptions) => {
-          await this.ensureForeground(sessionPath, options);
+          await this.stageHandoff(sessionPath, options);
           return { cancelled: false };
         },
         reload: async () => {
@@ -1668,25 +1841,18 @@ export class PiHost implements LocalPiHost {
     return { warmed: true };
   }
 
-  /** Open a session file (or create a new one in cwd). Foregrounds the
-   *  retained runtime for the file, creating it on first sight. Other
-   *  sessions keep running untouched: opening B never aborts, invalidates,
-   *  or rebuilds A. systemPrompt is an immutable creation argument for the
-   *  new runtime (bot persona overlay); existing runtimes keep theirs. */
+  /**
+   * Compatibility entry point (C11 deletes it). It is exactly "explicit
+   *  execution activation + legacy ready status" — NEVER "materialize an
+   *  arbitrary retained runtime" (R2/R5). Historical viewing is the
+   *  renderer's disk-only viewSession, not this.
+   *  systemPrompt is an immutable creation argument for a runtime this call
+   *  materializes; an already-installed owner keeps its own.
+   */
   async open(opts: { path?: string; cwd: string; requestId?: number; systemPrompt?: string | null }): Promise<AgentState> {
-    // Serialize per target file; unrelated sessions open concurrently.
-    // Claim the activation slot NOW: invocation order is user-intent order,
-    // so a slow open completing after a faster later one must warm its
-    // runtime without stealing the foreground (see activate()).
-    const seq = this.claimActivation();
-    const key = opts.path ?? `new:${opts.cwd}`;
-    return this.enqueueTransition(key, async () => {
     if (opts.path && this.opts.sessionsRoot) {
       // Sessions are forked per instance: refuse anything outside this
       // instance's root instead of interleaving turns into another owner's file.
-      // Existing files get the full symlink-safe check; not-yet-flushed new
-      // sessions fall back to containment, since the live session is the
-      // source of truth until its first flush.
       try {
         await validateSessionPath(this.opts.sessionsRoot, opts.path);
       } catch (error: unknown) {
@@ -1697,87 +1863,87 @@ export class PiHost implements LocalPiHost {
         } else throw error;
       }
     }
-    if (opts.path) {
-      const existing = this.sessions.get(opts.path);
-      if (existing) {
-        if (!existing.runtime.session.isStreaming) {
-          // Retained runtime: skip the full SessionManager.open + context
-          // rebuild when the transcript is byte-identical to the last sync
-          // (one stat vs parsing a large JSONL on every tab click). Stores
-          // the pre-read fingerprint (see refreshFromDisk): a racing append
-          // forces another sync rather than going invisible.
-          const fp = await this.fingerprintSessionFile(opts.path);
-          if (!this.sameFingerprint(fp, existing.diskFingerprint)) {
-            try {
-              this.syncSessionFromDisk(existing, opts.cwd);
-            } catch (err) {
-              // Unflushed new session (canonical future path, nothing on disk
-              // yet): the live session already is the source of truth.
-              if (!isMissingFileError(err)) throw err;
-            }
-            // Store the fingerprint observed BEFORE the read, not after: an
-            // append racing the read must NOT be recorded as ingested. The
-            // next comparison then mismatches and forces another sync. A
-            // stale-read corner (append landed before open() and was actually
-            // included) costs one redundant reparse — toward extra work,
-            // never silent stale state.
-            existing.diskFingerprint = fp;
-          }
-        }
-        return this.activate(existing, { cwd: opts.cwd, requestId: opts.requestId, seq });
-      }
-      try {
-        await this.ensureSessionRuntime(opts.path, opts.cwd, opts.systemPrompt);
-      } catch (err) {
-        // The session's stored cwd doesn't exist (project moved/deleted).
-        // Ask for a new location and retry with the override, mirroring pi's
-        // interactive-mode prompt.
-        if (this.isMissingCwdError(err) && this.opts.onMissingCwd) {
-          const storedCwd = opts.cwd;
-          const replacement = await this.opts.onMissingCwd(opts.path, storedCwd);
-          if (replacement) {
-            await this.ensureSessionRuntime(opts.path, replacement, opts.systemPrompt);
-            return this.activate(this.sessions.get(opts.path)!, { cwd: replacement, requestId: opts.requestId, seq });
-          }
-          throw err;
-        }
-        throw err;
-      }
-      return this.activate(this.sessions.get(opts.path)!, { cwd: opts.cwd, requestId: opts.requestId, seq });
-    }
-    // New session in `cwd`: a fresh runtime + file, never a reset of some
-    // other session's runtime. Foreground follows the user's new tab.
-    const sm = SessionManager.create(opts.cwd, this.opts.sessionsRoot);
-    const file = sm.getSessionFile()!;
-    if (opts.systemPrompt) this.pendingSystemPrompts.set(file, opts.systemPrompt);
-    await this.createSessionRuntimeWithManager(file, opts.cwd, sm);
-    return this.activate(this.sessions.get(file)!, { cwd: opts.cwd, requestId: opts.requestId, seq });
+    const entry = await this.transferExecution(opts.path ?? null, opts.cwd, {
+      systemPrompt: opts.systemPrompt,
+      requestId: opts.requestId,
     });
+    return this.getStateFor(entry);
   }
 
-  /** Foreground a session without disturbing anything else
-   *  (extension-requested "switch" and worktree flows). Creates the runtime
-   *  on demand like the old switch path did; other sessions keep running. */
-  async ensureForeground(
+  /** Pi's switch callback: an EXECUTION HANDOFF, not foregrounding. The
+   *  target becomes this project's owner and the source goes cold. Pi may
+   *  call this from INSIDE `runtime.fork()` while the source call is still
+   *  on the stack, so the source is never disposed from this callback (it
+   *  would destroy the runtime performing the fork) — the handoff is staged
+   *  and finalized by the operation that triggered it. */
+  private async stageHandoff(
     sessionPath: string,
-    options?: SwitchSessionOptions & { cwdOverride?: string }
+    options?: SwitchSessionOptions & { cwdOverride?: string },
   ): Promise<AgentState> {
     const seq = this.claimActivation();
-    let entry = this.sessions.get(sessionPath);
-    if (!entry) {
-      entry = await this.ensureSessionRuntime(sessionPath, options?.cwdOverride ?? this._cwd);
+    const targetCwd = options?.cwdOverride ?? this._cwd;
+    const source = this.entryForProject(targetCwd);
+    if (source && source.sessionFile === sessionPath) {
+      this.touchEntry(source);
+      return this.activate(source, { cwd: source.cwd, seq });
     }
-    return this.activate(entry, { cwd: entry.cwd, seq });
+    // Detached first: a busy or failing build never installs anything.
+    const candidate = await this.materializeExecutionRuntime(sessionPath, targetCwd);
+    if (source && (await this.isExecutionBusy(source))) {
+      await this.disposeDetachedEntry(candidate);
+      throw new ProjectExecutionBusyError(source.sessionFile, source.sessionId);
+    }
+    // Transient duplicate (R8): the source stays installed until the
+    // operation that requested the switch returns and finalizes. With no
+    // current owner there is nothing to hand off from — just install.
+    this.installExecutionEntry(candidate);
+    this.touchEntry(candidate);
+    if (source) this.pendingHandoff = { source, candidate, targetFile: sessionPath, targetCwd };
+    await this.activate(candidate, { cwd: candidate.cwd, seq });
+    if (this.sourceOperationDepth === 0) await this.finalizeHandoff();
+    return this.getStateFor(candidate);
   }
 
-  /** Create a fresh session runtime in cwd without foregrounding it (agent-
-   *  requested new sessions must not hijack the user's view). */
+  /** Converge a staged handoff once the source operation returned. Returns
+   *  the file owning the project afterwards, or null when the handoff was
+   *  abandoned because the source went busy (it keeps the project — its work
+   *  is never aborted). */
+  private async finalizeHandoff(): Promise<string | null> {
+    const staged = this.pendingHandoff;
+    if (!staged) return null;
+    this.pendingHandoff = null;
+    if (await this.isExecutionBusy(staged.source)) {
+      this.executionByCwd.set(projectKey(staged.source.cwd), staged.source.sessionFile);
+      await this.disposeDetachedEntry(staged.candidate);
+      return null;
+    }
+    await this.releaseOwnerEntry(staged.source);
+    this.installExecutionEntry(staged.candidate);
+    this.emitExecutionChanged(staged.candidate.cwd);
+    return staged.targetFile;
+  }
+
+  /** Drop a staged handoff without transferring ownership (cancel/failure):
+   *  the transient target is disposed and the source keeps the project. */
+  private async abandonHandoff(): Promise<void> {
+    const staged = this.pendingHandoff;
+    if (!staged) return;
+    this.pendingHandoff = null;
+    this.executionByCwd.set(projectKey(staged.source.cwd), staged.source.sessionFile);
+    await this.disposeDetachedEntry(staged.candidate);
+  }
+
+  /**
+   * Agent-requested new session: a COLD file, never an installed runtime.
+   *  Installing one would immediately violate one-hot retention when the
+   *  agent's own session is this project's owner. If Pi needs a live runtime
+   *  to mint the file, it is built transiently and disposed before we
+   *  return; only the transcript survives.
+   */
   private async createSessionIn(cwd: string, _options?: NewSessionOptions): Promise<AgentState> {
-    const sm = SessionManager.create(cwd, this.opts.sessionsRoot);
-    const file = sm.getSessionFile()!;
-    await this.createSessionRuntimeWithManager(file, cwd, sm);
-    const entry = this.sessions.get(file)!;
-    const state = await this.getStateFor(entry);
+    const candidate = await this.materializeExecutionRuntime(null, cwd);
+    const state = await this.getStateFor(candidate);
+    await this.disposeDetachedEntry(candidate);
     this.opts.onEvent({ type: "pideck_sessions_changed" });
     return state;
   }
@@ -1869,11 +2035,12 @@ export class PiHost implements LocalPiHost {
     }
   }
 
+  /** Compatibility switch API (C11 deletes it). Semantics match Pi's switch
+   *  callback: the target becomes the project owner, the source goes cold,
+   *  and no public call returns with two installed entries for one project. */
   async switchTo(sessionPath: string, options?: { cwdOverride?: string }): Promise<AgentState> {
-    return this.enqueueTransition(sessionPath, async () => {
-      const state = await this.ensureForeground(sessionPath, options);
-      return state;
-    });
+    const state = await this.stageHandoff(sessionPath, options);
+    return state;
   }
 
   // -------------------------------------------------------------------------
@@ -3025,24 +3192,49 @@ export class PiHost implements LocalPiHost {
     const entry = this.requireExecutionEntry(sessionFile);
     return this.enqueueTransition(entry.sessionFile, async () => {
       const sourceSessionId = entry.runtime.session.sessionId;
-      const r = await entry.runtime.fork(entryId);
+      // Branching inside the current session must not move ownership; only
+      // an actual Pi switch to another session path triggers a handoff.
+      this.sourceOperationDepth += 1;
+      let r: { selectedText?: string; cancelled?: boolean };
+      try {
+        r = await entry.runtime.fork(entryId);
+      } finally {
+        this.sourceOperationDepth -= 1;
+      }
+      if (r.cancelled) await this.abandonHandoff();
+      else await this.finalizeHandoff();
       if (!r.cancelled) await this.rollbacks.clearActive(sourceSessionId).catch(() => undefined);
       return { text: r.selectedText, cancelled: r.cancelled };
     });
   }
+  /**
+   * Clone (session-level fork). Pi's switch request is the handoff signal:
+   * on success the CLONE becomes this project's execution owner and the
+   * source goes cold; on cancel the transient clone is disposed and the
+   * source keeps the project. Source + clone are never both installed when
+   * this returns (R1/R8), and the target file is reported explicitly.
+   */
   async clone(sessionFile: string): Promise<{ cancelled?: boolean; sessionFile?: string }> {
     const entry = this.requireExecutionEntry(sessionFile);
     return this.enqueueTransition(entry.sessionFile, async () => {
       const sourceSessionId = entry.runtime.session.sessionId;
       const leafId = entry.runtime.session.sessionManager.getLeafId();
       if (!leafId) throw new Error("no current entry selected");
-      const knownBefore = new Set(this.sessions.keys());
-      const r = await entry.runtime.fork(leafId, { position: "at" });
-      if (!r.cancelled) await this.rollbacks.clearActive(sourceSessionId).catch(() => undefined);
-      // The fork's switchSession hook foregrounds the new runtime: report its
-      // file so callers never have to ask "which session is current".
-      const created = [...this.sessions.keys()].find((f) => !knownBefore.has(f));
-      return { cancelled: r.cancelled, sessionFile: created };
+      this.sourceOperationDepth += 1;
+      let r: { cancelled?: boolean };
+      try {
+        r = await entry.runtime.fork(leafId, { position: "at" });
+      } finally {
+        this.sourceOperationDepth -= 1;
+      }
+      if (r.cancelled) {
+        await this.abandonHandoff();
+        return { cancelled: true };
+      }
+      const ownerFile = await this.finalizeHandoff();
+      if (!ownerFile) return { cancelled: true };
+      await this.rollbacks.clearActive(sourceSessionId).catch(() => undefined);
+      return { cancelled: false, sessionFile: ownerFile };
     });
   }
 
@@ -3369,61 +3561,53 @@ export class PiHost implements LocalPiHost {
       }
     }
     this.sessions.clear();
-    this.creatingSessions.clear();
+    this.creatingCandidates.clear();
+    this.pendingHandoff = null;
     this.transitionQueues.clear();
     this.foregroundSessionFile = null;
   }
 
   /**
-   * Release one idle session runtime: unsubscribe its events, reject its
-   * pending dialogs, dispose the SDK session, drop its permission rules, and
-   * forget it. Refuses live runtimes (streaming sessions, sessions with
-   * pending UI, sessions with active children) — live work is never evicted.
-   * Returns true when the runtime was released.
+   * Release one idle runtime. Refuses live runtimes (streaming sessions,
+   * sessions with pending UI, sessions with active children) — live work is
+   * never evicted — and refuses to remove an EXECUTION OWNER: ownership only
+   * changes through activateExecution/deactivateExecution, so a random
+   * release can never strand the ownership index (R2/R3).
    */
   async releaseSession(sessionFile: string): Promise<boolean> {
     const entry = this.sessions.get(sessionFile);
     if (!entry) return true;
+    if (this.executionByCwd.get(projectKey(entry.cwd)) === sessionFile) return false;
+    return this.releaseInstalledEntry(entry);
+  }
+
+  /** Release the project's CURRENT owner from inside an ownership
+   *  transition (or the Pi handoff finalizer). Same liveness gate, but the
+   *  ownership check is bypassed because the caller owns the slot. */
+  private async releaseOwnerEntry(entry: SessionEntry): Promise<boolean> {
+    return this.releaseInstalledEntry(entry);
+  }
+
+  private async releaseInstalledEntry(entry: SessionEntry): Promise<boolean> {
+    const sessionFile = entry.sessionFile;
     const session = entry.runtime.session;
     if (session.isStreaming) return false;
     if ([...this.uiRequests.values()].some((p) => p.sessionFile === sessionFile)) return false;
     if (this.managedSubagents?.hasActiveForSession(session.sessionId)) return false;
     // TOCTOU guard: the thread scan awaits, and the session may be
-    // reactivated (open/activate touches lastUsedAt via resolveEntry) or
-    // start streaming while it runs. Snapshot recency now, revalidate after.
-    const observedLastUsedAt = entry.lastUsedAt;
+    // addressed (or start streaming) while it runs. Snapshot the lifecycle
+    // counter now, revalidate after — any concurrent use aborts the release
+    // rather than pulling a live runtime from under its user.
+    const observedVersion = entry.lifecycleVersion;
     if (await this.hasActiveThreadsForSession(session.sessionId).catch(() => false)) return false;
     // Final synchronous revalidation: no await may follow these checks
-    // before disposal begins. Anything that touched the session during the
-    // scan (foregrounding, prompt preparation, new UI/subagent activity)
-    // aborts the release instead of pulling a live runtime out from under
-    // its user. Every foreground assignment also touches lastUsedAt, so the
-    // recency check subsumes a foreground comparison — and releasing the
-    // foreground session itself stays legal (tab-close cleanup depends on
-    // it; the pointer is cleared below as before).
+    // before disposal begins.
     if (this.sessions.get(sessionFile) !== entry) return false;
-    if (entry.lastUsedAt !== observedLastUsedAt) return false;
+    if (entry.lifecycleVersion !== observedVersion) return false;
     if (entry.runtime.session.isStreaming) return false;
     if ([...this.uiRequests.values()].some((p) => p.sessionFile === sessionFile)) return false;
     if (this.managedSubagents?.hasActiveForSession(entry.sessionId)) return false;
-    entry.unsubscribe?.();
-    entry.unsubscribe = null;
-    this.rejectSessionUi(entry, new Error("session released"));
-    // Current session object (a rebind during the scan keeps the entry but
-    // swaps the SDK session; dispose exactly what is retained now).
-    const live = entry.runtime.session;
-    try {
-      live.dispose();
-    } catch {
-      /* ignore */
-    }
-    try {
-      this.opts.permission?.clearSessionRules(live.sessionId);
-    } catch {
-      /* ignore */
-    }
-    this.sessions.delete(sessionFile);
-    if (this.foregroundSessionFile === sessionFile) this.foregroundSessionFile = null;
+    this.disposeEntry(entry);
     return true;
   }
 }

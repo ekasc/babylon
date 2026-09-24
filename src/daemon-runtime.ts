@@ -295,9 +295,13 @@ export function createDaemonRuntime(client: DaemonClient): RuntimeFacade {
       const res = await client.request("pi.executionList", {});
       return unwrapExecutionListResult(res.payload, "pi.executionList");
     },
-    async executionActivate(cwd, sessionFile) {
-      const res = await client.request("pi.executionActivate", { cwd, sessionFile });
+    async executionActivate(cwd, sessionFile, opts) {
+      const res = await client.request("pi.executionActivate", { cwd, sessionFile, systemPrompt: opts?.systemPrompt ?? null });
       return unwrapExecutionActivateResult(res.payload, "pi.executionActivate");
+    },
+    async relocateExecution(sessionFile, fromCwd, toCwd) {
+      const res = await client.request("pi.relocateExecution", { sessionFile, fromCwd, toCwd });
+      return res.payload;
     },
     async executionDeactivate(cwd, expectedSessionFile) {
       const res = await client.request("pi.executionDeactivate", { cwd, expectedSessionFile });

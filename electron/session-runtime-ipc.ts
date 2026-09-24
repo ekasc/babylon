@@ -106,17 +106,37 @@ export function registerSessionRuntimeIpc(
     }
     return getRuntime().executionList();
   });
-  handle("pideck:execution-activate", async (_e, opts: { cwd: string; sessionFile?: string }) => {
+  handle("pideck:execution-activate", async (_e, opts: { cwd: string; sessionFile?: string; systemPrompt?: string | null }) => {
     if (!opts || typeof opts.cwd !== "string" || opts.cwd.length < 1 || opts.cwd.length > 4096) {
       throw new Error("invalid execution activation");
     }
     if (opts.sessionFile !== undefined && typeof opts.sessionFile !== "string") throw new Error("invalid session file");
+    // Creation overlay only: bounded, optional, and never a host-global.
+    if (opts.systemPrompt != null && (typeof opts.systemPrompt !== "string" || opts.systemPrompt.length > 20_000)) {
+      throw new Error("invalid system prompt");
+    }
+    const systemPrompt = opts.systemPrompt ?? null;
     if (isDaemonOwned()) {
       const client = requireDaemonClient();
-      const res = await client.request("pi.executionActivate", { cwd: opts.cwd, sessionFile: opts.sessionFile });
+      const res = await client.request("pi.executionActivate", { cwd: opts.cwd, sessionFile: opts.sessionFile, systemPrompt });
       return unwrapExecutionActivateResult(res.payload, "pi.executionActivate");
     }
-    return getRuntime().executionActivate(opts.cwd, opts.sessionFile);
+    return getRuntime().executionActivate(opts.cwd, opts.sessionFile, { systemPrompt });
+  });
+  handle("pideck:relocate-execution", async (_e, opts: { sessionFile: string; fromCwd: string; toCwd: string }) => {
+    if (
+      !opts ||
+      typeof opts.sessionFile !== "string" || opts.sessionFile.length < 1 || opts.sessionFile.length > 4096 ||
+      typeof opts.fromCwd !== "string" || opts.fromCwd.length < 1 || opts.fromCwd.length > 4096 ||
+      typeof opts.toCwd !== "string" || opts.toCwd.length < 1 || opts.toCwd.length > 4096
+    ) {
+      throw new Error("invalid execution relocation");
+    }
+    if (isDaemonOwned()) {
+      const client = requireDaemonClient();
+      return (await client.request("pi.relocateExecution", opts)).payload;
+    }
+    return getRuntime().relocateExecution(opts.sessionFile, opts.fromCwd, opts.toCwd);
   });
   handle("pideck:execution-deactivate", async (_e, opts: { cwd: string; expectedSessionFile: string }) => {
     if (

@@ -112,9 +112,9 @@ export function createLocalRuntime(opts: {
     async abort(sessionFile: string) { return piHost.abort(sessionFile); },
     async goalControl(f: string, a: string) { return piHost.execGoalCommand(f, a); },
     async executionList() { return piHost.listProjectExecutions(); },
-    async executionActivate(cwd, sessionFile) {
+    async executionActivate(cwd, sessionFile, opts) {
       try {
-        await piHost.activateExecution(cwd, sessionFile);
+        await piHost.activateExecution(cwd, sessionFile, opts);
         const execution = await piHost.executionSnapshot(cwd);
         if (!execution) throw new Error("activation produced no execution record");
         return { ok: true as const, execution };
@@ -125,6 +125,7 @@ export function createLocalRuntime(opts: {
       }
     },
     async executionDeactivate(cwd, expected) { return piHost.deactivateExecution(cwd, expected); },
+    async relocateExecution(sessionFile, fromCwd, toCwd) { return piHost.relocateExecution(sessionFile, fromCwd, toCwd); },
     async beginGoalPrompt(f: string, o: string, m: string, i?: unknown[], s?: string) {
       const behavior = s === "steer" || s === "followUp" ? s : undefined;
       // Same image sanitization as prompt(): malformed entries are dropped

@@ -90,7 +90,9 @@ export interface RuntimeFacade {
   executionList(): Promise<import("./execution").ProjectExecution[]>;
   /** Acquire/transfer a project's execution slot; busy owners come back as a
    *  structured envelope (errors do not survive message-only transports). */
-  executionActivate(cwd: string, sessionFile?: string): Promise<import("./execution").ExecutionActivateResult>;
+  executionActivate(cwd: string, sessionFile?: string, opts?: { systemPrompt?: string | null }): Promise<import("./execution").ExecutionActivateResult>;
+  /** Move a project's execution runtime (same session file) to another project cwd. */
+  relocateExecution(sessionFile: string, fromCwd: string, toCwd: string): Promise<unknown>;
   executionDeactivate(cwd: string, expectedSessionFile: string): Promise<boolean>;
   /** Silently persist a goal objective for an addressed session (no follow-up turn). */
   beginGoalPrompt(sessionFile: string, objective: string, message: string, images?: unknown[], streamingBehavior?: string): Promise<import("./lib/durable-goal").GoalBeginResult>;

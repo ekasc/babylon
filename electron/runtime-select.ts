@@ -56,6 +56,7 @@ function unstartedHost(): LocalPiHost {
     ...fallback,
     refreshFromDisk: notReady("refreshFromDisk"),
     switchTo: notReady("switchTo"),
+    relocateExecution: notReady("relocateExecution"),
     compact: notReady("compact"),
     getToolOutput: notReady("getToolOutput"),
     getStats: notReady("getStats"),

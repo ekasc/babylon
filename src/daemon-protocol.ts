@@ -90,6 +90,7 @@ export const KNOWN_MESSAGE_TYPES = [
   "pi.goalControl",
   "pi.executionList",
   "pi.executionActivate",
+  "pi.relocateExecution",
   "pi.executionDeactivate",
   "pi.executionChanged",
   "pi.goalBeginPrompt",

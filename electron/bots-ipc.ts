@@ -112,24 +112,20 @@ export function registerBotsIpc(
     const projectHash = projectHashForCwd(cwd);
     // Per-project chat first, legacy canonical second (owned-or-on-disk).
     const path = await resolveCanonicalSessionFile(botChatForProject(bot, projectHash));
-    const state = (await getRuntime().openSession({ path, cwd, systemPrompt: botPrompt, ...(requestId !== undefined ? { requestId } : {}) })) as {
-      sessionFile?: string;
-    } | null | undefined;
-    const sessionFile = state?.sessionFile ?? null;
+    // The claim IS the open: a busy owner rejects BEFORE a bot runtime is
+    // ever built, so a rejected bot can never leak a retained runtime. The
+    // persona overlay rides along as a creation-only argument. The claim is
+    // unconditional — a bot without a custom model still owns execution.
+    const claim = await getRuntime().executionActivate(cwd, path ?? undefined, { systemPrompt: botPrompt });
+    if (!claim.ok) throw new Error("this project is busy — wait for the current turn before opening the bot chat");
+    const sessionFile = claim.execution.sessionFile;
     if (sessionFile && sessionFile !== botChatForProject(bot, projectHash)) {
       botStore.setProjectSession(id, projectHash, sessionFile);
       broadcastBots();
     }
     if (bot.model) {
       try {
-        if (typeof path !== "string" || !path) throw new Error("bot chat path unavailable");
-        // The pin mutates the just-opened chat's model: claim it as this
-        // project's execution slot first (idle transfer is legal; a busy
-        // owner rejects and we skip the pin rather than mutating a
-        // non-owner — I4/I7).
-        const claim = await getRuntime().executionActivate(cwd, path);
-        if (!claim.ok) throw new Error("the bot chat is not this project's execution session");
-        await getHost().setModel(path, bot.model.provider, bot.model.modelId);
+        await getHost().setModel(sessionFile, bot.model.provider, bot.model.modelId);
       } catch (err) {
         console.warn(`[pideck] bot model pin unavailable (${bot.model.provider}/${bot.model.modelId}):`, err);
       }
@@ -196,10 +192,13 @@ export function registerBotsIpc(
     }
     const cwd = group.cwd && group.cwd.length > 0 ? group.cwd : members[0]?.cwd && members[0].cwd.length > 0 ? members[0].cwd! : getActiveCwd() || homedir();
     const path = await resolveCanonicalSessionFile(group.mainSessionFile);
-    const state = (await getRuntime().openSession({ path, cwd, systemPrompt: buildGroupSystemPrompt(group, members) })) as { sessionFile?: string } | null | undefined;
-    // Per-open creation argument above replaces the old host-global staging.
-    const sessionFile = state?.sessionFile ?? null;
-    if (!sessionFile) throw new Error("could not open group room");
+    // Same contract as bot open: claim execution (with the room overlay as a
+    // creation argument) so a busy owner rejects BEFORE a room runtime is
+    // installed. groups-open still claims for now (transitional until C11
+    // splits group viewing from group sending).
+    const claim = await getRuntime().executionActivate(cwd, path ?? undefined, { systemPrompt: buildGroupSystemPrompt(group, members) });
+    if (!claim.ok) throw new Error("this project is busy — wait for the current turn before opening the room");
+    const sessionFile = claim.execution.sessionFile;
     if (sessionFile !== group.mainSessionFile) {
       botStore.setGroupRoom(groupId, sessionFile);
       broadcastGroups();
@@ -376,34 +375,33 @@ export function registerBotsIpc(
     const targetCwd = target.cwd && target.cwd.length > 0 ? target.cwd : getActiveCwd() || homedir();
     const targetHash = projectHashForCwd(targetCwd);
     const targetPath = await resolveCanonicalSessionFile(botChatForProject(target, targetHash));
-    const targetState = (await getRuntime().openSession({ path: targetPath, cwd: targetCwd, systemPrompt: buildBotSystemPrompt(target, botStore.list()) })) as {
-      sessionFile?: string;
-    } | null | undefined;
-    const targetFile = targetState?.sessionFile ?? null;
+    const targetClaim = await getRuntime().executionActivate(targetCwd, targetPath ?? undefined, {
+      systemPrompt: buildBotSystemPrompt(target, botStore.list()),
+    });
+    if (!targetClaim.ok) throw new Error("that bot's project is busy — wait for the current turn");
+    const targetFile = targetClaim.execution.sessionFile;
     if (targetFile && targetFile !== botChatForProject(target, targetHash)) {
       botStore.setProjectSession(targetId, targetHash, targetFile);
       broadcastBots();
     }
     if (target.model) {
       try {
-        if (typeof targetPath !== "string" || !targetPath) throw new Error("bot chat path unavailable");
-        // Same ownership claim as the bot-open pin: configure only the
-        // session that owns execution (or skip when another session does).
-        const claim = await getRuntime().executionActivate(targetCwd, targetPath);
-        if (!claim.ok) throw new Error("the bot chat is not this project's execution session");
-        await getHost().setModel(targetPath, target.model.provider, target.model.modelId);
+        // Already the claimed owner (the activation above) — the pin may
+        // target the execution session only.
+        await getHost().setModel(targetFile, target.model.provider, target.model.modelId);
       } catch (err) {
         console.warn(`[pideck] bot model pin unavailable (${target.model.provider}/${target.model.modelId}):`, err);
       }
     }
-    if (!targetFile) throw new Error("bot chat has no runtime identity");
     if (getHost().isSessionStreaming(targetFile)) throw new Error("The agent is busy, wait for this turn to finish");
     const sender = from ? `@${botHandle(from)} (${from.name})` : "you (the human)";
     await getRuntime().prompt(`[DM from ${sender}, reply briefly in your voice, or PASS if nothing to add]\n\n${text}`, undefined, undefined, targetFile);
     const reply = lastAssistantText(await getRuntime().getMessages(targetFile));
     const pass = isPassReply(reply);
     // Switch home and relay the reply as an attributed activity line.
-    await getRuntime().openSession({ path: origin, cwd: originCwd, systemPrompt: overlayForSessionFile(origin, originCwd) });
+    // Switch home by claiming the origin back as this project's execution
+    // session (never by materializing a historical runtime).
+    await getRuntime().executionActivate(originCwd, origin, { systemPrompt: overlayForSessionFile(origin, originCwd) });
     if (!pass) {
       const clipped = reply.length > 6000 ? `${reply.slice(0, 6000)}\n… (truncated, full reply lives in @${botHandle(target)}'s chat)` : reply;
       await getHost().postBotMessage(

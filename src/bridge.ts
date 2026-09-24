@@ -616,7 +616,9 @@ export interface Bridge {
   executionList(): Promise<ProjectExecution[]>;
   /** Acquire/transfer a project's execution slot; busy owners come back as
    *  a structured envelope (I4). */
-  executionActivate(cwd: string, sessionFile?: string): Promise<ExecutionActivateResult>;
+  executionActivate(cwd: string, sessionFile?: string, systemPrompt?: string | null): Promise<ExecutionActivateResult>;
+  /** Move a project's execution runtime (same session file/history) to another project cwd. */
+  relocateExecution(sessionFile: string, fromCwd: string, toCwd: string): Promise<unknown>;
   executionDeactivate(cwd: string, expectedSessionFile: string): Promise<boolean>;
   /** Ownership changed for a project: merges into the execution registry
    *  only — never selects, opens, or navigates a transcript. */
@@ -896,6 +898,7 @@ export const bridge: Bridge = window.pideck ?? {
   beginGoalPrompt: () => Promise.resolve({ goal: null, started: true, error: null }),
   executionList: () => Promise.resolve([]),
   executionActivate: () => Promise.reject(new Error("bridge unavailable")),
+  relocateExecution: () => Promise.reject(new Error("bridge unavailable")),
   executionDeactivate: () => Promise.resolve(false),
   onExecutionChanged: () => () => {},
   designGet: () => Promise.resolve({ design: null, stage: "idle" as const }),

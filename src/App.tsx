@@ -1442,20 +1442,41 @@ export default function App() {
       return { cwd, name: cwd.split("/").filter(Boolean).pop() || cwd, lastUsed };
     });
   }, [spaces, groups]);
+  // "New Session" in the execution model means: make a new conversation this
+  // project's execution session. Claim FIRST, then view the concrete file it
+  // produced — never optimistically switch to an unnamed fresh session: a
+  // busy owner must leave the user exactly where they were (I4).
+  const claimNewSession = useCallback(
+    async (cwd: string): Promise<boolean> => {
+      try {
+        const result = await bridge.executionActivate(cwd);
+        if (!result.ok) {
+          toast("warning", "This project is busy — wait for the current turn before starting a new chat.");
+          return false;
+        }
+        await viewSession(result.execution.sessionFile, cwd);
+        return true;
+      } catch (e) {
+        toast("error", errorMessage(e, "failed to start a new session"));
+        return false;
+      }
+    },
+    [toast, viewSession]
+  );
   const newSession = useCallback(() => {
     const cwd = activeSpace ?? status.cwd;
     if (cwd) {
-      void openSession(undefined, cwd);
+      void claimNewSession(cwd);
       return;
     }
     setShowNewSession(true);
-  }, [activeSpace, status.cwd, openSession]);
+  }, [activeSpace, status.cwd, claimNewSession]);
   const chooseNewSessionProject = useCallback(
     async (cwd: string) => {
       setShowNewSession(false);
-      await openSession(undefined, cwd);
+      await claimNewSession(cwd);
     },
-    [openSession]
+    [claimNewSession]
   );
 
   // Project settings entry: resilient, the header button and the Bots shelf
@@ -1484,8 +1505,16 @@ export default function App() {
   // Switch to a different (or new) project folder.
   const openFolder = useCallback(async () => {
     const cwd = await bridge.pickFolder();
-    if (cwd) await openSession(undefined, cwd);
-  }, [openSession]);
+    if (!cwd) return;
+    // A folder with an existing conversation is selected, not duplicated:
+    // the claim only creates when the project has no execution session yet.
+    const latest = groups.find((g) => g.cwd === cwd)?.sessions[0];
+    if (latest) {
+      await viewSession(latest.path, cwd);
+      return;
+    }
+    await claimNewSession(cwd);
+  }, [claimNewSession, groups, viewSession]);
 
   // Bot Mode: open a bot's canonical forever-chat. The main process opens the
   // host session (installing the persona overlay + model pin and creating the
@@ -1505,14 +1534,16 @@ export default function App() {
         }
         cwd = picked;
       }
-      await openSession(result.sessionFile ?? undefined, cwd);
+      // botsOpen already claimed execution and returned the owner; viewing
+      // is all that is left (never a second openSession).
+      if (result.sessionFile) await viewSession(result.sessionFile, cwd);
     } catch (e) {
       // Drop the optimistic row/header so a failed open can't strand the UI
       // on a session that never displayed (header falls back to live status).
       setViewedSessionPath(null);
       toast("error", errorMessage(e, "could not open bot chat"));
     }
-  }, [openSession, projectFilter, status.cwd, toast]);
+  }, [viewSession, projectFilter, status.cwd, toast]);
 
   const createBot = useCallback(async (input: NewBotInput) => {
     const created = await bridge.botsCreate(input);

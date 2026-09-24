@@ -17,6 +17,38 @@
  * or whichever runtime happened to emit last.
  */
 
+/*
+ * Retention invariants (R1-R10) — the runtime-memory contract. They refine
+ * I1/I2/I9 for the PiHost side: view = disk, execute = runtime, and there is
+ * exactly ONE installed top-level AgentSession per normalized project cwd.
+ *
+ * R1. A normalized project cwd has at most one installed top-level SessionEntry.
+ * R2. Every installed SessionEntry is the execution owner of its project.
+ * R3. Every execution owner has exactly one installed SessionEntry.
+ * R4. Historical/viewed/open-tab sessions do not require a SessionEntry.
+ * R5. Creating or viewing a historical session cannot materialize a runtime.
+ * R6. A busy execution owner is never released to make room for another session.
+ * R7. Cross-project execution remains independent.
+ * R8. Temporary Pi fork/switch construction may create a transient runtime,
+ *     but no public operation may return while two installed entries remain
+ *     for the same project.
+ * R9. Runtime count scales with executing projects, not session count or tab count.
+ * R10. ModelRuntime/project services are project resources and are not governed
+ *      by the one-SessionEntry rule.
+ */
+export const RETENTION_INVARIANTS: readonly string[] = [
+  "R1. A normalized project cwd has at most one installed top-level SessionEntry.",
+  "R2. Every installed SessionEntry is the execution owner of its project.",
+  "R3. Every execution owner has exactly one installed SessionEntry.",
+  "R4. Historical/viewed/open-tab sessions do not require a SessionEntry.",
+  "R5. Creating or viewing a historical session cannot materialize a runtime.",
+  "R6. A busy execution owner is never released to make room for another session.",
+  "R7. Cross-project execution remains independent.",
+  "R8. Temporary Pi fork/switch construction may create a transient runtime, but no public operation may return while two installed entries remain for the same project.",
+  "R9. Runtime count scales with executing projects, not session count or tab count.",
+  "R10. ModelRuntime/project services are project resources and are not governed by the one-SessionEntry rule.",
+];
+
 /** Lifecycle of a project's execution session. */
 export type ExecutionState =
   | "idle"

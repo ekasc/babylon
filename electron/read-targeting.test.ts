@@ -98,12 +98,16 @@ describe("addressed reads require explicit identity", () => {
   });
 
   it("reads never move the foreground and never leak the foreground's content", async () => {
-    const { cwd, agentDir } = await makeProject("fg");
+    const a = await makeProject("fg-a");
+    const b = await makeProject("fg-b");
+    const { cwd, agentDir } = a;
     const host = makeHost(cwd, agentDir);
     await host.start();
     try {
-      const seedTurn = (marker: string) => {
-        const sm = SessionManager.create(cwd);
+      // One runtime per project (R1): two live sessions means two projects,
+      // so the addressed-vs-foreground distinction is not a retention quirk.
+      const seedTurn = (marker: string, project: string) => {
+        const sm = SessionManager.create(project);
         const file = sm.getSessionFile();
         if (!file) throw new Error("no canonical session file");
         const when = Date.now();
@@ -120,10 +124,10 @@ describe("addressed reads require explicit identity", () => {
         });
         return file;
       };
-      const fileA = seedTurn("alpha-session-marker");
-      const fileB = seedTurn("beta-session-marker");
-      await host.open({ path: fileA, cwd });
-      await host.open({ path: fileB, cwd });
+      const fileA = seedTurn("alpha-session-marker", a.cwd);
+      const fileB = seedTurn("beta-session-marker", b.cwd);
+      await host.open({ path: fileA, cwd: a.cwd });
+      await host.open({ path: fileB, cwd: b.cwd });
       expect(host.activeSessionFile).toBe(fileB);
 
       await host.getState(fileA);

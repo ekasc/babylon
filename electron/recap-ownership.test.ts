@@ -65,15 +65,18 @@ describe("recap sweep targets execution owners only", () => {
     try {
       const fileA = seed(a.cwd);
       const fileB = seed(b.cwd);
-      const fileC = seed(a.cwd); // retained non-owner in project A
+      const fileC = seed(a.cwd); // supersedes fileA: one runtime per project
 
       await host.open({ path: fileA, cwd: a.cwd });
       await host.activateExecution(a.cwd, fileA);
       await host.open({ path: fileB, cwd: b.cwd });
       await host.activateExecution(b.cwd, fileB);
-      // Foreground ends on the retained non-owner: viewed ≠ recapped.
+      // Project A's owner moves to C: A is released, so only the CURRENT
+      // owners are sweep targets (never a released runtime).
       await host.open({ path: fileC, cwd: a.cwd });
       expect(host.activeSessionFile).toBe(fileC);
+      expect(host.testSessions().has(fileA)).toBe(false);
+      host.testAssertRetentionInvariant();
 
       // Both owners were just opened: clear the in-memory quiet clock and
       // fast-forward the interval so the sweep treats them as due.
@@ -81,13 +84,13 @@ describe("recap sweep targets execution owners only", () => {
       process.env.PIDECK_RECAP_MS = "1";
       tailCalls.length = 0;
       await host.testSweepRecap();
-      expect(new Set(tailCalls)).toEqual(new Set([fileA, fileB]));
+      expect(new Set(tailCalls)).toEqual(new Set([fileB, fileC]));
 
       // A busy owner is skipped; the other project's owner still recaps.
-      Object.defineProperty(host.testSessions().get(fileA)!.runtime.session, "isStreaming", { value: true, configurable: true });
+      Object.defineProperty(host.testSessions().get(fileB)!.runtime.session, "isStreaming", { value: true, configurable: true });
       tailCalls.length = 0;
       await host.testSweepRecap();
-      expect(tailCalls).toEqual([fileB]);
+      expect(tailCalls).toEqual([fileC]);
       expect(host.activeSessionFile).toBe(fileC);
     } finally {
       if (originalRecapMs === undefined) delete process.env.PIDECK_RECAP_MS;

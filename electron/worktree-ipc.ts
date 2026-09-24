@@ -118,7 +118,11 @@ export function registerWorktreeIpc(
           gitWorktree = { path: wtPath, branch, baseBranch: info.branch };
           await rewriteSessionHeader(worktreePath, { cwd: wtPath });
           if (!worktreePath) throw new Error("clone did not produce a session file");
-          await getRuntime().switchTo(worktreePath);
+          // The clone already owns this project; moving it into a git
+          // worktree RELOCATES that ownership: the runtime is rebuilt under
+          // the worktree cwd (services, permissions, tool contexts are
+          // cwd-bound) instead of being re-pointed in place.
+          await getRuntime().relocateExecution(worktreePath, getActiveCwd(), wtPath);
           workCwd = wtPath;
           applyCwd(wtPath);
         }
@@ -176,7 +180,9 @@ export function registerWorktreeIpc(
         // runtime first, then remove only artifacts this attempt created.
         let restored = false;
         try {
-          await getRuntime().switchTo(originalPath);
+          // Restore ownership of the ORIGINAL session (the inverse move),
+          // never via a hidden runtime-creating switch.
+          await getRuntime().executionActivate(originalCwd, originalPath);
           restored = true;
           applyCwd(originalCwd);
         } catch {
@@ -216,7 +222,10 @@ export function registerWorktreeIpc(
       : false;
 
     const cleanup = async () => {
-      await getRuntime().switchTo(originalPath);
+      // Leaving the worktree is an execution hand-back: the original session
+      // becomes the project's owner again (its runtime is rebuilt under the
+      // original cwd, never merely foregrounded).
+      await getRuntime().executionActivate(wireStr(header ?? undefined, "cwd") ?? getActiveCwd(), originalPath);
 
       let gitRemoved = false;
       if (!opts.keep) {

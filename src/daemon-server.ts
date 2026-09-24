@@ -108,7 +108,8 @@ export interface DaemonPiHost {
   listProjectExecutions(): Promise<ProjectExecution[]>;
   executionSnapshot(cwd: string): Promise<ProjectExecution | null>;
   /** Narrow structural view of SessionEntry: the server only needs identity. */
-  activateExecution(cwd: string, sessionFile?: string): Promise<{ sessionFile: string; sessionId: string }>;
+  activateExecution(cwd: string, sessionFile?: string, opts?: { systemPrompt?: string | null }): Promise<{ sessionFile: string; sessionId: string }>;
+  relocateExecution(sessionFile: string, fromCwd: string, toCwd: string): Promise<{ sessionFile: string; sessionId: string }>;
   deactivateExecution(cwd: string, expectedSessionFile: string): Promise<boolean>;
   /** Silently persist a goal objective for an addressed session (no follow-up turn). */
   beginGoalPrompt(sessionFile: string, objective: string, message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp"): Promise<import("../src/lib/durable-goal").GoalBeginResult>;
@@ -812,14 +813,33 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
             case "pi.executionList":
               payload = { executions: await piHost.listProjectExecutions() };
               break;
+            case "pi.relocateExecution": {
+              const { sessionFile, fromCwd, toCwd } = request.payload as { sessionFile?: unknown; fromCwd?: unknown; toCwd?: unknown };
+              if (
+                typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096 ||
+                typeof fromCwd !== "string" || fromCwd.length < 1 || fromCwd.length > 4096 ||
+                typeof toCwd !== "string" || toCwd.length < 1 || toCwd.length > 4096
+              ) {
+                send(socket, createEnvelope("response", "error", { error: "pi.relocateExecution requires { sessionFile, fromCwd, toCwd }" }, request.id));
+                return;
+              }
+              const relocated = await piHost.relocateExecution(sessionFile, fromCwd, toCwd);
+              payload = { sessionFile: relocated.sessionFile, cwd: toCwd };
+              break;
+            }
             case "pi.executionActivate": {
-              const { cwd, sessionFile } = request.payload as { cwd?: unknown; sessionFile?: unknown };
-              if (typeof cwd !== "string" || cwd.length < 1 || (sessionFile != null && typeof sessionFile !== "string")) {
+              const { cwd, sessionFile, systemPrompt } = request.payload as { cwd?: unknown; sessionFile?: unknown; systemPrompt?: unknown };
+              const overlay = systemPrompt == null ? null : systemPrompt;
+              if (
+                typeof cwd !== "string" || cwd.length < 1 ||
+                (sessionFile != null && typeof sessionFile !== "string") ||
+                (overlay !== null && (typeof overlay !== "string" || overlay.length > 20_000))
+              ) {
                 send(socket, createEnvelope("response", "error", { error: "pi.executionActivate requires { cwd }" }, request.id));
                 return;
               }
               try {
-                await piHost.activateExecution(cwd, typeof sessionFile === "string" ? sessionFile : undefined);
+                await piHost.activateExecution(cwd, typeof sessionFile === "string" ? sessionFile : undefined, { systemPrompt: overlay });
                 const execution = await piHost.executionSnapshot(cwd);
                 if (!execution) throw new Error("activation produced no execution record");
                 payload = { ok: true, execution };
