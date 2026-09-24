@@ -28,10 +28,11 @@ export interface DesignState {
   target: DesignTarget;
   /** Paths relative to the project cwd (survive thread disposal). */
   briefPath: string;
-  brandPath: string;
+  /** The design direction artifact. */
+  directionPath: string;
   logPath: string;
   briefApproved: boolean;
-  brandApproved: boolean;
+  directionApproved: boolean;
   done: boolean;
   /** What the build loop is doing right now. Deliberately NOT a round
    *  counter: the rounds live in the review records, so this can only ever be
@@ -49,20 +50,27 @@ export type DesignStage =
   | "idle"
   | "elicit"
   | "brief-confirm"
-  | "brand"
+  | "direction"
   | "build"
   | "done";
+
+/** Normalize a stage that crossed a read boundary. State written before the
+ *  rename carries "brand"; the new spelling wins, and the legacy one cannot
+ *  come back after a save. */
+export function normalizeDesignStage(value: unknown): DesignStage {
+  return value === "brand" ? "direction" : (value as DesignStage);
+}
 
 /** Pure stage derivation: what exists decides what happens next, so
  *  re-running /design always continues from the current artifacts. */
 export function stageFor(
   state: DesignState | null,
   briefExists: boolean,
-  brandExists: boolean
+  directionExists: boolean
 ): DesignStage {
   if (!state || state.done) return state?.done ? "done" : "idle";
   if (!state.briefApproved || !briefExists) return briefExists ? "brief-confirm" : "elicit";
-  if (!state.brandApproved || !brandExists) return "brand";
+  if (!state.directionApproved || !directionExists) return "direction";
   return "build";
 }
 
@@ -76,7 +84,13 @@ export function briefPathFor(slug: string): string {
   return join(".babylon", "design", `${slug}-brief.md`);
 }
 
-export function brandPathFor(slug: string): string {
+export function directionPathFor(slug: string): string {
+  return join(".babylon", "design", `${slug}-direction.md`);
+}
+
+/** Pre-rename artifact name. Read-only: it exists so an in-flight session still
+ *  finds the direction it already wrote, and nothing writes here again. */
+function legacyBrandPathFor(slug: string): string {
   return join(".babylon", "design", `${slug}-brand.md`);
 }
 
@@ -90,10 +104,10 @@ export function createDesignState(subject: string, slug: string): DesignState {
     subject,
     target: "web",
     briefPath: briefPathFor(slug),
-    brandPath: brandPathFor(slug),
+    directionPath: directionPathFor(slug),
     logPath: logPathFor(slug),
     briefApproved: false,
-    brandApproved: false,
+    directionApproved: false,
     done: false,
     updatedAt: new Date().toISOString(),
   };
@@ -107,14 +121,14 @@ export function slugFor(subject: string): string {
 
 /** Clear approvals whose artifact is gone. A rewritten brief always needs
  *  fresh confirmation — it must never inherit a stale approval, and a new
- *  brief invalidates the old brand with it. */
+ *  brief invalidates the old direction with it. */
 export function sanitizedStateFor(
   state: DesignState,
   briefExists: boolean,
-  brandExists: boolean
+  directionExists: boolean
 ): DesignState {
-  if (!briefExists) return { ...state, briefApproved: false, brandApproved: false };
-  if (!brandExists) return { ...state, brandApproved: false };
+  if (!briefExists) return { ...state, briefApproved: false, directionApproved: false };
+  if (!directionExists) return { ...state, directionApproved: false };
   return state;
 }
 
@@ -133,6 +147,9 @@ async function readJson<T>(path: string, fallback: T): Promise<T> {
   }
 }
 
+/** Accepts the current shape and the pre-rename one. The legacy spelling is
+ *  tolerated HERE and nowhere else: it is normalised immediately, and the next
+ *  save writes only the new vocabulary. */
 export function isDesignState(value: unknown): value is DesignState {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const v = value as Record<string, unknown>;
@@ -140,8 +157,8 @@ export function isDesignState(value: unknown): value is DesignState {
     typeof v.slug === "string" &&
     typeof v.subject === "string" &&
     typeof v.briefPath === "string" &&
-    typeof v.brandPath === "string" &&
-    typeof v.logPath === "string"
+    typeof v.logPath === "string" &&
+    (typeof v.directionPath === "string" || typeof v.brandPath === "string")
   );
 }
 
@@ -154,18 +171,48 @@ export async function loadDesignState(cwd: string, sessionId: string): Promise<D
   }
   const raw = await readJson<unknown>(path, null);
   if (!isDesignState(raw)) return null;
+  const record = raw as unknown as Record<string, unknown>;
+  // One-way migration of persisted workflow state. When both spellings are
+  // present the NEW one wins, so a stale legacy value can never override it.
+  const directionPath = (record.directionPath ?? record.brandPath) as string;
+  const directionApproved = (record.directionApproved ?? record.brandApproved ?? false) === true;
   // Stored paths are trusted by the log writer and the approve guards: they
-  // must be exactly the slug-derived paths, never a hand-edited escape.
+  // must be exactly a slug-derived path (current or legacy), never a
+  // hand-edited escape.
+  const directionIsKnown =
+    directionPath === directionPathFor(record.slug as string) ||
+    directionPath === legacyBrandPathFor(record.slug as string);
   if (
     raw.briefPath !== briefPathFor(raw.slug) ||
-    raw.brandPath !== brandPathFor(raw.slug) ||
+    !directionIsKnown ||
     raw.logPath !== logPathFor(raw.slug)
   ) {
     return null;
   }
   // Target arrived later than the state file: old sessions without it (or
   // with a hand-edited bogus value) read as "web", never as missing.
-  return { ...raw, target: parseDesignTarget(raw.target) ?? "web" };
+  // The returned object is built field by field: spreading the raw record
+  // would carry the legacy keys forward, and everything downstream would keep
+  // writing the old vocabulary.
+  return {
+    slug: raw.slug,
+    subject: raw.subject,
+    target: parseDesignTarget(raw.target) ?? "web",
+    briefPath: raw.briefPath,
+    directionPath,
+    logPath: raw.logPath,
+    briefApproved: raw.briefApproved === true,
+    directionApproved,
+    done: raw.done === true,
+    ...(isDesignPhase(record.phase) ? { phase: record.phase } : {}),
+    updatedAt: typeof record.updatedAt === "string" ? record.updatedAt : "",
+  };
+}
+
+/** A phase that crossed the wire must be a known value; an unknown one is
+ *  dropped rather than displayed as a guess. */
+function isDesignPhase(value: unknown): value is DesignPhase {
+  return value === "implementing" || value === "revising" || value === "needs-user";
 }
 
 export async function saveDesignState(
@@ -175,7 +222,22 @@ export async function saveDesignState(
 ): Promise<void> {
   const path = designFileForSession(cwd, sessionId);
   await mkdir(join(designDir(cwd), "sessions"), { recursive: true });
-  await writeFile(path, JSON.stringify({ ...state, updatedAt: new Date().toISOString() }, null, 2) + "\n", "utf-8");
+  // Written field by field: after this save the file contains no legacy key,
+  // even when the state that came in was migrated from one.
+  const record = {
+    slug: state.slug,
+    subject: state.subject,
+    target: state.target,
+    briefPath: state.briefPath,
+    directionPath: state.directionPath,
+    logPath: state.logPath,
+    briefApproved: state.briefApproved,
+    directionApproved: state.directionApproved,
+    done: state.done,
+    ...(state.phase ? { phase: state.phase } : {}),
+    updatedAt: new Date().toISOString(),
+  };
+  await writeFile(path, JSON.stringify(record, null, 2) + "\n", "utf-8");
 }
 
 export async function clearDesignState(cwd: string, sessionId: string): Promise<void> {
@@ -192,9 +254,9 @@ export async function clearDesignState(cwd: string, sessionId: string): Promise<
 export function stageOfState(cwd: string, state: DesignState | null): DesignStage {
   if (!state) return "idle";
   const briefExists = existsSync(join(cwd, state.briefPath));
-  const brandExists = existsSync(join(cwd, state.brandPath));
-  const clean = sanitizedStateFor(state, briefExists, brandExists);
-  return stageFor(clean, existsSync(join(cwd, clean.briefPath)), existsSync(join(cwd, clean.brandPath)));
+  const directionExists = existsSync(join(cwd, state.directionPath));
+  const clean = sanitizedStateFor(state, briefExists, directionExists);
+  return stageFor(clean, existsSync(join(cwd, clean.briefPath)), existsSync(join(cwd, clean.directionPath)));
 }
 /** Design state plus its live stage: what `designGet` / `designControl`
  *  return. The renderer cannot stat files, so the stage travels with the state. */
@@ -213,9 +275,13 @@ export function unwrapDesignResult(payload: unknown, type: string): DesignStatus
   }
   const design = (payload as { design?: unknown }).design ?? null;
   if (design !== null && !isDesignState(design)) throw new Error(`${type} returned a malformed payload`);
-  const rawStage = (payload as { stage?: unknown }).stage;
+  // A peer that still answers with the pre-rename stage is normalized here,
+  // not rejected: the vocabulary changed, the stage did not.
+  const rawStage = normalizeDesignStage((payload as { stage?: unknown }).stage);
+  // A peer that still answers with the pre-rename stage is normalized here,
+  // not rejected: the vocabulary changed, the stage did not.
   const stage: DesignStage =
-    rawStage === "idle" || rawStage === "elicit" || rawStage === "brief-confirm" || rawStage === "brand" || rawStage === "build" || rawStage === "done"
+    rawStage === "idle" || rawStage === "elicit" || rawStage === "brief-confirm" || rawStage === "direction" || rawStage === "build" || rawStage === "done"
       ? rawStage
       : design
         ? "elicit"
@@ -255,12 +321,12 @@ export function unwrapDesignBeginResult(payload: unknown, type: string): DesignB
   const rawDesign = record.design ?? null;
   const design = rawDesign === null ? null : isDesignState(rawDesign) ? rawDesign : null;
   if (rawDesign !== null && design === null) throw new Error(`${type} returned a malformed payload`);
-  const rawStage = record.stage;
+  const rawStage = normalizeDesignStage(record.stage);
   if (
     rawStage !== "idle" &&
     rawStage !== "elicit" &&
     rawStage !== "brief-confirm" &&
-    rawStage !== "brand" &&
+    rawStage !== "direction" &&
     rawStage !== "build" &&
     rawStage !== "done"
   ) {

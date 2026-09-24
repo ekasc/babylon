@@ -61,6 +61,8 @@ export interface LocalPiHost {
   controlSubagent(action: SubagentControlAction, runId: string, message?: string): Promise<unknown>;
   promoteSubagent(runId: string): Promise<{ sessionFile: string; cwd: string; parentSessionFile: string | null }>;
   warmProject(cwd: string): { warmed: boolean };
+  designGetArtifact(sessionFile: string, kind: "brief" | "direction"): Promise<unknown>;
+  designApproveArtifact(sessionFile: string, kind: "brief" | "direction", revision: string): Promise<import("../electron/design-mode/store").DesignStatus>;
   hasSessionRuntime(sessionFile: string): boolean;
   sessionCwdFor(sessionFile: string): string | null;
   listProjectExecutions(): Promise<import("./execution").ProjectExecution[]>;

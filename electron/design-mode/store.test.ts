@@ -28,9 +28,9 @@ describe("design stage derivation", () => {
     expect(stageFor(base, true, false)).toBe("brief-confirm");
   });
   it("gates build on both approvals", () => {
-    expect(stageFor({ ...base, briefApproved: true }, true, false)).toBe("brand");
-    expect(stageFor({ ...base, briefApproved: true }, true, true)).toBe("brand");
-    expect(stageFor({ ...base, briefApproved: true, brandApproved: true }, true, true)).toBe("build");
+    expect(stageFor({ ...base, briefApproved: true }, true, false)).toBe("direction");
+    expect(stageFor({ ...base, briefApproved: true }, true, true)).toBe("direction");
+    expect(stageFor({ ...base, briefApproved: true, directionApproved: true }, true, true)).toBe("build");
   });
   it("ends when done", () => {
     expect(stageFor({ ...base, done: true }, true, true)).toBe("done");
@@ -50,10 +50,10 @@ describe("design state round-trip", () => {
     expect(briefPathFor("us-screen")).toContain("us-screen-brief.md");
   });
   it("lapses approvals when artifacts go missing", () => {
-    const approved = { ...createDesignState("Us screen", "us-screen"), briefApproved: true, brandApproved: true };
+    const approved = { ...createDesignState("Us screen", "us-screen"), briefApproved: true, directionApproved: true };
     expect(sanitizedStateFor(approved, true, true)).toBe(approved);
-    expect(sanitizedStateFor(approved, true, false)).toMatchObject({ briefApproved: true, brandApproved: false });
-    expect(sanitizedStateFor(approved, false, true)).toMatchObject({ briefApproved: false, brandApproved: false });
+    expect(sanitizedStateFor(approved, true, false)).toMatchObject({ briefApproved: true, directionApproved: false });
+    expect(sanitizedStateFor(approved, false, true)).toMatchObject({ briefApproved: false, directionApproved: false });
   });
   it("never yields an empty slug", () => {
     expect(slugFor("Us screen")).toBe("us-screen");
@@ -86,8 +86,8 @@ describe("design stage against the worktree", () => {
     await mkdir(designDir(cwd), { recursive: true });
     await writeFile(join(cwd, state.briefPath), "# brief\n", "utf-8");
     expect(stageOfState(cwd, state)).toBe("brief-confirm");
-    const approved = { ...state, briefApproved: true, brandApproved: true };
-    await writeFile(join(cwd, state.brandPath), "# brand\n", "utf-8");
+    const approved = { ...state, briefApproved: true, directionApproved: true };
+    await writeFile(join(cwd, state.directionPath), "# brand\n", "utf-8");
     expect(stageOfState(cwd, approved)).toBe("build");
   });
 });
@@ -95,7 +95,7 @@ describe("design stage against the worktree", () => {
 describe("unwrapDesignResult", () => {
   it("passes state plus stage through, null when no session", () => {
     const state = createDesignState("Us screen", "us-screen");
-    expect(unwrapDesignResult({ design: state, stage: "brand" }, "t")).toEqual({ design: state, stage: "brand", maxRounds: 3 });
+    expect(unwrapDesignResult({ design: state, stage: "brand" }, "t")).toEqual({ design: state, stage: "direction", maxRounds: 3 });
     expect(unwrapDesignResult({ design: null, stage: "idle" }, "t")).toEqual({ design: null, stage: "idle", maxRounds: 3 });
   });
   it("fails closed on malformed payloads", () => {

@@ -114,6 +114,8 @@ export interface DaemonPiHost {
   beginGoalPrompt(sessionFile: string, objective: string, message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp"): Promise<import("../src/lib/durable-goal").GoalBeginResult>;
   /** Run a `/design …` control invocation; returns the fresh design state. */
   execDesignCommand(sessionFile: string, args: string): Promise<import("../electron/design-mode/store").DesignStatus>;
+  designGetArtifact(sessionFile: string, kind: "brief" | "direction"): Promise<unknown>;
+  designApproveArtifact(sessionFile: string, kind: "brief" | "direction", revision: string): Promise<import("../electron/design-mode/store").DesignStatus>;
   /** Transactional design start + first interview turn for an addressed session. */
   beginDesignPrompt(sessionFile: string, subject: string, message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp"): Promise<import("../electron/design-mode/store").DesignBeginResult>;
   abort(sessionFile: string): Promise<unknown>;
@@ -851,6 +853,36 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
                 return;
               }
               payload = { released: await piHost.deactivateExecution(cwd, expectedSessionFile) };
+              break;
+            }
+            case "pi.designGetArtifact": {
+              const { sessionFile, kind } = request.payload as { sessionFile?: unknown; kind?: unknown };
+              if (
+                typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096 ||
+                (kind !== "brief" && kind !== "direction")
+              ) {
+                send(socket, createEnvelope("response", "error", { error: "pi.designGetArtifact requires { sessionFile, kind }" }, request.id));
+                return;
+              }
+              payload = await piHost.designGetArtifact(sessionFile, kind);
+              break;
+            }
+            case "pi.designApproveArtifact": {
+              const { sessionFile, kind, revision } = request.payload as {
+                sessionFile?: unknown;
+                kind?: unknown;
+                revision?: unknown;
+              };
+              if (
+                typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096 ||
+                typeof revision !== "string" || revision.length < 1 || revision.length > 128 ||
+                (kind !== "brief" && kind !== "direction")
+              ) {
+                send(socket, createEnvelope("response", "error", { error: "pi.designApproveArtifact requires { sessionFile, kind, revision }" }, request.id));
+                return;
+              }
+              const approved = await piHost.designApproveArtifact(sessionFile, kind, revision);
+              payload = { design: approved.design, stage: approved.stage, maxRounds: approved.maxRounds };
               break;
             }
             case "pi.designControl": {

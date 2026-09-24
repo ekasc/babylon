@@ -30,14 +30,14 @@ describe("useDesignMode", () => {
 
   it("adopts the fresh status from control and toasts on failure", async () => {
     const design = { ...createDesignState("Us screen", "us-screen"), briefApproved: true };
-    const spy = vi.spyOn(bridge, "designControl").mockResolvedValue({ design, stage: "brand", maxRounds: 3 });
+    const spy = vi.spyOn(bridge, "designControl").mockResolvedValue({ design, stage: "direction", maxRounds: 3 });
     try {
       const { result } = renderHook(() => useDesignMode(toast));
       await act(async () => {
         await result.current.designControl("/s/session.jsonl", "approve-brief");
       });
       expect(spy).toHaveBeenCalledWith("/s/session.jsonl", "approve-brief");
-      expect(result.current.designStatus?.stage).toBe("brand");
+      expect(result.current.designStatus?.stage).toBe("direction");
       expect(toast).not.toHaveBeenCalled();
     } finally {
       spy.mockRestore();

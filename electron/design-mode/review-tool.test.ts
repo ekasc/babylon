@@ -75,11 +75,11 @@ async function approvedState(cwd: string, target: "web" | "mobile-web" | "native
   const state = createDesignState("Sessions UI", "sessions-ui");
   state.target = target;
   state.briefApproved = true;
-  state.brandApproved = true;
+  state.directionApproved = true;
   await saveDesignState(cwd, SESSION_ID, state);
   // Artifacts must exist for the approvals to survive sanitization.
   await writeFile(join(cwd, state.briefPath), "# brief", "utf-8");
-  await writeFile(join(cwd, state.brandPath), "# direction", "utf-8");
+  await writeFile(join(cwd, state.directionPath), "# direction", "utf-8");
   return state;
 }
 

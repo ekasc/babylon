@@ -46,7 +46,9 @@ interface Props {
   onEndDesign?: () => void;
   onRestartDesign?: () => void;
   onApproveDesignBrief?: () => void;
-  onApproveDesignBrand?: () => void;
+  onApproveDesignDirection?: () => void;
+  /** Revising an artifact is ordinary conversation: seed the composer. */
+  onReviseDesignArtifact?: (kind: "brief" | "direction") => void;
   /** Viewed-vs-execution gate (src/lib/composer-execution.ts); forwarded
       verbatim — the footer never inspects execution state itself. */
   executionAccess?: import("../lib/composer-execution").ComposerExecutionAccessUi;
@@ -83,7 +85,8 @@ export default function SessionFooter({
   onEndDesign = () => {},
   onRestartDesign = () => {},
   onApproveDesignBrief = () => {},
-  onApproveDesignBrand = () => {},
+  onApproveDesignDirection = () => {},
+  onReviseDesignArtifact,
   executionAccess,
 }: Props) {
 	// The session controls (permission, model, thinking, run state, usage)
@@ -133,9 +136,9 @@ export default function SessionFooter({
             executionAccess={executionAccess}
             designApproval={
               designMode === "active" && designStage === "brief-confirm"
-                ? { label: "Approve brief", onApprove: onApproveDesignBrief }
-                : designMode === "active" && designStage === "brand"
-                  ? { label: "Approve direction", onApprove: onApproveDesignBrand }
+                ? { label: "Review brief", onApprove: onApproveDesignBrief }
+                : designMode === "active" && designStage === "direction"
+                  ? { label: "Review direction", onApprove: onApproveDesignDirection }
                   : null
             }
           />

@@ -100,6 +100,10 @@ export interface RuntimeFacade {
   beginGoalPrompt(sessionFile: string, objective: string, message: string, images?: unknown[], streamingBehavior?: string): Promise<import("./lib/durable-goal").GoalBeginResult>;
   /** Run a `/design …` control invocation; returns the fresh design state. */
   designControl(sessionFile: string, args: string): Promise<import("../electron/design-mode/store").DesignStatus>;
+  /** Read one design artifact plus the revision the user would approve. */
+  designGetArtifact(sessionFile: string, kind: "brief" | "direction"): Promise<{ kind: string; content: string; revision: string }>;
+  /** Approve exactly the revision the user read; refuses a changed artifact. */
+  designApproveArtifact(sessionFile: string, kind: "brief" | "direction", revision: string): Promise<import("../electron/design-mode/store").DesignStatus>;
   /** Transactional design start + first interview turn for an addressed session. */
   beginDesignPrompt(sessionFile: string, subject: string, message: string, images?: unknown[], streamingBehavior?: string): Promise<import("../electron/design-mode/store").DesignBeginResult>;
   // Lifecycle

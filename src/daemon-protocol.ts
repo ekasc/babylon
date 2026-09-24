@@ -95,6 +95,8 @@ export const KNOWN_MESSAGE_TYPES = [
   "pi.executionChanged",
   "pi.goalBeginPrompt",
   "pi.designControl",
+  "pi.designGetArtifact",
+  "pi.designApproveArtifact",
   "pi.designBeginPrompt",
   "pi.notifyDiagnostics",
   "pi.event",

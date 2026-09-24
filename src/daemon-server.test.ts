@@ -75,6 +75,8 @@ function fakePiHost(overrides: Partial<DaemonPiHost>): DaemonPiHost {
     relocateExecution: fail("relocateExecution"),
     deactivateExecution: fail("deactivateExecution"),
     execDesignCommand: fail("execDesignCommand"),
+  designGetArtifact: fail("designGetArtifact"),
+  designApproveArtifact: fail("designApproveArtifact"),
     beginDesignPrompt: fail("beginDesignPrompt"),
     getState: fail("getState"),
     getMessages: fail("getMessages"),

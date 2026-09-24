@@ -35,7 +35,7 @@ export function reviewRoundDir(cwd: string, slug: string, round: number): string
   return join(reviewsDir(cwd, slug), `round-${round}`);
 }
 
-/** Repo-relative form, matching briefPathFor/brandPathFor. Recorded paths are
+/** Repo-relative form, matching briefPathFor/directionPathFor. Recorded paths are
  *  relative so they are portable and so a reader can re-validate containment
  *  against the project root instead of trusting an absolute path. */
 export function reviewRoundRelPath(slug: string, round: number): string {

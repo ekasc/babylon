@@ -32,61 +32,21 @@ async function seedDesign(cwd: string, subject = "Redesign settings") {
   return state;
 }
 
-describe("design approvals continue the workflow", () => {
-  it("approve-brief flips the flag and starts the brand stage", async () => {
-    const { cwd } = await makeProject("approve-brief");
-    const state = await seedDesign(cwd);
-    await mkdir(join(cwd, "design"), { recursive: true });
-    await writeFile(join(cwd, state.briefPath), "# Brief\n");
-    const followUps: string[] = [];
-    const ext = createDesignModeExtension({
-      getCwd: () => cwd,
-      getSessionId: () => SESSION_ID,
-      sendFollowUp: (text: string) => void followUps.push(text),
-    });
-    const handler = ext.commands?.get("design")?.handler;
-    expect(handler).toBeDefined();
-    await handler!("approve-brief", mockCtx());
-    expect((await loadDesignState(cwd, SESSION_ID))?.briefApproved).toBe(true);
-    expect(followUps).toHaveLength(1);
-    expect(followUps[0]).toMatch(/brand stage/i);
-  });
-
-  it("approve-brand flips the flag and starts the build stage", async () => {
-    const { cwd } = await makeProject("approve-brand");
-    const state = await seedDesign(cwd);
-    await mkdir(join(cwd, "design"), { recursive: true });
-    await writeFile(join(cwd, state.briefPath), "# Brief\n");
-    await saveDesignState(cwd, SESSION_ID, { ...state, briefApproved: true });
-    await writeFile(join(cwd, state.brandPath), "# Brand\n");
-    const followUps: string[] = [];
-    const ext = createDesignModeExtension({
-      getCwd: () => cwd,
-      getSessionId: () => SESSION_ID,
-      sendFollowUp: (text: string) => void followUps.push(text),
-    });
-    const handler = ext.commands?.get("design")?.handler;
-    await handler!("approve-brand", mockCtx());
-    expect((await loadDesignState(cwd, SESSION_ID))?.brandApproved).toBe(true);
-    expect(followUps).toHaveLength(1);
-    expect(followUps[0]).toMatch(/build stage/i);
-  });
-
-  it("approve-brief without a brief artifact warns and sends nothing", async () => {
-    const { cwd } = await makeProject("approve-empty");
+describe("approval moved to the review surface", () => {
+  it("no longer offers a CLI approve subcommand", async () => {
+    const { cwd } = await makeProject("no-cli-approve");
     await seedDesign(cwd);
-    const followUps: string[] = [];
     const ext = createDesignModeExtension({
       getCwd: () => cwd,
       getSessionId: () => SESSION_ID,
-      sendFollowUp: (text: string) => void followUps.push(text),
+      sendFollowUp: () => undefined,
     });
-    const ctx = mockCtx();
     const handler = ext.commands?.get("design")?.handler;
+    const ctx = mockCtx();
+    // A stale scripted invocation is inert, not a silent approval.
     await handler!("approve-brief", ctx);
-    expect(followUps).toHaveLength(0);
     expect((await loadDesignState(cwd, SESSION_ID))?.briefApproved).toBe(false);
-    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/interview/i), "warning");
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/Usage/), "warning");
   });
 });
 

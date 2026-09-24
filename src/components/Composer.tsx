@@ -2,6 +2,7 @@ import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { CommandInfo } from "../bridge";
 import type { AgentModel, AgentState, SessionStats } from "../bridge";
 import { type ComposerExecutionAccessUi } from "../lib/composer-execution";
+import DesignReviewSurface, { type DesignArtifactKind } from "./DesignReviewSurface";
 import type { DesignSubphase } from "../lib/design-phase";
 import type { Dialog } from "../store";
 import type { Bot } from "../bots";
@@ -79,7 +80,7 @@ interface Props {
 	onToggleGoal?: () => void;
 	/** Design composer mode: off | armed (next send starts it) | active. */
 	designMode?: "off" | "armed" | "active";
-	/** Active stage key for the indicator (elicit, brief-confirm, brand, build). */
+	/** Active stage key for the indicator (elicit, brief-confirm, direction, build). */
 	designStage?: string;
 	/** Derived build sub-phase: what the loop is doing inside `build`. */
 	designSubphase?: DesignSubphase;
@@ -93,7 +94,14 @@ interface Props {
 	/** Clear the design and arm the next send (fresh subject). From the menu. */
 	onRestartDesign?: () => void;
 	/** Pending design approval (brief/brand), if any: one button in the row, never a strip. */
+	/** Pending approval: a label plus what to do when the user asks to review.
+	    The surface itself is a backend-bound read, so it opens in place. */
 	designApproval?: { label: string; onApprove(): void } | null;
+	/** The artifact currently open in the review surface, if any. */
+	designReviewKind?: DesignArtifactKind | null;
+	designReviewSession?: string | null;
+	onDesignRevise?(kind: DesignArtifactKind): void;
+	onDesignReviewError?(message: string): void;
 	/** Viewed-vs-execution gate (src/lib/composer-execution.ts). Omitted =
 	    owner: legacy callers and existing tests keep full behavior. */
 	executionAccess?: ComposerExecutionAccessUi;
@@ -111,8 +119,7 @@ function designStageLabel(stage: string, subphase?: DesignSubphase): string {
 			return "Interview";
 		case "brief-confirm":
 			return "Brief";
-		case "brand":
-			// Internal stage stays "brand" (persisted contract); users see Direction.
+		case "direction":
 			return "Direction";
 		case "build":
 			// Inside the build stage the subphase is the useful fact: building,
@@ -224,10 +231,21 @@ const Composer = memo(function Composer({
 	onEndDesign,
 	onRestartDesign,
 	designApproval = null,
+	designReviewKind = null,
+	designReviewSession = null,
+	onDesignRevise,
+	onDesignReviewError,
 	executionAccess,
 }: Props) {
 	const [text, setText] = useState("");
 	const [designMenuOpen, setDesignMenuOpen] = useState(false);
+	// Which artifact is open in the review surface, if any. Approval therefore
+	// always happens against text the user actually read.
+	const [openReview, setOpenReview] = useState<DesignArtifactKind | null>(designReviewKind);
+	useEffect(() => setOpenReview(designReviewKind), [designReviewKind]);
+	// Which artifact the pending approval CTA stands for.
+	const pendingArtifactKind: DesignArtifactKind | null =
+		designStage === "brief-confirm" ? "brief" : designStage === "direction" ? "direction" : null;
 	// Viewed-vs-execution gate: owner = full composer (today); claimable =
 	// write (send acquires ownership) but no controls that mutate the OTHER
 	// runtime; blocked = history reading with Return to live only.
@@ -647,6 +665,24 @@ const Composer = memo(function Composer({
 						})}
 					</div>
 				)}
+				{openReview ? (
+					<DesignReviewSurface
+						kind={openReview}
+						sessionFile={designReviewSession ?? ""}
+						onClose={() => setOpenReview(null)}
+						onRevise={() => {
+							// Revising is ordinary conversation: hand the composer
+							// back to the user with the document named.
+							onDesignRevise?.(openReview);
+							setOpenReview(null);
+						}}
+						onApproved={() => {
+							setOpenReview(null);
+							designApproval?.onApprove();
+						}}
+						onError={(message) => onDesignReviewError?.(message)}
+					/>
+				) : null}
 				<div
 					className={`composer-surface group relative flex flex-col ${designMode === "active" ? "is-design-mode" : ""}`}
 				>
@@ -918,7 +954,14 @@ const Composer = memo(function Composer({
 						) : null}
 						{!execNonOwner && designApproval ? (
 							<span className="flex shrink-0 items-center">
-								<button type="button" onClick={designApproval.onApprove} title="Approve and continue the design flow" className="composer-pressable composer-approve-enter rounded-md bg-accent px-2.5 py-1 text-[12px] font-semibold text-bg hover:bg-accent/90">{designApproval.label}</button>
+								<button
+									type="button"
+									onClick={designApproval.onApprove}
+									title="Review this document, then approve it"
+									className="composer-pressable composer-approve-enter rounded-md bg-accent px-2.5 py-1 text-[12px] font-semibold text-bg hover:bg-accent/90"
+								>
+									{designApproval.label}
+								</button>
 							</span>
 						) : null}
 							{!execNonOwner && streaming && (

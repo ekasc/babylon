@@ -70,6 +70,10 @@ const api: Bridge = {
     ipcRenderer.invoke("pideck:goal-begin-prompt", { sessionFile, objective, message, images, streamingBehavior }),
   designGet: (sessionId: string, cwd: string) => ipcRenderer.invoke("pideck:design-get", sessionId, cwd),
   designControl: (sessionFile: string, args: string) => ipcRenderer.invoke("pideck:design-control", { sessionFile, args }),
+  designGetArtifact: (sessionFile: string, kind: "brief" | "direction") =>
+    ipcRenderer.invoke("pideck:design-get-artifact", { sessionFile, kind }),
+  designApproveArtifact: (sessionFile: string, kind: "brief" | "direction", revision: string) =>
+    ipcRenderer.invoke("pideck:design-approve-artifact", { sessionFile, kind, revision }),
   designReviewShot: (opts: { cwd: string; path: string }) => ipcRenderer.invoke("pideck:design-review-shot", opts),
   beginDesignPrompt: (sessionFile: string, subject: string, message: string, images?: unknown[], streamingBehavior?: string) =>
     ipcRenderer.invoke("pideck:design-begin-prompt", { sessionFile, subject, message, images, streamingBehavior }),

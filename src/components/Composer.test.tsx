@@ -199,7 +199,7 @@ describe("composer design toggle", () => {
   });
 
   it("shows the stage indicator while active", () => {
-    render(<Composer {...baseProps({ onToggleDesign: vi.fn(), designMode: "active", designStage: "brand" })} />);
+    render(<Composer {...baseProps({ onToggleDesign: vi.fn(), designMode: "active", designStage: "direction" })} />);
     expect(screen.getByRole("button", { name: /Design · Direction/ })).toBeTruthy();
     expect(document.querySelector(".composer-surface.is-design-mode")).toBeTruthy();
   });
@@ -249,7 +249,7 @@ describe("composer design toggle", () => {
         {...baseProps({
           onToggleDesign: vi.fn(),
           designMode: "active",
-          designStage: "brand",
+          designStage: "direction",
           onEndDesign,
           onRestartDesign,
         })}

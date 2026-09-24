@@ -75,7 +75,7 @@ export function renderDesignStatus(state: DesignState | null): string {
   const flags = [
     `target: ${state.target}`,
     `brief: ${state.briefApproved ? "approved" : "pending"} (${state.briefPath})`,
-    `brand: ${state.brandApproved ? "approved" : "pending"} (${state.brandPath})`,
+    `direction: ${state.directionApproved ? "approved" : "pending"} (${state.directionPath})`,
     state.done ? "done" : "active",
   ];
   return [`Design: ${state.subject} (${state.slug})`, ...flags].join("\n");
@@ -96,8 +96,8 @@ export const DESIGN_UNTITLED_SUBJECT = "Untitled design";
 export function renderDesignSystemPrompt(state: DesignState, stage: DesignStage): string {
   const named = state.subject !== DESIGN_UNTITLED_SUBJECT;
   const base = named
-    ? `[Design mode: ${state.subject}] Stage: ${stage}. Brief: ${state.briefPath}. Design direction: ${state.brandPath}. Log: ${state.logPath}.`
-    : `[Design mode] Stage: ${stage}. Brief: ${state.briefPath}. Design direction: ${state.brandPath}. Log: ${state.logPath}. The user has not named the subject yet — their first message defines it. Never say, write, or echo "untitled".`;
+    ? `[Design mode: ${state.subject}] Stage: ${stage}. Brief: ${state.briefPath}. Design direction: ${state.directionPath}. Log: ${state.logPath}.`
+    : `[Design mode] Stage: ${stage}. Brief: ${state.briefPath}. Design direction: ${state.directionPath}. Log: ${state.logPath}. The user has not named the subject yet — their first message defines it. Never say, write, or echo "untitled".`;
   switch (stage) {
     case "elicit":
       return `${base} Establish the brief by reading the repository first, then asking only what the code and the request cannot answer.
@@ -110,8 +110,8 @@ export function renderDesignSystemPrompt(state: DesignState, stage: DesignStage)
 - Record the target with the design_set_target tool call, then write the brief file and summarize it briefly in chat. Do not build anything yet.`;
     case "brief-confirm":
       return `${base} The brief exists and awaits the user's approval (composer Approve brief button). Summarize it briefly in plain chat, answer questions, revise the file on request. Do not build yet. Never ask the user to type /design commands.`;
-    case "brand":
-      return `${base} Propose the design direction in plain chat, write ${state.brandPath}, and summarize the proposal briefly. Read the repository first: when the design system already answers, derive the direction from it and say so instead of inventing a new palette. The user approves via the composer Approve direction button. Do not use ask_question dialogs. Do not implement anything until the direction is approved.`;
+    case "direction":
+      return `${base} Propose the design direction in plain chat, write ${state.directionPath}, and summarize the proposal briefly. Read the repository first: when the design system already answers, derive the direction from it and say so instead of inventing a new palette. The user approves via the composer Approve direction button. Do not use ask_question dialogs. Do not implement anything until the direction is approved.`;
     case "build":
       return `${base} Brief + direction are approved. Call design_set_phase with "implementing" when a build turn starts, and with "needs-user" if the work cannot continue without them (judge inconclusive, native screenshots missing). A design_review verdict sets the phase itself. Implement on a branch/worktree (file writes are permission-governed), then judge: ${state.target === "native" ? "attached simulator screenshots against brief + direction" : "browser_capture_review against brief + direction"}. Pass/fail with a punchlist in plain chat, at most ${JUDGE_MAX_ROUNDS} revise rounds, then escalate in plain chat with captures and punchlist attached. Log every round to ${state.logPath}. Never use ask_question dialogs or /design commands in chat.`;
     case "done":
@@ -153,7 +153,7 @@ function nativeBuildBody(state: DesignState): string {
 /** Deprecated: retained for compat/tests only. The GUI mode never injects
  *  this into chat — behavior arrives silently via renderDesignSystemPrompt. */
 export function renderStageFollowUp(state: DesignState, stage: DesignStage): string {
-  const head = `[Design Mode: ${stage}]\nSubject: ${state.subject}\nBrief: ${state.briefPath}\nDesign direction: ${state.brandPath}\nLog: ${state.logPath}\n`;
+  const head = `[Design Mode: ${stage}]\nSubject: ${state.subject}\nBrief: ${state.briefPath}\nDesign direction: ${state.directionPath}\nLog: ${state.logPath}\n`;
   switch (stage) {
     case "elicit":
       return (
@@ -174,11 +174,11 @@ export function renderStageFollowUp(state: DesignState, stage: DesignStage): str
         head +
         `The brief at ${state.briefPath} awaits GUI confirmation. Summarize it briefly, answer questions, revise on request. Advance only on GUI approval.`
       );
-    case "brand":
+    case "direction":
       return (
         head +
         [
-          `Propose the design direction and write it to ${state.brandPath} using this skeleton:`,
+          `Propose the design direction and write it to ${state.directionPath} using this skeleton:`,
           DIRECTION_TEMPLATE,
           "Derive what the repository already answers (existing tokens, components, patterns) before inventing anything new, and record the intent accordingly.",
           "Cover the brief's target: platform conventions, touch targets, and safe areas for mobile-web/native; viewport behavior for web.",

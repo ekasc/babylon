@@ -313,6 +313,14 @@ export function createDaemonRuntime(client: DaemonClient): RuntimeFacade {
       const res = await client.request("pi.goalBeginPrompt", { sessionFile: f, objective: o, message: m, images: i, streamingBehavior: s });
       return unwrapGoalBeginResult(res.payload, "pi.goalBeginPrompt");
     },
+    async designGetArtifact(f, kind) {
+      const res = await client.request("pi.designGetArtifact", { sessionFile: f, kind });
+      return res.payload as { kind: string; content: string; revision: string };
+    },
+    async designApproveArtifact(f, kind, revision) {
+      const res = await client.request("pi.designApproveArtifact", { sessionFile: f, kind, revision });
+      return unwrapDesignResult(res.payload, "pi.designApproveArtifact");
+    },
     async designControl(f, a) {
       const res = await client.request("pi.designControl", { sessionFile: f, args: a });
       return unwrapDesignResult(res.payload, "pi.designControl");

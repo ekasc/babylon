@@ -141,6 +141,10 @@ export function createLocalRuntime(opts: {
       return piHost.beginGoalPrompt(f, o, m, images, behavior);
     },
     async designControl(f: string, a: string) { return piHost.execDesignCommand(f, a); },
+    async designGetArtifact(f, kind) {
+      return piHost.designGetArtifact(f, kind) as Promise<{ kind: string; content: string; revision: string }>;
+    },
+    async designApproveArtifact(f, kind, revision) { return piHost.designApproveArtifact(f, kind, revision); },
     async beginDesignPrompt(f: string, s: string, m: string, i?: unknown[], b?: string) {
       const behavior = b === "steer" || b === "followUp" ? b : undefined;
       const images = Array.isArray(i)

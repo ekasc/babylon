@@ -2102,6 +2102,11 @@ export default function App() {
           : [],
     [activeGroup, bots, sharedSpeakers, sharedStaff]
   );
+  /** Seed the composer with a prompt the user has not typed yet. */
+  const seedComposer = useCallback((prompt: string) => {
+    setDraftRequest({ id: Date.now(), text: prompt });
+  }, []);
+
   const chatProjectName = useMemo(() => {
     const cwd = activeSpace;
     return cwd ? cwd.split("/").filter(Boolean).pop() || cwd : null;
@@ -2712,14 +2717,19 @@ export default function App() {
                 onEndDesign={() => void endDesign()}
                 onRestartDesign={() => void restartDesign()}
                 onApproveDesignBrief={() => {
-                  const target = viewedPathRef.current;
-                  if (!target) return;
-                  void designControl(target, "approve-brief");
+                  // The review surface already approved the revision it read;
+                  // this is only the post-approval state sync.
+                  const t = designTargetRef.current;
+                  if (t) void refreshDesign(t.sessionId, t.cwd);
                 }}
-                onApproveDesignBrand={() => {
-                  const target = viewedPathRef.current;
-                  if (!target) return;
-                  void designControl(target, "approve-brand");
+                onApproveDesignDirection={() => {
+                  const t = designTargetRef.current;
+                  if (t) void refreshDesign(t.sessionId, t.cwd);
+                }}
+                onReviseDesignArtifact={(kind) => {
+                  // Revision is ordinary conversation: seed the composer and
+                  // let the user talk. No backend operation, no state change.
+                  seedComposer(kind === "brief" ? "Revise the brief: " : "Revise the design direction: ");
                 }}
               />
               </ErrorBoundary>

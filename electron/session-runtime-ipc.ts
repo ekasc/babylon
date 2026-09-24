@@ -252,6 +252,48 @@ export function registerSessionRuntimeIpc(
     const bytes = await readFile(resolve(opts.cwd, opts.path));
     return { dataUrl: `data:image/png;base64,${bytes.toString("base64")}` };
   });
+  // Read the artifact under review. Semantic, not a file reader: the path comes
+  // from the trusted design state and is containment-checked in the backend.
+  handle("pideck:design-get-artifact", async (_e, opts: { sessionFile: string; kind: string }) => {
+    if (
+      !opts ||
+      typeof opts.sessionFile !== "string" || opts.sessionFile.length < 1 || opts.sessionFile.length > 4096 ||
+      (opts.kind !== "brief" && opts.kind !== "direction")
+    ) {
+      throw new Error("invalid design artifact request");
+    }
+    if (isDaemonOwned()) {
+      const client = requireDaemonClient();
+      const res = await client.request("pi.designGetArtifact", { sessionFile: opts.sessionFile, kind: opts.kind });
+      const payload = res.payload as { kind?: unknown; content?: unknown; revision?: unknown };
+      if (typeof payload.content !== "string" || typeof payload.revision !== "string") {
+        throw new Error("pi.designGetArtifact returned a malformed payload");
+      }
+      return { kind: opts.kind, content: payload.content, revision: payload.revision };
+    }
+    return getRuntime().designGetArtifact(opts.sessionFile, opts.kind);
+  });
+  // Approve the exact revision the user read.
+  handle("pideck:design-approve-artifact", async (_e, opts: { sessionFile: string; kind: string; revision: string }) => {
+    if (
+      !opts ||
+      typeof opts.sessionFile !== "string" || opts.sessionFile.length < 1 || opts.sessionFile.length > 4096 ||
+      typeof opts.revision !== "string" || opts.revision.length < 1 || opts.revision.length > 128 ||
+      (opts.kind !== "brief" && opts.kind !== "direction")
+    ) {
+      throw new Error("invalid design approval");
+    }
+    if (isDaemonOwned()) {
+      const client = requireDaemonClient();
+      const res = await client.request("pi.designApproveArtifact", {
+        sessionFile: opts.sessionFile,
+        kind: opts.kind,
+        revision: opts.revision,
+      });
+      return unwrapDesignResult(res.payload, "pi.designApproveArtifact");
+    }
+    return getRuntime().designApproveArtifact(opts.sessionFile, opts.kind, opts.revision);
+  });
   handle("pideck:design-control", async (_e, opts: { sessionFile: string; args: string }) => {
     if (!opts || typeof opts.sessionFile !== "string" || typeof opts.args !== "string" || opts.args.length > 5000) {
       throw new Error("invalid design control");

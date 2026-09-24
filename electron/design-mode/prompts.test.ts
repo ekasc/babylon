@@ -70,15 +70,15 @@ describe("design prompts", () => {
     expect(renderDesignSystemPrompt(state, "elicit")).toContain("Do not build anything yet");
   });
   it("direction stage gates build on GUI approval", () => {
-    const followUp = renderStageFollowUp(state, "brand");
+    const followUp = renderStageFollowUp(state, "direction");
     expect(followUp).not.toContain("via ask_question");
     expect(followUp).not.toContain("/design approve-brand");
     expect(followUp).toContain("composer Approve direction");
     // Direction is derived from the repo when the repo already answers.
     expect(followUp).toContain("Derive what the repository already answers");
     expect(followUp).toContain("Do not implement anything");
-    expect(renderDesignSystemPrompt(state, "brand")).not.toContain("via ask_question");
-    expect(renderDesignSystemPrompt(state, "brand")).toContain("Read the repository first");
+    expect(renderDesignSystemPrompt(state, "direction")).not.toContain("via ask_question");
+    expect(renderDesignSystemPrompt(state, "direction")).toContain("Read the repository first");
   });
   it("build stage bounds the judge loop and names escalation", () => {
     const followUp = renderStageFollowUp(state, "build");

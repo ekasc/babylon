@@ -46,7 +46,7 @@ import type { ReviewBundle } from "../sim-controller";
 
 /**
  * Babylon's hardbaked design-mode extension: the phased design flow
- * (elicitation → brief → brand approval → build → judge/revise → log)
+ * (elicitation → brief → direction approval → build → judge/revise → log)
  * as a silent GUI mode plus small chassis.
  *
  * Registered inline in pi-host's `extensionsOverride` (same pattern as the
@@ -57,12 +57,12 @@ import type { ReviewBundle } from "../sim-controller";
  * turn itself — no snapshot-at-click, no synthetic kickoff message. Stage
  * behavior arrives silently through `before_agent_start` system-prompt
  * injection. Approvals arrive via composer buttons (Approve brief / Approve
- * brand) and each one dispatches an internal follow-up turn for the next
+ * direction) and each one dispatches an internal follow-up turn for the next
  * stage (deliverAs followUp — never a synthetic user message, never pasted
  * `/design` commands or ask_question dialogs).
  *
  * Stage derives from artifacts, not from a manual step counter: no brief →
- * elicit, unapproved brief → confirm, unapproved brand → brand gate,
+ * elicit, unapproved brief → confirm, unapproved direction → direction gate,
  * both approved → build/judge. Re-running /design therefore resumes from
  * the current artifacts by construction.
  */
@@ -153,12 +153,12 @@ export function createDesignModeExtension(deps: DesignModeExtensionDeps): Extens
     const clean = sanitizedStateFor(
       state,
       artifactExists(cwd, state.briefPath),
-      artifactExists(cwd, state.brandPath)
+      artifactExists(cwd, state.directionPath)
     );
     return stageFor(
       clean,
       artifactExists(cwd, clean.briefPath),
-      artifactExists(cwd, clean.brandPath)
+      artifactExists(cwd, clean.directionPath)
     );
   }
 
@@ -264,56 +264,6 @@ export function createDesignModeExtension(deps: DesignModeExtensionDeps): Extens
       return;
     }
 
-    if (sub === "approve-brief") {
-      const state = await loadDesignState(at.cwd, at.sessionId);
-      if (!state) {
-        ctx.ui.notify("No design session. Use /design start <subject> first.", "warning");
-        return;
-      }
-      if (!artifactExists(at.cwd, state.briefPath)) {
-        ctx.ui.notify("No brief to approve yet — the interview comes first.", "warning");
-        return;
-      }
-      const approved = { ...state, briefApproved: true };
-      await saveDesignState(at.cwd, at.sessionId, approved);
-      await clearStatus();
-      // "Approve and continue" means continue: kick off the brand stage as
-      // an internal follow-up turn (deliverAs followUp — never a synthetic
-      // user message). Without this the agent sits idle until the user
-      // types again, which is exactly what the button promises not to do.
-      deps.sendFollowUp(
-        [
-          "[Design] The brief is approved.",
-          `Begin the brand stage for "${approved.subject}": read the approved brief at ${approved.briefPath}, develop the brand direction, and write ${approved.brandPath} per the design playbook.`,
-        ].join("\n")
-      );
-      return;
-    }
-
-    if (sub === "approve-brand") {
-      const state = await loadDesignState(at.cwd, at.sessionId);
-      if (!state?.briefApproved) {
-        ctx.ui.notify("The brief must be approved before the brand.", "warning");
-        return;
-      }
-      if (!artifactExists(at.cwd, state.brandPath)) {
-        ctx.ui.notify("No brand direction to approve yet.", "warning");
-        return;
-      }
-      const approved = { ...state, brandApproved: true };
-      await saveDesignState(at.cwd, at.sessionId, approved);
-      await clearStatus();
-      // Same continuation contract as approve-brief: the build stage starts
-      // now, not on the user's next unrelated message.
-      deps.sendFollowUp(
-        [
-          "[Design] The brand direction is approved.",
-          `Begin the build stage for "${approved.subject}" per the design playbook (target: ${approved.target}).`,
-        ].join("\n")
-      );
-      return;
-    }
-
     if (sub === "done") {
       const state = await loadDesignState(at.cwd, at.sessionId);
       if (!state) {
@@ -333,7 +283,7 @@ export function createDesignModeExtension(deps: DesignModeExtensionDeps): Extens
       return;
     }
 
-    ctx.ui.notify("Usage: /design [start <subject> | resume | status | set-target <web | mobile-web | native> | approve-brief | approve-brand | done | clear]", "warning");
+    ctx.ui.notify("Usage: /design [start <subject> | resume | status | set-target <web | mobile-web | native> | done | clear]. Approvals happen from the composer's review surface.", "warning");
   };
 
   const commands = new Map([
@@ -342,7 +292,7 @@ export function createDesignModeExtension(deps: DesignModeExtensionDeps): Extens
       {
         name: "design",
         sourceInfo,
-        description: "Phased design flow: interview, brief, brand approval, build, visual review",
+        description: "Phased design flow: interview, brief, design direction, build, visual review",
         handler: designCommand,
       },
     ],
@@ -434,7 +384,7 @@ export function createDesignModeExtension(deps: DesignModeExtensionDeps): Extens
             const state = await loadDesignState(at.cwd, at.sessionId);
             if (!state) throw new Error("No design session. Start one before reviewing.");
             if (state.done) throw new Error("This design session is finished.");
-            if (!state.briefApproved || !state.brandApproved) {
+            if (!state.briefApproved || !state.directionApproved) {
               throw new Error("The brief and design direction must be approved before reviewing.");
             }
 

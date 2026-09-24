@@ -52,6 +52,8 @@ function unstartedHost(): LocalPiHost {
     warmProject: notReady("warmProject"),
     hasSessionRuntime: () => false,
     sessionCwdFor: () => null,
+    designGetArtifact: notReady("designGetArtifact"),
+    designApproveArtifact: notReady("designApproveArtifact"),
 
     ...fallback,
     refreshFromDisk: notReady("refreshFromDisk"),

@@ -26,6 +26,13 @@ import { createDesignModeExtension } from "./design-mode/extension";
 import { loadSessionGoal, saveSessionGoal, clearSessionGoal, loadGoalModeConfig } from "./goal-mode/store";
 import { createDurableGoalState, defaultDurableGoalModeConfig, type GoalBeginResult } from "../src/lib/durable-goal";
 import { loadDesignState, saveDesignState, clearDesignState, createDesignState, slugFor, stageOfState, JUDGE_MAX_ROUNDS, type DesignStatus, type DesignState, type DesignBeginResult } from "./design-mode/store";
+import {
+  approveDesignArtifact,
+  approvedFlagFor,
+  readDesignArtifact,
+  type DesignArtifact,
+  type DesignArtifactKind,
+} from "./design-mode/artifact";
 import type { DurableGoalState } from "../src/lib/durable-goal";
 import { shouldRelayImagesThrough, toPiImages } from "./prompt-images";
 import { clampToolOutput, readSessionTail, readToolOutput } from "./sessions";
@@ -2261,6 +2268,60 @@ export class PiHost implements LocalPiHost {
    * `/design` only reports. Path-addressed like every other GUI control —
    * the foreground may move before the backend handles the click.
    */
+  async designGetArtifact(
+    sessionFile: string,
+    kind: DesignArtifactKind
+  ): Promise<DesignArtifact> {
+    if (this.draining) throw new Error("daemon is draining for restart; please resend in a moment");
+    const entry = this.requireExecutionEntry(sessionFile);
+    const design = await loadDesignState(entry.cwd, entry.sessionId);
+    if (!design) throw new Error("No design session.");
+    return readDesignArtifact(entry.cwd, design, kind);
+  }
+
+  /**
+   * Approve an artifact the user actually read, bound to that exact revision.
+   * The file may have been rewritten since the review surface opened it —
+   * approving unseen text is the bug this refuses.
+   */
+  async designApproveArtifact(
+    sessionFile: string,
+    kind: DesignArtifactKind,
+    revision: string
+  ): Promise<DesignStatus> {
+    if (this.draining) throw new Error("daemon is draining for restart; please resend in a moment");
+    const entry = this.requireExecutionEntry(sessionFile);
+    const design = await loadDesignState(entry.cwd, entry.sessionId);
+    if (!design) throw new Error("No design session.");
+    if (kind === "direction" && !design.briefApproved) {
+      throw new Error("The brief must be approved before the design direction.");
+    }
+    // Throws DesignArtifactChangedError when the text moved under the user.
+    await approveDesignArtifact(entry.cwd, design, kind, revision);
+    const next = { ...design, [approvedFlagFor(kind)]: true } as DesignState;
+    await saveDesignState(entry.cwd, entry.sessionId, next);
+    // Approve and continue: the next stage starts now, as an internal follow-up
+    // on the OWNING session — never a synthetic user message.
+    const session = entry.runtime.session;
+    void session
+      .sendUserMessage(
+        kind === "brief"
+          ? [
+              "[Design] The brief is approved.",
+              `Begin the direction stage for "${next.subject}": read the approved brief at ${next.briefPath}, derive the design direction (EXTEND, EVOLVE or RETHINK) from it and the repository, and write ${next.directionPath} per the design playbook.`,
+            ].join("\n")
+          : [
+              "[Design] The design direction is approved.",
+              `Begin the build stage for "${next.subject}" per the design playbook (target: ${next.target}).`,
+            ].join("\n"),
+        { deliverAs: "followUp" }
+      )
+      .catch((err: unknown) => {
+        console.warn(`[pideck] design approval follow-up failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
+    return { design: next, stage: stageOfState(entry.cwd, next), maxRounds: JUDGE_MAX_ROUNDS };
+  }
+
   async execDesignCommand(sessionFile: string, args: string): Promise<DesignStatus> {
     if (this.draining) throw new Error("daemon is draining for restart; please resend in a moment");
     const text = args ? `/design ${args}` : "/design";
