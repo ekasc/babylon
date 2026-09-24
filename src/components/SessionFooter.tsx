@@ -45,6 +45,9 @@ interface Props {
   onRestartDesign?: () => void;
   onApproveDesignBrief?: () => void;
   onApproveDesignBrand?: () => void;
+  /** Viewed-vs-execution gate (src/lib/composer-execution.ts); forwarded
+      verbatim — the footer never inspects execution state itself. */
+  executionAccess?: import("../lib/composer-execution").ComposerExecutionAccessUi;
 }
 
 export default function SessionFooter({
@@ -78,6 +81,7 @@ export default function SessionFooter({
   onRestartDesign = () => {},
   onApproveDesignBrief = () => {},
   onApproveDesignBrand = () => {},
+  executionAccess,
 }: Props) {
 	// The session controls (permission, model, thinking, run state, usage)
 	// live in the composer surface itself. The footer is just the composer,
@@ -122,6 +126,7 @@ export default function SessionFooter({
             onToggleDesign={onToggleDesign}
             onEndDesign={onEndDesign}
             onRestartDesign={onRestartDesign}
+            executionAccess={executionAccess}
             designApproval={
               designMode === "active" && designStage === "brief-confirm"
                 ? { label: "Approve brief", onApprove: onApproveDesignBrief }

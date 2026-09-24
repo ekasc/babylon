@@ -39,6 +39,13 @@ import {
 import type { ProjectExecution } from "./execution";
 import { clampHard, clampWithRubberband } from "./lib/gesture-math";
 import { performSend, type SendExecutionDeps, type SendStage } from "./lib/send-execution";
+import {
+  deriveComposerExecutionAccess,
+  deriveViewedStreaming,
+  executionBusyLabel,
+  returnToExecution as returnToExecutionImpl,
+  type ComposerExecutionAccessUi,
+} from "./lib/composer-execution";
 import Sidebar from "./components/Sidebar";
 import { useTheme } from "./components/hooks/useTheme";
 import { useRollback } from "./components/hooks/useRollback";
@@ -1943,6 +1950,43 @@ export default function App() {
     (path: string) => resolveSessionTitle(sessionByPath, path),
     [sessionByPath]
   );
+
+  // Viewed-vs-execution composer access: LIVE state comes from runtimeByPath
+  // (event-derived, so the lock clears the moment the owner settles) with
+  // executionsByCwd as the ownership/fallback registry — no new polling.
+  const ownerRuntimeState = currentExecution
+    ? (runtimeByPath[currentExecution.sessionFile]?.execution ?? currentExecution.state)
+    : null;
+  const composerAccess = deriveComposerExecutionAccess({
+    viewedSessionPath,
+    currentExecution,
+    ownerExecutionState: ownerRuntimeState,
+  });
+  // Stream truth for ChatView + Composer: a hidden execution streaming never
+  // leaks steer/queue/Stop/follow into another transcript (I3).
+  const viewedStreaming = deriveViewedStreaming(viewingExecution, activeStreaming);
+  // Return to live = pure view navigation to the CURRENT owner (I3): the
+  // owner already owns execution, this only changes what ChatView shows.
+  const returnToExecution = useCallback(() => {
+    returnToExecutionImpl({
+      currentExecution: activeSpace ? executionsByCwd[activeSpace] : null,
+      viewSession,
+      bridge,
+      onBeforeView: () => setPromotedParent(null),
+    });
+  }, [activeSpace, executionsByCwd, viewSession]);
+  const composerExecutionAccess = useMemo<ComposerExecutionAccessUi>(() => {
+    if (composerAccess.kind === "blocked") {
+      const state = ownerRuntimeState ?? currentExecution?.state ?? "working";
+      return {
+        kind: "blocked",
+        ownerLabel: sessionTitle(composerAccess.ownerSessionFile),
+        busyLabel: executionBusyLabel(state),
+        onReturnToLive: returnToExecution,
+      };
+    }
+    return { kind: composerAccess.kind };
+  }, [composerAccess, ownerRuntimeState, currentExecution, sessionTitle, returnToExecution]);
   const tabItems = useMemo(
     () => buildTabItems(navTabs.tabs, sessionByPath, sessionTitle),
     [navTabs.tabs, sessionByPath, sessionTitle]
@@ -2550,7 +2594,7 @@ export default function App() {
                   canLoadMore={canLoadMore}
                   loadingEarlier={loadingEarlier}
                   onNeedEarlier={chatOnNeedEarlier}
-                  streaming={activeStreaming}
+                  streaming={viewedStreaming}
                   isRoom={activeGroup != null}
                   roomHandle={
                     activeGroup != null || sharedSpeakers
@@ -2589,14 +2633,15 @@ export default function App() {
             {hasSession ? (
               <ErrorBoundary fallback={<PaneCrashFallback name="composer pane" />}>
               <SessionFooter
-                agentState={agentState}
-                stats={stats}
+                agentState={composerAccess.kind === "owner" ? agentState : null}
+                stats={composerAccess.kind === "owner" ? stats : null}
                 models={models}
                 thinkingLevels={thinkingLevels}
                 onSetModel={setModel}
                 onSetThinking={setThinking}
                 onCompact={compact}
-                streaming={activeStreaming}
+                streaming={viewedStreaming}
+                executionAccess={composerExecutionAccess}
                 steering={state.steering}
                 followUp={state.followUp}
                 commands={commands}
@@ -2605,7 +2650,7 @@ export default function App() {
                 toast={toast}
                 onSend={send}
                 onAbort={abort}
-                dialogs={state.dialogs}
+                dialogs={composerAccess.kind === "owner" ? state.dialogs : []}
                 onDialogDismiss={(id) => dispatch({ type: "dialog-dismiss", id })}
                 runningWorkflows={runningWorkflows}
                 subagentCount={subagentCount}

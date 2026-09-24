@@ -1,6 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { CommandInfo } from "../bridge";
 import type { AgentModel, AgentState, SessionStats } from "../bridge";
+import { type ComposerExecutionAccessUi } from "../lib/composer-execution";
 import type { Dialog } from "../store";
 import type { Bot } from "../bots";
 import { expandSkillMentions } from "../lib/skillRef";
@@ -90,6 +91,9 @@ interface Props {
 	onRestartDesign?: () => void;
 	/** Pending design approval (brief/brand), if any: one button in the row, never a strip. */
 	designApproval?: { label: string; onApprove(): void } | null;
+	/** Viewed-vs-execution gate (src/lib/composer-execution.ts). Omitted =
+	    owner: legacy callers and existing tests keep full behavior. */
+	executionAccess?: ComposerExecutionAccessUi;
 }
 
 function trunc(s: string, n = 42): string {
@@ -213,9 +217,16 @@ const Composer = memo(function Composer({
 	onEndDesign,
 	onRestartDesign,
 	designApproval = null,
+	executionAccess,
 }: Props) {
 	const [text, setText] = useState("");
 	const [designMenuOpen, setDesignMenuOpen] = useState(false);
+	// Viewed-vs-execution gate: owner = full composer (today); claimable =
+	// write (send acquires ownership) but no controls that mutate the OTHER
+	// runtime; blocked = history reading with Return to live only.
+	const execKind = executionAccess?.kind ?? "owner";
+	const execBlocked = execKind === "blocked";
+	const execNonOwner = execKind !== "owner";
 	// Transient menu state never survives a session switch.
 	useEffect(() => {
 		setDesignMenuOpen(false);
@@ -377,6 +388,7 @@ const Composer = memo(function Composer({
 	};
 
 	const submit = async () => {
+		if (execBlocked) return;
 		const t = text.trim();
 		if (!t && attachments.length === 0) return;
 		if (sending && !streaming) return;
@@ -732,7 +744,7 @@ const Composer = memo(function Composer({
 
 					{!hasBlockingDialog && (
 						<div className="flex items-center gap-3 px-4 py-3">
-							<input ref={fileRef} type="file" multiple className="hidden" onChange={(e) => { void addFiles(e.target.files ?? []); e.target.value = ""; }} />
+							{!execBlocked && (<><input ref={fileRef} type="file" multiple className="hidden" onChange={(e) => { void addFiles(e.target.files ?? []); e.target.value = ""; }} />
 							<button onClick={() => fileRef.current?.click()} title="Attach (paste / drag & drop)" aria-label="Attach file" disabled={hasBlockingDialog} className="composer-pressable grid h-8 w-8 shrink-0 place-items-center text-dim hover:text-fg disabled:opacity-40"><PaperclipIcon size={16} /></button>
 						<span className="relative shrink-0">
 							<button
@@ -777,13 +789,14 @@ const Composer = memo(function Composer({
 								</div>
 							) : null}
 						</span>
-							<span className="shrink-0 select-none text-[length:var(--prompt-font)] leading-none text-dim" aria-hidden>&gt;</span>
-							<textarea ref={composerRef} value={text} onChange={(e) => { setText(e.target.value); if (historyCursor !== null) setHistoryCursor(null); }} onKeyDown={onKeyDown} onPaste={onPaste} rows={1} disabled={hasBlockingDialog} placeholder={streaming ? (mode === "steer" ? "Steer…" : "Queue…") : "Message Pi…"} role="textbox" aria-label="Message Pi" aria-autocomplete="list" aria-controls={ac.openMenu?.id} aria-activedescendant={ac.openMenu ? `${ac.openMenu.optionIdPrefix}-${ac.openMenu.selected}` : undefined} className="composer-input max-h-[140px] min-h-[20px] w-full flex-1 resize-none border-0 bg-transparent py-1 text-[length:var(--prompt-font)] leading-[1.5] outline-none placeholder:text-dim focus:outline-none focus-visible:outline-none" />
-							{streaming ? (
+							</>)}
+<span className="shrink-0 select-none text-[length:var(--prompt-font)] leading-none text-dim" aria-hidden>&gt;</span>
+							<textarea ref={composerRef} value={text} onChange={(e) => { setText(e.target.value); if (historyCursor !== null) setHistoryCursor(null); }} onKeyDown={onKeyDown} onPaste={onPaste} rows={1} disabled={hasBlockingDialog || execBlocked} placeholder={execBlocked && !text ? "Viewing history" : streaming ? (mode === "steer" ? "Steer…" : "Queue…") : "Message Pi…"} role="textbox" aria-label="Message Pi" aria-autocomplete="list" aria-controls={ac.openMenu?.id} aria-activedescendant={ac.openMenu ? `${ac.openMenu.optionIdPrefix}-${ac.openMenu.selected}` : undefined} className="composer-input max-h-[140px] min-h-[20px] w-full flex-1 resize-none border-0 bg-transparent py-1 text-[length:var(--prompt-font)] leading-[1.5] outline-none placeholder:text-dim focus:outline-none focus-visible:outline-none" />
+							{!execBlocked && (streaming ? (
 								<div className="flex shrink-0 items-center gap-1.5" role="group" aria-label="Delivery mode"><button onClick={() => setMode("steer")} aria-pressed={mode === "steer"} title="Interrupt and redirect" className={`composer-pressable h-8 rounded-md px-3 text-[12px] ${mode === "steer" ? "bg-accent text-white" : "bg-inset text-dim hover:text-fg"}`}>steer</button><button onClick={() => setMode("followUp")} aria-pressed={mode === "followUp"} title="Queue after current run" className={`composer-pressable h-8 rounded-md px-3 text-[12px] ${mode === "followUp" ? "bg-accent text-white" : "bg-inset text-dim hover:text-fg"}`}>queue</button><button onClick={onAbort} title="Stop run" aria-label="Stop run" className="composer-pressable grid h-8 w-8 place-items-center rounded-md bg-err text-white hover:bg-err/90"><StopIcon size={14} /></button></div>
 							) : (
 								<button onClick={submit} disabled={sending || (!text.trim() && attachments.length === 0)} title={sending ? "Sending…" : "Send"} aria-label="Send message" className="composer-pressable grid h-8 w-8 shrink-0 place-items-center rounded-full bg-fg text-bg hover:bg-fg/90 disabled:cursor-not-allowed disabled:opacity-30"><SendIcon size={14} /></button>
-							)}
+							))}
 						</div>
 					)}
 					{/* Session control row, part of the composer surface (T3Code's
@@ -791,30 +804,30 @@ const Composer = memo(function Composer({
 					    left (permission, model, thinking), session state on the
 					    right (Goal, Design, activity, usage). A pending Approve
 					    is the one emphasized element, never another ghost. */}
-					{!hasBlockingDialog && (
+					{!hasBlockingDialog && (!execBlocked ? (
 						<div className="composer-controls-row flex items-center gap-0.5 border-t border-line/60 px-3 py-1">
 							<span className="flex shrink-0 items-center">
 								<PermissionModePicker />
 							</span>
-							<span className="model-shrink flex min-w-0 max-w-[38%] shrink items-center">
+							{!execNonOwner && (<span className="model-shrink flex min-w-0 max-w-[38%] shrink items-center">
 								<ModelPicker
 									models={models}
 									current={agentState?.model ?? null}
 									disabled={!models.length}
 									onSelect={onSetModel}
 								/>
-							</span>
-							<span className="flex shrink-0 items-center">
+							</span>)}
+							{!execNonOwner && (<span className="flex shrink-0 items-center">
 								<ThinkingPicker
 									current={agentState?.thinkingLevel ?? "off"}
 									available={thinkingLevels.length ? thinkingLevels : undefined}
 									disabled={!agentState}
 									onSelect={onSetThinking}
 								/>
-							</span>
+							</span>)}
 							<div className="flex-1" />
-							<span aria-hidden="true" className="mx-1.5 h-4 w-px shrink-0 bg-line/60" />
-							{onToggleGoal ? (
+							{!execNonOwner && (<span aria-hidden="true" className="mx-1.5 h-4 w-px shrink-0 bg-line/60" />)}
+							{!execNonOwner && onToggleGoal ? (
 								<span className="flex shrink-0 items-center">
 									<button
 										type="button"
@@ -836,7 +849,7 @@ const Composer = memo(function Composer({
 									</button>
 								</span>
 							) : null}
-						{onToggleDesign ? (
+						{!execNonOwner && onToggleDesign ? (
 							<span className="relative flex shrink-0 items-center">
 								<button
 									type="button"
@@ -896,21 +909,32 @@ const Composer = memo(function Composer({
 								) : null}
 							</span>
 						) : null}
-						{designApproval ? (
+						{!execNonOwner && designApproval ? (
 							<span className="flex shrink-0 items-center">
 								<button type="button" onClick={designApproval.onApprove} title="Approve and continue the design flow" className="composer-pressable composer-approve-enter rounded-md bg-accent px-2.5 py-1 text-[12px] font-semibold text-bg hover:bg-accent/90">{designApproval.label}</button>
 							</span>
 						) : null}
-							{streaming && (
+							{!execNonOwner && streaming && (
 								<span className="flex shrink-0 items-center px-1">
 									<ThroughputBars active />
 								</span>
 							)}
-							<span className="flex shrink-0 items-center">
+							{!execNonOwner && (<span className="flex shrink-0 items-center">
 								<StatsPopover stats={stats ?? null} hasSession={!!agentState} onCompact={onCompact} />
-							</span>
+							</span>)}
 						</div>
-					)}
+					) : (
+						<div className="composer-controls-row flex items-center gap-2 border-t border-line/60 px-3 py-1.5 text-[12px] text-dim" role="status">
+							<span className="min-w-0 truncate">
+								{executionAccess?.ownerLabel ? `“${executionAccess.ownerLabel}” ` : ""}{executionAccess?.busyLabel ?? "is active"}
+							</span>
+							{executionAccess?.onReturnToLive ? (
+								<button type="button" onClick={executionAccess.onReturnToLive} className="composer-pressable ml-auto shrink-0 rounded-md px-2 py-0.5 text-[12px] font-medium text-accent hover:bg-inset">
+									Return to live
+								</button>
+							) : null}
+						</div>
+					))}
 				</div>
 
 			</div>

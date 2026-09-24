@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, fireEvent} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import Composer from "./Composer";
 
@@ -325,5 +325,92 @@ describe("composer stash menu", () => {
     await userEvent.click(box);
     await userEvent.keyboard("{Escape}");
     expect(screen.queryByRole("menu", { name: "Stashed drafts" })).toBeNull();
+  });
+});
+
+describe("composer execution access gating", () => {
+  const blockedAccess = {
+    kind: "blocked" as const,
+    ownerLabel: "Auth refactor",
+    busyLabel: "is working",
+    onReturnToLive: vi.fn(),
+  };
+
+  it("blocked: history-reading composer — disabled input, no runtime controls, Return to live", () => {
+    render(<Composer {...baseProps({ executionAccess: blockedAccess })} />);
+    const ta = screen.getByRole("textbox", { name: "Message Pi" }) as HTMLTextAreaElement;
+    expect(ta.disabled).toBe(true);
+    expect(ta.placeholder).toBe("Viewing history");
+    // Turn controls gone entirely.
+    expect(screen.queryByLabelText("Send message")).toBeNull();
+    expect(screen.queryByLabelText("Stop run")).toBeNull();
+    expect(screen.queryByText("steer")).toBeNull();
+    // Runtime-mutating controls gone: goal/design/model/thinking/permission.
+    expect(screen.queryByText("Goal")).toBeNull();
+    expect(screen.queryByText("Design")).toBeNull();
+    expect(screen.queryByText("select model")).toBeNull();
+    expect(screen.queryByTitle("Reasoning level")).toBeNull();
+    expect(screen.queryByText("Auto")).toBeNull();
+    // The one row that remains: owner identity + phrasing + explicit nav.
+    const status = screen.getByRole("status");
+    expect(status.textContent).toContain("Auth refactor");
+    expect(status.textContent).toContain("is working");
+    fireEvent.click(screen.getByRole("button", { name: "Return to live" }));
+    expect(blockedAccess.onReturnToLive).toHaveBeenCalledTimes(1);
+  });
+
+  it("claimable: writable, but no controls that mutate the other runtime", async () => {
+    render(<Composer {...baseProps({ executionAccess: { kind: "claimable" } })} />);
+    const ta = screen.getByRole("textbox", { name: "Message Pi" }) as HTMLTextAreaElement;
+    expect(ta.disabled).toBe(false);
+    await userEvent.type(ta, "fix the parser");
+    const send = screen.getByLabelText("Send message") as HTMLButtonElement;
+    expect(send.disabled).toBe(false);
+    // No live/stream or foreign-runtime controls (no Stop; App feeds
+    // streaming=false for non-owner views; model/thinking/goal/design hidden).
+    expect(screen.queryByLabelText("Stop run")).toBeNull();
+    expect(screen.queryByText("select model")).toBeNull();
+    expect(screen.queryByTitle("Reasoning level")).toBeNull();
+    expect(screen.queryByText("Goal")).toBeNull();
+    expect(screen.queryByText("Design")).toBeNull();
+    // Idle owner: writable without any Return to live demand (item 8).
+    expect(screen.queryByText("Return to live")).toBeNull();
+    // Permission mode stays available in claimable (not a runtime mutation).
+    expect(screen.getByTitle("Execution mode: Auto")).toBeTruthy();
+  });
+
+  it("owner: existing full composer behavior unchanged", async () => {
+    const onToggleGoal = vi.fn();
+    render(<Composer {...baseProps({ executionAccess: { kind: "owner" }, onToggleGoal, goalMode: "off" })} />);
+    const ta = screen.getByRole("textbox", { name: "Message Pi" }) as HTMLTextAreaElement;
+    expect(ta.disabled).toBe(false);
+    expect(screen.getByText("select model")).toBeTruthy();
+    expect(screen.getByTitle("Reasoning level")).toBeTruthy();
+    expect(screen.getByText("Goal")).toBeTruthy();
+    expect(screen.queryByText("Return to live")).toBeNull();
+    expect(screen.getByTitle("Execution mode: Auto")).toBeTruthy();
+    fireEvent.click(screen.getByText("Goal"));
+    expect(onToggleGoal).toHaveBeenCalledTimes(1);
+  });
+
+  it("draft survives blocked → claimable without the composer unmounting", async () => {
+    const { rerender } = render(<Composer {...baseProps({ executionAccess: { kind: "owner" } })} />);
+    await userEvent.type(screen.getByRole("textbox", { name: "Message Pi" }), "fix the parser");
+    rerender(<Composer {...baseProps({ executionAccess: blockedAccess })} />);
+    let ta = screen.getByRole("textbox", { name: "Message Pi" }) as HTMLTextAreaElement;
+    expect(ta.disabled).toBe(true);
+    expect(ta.value).toBe("fix the parser");
+    // A settles: same component instance, same draft, unlocked.
+    rerender(<Composer {...baseProps({ executionAccess: { kind: "claimable" } })} />);
+    ta = screen.getByRole("textbox", { name: "Message Pi" }) as HTMLTextAreaElement;
+    expect(ta.disabled).toBe(false);
+    expect(ta.value).toBe("fix the parser");
+  });
+
+  it("stream controls absent while streaming=false even for the owner (hidden-stream contract)", () => {
+    render(<Composer {...baseProps({ executionAccess: { kind: "owner" }, streaming: false })} />);
+    expect(screen.queryByLabelText("Stop run")).toBeNull();
+    expect(screen.queryByText("steer")).toBeNull();
+    expect(screen.queryByText("queue")).toBeNull();
   });
 });
