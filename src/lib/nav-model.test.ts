@@ -1,27 +1,12 @@
 import { describe, expect, it } from "vitest";
-import type { SessionRuntimeState } from "../sessionRuntime";
 import {
   addNavTab,
-  agentStateLabel,
   closeSpaceTab,
-  deriveLiveAgents,
   migrateLegacyTabs,
   pickSpaceTab,
   tabsStore,
   visibleSpaceTabs,
 } from "./nav-model";
-
-function rt(over: Partial<SessionRuntimeState> & { sessionPath: string; cwd: string }): SessionRuntimeState {
-  return {
-    sessionId: "s",
-    lifecycle: "open",
-    execution: "idle",
-    attention: "none",
-    live: false,
-    ...over,
-  };
-}
-
 describe("migrateLegacyTabs", () => {
   it("flattens the per-space record in space order", () => {
     const out = migrateLegacyTabs({ "/b": ["p2"], "/a": ["p1"] }, ["/a", "/b"]);
@@ -161,48 +146,5 @@ describe("visibleSpaceTabs", () => {
   });
   it("falls back to everything with no project context", () => {
     expect(visibleSpaceTabs(tabs, null)).toBe(tabs);
-  });
-});
-
-describe("deriveLiveAgents", () => {
-  const mtime = new Map([["w", 3], ["a", 2], ["u", 1]]);
-  const runtime = [
-    rt({ sessionPath: "w", cwd: "/x", execution: "working", live: true }),
-    rt({ sessionPath: "a", cwd: "/x", execution: "approval", live: true }),
-    rt({ sessionPath: "i", cwd: "/x" }),
-    rt({ sessionPath: "f", cwd: "/x", execution: "failed", live: true }),
-    rt({ sessionPath: "u", cwd: "/y", attention: "unread" }),
-    rt({ sessionPath: "s", cwd: "/x", execution: "failed", lifecycle: "settled" }),
-  ];
-  it("shows only chats with a running turn (working/waiting/approval)", () => {
-    const paths = deriveLiveAgents(runtime, mtime).map((a) => a.path);
-    expect(paths).toContain("w");
-    expect(paths).toContain("a");
-    expect(paths).not.toContain("i");
-    expect(paths).not.toContain("f");
-    expect(paths).not.toContain("u");
-    expect(paths).not.toContain("s");
-  });
-
-  it("orders approval before working", () => {
-    const agents = deriveLiveAgents(
-      [
-        rt({ sessionPath: "f", cwd: "/x", execution: "working", live: true }),
-        rt({ sessionPath: "a", cwd: "/x", execution: "approval", live: true }),
-        rt({ sessionPath: "w", cwd: "/x", execution: "working", live: true }),
-      ],
-      new Map([["w", 2], ["f", 1]])
-    ).map((a) => a.path);
-    expect(agents).toEqual(["a", "w", "f"]);
-  });
-});
-
-describe("agentStateLabel", () => {
-  it("names states the way the section shows them", () => {
-    expect(agentStateLabel({ execution: "working", attention: "none" })).toBe("Working");
-    expect(agentStateLabel({ execution: "waiting", attention: "none" })).toBe("Waiting");
-    expect(agentStateLabel({ execution: "idle", attention: "approval" })).toBe("Needs input");
-    expect(agentStateLabel({ execution: "failed", attention: "none" })).toBe("Failed");
-    expect(agentStateLabel({ execution: "idle", attention: "unread" })).toBe("Unread");
   });
 });

@@ -1,6 +1,5 @@
 import type { ProjectGroup, SessionMeta } from "./bridge";
 import type { AttentionState, SessionRuntimeState } from "./sessionRuntime";
-import { deriveLiveAgents } from "./lib/nav-model";
 import type { HistoryEntry } from "./components/SessionHistoryMenu";
 
 export type SessionByPath = Map<string, { session: SessionMeta; cwd: string }>;
@@ -52,23 +51,6 @@ export function buildHistoryEntries(groups: ProjectGroup[], openPaths: Set<strin
   return all.sort((a, b) => b.mtime - a.mtime).slice(0, 15);
 }
 
-export function buildMtimeByPath(groups: ProjectGroup[]): Map<string, number> {
-  const map = new Map<string, number>();
-  for (const g of groups) for (const s of g.sessions) map.set(s.path, s.mtime);
-  return map;
-}
-
-export function buildLiveAgentRows(
-  runtime: SessionRuntimeState[],
-  mtimeByPath: Map<string, number>,
-  titleFor: (path: string) => string
-): Array<{ agent: ReturnType<typeof deriveLiveAgents>[number]; title: string; projectName: string }> {
-  return deriveLiveAgents(runtime, mtimeByPath).map((agent) => ({
-    agent,
-    title: titleFor(agent.path),
-    projectName: agent.cwd.split("/").filter(Boolean).pop() || agent.cwd,
-  }));
-}
 
 export function buildAllSpaceCwds(spaces: string[], activeSpace: string | null): string[] {
   const list = [...spaces];

@@ -20,8 +20,6 @@ import {
   buildAllSpaceCwds,
   buildAttentionByPath,
   buildHistoryEntries,
-  buildLiveAgentRows,
-  buildMtimeByPath,
   buildSessionByPath,
   buildTabItems,
   resolveSessionTitle,
@@ -40,6 +38,7 @@ import type { ProjectExecution } from "./execution";
 import { clampHard, clampWithRubberband } from "./lib/gesture-math";
 import { performSend, type SendExecutionDeps, type SendStage } from "./lib/send-execution";
 import { performCloseTab } from "./lib/close-tab";
+import { deriveExecutionTrees, openExecutionRoot, type ExecutionTree } from "./lib/execution-tree";
 import {
   deriveComposerExecutionAccess,
   deriveViewedStreaming,
@@ -1987,10 +1986,21 @@ export default function App() {
     () => buildHistoryEntries(groups, new Set(navTabs.tabs.map((t) => t.path))),
     [groups, navTabs.tabs]
   );
-  const mtimeByPath = useMemo(() => buildMtimeByPath(groups), [groups]);
-  const liveAgentRows = useMemo(
-    () => buildLiveAgentRows(Object.values(runtimeByPath), mtimeByPath, sessionTitle),
-    [runtimeByPath, mtimeByPath, sessionTitle]
+  // Agents roots come EXCLUSIVELY from executionsByCwd (ownership
+  // authority); runtimeByPath only enriches an owner's live state, and
+  // activity sources only contribute children under an existing root.
+  const executionTrees = useMemo(
+    () =>
+      deriveExecutionTrees({
+        executions: Object.values(executionsByCwd),
+        runtimeByPath,
+        threads: activity.threads,
+        subagents: activity.subagents,
+        workflows: workflowRuns,
+        titleFor: sessionTitle,
+        activeCwd: activeSpace ?? status.cwd ?? null,
+      }),
+    [executionsByCwd, runtimeByPath, activity.threads, activity.subagents, workflowRuns, sessionTitle, activeSpace, status.cwd]
   );
   const allSpaceCwds = useMemo(() => buildAllSpaceCwds(spaces, activeSpace), [spaces, activeSpace]);
 
@@ -2025,11 +2035,11 @@ export default function App() {
   );
   const onSearch = useCallback(() => togglePalette(true), [togglePalette]);
   const onAddSpace = useCallback(() => void addSpace(), [addSpace]);
-  const onOpenLiveAgent = useCallback(
-    (row: (typeof liveAgentRows)[number]) => {
-      setPromotedParent(null);
-      // Viewing an agent's transcript must not touch its execution (I3).
-      void viewSession(row.agent.path, row.agent.cwd);
+  const onOpenExecutionRoot = useCallback(
+    (tree: ExecutionTree) => {
+      // Root click = view the owning session only (I3): the root already
+      // owns execution; no activation, no ownership change.
+      openExecutionRoot({ viewSession, bridge, onBeforeView: () => setPromotedParent(null) }, tree);
     },
     [viewSession]
   );
@@ -2498,9 +2508,9 @@ export default function App() {
         spaceCwds={spaces}
         onAddSpace={onAddSpace}
         onRemoveSpace={removeSpace}
-        liveAgents={liveAgentRows}
+        executionTrees={executionTrees}
         allSpaceCwds={allSpaceCwds}
-        onOpenLiveAgent={onOpenLiveAgent}
+        onOpenExecutionRoot={onOpenExecutionRoot}
         onTogglePin={togglePin}
         onToggleSnooze={toggleSnooze}
         onToggleUnread={toggleUnread}

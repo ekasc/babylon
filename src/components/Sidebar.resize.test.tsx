@@ -35,12 +35,12 @@ function baseProps() {
     settled: {},
     onSettle: noop,
     onUnsettle: noop,
-    liveAgents: [],
     allSpaceCwds: [],
-    onOpenLiveAgent: noop,
     spaceCwds: [],
     onAddSpace: noop,
     onRemoveSpace: noop,
+    executionTrees: [],
+    onOpenExecutionRoot: noop,
   };
 }
 

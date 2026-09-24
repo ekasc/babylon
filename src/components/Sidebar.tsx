@@ -21,7 +21,8 @@ import {
 } from "./icons";
 import ProjectFilter from "./ProjectFilter";
 import { ProjectIcon } from "./ProjectIcon";
-import { AgentsSection, type AgentRow } from "./AgentsSection";
+import { AgentsSection } from "./AgentsSection";
+import type { ExecutionTree } from "../lib/execution-tree";
 import {
 	compareSettled,
 	formatRunDuration,
@@ -1016,11 +1017,12 @@ interface Props {
 	settled: Record<string, number>;
 	onSettle(path: string): void;
 	onUnsettle(path: string): void;
-	/** Live session agents (derived in App): executing, waiting, needing
-	 *  input, or failed-but-unsettled. Clicking activates the session. */
-	liveAgents: AgentRow[];
+	/** Project execution trees (derived in App from executionsByCwd):
+	 *  roots own their children; clicking a root views the owning session
+	 *  without changing execution. */
+	executionTrees: ExecutionTree[];
 	allSpaceCwds: string[];
-	onOpenLiveAgent(row: AgentRow): void;
+	onOpenExecutionRoot(tree: ExecutionTree): void;
 	/** User-curated space folders. The session index is never auto-imported. */
 	spaceCwds: string[];
 	onAddSpace(): void;
@@ -1066,9 +1068,9 @@ export default memo(function Sidebar(props: Props) {
 		settled,
 		onSettle,
 		onUnsettle,
-		liveAgents,
+		executionTrees,
 		allSpaceCwds,
-		onOpenLiveAgent,
+		onOpenExecutionRoot,
 		spaceCwds,
 		onAddSpace,
 		onRemoveSpace,
@@ -1490,10 +1492,9 @@ export default memo(function Sidebar(props: Props) {
 
 						<div className="mt-2">
 							<AgentsSection
-								rows={liveAgents}
-								activePath={activePath ?? null}
-								allCwds={allSpaceCwds}
-								onOpen={onOpenLiveAgent}
+								trees={executionTrees}
+								selectedPath={activePath ?? null}
+								onOpenRoot={onOpenExecutionRoot}
 							/>
 						</div>
 

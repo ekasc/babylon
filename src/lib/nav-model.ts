@@ -1,8 +1,3 @@
-import type {
-  AttentionState,
-  ExecutionState,
-  SessionRuntimeState,
-} from "../sessionRuntime";
 import { defineStore } from "./versioned-store";
 
 /**
@@ -163,56 +158,3 @@ export function visibleSpaceTabs<T extends NavTab>(tabs: T[], cwd: string | null
   return tabs.filter((t) => t.cwd === cwd);
 }
 
-export type AgentSortState = "approval" | "working" | "waiting" | "failed" | "unread" | "live";
-
-export interface LiveAgent {
-  path: string;
-  cwd: string;
-  execution: ExecutionState;
-  attention: AttentionState;
-  startedAt?: number;
-  mtime: number;
-}
-
-/**
- * Sessions with a chat that is actively running: a turn is in flight
- * (working), or the agent is mid-turn but blocked on the user (waiting,
- * approval). Idle chats, unread-only chats, and finished chats do NOT appear
- * here — this section is "running chats", not an inbox or a history. Pure
- * derivation from existing runtime + session metadata.
- */
-export function deriveLiveAgents(
-  runtime: SessionRuntimeState[],
-  mtimeByPath: Map<string, number>
-): LiveAgent[] {
-  const out: LiveAgent[] = [];
-  for (const r of runtime) {
-    const running = r.execution === "working" || r.execution === "waiting" || r.execution === "approval";
-    if (!running) continue;
-    out.push({
-      path: r.sessionPath,
-      cwd: r.cwd,
-      execution: r.execution,
-      attention: r.attention,
-      startedAt: r.startedAt,
-      mtime: mtimeByPath.get(r.sessionPath) ?? 0,
-    });
-  }
-  const rank = (a: LiveAgent): number => {
-    if (a.attention === "approval" || a.execution === "approval") return 0;
-    if (a.execution === "working") return 1;
-    if (a.execution === "waiting") return 2;
-    if (a.execution === "failed") return 3;
-    return 4;
-  };
-  return out.sort((a, b) => rank(a) - rank(b) || b.mtime - a.mtime);
-}
-
-export function agentStateLabel(a: Pick<LiveAgent, "execution" | "attention">): string {
-  if (a.attention === "approval" || a.execution === "approval") return "Needs input";
-  if (a.execution === "working") return "Working";
-  if (a.execution === "waiting") return "Waiting";
-  if (a.execution === "failed") return "Failed";
-  if (a.attention === "unread") return "Unread";
-  return "Live";
-}

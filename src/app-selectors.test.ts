@@ -3,7 +3,6 @@ import {
   buildAllSpaceCwds,
   buildAttentionByPath,
   buildHistoryEntries,
-  buildMtimeByPath,
   buildSessionByPath,
   buildTabItems,
   resolveSessionTitle,
@@ -54,10 +53,6 @@ describe("app-selectors", () => {
     expect(entries.map((e) => e.path)).toEqual(["/s/b.json", "/s/c.json", "/s/a.json"]);
     expect(entries.find((e) => e.path === "/s/a.json")?.open).toBe(true);
     expect(entries.find((e) => e.path === "/s/b.json")?.projectName).toBe("alpha");
-  });
-
-  it("builds the mtime map", () => {
-    expect(buildMtimeByPath(groups).get("/s/b.json")).toBe(300);
   });
 
   it("derives attention per path", () => {

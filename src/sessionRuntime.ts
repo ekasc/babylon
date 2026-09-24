@@ -4,16 +4,14 @@
 // in App and consumed by the sidebar, Space activity, header, and Agents
 // dock.
 //
-// Runtime truth about the DEFAULT Pi agent: PiHost runs a SINGLE
-// AgentSessionRuntime, so only the active session can execute. Switching
-// sessions aborts the outgoing in-flight turn (the SDK settles it into that
-// session's file with aborted=true), which the ordered event layer observes
-// like any other settle: the row goes idle, unread marks, nothing ghosts.
-// Background survival belongs to independent runtimes only — spawned
-// subagents and threads (file-backed roster) — never to the default run.
-// The per-path map below is still keyed by path (never by foreground) so
-// concurrent sources and rapid navigation cannot corrupt each other; the
-// singleton abort is what keeps default entries truthful, not map cleverness.
+// SessionRuntimeState is a RENDERER PROJECTION of observed per-session
+// activity (events, file-backed rosters, snapshots) — not an ownership
+// registry. Top-level execution ownership is authoritative in
+// ProjectExecution / executionsByCwd: runtimeByPath may enrich an owner's
+// live state and attention but never establishes ownership, never creates
+// an Agents root, and never decides which tab is executing. The per-path
+// map stays keyed by path (never by foreground) so concurrent sources and
+// rapid navigation cannot corrupt each other.
 //
 // Execution vocabulary (smallest truthful set for Pi's event model):
 //   idle     — nothing running

@@ -4,7 +4,8 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { SessionTabs, type TabItem } from "./SessionTabs";
 import { SessionHistoryMenu } from "./SessionHistoryMenu";
-import { AgentsSection, type AgentRow } from "./AgentsSection";
+import { AgentsSection } from "./AgentsSection";
+import type { ExecutionTree } from "../lib/execution-tree";
 
 afterEach(() => cleanup());
 
@@ -72,39 +73,81 @@ describe("SessionHistoryMenu", () => {
     expect(onOpen).toHaveBeenCalledWith(entries[1]);
   });
 });
-
-function agentRow(over: Partial<AgentRow["agent"]> = {}): AgentRow {
-  return {
-    agent: {
-      path: "/s/a",
-      cwd: "/x",
-      execution: "working",
-      attention: "none",
-      mtime: 1,
-      ...over,
-    },
-    title: "Alpha",
-    projectName: "ex",
-  };
-}
-
 describe("AgentsSection", () => {
-  it("shows live agents with state, hides when idle", () => {
+  const tree = (over: Partial<ExecutionTree> = {}): ExecutionTree => ({
+    cwd: "/babylon",
+    sessionFile: "/babylon/s1.jsonl",
+    sessionId: "s1",
+    title: "Auth refactor",
+    projectName: "babylon",
+    state: "working",
+    attention: "none",
+    children: [],
+    ...over,
+  });
+
+  it("renders one root row, no count, Idle when empty", () => {
     const { rerender } = render(
-      <AgentsSection rows={[agentRow()]} activePath={null} allCwds={["/x"]} onOpen={() => {}} />
+      <AgentsSection trees={[tree()]} selectedPath={null} onOpenRoot={() => {}} />
     );
-    expect(screen.getByText("Alpha")).toBeTruthy();
+    expect(screen.getByText("Auth refactor")).toBeTruthy();
     expect(screen.getByText("Working")).toBeTruthy();
-    rerender(<AgentsSection rows={[]} activePath={null} allCwds={["/x"]} onOpen={() => {}} />);
-    expect(screen.queryByText("Alpha")).toBeNull();
+    expect(screen.queryByText(/Agents \(/)).toBeNull(); // ambiguous count removed
+    rerender(<AgentsSection trees={[]} selectedPath={null} onOpenRoot={() => {}} />);
+    expect(screen.queryByText("Auth refactor")).toBeNull();
     expect(screen.getByText("Idle.")).toBeTruthy();
   });
 
-  it("clicking an agent activates its session", async () => {
-    const onOpen = vi.fn();
-    const row = agentRow();
-    render(<AgentsSection rows={[row]} activePath={null} allCwds={["/x"]} onOpen={onOpen} />);
-    await userEvent.click(screen.getByText("Alpha"));
-    expect(onOpen).toHaveBeenCalledWith(row);
+  it("nests children under their root without extra project identity", () => {
+    render(
+      <AgentsSection
+        trees={[
+          tree({
+            children: [
+              { key: "t1", kind: "thread", label: "Explore middleware", statusLabel: "Running", state: "working" },
+              { key: "w1", kind: "workflow", label: "Release checks", statusLabel: "Paused", state: "waiting" },
+            ],
+          }),
+        ]}
+        selectedPath={null}
+        onOpenRoot={() => {}}
+      />
+    );
+    expect(screen.getByText("Explore middleware")).toBeTruthy();
+    expect(screen.getByText("Running")).toBeTruthy();
+    expect(screen.getByText("Release checks")).toBeTruthy();
+    expect(screen.getByText("Paused")).toBeTruthy();
+    // Project identity appears once (on the root), never per child.
+    expect(screen.getAllByText("babylon")).toHaveLength(1);
+    // Child rows are monitoring-only: no button/click surface.
+    expect(screen.queryByRole("button", { name: /Explore middleware/ })).toBeNull();
+  });
+
+  it("renders two project roots", () => {
+    render(
+      <AgentsSection
+        trees={[tree(), tree({ cwd: "/rot", sessionFile: "/rot/s9.jsonl", sessionId: "s9", title: "Screen parser", projectName: "rot" })]}
+        selectedPath={null}
+        onOpenRoot={() => {}}
+      />
+    );
+    expect(screen.getByText("Auth refactor")).toBeTruthy();
+    expect(screen.getByText("Screen parser")).toBeTruthy();
+  });
+
+  it("selected/viewed is a view highlight only; an executing root renders even when another session is viewed", async () => {
+    const onOpenRoot = vi.fn();
+    render(
+      <AgentsSection
+        trees={[tree()]}
+        selectedPath="/babylon/other.jsonl" // viewed session is NOT the root
+        onOpenRoot={onOpenRoot}
+      />
+    );
+    // Membership never depends on the viewed session: the executing root stays.
+    expect(screen.getByText("Auth refactor")).toBeTruthy();
+    await userEvent.click(screen.getByText("Auth refactor"));
+    expect(onOpenRoot).toHaveBeenCalledTimes(1);
+    expect(onOpenRoot.mock.calls[0]?.[0]).toMatchObject({ sessionId: "s1" });
   });
 });
