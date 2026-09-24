@@ -2223,26 +2223,15 @@ export class PiHost implements LocalPiHost {
     const design = await loadDesignState(entry.cwd, entry.runtime.session.sessionId).catch(() => null);
     return { design, stage: stageOfState(entry.cwd, design), started: true, error: null };
   }
-  async steer(message: string): Promise<void> {
-    const entry = this.activeEntry();
-    await this.commitActiveRollback(entry.sessionId);
-    return entry.runtime.session.steer(message);
-  }
-  async followUp(message: string): Promise<void> {
-    const entry = this.activeEntry();
-    await this.commitActiveRollback(entry.sessionId);
-    return entry.runtime.session.followUp(message);
-  }
-  /** Abort one session's run. Other sessions keep running untouched — this is
-   *  what the Agents dock calls to stop a background run. */
-  async abort(sessionFile?: string | null): Promise<void> {
-    const entry = this.resolveEntry(sessionFile);
+  /** Abort one session's run. Explicit execution identity — never the
+   *  foreground pointer (I8); other sessions keep running untouched. */
+  async abort(sessionFile: string): Promise<void> {
+    const entry = this.requireExecutionEntry(sessionFile);
     return entry.runtime.session.abort();
   }
-  async compact(customInstructions?: string): Promise<CompactionResult> {
-    const entry = this.activeEntry();
+  async compact(sessionFile: string, customInstructions?: string): Promise<CompactionResult> {
+    const entry = this.requireExecutionEntry(sessionFile);
     return this.enqueueTransition(entry.sessionFile, async () => {
-      await this.ensureSession();
       const session = entry.runtime.session;
       // Manual compact also refreshes the snapcompact archive so a user
       // who clicks Compact and selects "snapcompact" strategy sees a
@@ -2262,8 +2251,8 @@ export class PiHost implements LocalPiHost {
     });
   }
 
-  private async moveToExactLeaf(targetId: string | null, forEntry?: SessionEntry): Promise<void> {
-    const session = (forEntry ?? this.activeEntry()).runtime.session;
+  private async moveToExactLeaf(entry: SessionEntry, targetId: string | null): Promise<void> {
+    const session = entry.runtime.session;
     const manager = session.sessionManager;
     if (targetId === null) {
       manager.resetLeaf();
@@ -2500,11 +2489,9 @@ export class PiHost implements LocalPiHost {
     });
   }
 
-  private async commitActiveRollback(sessionId?: string | null): Promise<void> {
-    if (!sessionId && this.foregroundSessionFile) {
-      sessionId = this.sessions.get(this.foregroundSessionFile)?.sessionId ?? null;
-    }
-    if (!sessionId) return;
+  private async commitActiveRollback(sessionId: string): Promise<void> {
+    // Explicit id from the caller — no foreground fallback (I8): every
+    // production call site already holds its own session identity.
     await this.rollbacks.clearActive(sessionId).catch(() => undefined);
   }
 
@@ -2512,7 +2499,11 @@ export class PiHost implements LocalPiHost {
   // State
   // -------------------------------------------------------------------------
 
-  async getState(): Promise<AgentState> {
+  async getState(sessionFile?: string): Promise<AgentState> {
+    // Addressed read for mutation round-trips (setModel/setThinking follow
+    // up with getState(target)); the no-arg form stays foreground-shaped
+    // until the read-side cleanup.
+    if (sessionFile !== undefined) return this.getStateFor(this.requireEntry(sessionFile));
     return this.getStateFor(this.activeEntry());
   }
 
@@ -2598,10 +2589,9 @@ export class PiHost implements LocalPiHost {
       return mapped;
     });
   }
-  async setModel(provider: string, modelId: string): Promise<{ model: unknown }> {
-    const entry = this.activeEntry();
+  async setModel(sessionFile: string, provider: string, modelId: string): Promise<{ model: unknown }> {
+    const entry = this.requireExecutionEntry(sessionFile);
     return this.enqueueTransition(entry.sessionFile, async () => {
-      await this.ensureSession();
       const model = entry.services.modelRuntime.getModel(provider, modelId);
       if (!model) throw new Error(`Model not found: ${provider}/${modelId}`);
       await entry.runtime.session.setModel(model);
@@ -2609,10 +2599,9 @@ export class PiHost implements LocalPiHost {
       return { model };
     });
   }
-  async setThinking(level: string): Promise<unknown> {
-    const entry = this.activeEntry();
+  async setThinking(sessionFile: string, level: string): Promise<unknown> {
+    const entry = this.requireExecutionEntry(sessionFile);
     return this.enqueueTransition(entry.sessionFile, async () => {
-      await this.ensureSession();
       // The settings/UI surface only offers valid levels, but the daemon
       // forwards raw strings: validate before handing one to the session.
       const validated = level;
@@ -2646,10 +2635,12 @@ export class PiHost implements LocalPiHost {
       return [];
     }
   }
-  async setSessionName(name: string): Promise<unknown> {
-    const entry = this.activeEntry();
+  async setSessionName(sessionFile: string, name: string): Promise<unknown> {
+    // Metadata rename needs the retained runtime, not execution ownership
+    // (renameSession is the richer path-addressed API; this stays for
+    // compatibility until the facade cleanup).
+    const entry = this.requireEntry(sessionFile);
     return this.enqueueTransition(entry.sessionFile, async () => {
-      await this.ensureSession();
       entry.runtime.session.setSessionName(name);
       await this.commitActiveRollback(entry.runtime.session.sessionId);
       return {};
@@ -2662,6 +2653,30 @@ export class PiHost implements LocalPiHost {
       this.sessions.get(sessionFile) ??
       [...this.sessions.values()].find((entry) => resolve(entry.sessionFile) === resolve(sessionFile))
     );
+  }
+
+  /** "This retained runtime exists." Mutators never auto-open: runtime
+   *  creation/ownership transfer belongs to executionActivate alone, so a
+   *  cold historical path rejects instead of becoming a hidden activation. */
+  private requireEntry(sessionFile: string): SessionEntry {
+    if (!sessionFile) throw new Error("sessionFile is required");
+    const entry = this.findEntry(sessionFile);
+    if (!entry) throw new Error("Session runtime is not available");
+    this.touchEntry(entry);
+    return entry;
+  }
+
+  /** "This retained runtime is the project's execution session" — the guard
+   *  every runtime MUTATION uses. Path-addressing alone is not enough:
+   *  otherwise a viewed historical session could be explicitly targeted
+   *  while another session owns/does project work and still mutate state. */
+  private requireExecutionEntry(sessionFile: string): SessionEntry {
+    const entry = this.requireEntry(sessionFile);
+    const owner = this.executionByCwd.get(entry.cwd);
+    if (!owner || resolve(owner) !== resolve(entry.sessionFile)) {
+      throw new Error("This session is not the project's execution session");
+    }
+    return entry;
   }
 
   /**
@@ -2765,7 +2780,7 @@ export class PiHost implements LocalPiHost {
 
   /** Entry-scoped alias for queued bodies that already hold their target. */
   private moveToExactLeafFor(entry: SessionEntry, targetId: string | null): Promise<void> {
-    return this.moveToExactLeaf(targetId, entry);
+    return this.moveToExactLeaf(entry, targetId);
   }
 
   async getTurnChanges(entryId: string): Promise<TurnChanges> {
@@ -2800,9 +2815,8 @@ export class PiHost implements LocalPiHost {
     return this.snapshots.fileDiff(entry.cwd, checkpoint.beforeTree, checkpoint.afterTree, path);
   }
 
-  async prepareRollback(userEntryId: string): Promise<RollbackPlan> {
-    await this.ensureSession();
-    const entry = this.activeEntry();
+  async prepareRollback(sessionFile: string, userEntryId: string): Promise<RollbackPlan> {
+    const entry = this.requireExecutionEntry(sessionFile);
     const session = entry.runtime.session;
     if (session.isStreaming) throw new Error("Finish or stop the active response before rolling back");
     if (!session.sessionFile) throw new Error("Send at least one message before rolling back");
@@ -2882,13 +2896,15 @@ export class PiHost implements LocalPiHost {
     // prepared against that session and the body below refuses to run
     // against any other.
     const plan = this.rollbackPlans.get(planId);
-    const key = plan?.sessionFile ?? this.foregroundSessionFile ?? "host";
+    // The plan carries its session identity — it IS the addressed
+    // capability. No foreground fallback: a plan for a session that lost
+    // execution ownership must fail before any file is touched.
+    if (!plan || Date.now() - plan.createdAt > 10 * 60_000) throw new Error("The rollback preview expired; review it again");
+    const key = plan.sessionFile;
     return this.enqueueTransition(key, async () => {
-      await this.ensureSession();
       const livePlan = this.rollbackPlans.get(planId);
       if (!livePlan || Date.now() - livePlan.createdAt > 10 * 60_000) throw new Error("The rollback preview expired; review it again");
-      const entry = this.sessions.get(livePlan.sessionFile);
-      if (!entry) throw new Error("The session is no longer open");
+      const entry = this.requireExecutionEntry(livePlan.sessionFile);
       const session = entry.runtime.session;
       const manager = session.sessionManager;
       if (session.isStreaming) throw new Error("Finish or stop the active response before rolling back");
@@ -2954,10 +2970,9 @@ export class PiHost implements LocalPiHost {
     });
   }
 
-  async undoRollback(): Promise<{ history: HistoryProjection }> {
-    const entry = this.activeEntry();
+  async undoRollback(sessionFile: string): Promise<{ history: HistoryProjection }> {
+    const entry = this.requireExecutionEntry(sessionFile);
     return this.enqueueTransition(entry.sessionFile, async () => {
-      await this.ensureSession();
       const session = entry.runtime.session;
       const manager = session.sessionManager;
       const ledger = await this.rollbacks.load(session.sessionId);
@@ -2982,13 +2997,13 @@ export class PiHost implements LocalPiHost {
       await this.snapshots.restore(entry.cwd, redoMap);
       let navigated = false;
       try {
-        await this.moveToExactLeaf(active.previousLeafId, entry);
+        await this.moveToExactLeaf(entry, active.previousLeafId);
         navigated = true;
         await this.rollbacks.clearActive(session.sessionId);
         return { history: await this.getHistory(entry) };
       } catch (error) {
         if (navigated) {
-          await this.moveToExactLeaf(active.rollbackLeafId, entry).catch(() => undefined);
+          await this.moveToExactLeaf(entry, active.rollbackLeafId).catch(() => undefined);
         }
         await this.snapshots.restore(entry.cwd, active.restoreMap).catch(() => undefined);
         throw error;
@@ -3005,20 +3020,18 @@ export class PiHost implements LocalPiHost {
     await this.ensureSession();
     return this.activeEntry().runtime.session.getUserMessagesForForking();
   }
-  async fork(entryId: string): Promise<{ text?: string; cancelled?: boolean }> {
-    const entry = this.activeEntry();
+  async fork(sessionFile: string, entryId: string): Promise<{ text?: string; cancelled?: boolean }> {
+    const entry = this.requireExecutionEntry(sessionFile);
     return this.enqueueTransition(entry.sessionFile, async () => {
-      await this.ensureSession();
       const sourceSessionId = entry.runtime.session.sessionId;
       const r = await entry.runtime.fork(entryId);
       if (!r.cancelled) await this.rollbacks.clearActive(sourceSessionId).catch(() => undefined);
       return { text: r.selectedText, cancelled: r.cancelled };
     });
   }
-  async clone(): Promise<{ cancelled?: boolean }> {
-    const entry = this.activeEntry();
+  async clone(sessionFile: string): Promise<{ cancelled?: boolean }> {
+    const entry = this.requireExecutionEntry(sessionFile);
     return this.enqueueTransition(entry.sessionFile, async () => {
-      await this.ensureSession();
       const sourceSessionId = entry.runtime.session.sessionId;
       const leafId = entry.runtime.session.sessionManager.getLeafId();
       if (!leafId) throw new Error("no current entry selected");

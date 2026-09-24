@@ -109,7 +109,7 @@ export function createLocalRuntime(opts: {
         : undefined;
       return piHost.prompt(m, images, behavior, f);
     },
-    async abort(sessionFile?: string) { return piHost.abort(sessionFile); },
+    async abort(sessionFile: string) { return piHost.abort(sessionFile); },
     async goalControl(f: string, a: string) { return piHost.execGoalCommand(f, a); },
     async executionList() { return piHost.listProjectExecutions(); },
     async executionActivate(cwd, sessionFile) {
@@ -155,14 +155,14 @@ export function createLocalRuntime(opts: {
     async releaseSession(path: string) {
       return { released: await piHost.releaseSession(path) };
     },
-    async getState() { return piHost.getState(); },
+    async getState(sessionFile?: string) { return piHost.getState(sessionFile); },
     async getMessages() { return piHost.getMessages(); },
     async getToolOutput(id) { return piHost.getToolOutput(id); },
     async getModels() { return piHost.getModels(); },
     async warmProject(cwd) { return piHost.warmProject(cwd); },
-    async setModel(p, id) { return piHost.setModel(p, id); },
+    async setModel(f, p, id) { return piHost.setModel(f, p, id); },
     async getThinkingLevels() { return piHost.getThinkingLevels(); },
-    async setThinking(l) { return piHost.setThinking(l); },
+    async setThinking(f, l) { return piHost.setThinking(f, l); },
     async getSettings() { return piHost.getSettings(); },
     async setSettings(p) {
       // The renderer sends a partial settings object: validate it the same
@@ -170,19 +170,19 @@ export function createLocalRuntime(opts: {
       // of merging through into persistence.
       return piHost.setSettings(toSettingsPatch(p));
     },
-    async setSessionName(n) { return piHost.setSessionName(n); },
+    async setSessionName(f, n) { return piHost.setSessionName(f, n); },
     async renameSession(f, n) { return piHost.renameSession(f, n); },
-    async compact() { return piHost.compact(); },
+    async compact(f, c) { return piHost.compact(f, c); },
     async getTree() { return piHost.getTree(); },
     async getHistory() { return piHost.getHistory(); },
     async getTurnChanges(e) { return piHost.getTurnChanges(e); },
     async getTurnFileDiff(e, p) { return piHost.getTurnFileDiff(e, p); },
-    async prepareRollback(e) { return piHost.prepareRollback(e); },
+    async prepareRollback(f, e) { return piHost.prepareRollback(f, e); },
     async commitRollback(p) { return piHost.commitRollback(p); },
-    async undoRollback() { return piHost.undoRollback(); },
+    async undoRollback(f) { return piHost.undoRollback(f); },
     async getForkMessages() { return piHost.getForkMessages(); },
-    async fork(e) { return piHost.fork(e); },
-    async clone() { return piHost.clone(); },
+    async fork(f, e) { return piHost.fork(f, e); },
+    async clone(f) { return piHost.clone(f); },
     async generateCommitMessage(c) { return piHost.generateGitCommitMessage(c); },
     async getRecaps(f) { return piHost.getRecaps(f); },
     async refreshFromDisk(f) { return piHost.refreshFromDisk(f); },

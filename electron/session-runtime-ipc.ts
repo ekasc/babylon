@@ -67,12 +67,17 @@ export function registerSessionRuntimeIpc(
     return result;
   });
   handle("pideck:abort", async (_e, opts?: { sessionFile?: string }) => {
+    // Mandatory execution identity: null/empty is a protocol error, never a
+    // foreground fallback.
+    if (!opts || typeof opts.sessionFile !== "string" || opts.sessionFile.length < 1 || opts.sessionFile.length > 4096) {
+      throw new Error("sessionFile is required");
+    }
     if (isDaemonOwned()) {
       const client = requireDaemonClient();
-      const res = await client.request("pi.abort", { sessionFile: opts?.sessionFile });
+      const res = await client.request("pi.abort", { sessionFile: opts.sessionFile });
       return res.payload;
     }
-    return getRuntime().abort(opts?.sessionFile);
+    return getRuntime().abort(opts.sessionFile);
   });
   handle("pideck:goal-get", async (_e, sessionId: string, cwd: string) => {
     // The state file is the shared source of truth on this machine: the
@@ -256,13 +261,17 @@ export function registerSessionRuntimeIpc(
     }
     return getRuntime().getMessages();
   });
-  handle("pideck:get-state", async () => {
+  handle("pideck:get-state", async (_e, opts?: { sessionFile?: string }) => {
+    const sessionFile = opts?.sessionFile;
+    if (sessionFile !== undefined && (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096)) {
+      throw new Error("invalid session file");
+    }
     if (isDaemonOwned()) {
       const client = requireDaemonClient();
-      const res = await client.request("pi.getState", {});
+      const res = await client.request("pi.getState", { sessionFile });
       return res.payload;
     }
-    return getRuntime().getState();
+    return getRuntime().getState(sessionFile);
   });
   handle("pideck:get-stats", async () => {
     if (isDaemonOwned()) {

@@ -17,6 +17,14 @@ export function registerRuntimeIpc(
   },
 ): void {
   const { getRuntime, daemonOnly, getWindow, getHostReady } = deps;
+  /** Strict identity: every addressed mutator requires a real sessionFile;
+   *  no foreground/undefined fallback survives the IPC boundary. */
+  const requireSessionFile = (value: unknown): string => {
+    if (typeof value !== "string" || value.length < 1 || value.length > 4096) {
+      throw new Error("sessionFile is required");
+    }
+    return value;
+  };
   /**
    * Early-boot calls race startHost(): the renderer boots faster than the
    * login-shell import + daemon handshake, so `hostReady` may not even be
@@ -43,10 +51,14 @@ export function registerRuntimeIpc(
     return getRuntime().warmProject(cwd);
   });
   handle("pideck:get-commands", () => getRuntime().getCommands());
-  handle("pideck:set-model", (_e, provider: string, modelId: string) =>
-    getRuntime().setModel(provider, modelId)
-  );
-  handle("pideck:set-thinking", (_e, level: string) => getRuntime().setThinking(level));
+  handle("pideck:set-model", async (_e, sessionFile: unknown, provider: string, modelId: string) => {
+    const file = requireSessionFile(sessionFile);
+    return getRuntime().setModel(file, provider, modelId);
+  });
+  handle("pideck:set-thinking", async (_e, sessionFile: unknown, level: string) => {
+    const file = requireSessionFile(sessionFile);
+    return getRuntime().setThinking(file, level);
+  });
   handle("pideck:get-thinking-levels", () => getRuntime().getThinkingLevels());
   handle("pideck:list-fonts", async () => {
     const { promisify } = await import("node:util");
@@ -100,11 +112,16 @@ export function registerRuntimeIpc(
     return getRuntime().getSettings();
   });
   handle("pideck:set-settings", (_e, patch: unknown) => getRuntime().setSettings(patch));
-  handle("pideck:set-session-name", (_e, name: string) => {
+  handle("pideck:set-session-name", async (_e, sessionFile: unknown, name: string) => {
+    const file = requireSessionFile(sessionFile);
     if (typeof name !== "string" || name.length > 500) throw new Error("invalid session name");
-    return getRuntime().setSessionName(name);
+    return getRuntime().setSessionName(file, name);
   });
-  handle("pideck:compact", () => getRuntime().compact());
+  handle("pideck:compact", async (_e, sessionFile: unknown, customInstructions?: unknown) => {
+    const file = requireSessionFile(sessionFile);
+    if (customInstructions !== undefined && typeof customInstructions !== "string") throw new Error("invalid compaction instructions");
+    return getRuntime().compact(file, customInstructions);
+  });
 
   // Branching / worktrees
   handle("pideck:get-tree", () => getRuntime().getTree());
@@ -118,21 +135,29 @@ export function registerRuntimeIpc(
     if (typeof path !== "string" || path.length < 1 || path.length > 4096) throw new Error("invalid file path");
     return getRuntime().getTurnFileDiff(entryId, path);
   });
-  handle("pideck:rollback:prepare", (_e, entryId: string) => {
+  handle("pideck:rollback:prepare", async (_e, sessionFile: unknown, entryId: string) => {
+    const file = requireSessionFile(sessionFile);
     if (typeof entryId !== "string" || entryId.length < 1 || entryId.length > 200) throw new Error("invalid history entry ID");
-    return getRuntime().prepareRollback(entryId);
+    return getRuntime().prepareRollback(file, entryId);
   });
   handle("pideck:rollback:commit", (_e, planId: string) => {
     if (typeof planId !== "string" || !/^[0-9a-f-]{36}$/i.test(planId)) throw new Error("invalid rollback plan ID");
     return getRuntime().commitRollback(planId);
   });
-  handle("pideck:rollback:undo", () => getRuntime().undoRollback());
-  handle("pideck:get-fork-messages", () => getRuntime().getForkMessages());
-  handle("pideck:fork", (_e, entryId: string) => {
-    if (typeof entryId !== "string" || entryId.length < 1 || entryId.length > 200) throw new Error("invalid history entry ID");
-    return getRuntime().fork(entryId);
+  handle("pideck:rollback:undo", async (_e, sessionFile: unknown) => {
+    const file = requireSessionFile(sessionFile);
+    return getRuntime().undoRollback(file);
   });
-  handle("pideck:clone", () => getRuntime().clone());
+  handle("pideck:get-fork-messages", () => getRuntime().getForkMessages());
+  handle("pideck:fork", async (_e, sessionFile: unknown, entryId: string) => {
+    const file = requireSessionFile(sessionFile);
+    if (typeof entryId !== "string" || entryId.length < 1 || entryId.length > 200) throw new Error("invalid history entry ID");
+    return getRuntime().fork(file, entryId);
+  });
+  handle("pideck:clone", async (_e, sessionFile: unknown) => {
+    const file = requireSessionFile(sessionFile);
+    return getRuntime().clone(file);
+  });
   handle("pideck:task-list", async () => getRuntime().taskList());
   handle("pideck:task-get", async (_e, id: unknown) => {
     if (typeof id !== "string" || id.length === 0 || id.length > 200) throw new Error("invalid task id");

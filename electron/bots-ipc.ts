@@ -120,7 +120,14 @@ export function registerBotsIpc(
     }
     if (bot.model) {
       try {
-        await getHost().setModel(bot.model.provider, bot.model.modelId);
+        if (typeof path !== "string" || !path) throw new Error("bot chat path unavailable");
+        // The pin mutates the just-opened chat's model: claim it as this
+        // project's execution slot first (idle transfer is legal; a busy
+        // owner rejects and we skip the pin rather than mutating a
+        // non-owner — I4/I7).
+        const claim = await getRuntime().executionActivate(cwd, path);
+        if (!claim.ok) throw new Error("the bot chat is not this project's execution session");
+        await getHost().setModel(path, bot.model.provider, bot.model.modelId);
       } catch (err) {
         console.warn(`[pideck] bot model pin unavailable (${bot.model.provider}/${bot.model.modelId}):`, err);
       }
@@ -375,7 +382,12 @@ export function registerBotsIpc(
     }
     if (target.model) {
       try {
-        await getHost().setModel(target.model.provider, target.model.modelId);
+        if (typeof targetPath !== "string" || !targetPath) throw new Error("bot chat path unavailable");
+        // Same ownership claim as the bot-open pin: configure only the
+        // session that owns execution (or skip when another session does).
+        const claim = await getRuntime().executionActivate(targetCwd, targetPath);
+        if (!claim.ok) throw new Error("the bot chat is not this project's execution session");
+        await getHost().setModel(targetPath, target.model.provider, target.model.modelId);
       } catch (err) {
         console.warn(`[pideck] bot model pin unavailable (${target.model.provider}/${target.model.modelId}):`, err);
       }

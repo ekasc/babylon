@@ -37,6 +37,8 @@ describe("PiHost rollback integration", () => {
     await host.open({ cwd });
     const isolated = (await import("@earendil-works/pi-coding-agent")).SessionManager.create(cwd, sessionDir);
     await host.switchTo(isolated.getSessionFile()!, { cwdOverride: cwd });
+    const sessionFile = host.activeSessionFile as string;
+    await host.activateExecution(cwd, sessionFile);
 
     const start = await host.testCaptureTurnStart();
     expect(start).not.toBeNull();
@@ -65,23 +67,23 @@ describe("PiHost rollback integration", () => {
       expect.objectContaining({ entryId: userEntryId, rollbackAvailable: true }),
     ]));
 
-    const plan = await host.prepareRollback(userEntryId);
+    const plan = await host.prepareRollback(sessionFile, userEntryId);
     expect(plan).toMatchObject({ abandonedCount: 1, counts: { modified: 1 } });
     const rolled = await host.commitRollback(plan.planId);
     expect(rolled.editorText).toBe("make the bad change");
     expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("before\n");
     expect(host.session.sessionManager.getLeafId()).toBe(parentLeafId);
     expect((await host.getHistory()).activeRollback).toMatchObject({ undoAvailable: true });
-    const sessionFile = (await host.getState()).sessionFile as string;
     await host.dispose();
 
     const reopened = new PiHost({ cwd, agentDir, stateDir, onEvent: () => undefined, onStatus: () => undefined });
     await reopened.start();
     await reopened.open({ cwd, path: sessionFile });
+    await reopened.activateExecution(cwd, sessionFile);
     expect(reopened.session.sessionManager.getLeafId()).toBe(parentLeafId);
     expect((await reopened.getHistory()).activeRollback).toMatchObject({ undoAvailable: true });
 
-    await reopened.undoRollback();
+    await reopened.undoRollback(sessionFile);
     expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("after\n");
     expect(reopened.session.sessionManager.getLeafId()).toBe(assistantEntryId);
     expect((await reopened.getHistory()).activeRollback).toBeUndefined();
@@ -135,7 +137,9 @@ describe("PiHost rollback integration", () => {
     await writeFile(join(cwd, ".pi", "state", "guardrails", "decisions.jsonl"), '{"at":1}\n');
     await host.testCaptureTurnEnd(start);
     expect((await host.getHistory()).turns.find((t) => t.entryId === u1)?.changedCount).toBe(1);
-    const plan = await host.prepareRollback(u1);
+    const sessionFile2 = host.activeSessionFile as string;
+    await host.activateExecution(cwd, sessionFile2);
+    const plan = await host.prepareRollback(sessionFile2, u1);
     expect(plan.changes.map((c) => c.path)).toEqual(["file.txt"]);
 
     // Turn 2: bookkeeping writes only (the read-only turn). No card.
@@ -192,7 +196,9 @@ describe("PiHost rollback integration", () => {
     // user now immediately edits to C with no settle() / no wait, and clicks
     // Rollback. The drift guard inside commitRollback must see the changed
     // worktree and refuse; the file must remain at C.
-    const plan = await host.prepareRollback(userEntryId);
+    const sessionFile3 = host.activeSessionFile as string;
+    await host.activateExecution(cwd, sessionFile3);
+    const plan = await host.prepareRollback(sessionFile3, userEntryId);
     expect(plan).toMatchObject({ abandonedCount: 1 });
     await writeFile(join(cwd, "file.txt"), "manual-C\n");
     await expect(host.commitRollback(plan.planId)).rejects.toThrow(/changed/i);
@@ -263,6 +269,54 @@ describe("PiHost rollback integration", () => {
     // signals: both must be false.
     expect(turn?.rollbackAvailable).toBe(false);
     expect(turn?.checkpointAvailable).toBe(false);
+    await host.dispose();
+  }, 30_000);
+
+  it("refuses to commit a plan for a session that no longer owns execution", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pideck-rollback-ownership-"));
+    roots.push(root);
+    const cwd = join(root, "project");
+    const agentDir = join(root, "agent");
+    const stateDir = join(root, "state");
+    const sessionDir = join(root, "sessions");
+    await mkdir(cwd);
+    await mkdir(agentDir);
+    await git(cwd, ["init"]);
+    await writeFile(join(cwd, "file.txt"), "before\n");
+    await git(cwd, ["add", "file.txt"]);
+
+    const host = new PiHost({ cwd, agentDir, stateDir, onEvent: () => undefined, onStatus: () => undefined });
+    await host.start();
+    await host.open({ cwd });
+    const isolated = (await import("@earendil-works/pi-coding-agent")).SessionManager.create(cwd, sessionDir);
+    await host.switchTo(isolated.getSessionFile()!, { cwdOverride: cwd });
+    const sessionFile = host.activeSessionFile as string;
+    await host.activateExecution(cwd, sessionFile);
+
+    // Real turn → checkpoint → rollback plan against the OWNER session.
+    const start = await host.testCaptureTurnStart();
+    if (!start || "skipped" in start) throw new Error("expected a turn checkpoint");
+    const userEntryId = host.session.sessionManager.appendMessage({
+      role: "user",
+      content: [{ type: "text", text: "make the change" }],
+      timestamp: Date.now(),
+    });
+    await writeFile(join(cwd, "file.txt"), "after\n");
+    await host.testCaptureTurnEnd(start);
+    const plan = await host.prepareRollback(sessionFile, userEntryId);
+
+    // Ownership moves: release A, another session owns the project.
+    expect(await host.deactivateExecution(cwd, sessionFile)).toBe(true);
+    const otherFile = (await import("@earendil-works/pi-coding-agent")).SessionManager.create(cwd, sessionDir).getSessionFile()!;
+    await host.activateExecution(cwd, otherFile);
+    // The user re-VIEWS A (its runtime comes back through the view path,
+    // no ownership): the stale Confirm now has a retained runtime but no
+    // execution right — must fail before touching project files.
+    await host.open({ path: sessionFile, cwd });
+    await writeFile(join(cwd, "file.txt"), "manual-edit\n");
+
+    await expect(host.commitRollback(plan.planId)).rejects.toThrow(/execution session/);
+    expect(await readFile(join(cwd, "file.txt"), "utf8")).toBe("manual-edit\n");
     await host.dispose();
   }, 30_000);
 });

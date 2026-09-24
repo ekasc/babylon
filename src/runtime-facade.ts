@@ -43,34 +43,34 @@ export interface RuntimeFacade {
   openSession(opts: { path?: string; cwd: string; requestId?: number; systemPrompt?: string | null }): Promise<unknown>;
   /** Explicit sessionFile wins over the foreground pointer (send-while-switching). */
   prompt(message: string, images?: unknown[], streamingBehavior?: string, sessionFile?: string | null): Promise<unknown>;
-  abort(sessionFile?: string): Promise<unknown>;
+  abort(sessionFile: string): Promise<unknown>;
   releaseSession?(path: string): Promise<{ released: boolean }>;
-  getState(): Promise<AgentState | null>;
+  getState(sessionFile?: string): Promise<AgentState | null>;
   getMessages(): Promise<unknown[]>;
   getToolOutput(toolCallId: string): Promise<unknown>;
   getModels(): Promise<unknown[]>;
   /** Idempotent pre-warm of a project (rollback shadow + model runtime). */
   warmProject(cwd: string): Promise<unknown>;
-  setModel(provider: string, modelId: string): Promise<unknown>;
+  setModel(sessionFile: string, provider: string, modelId: string): Promise<unknown>;
   getThinkingLevels(): Promise<string[]>;
-  setThinking(level: string): Promise<unknown>;
+  setThinking(sessionFile: string, level: string): Promise<unknown>;
   getSettings(): Promise<unknown>;
   setSettings(patch: unknown): Promise<unknown>;
-  setSessionName(name: string): Promise<unknown>;
+  setSessionName(sessionFile: string, name: string): Promise<unknown>;
   /** Path-addressed rename: retained sessions go through their live runtime,
    *  never-opened files get a session_info append. Never moves foreground. */
   renameSession(sessionFile: string, name: string): Promise<unknown>;
-  compact(): Promise<unknown>;
+  compact(sessionFile: string, customInstructions?: string): Promise<unknown>;
   getTree(): Promise<unknown>;
   getHistory(): Promise<HistoryProjection>;
   getTurnChanges(entryId: string): Promise<TurnChanges>;
   getTurnFileDiff(entryId: string, path: string): Promise<TurnFileDiff>;
-  prepareRollback(entryId: string): Promise<RollbackPlan>;
+  prepareRollback(sessionFile: string, entryId: string): Promise<RollbackPlan>;
   commitRollback(planId: string): Promise<{ editorText: string; history: HistoryProjection }>;
-  undoRollback(): Promise<{ history: HistoryProjection }>;
+  undoRollback(sessionFile: string): Promise<{ history: HistoryProjection }>;
   getForkMessages(): Promise<unknown[]>;
-  fork(entryId: string): Promise<{ text?: string; cancelled?: boolean }>;
-  clone(): Promise<{ cancelled?: boolean }>;
+  fork(sessionFile: string, entryId: string): Promise<{ text?: string; cancelled?: boolean }>;
+  clone(sessionFile: string): Promise<{ cancelled?: boolean }>;
   generateCommitMessage(context: PreparedCommitContext): Promise<GeneratedCommitMessage>;
   getRecaps(sessionFile: string): Promise<unknown>;
   refreshFromDisk(sessionFile: string): Promise<boolean>;

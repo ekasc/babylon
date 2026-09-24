@@ -418,6 +418,24 @@ describe("babylon daemon server", () => {
     expect(ev.payload).toEqual(execution);
   });
 
+  it("rejects addressed mutators with a missing sessionFile", async () => {
+    const piHost = fakePiHost({ setModel: async () => ({ model: null }) });
+    const server = await start({ piHost });
+    const port = (server.address() as { port: number }).port;
+    const socket = await connect(port);
+    const r = reader(socket);
+    // Missing identity is a protocol error, never a foreground fallback.
+    await request(socket, "pi.setModel", { provider: "p", modelId: "m" });
+    const err = await r.next("error");
+    expect(String((err.payload as { error?: string }).error)).toMatch(/requires \{ sessionFile, provider, modelId \}/);
+    await request(socket, "pi.abort", {});
+    const err2 = await r.next("error");
+    expect(String((err2.payload as { error?: string }).error)).toMatch(/requires \{ sessionFile \}/);
+    await request(socket, "pi.undoRollback", { sessionFile: "" });
+    const err3 = await r.next("error");
+    expect(String((err3.payload as { error?: string }).error)).toMatch(/requires \{ sessionFile \}/);
+  });
+
   it("serves pi.executionDeactivate as { released }", async () => {
     const seen: Array<[string, string]> = [];
     const piHost = fakePiHost({

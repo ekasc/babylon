@@ -86,13 +86,13 @@ export function registerWorktreeIpc(
 
       let worktreePath: string | undefined;
       try {
-        const cloneRes = await getRuntime().clone();
+        const cloneRes = await getRuntime().clone(before.sessionFile);
         if (cloneRes?.cancelled) throw new Error("worktree cancelled by extension");
         worktreePath = (await getRuntime().getState())?.sessionFile ?? undefined;
         if (!worktreePath || worktreePath === originalPath) throw new Error("clone did not produce a session file");
 
         const safeName = sanitizeWorktreeName(opts.name) || `exp-${Date.now().toString(36)}`;
-        await getRuntime().setSessionName(`worktree: ${safeName}`);
+        await getRuntime().setSessionName(worktreePath, `worktree: ${safeName}`);
         const afterNameState = await getRuntime().getState();
         await ensureClonedSessionFile(worktreePath, originalPath, getActiveCwd(), afterNameState?.sessionId);
         let workCwd = getActiveCwd();

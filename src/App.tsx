@@ -37,6 +37,7 @@ import {
 import type { ProjectExecution } from "./execution";
 import { clampHard, clampWithRubberband } from "./lib/gesture-math";
 import { performSend, type SendExecutionDeps, type SendStage } from "./lib/send-execution";
+import { captureTargetThen } from "./lib/confirm-target";
 import { performCloseTab } from "./lib/close-tab";
 import { deriveExecutionTrees, openExecutionRoot, type ExecutionTree } from "./lib/execution-tree";
 import {
@@ -1774,12 +1775,16 @@ export default function App() {
   );
 
   const abort = useCallback(async () => {
+    // Capture BEFORE the call: the viewed session is the only legal
+    // target — no foreground/status fallback (I7/I8).
+    const target = viewedPathRef.current;
+    if (!target) return;
     try {
-      await bridge.abort(viewedSessionPath ?? status.sessionPath ?? undefined);
+      await bridge.abort(target);
     } catch {
       /* ignore */
     }
-  }, [viewedSessionPath, status.sessionPath]);
+  }, []);
 
   // Stop a live subagent/thread/workflow from its LaunchCard. Routes to the
   // correct bridge control by run kind; the store flips the card to "stopped"
@@ -1799,10 +1804,16 @@ export default function App() {
 
   const setModel = useCallback(
     async (provider: string, modelId: string) => {
+      // Capture identity first; the backend enforces execution ownership.
+      const target = viewedPathRef.current;
+      if (!target) {
+        toast("error", "No session is open");
+        return;
+      }
       try {
         const prev = agentState?.model;
-        await bridge.setModel(provider, modelId);
-        setAgentState(await bridge.getState());
+        await bridge.setModel(target, provider, modelId);
+        setAgentState(await bridge.getState(target));
         // In-chat alert when the live session's model actually changes.
         // Skipped with no active session, and when re-selecting the same model.
         if (
@@ -1822,9 +1833,14 @@ export default function App() {
 
   const setThinking = useCallback(
     async (level: string) => {
+      const target = viewedPathRef.current;
+      if (!target) {
+        toast("error", "No session is open");
+        return;
+      }
       try {
-        await bridge.setThinking(level);
-        setAgentState(await bridge.getState());
+        await bridge.setThinking(target, level);
+        setAgentState(await bridge.getState(target));
       } catch (e) {
         toast("error", errorMessage(e, "thinking level change failed"));
       }
@@ -1835,17 +1851,26 @@ export default function App() {
   // Theme is owned by useTheme (Settings → Appearance).
 
   const compact = useCallback(async () => {
+    const target = viewedPathRef.current;
+    if (!target) return;
     try {
-      await bridge.compact();
+      await bridge.compact(target);
     } catch (e) {
       toast("error", errorMessage(e, "compaction failed"));
     }
   }, [toast]);
 
   const forkCurrent = useCallback(async () => {
-    if (!(await confirmAction({ title: "Fork the current session into a separate session?", message: "The current session remains preserved.", confirmLabel: "Fork" }))) return;
+    // Capture BEFORE the confirm dialog: navigating during the modal must
+    // not retarget the fork (confirm-target contract).
+    const captured = await captureTargetThen(
+      () => viewedPathRef.current,
+      () => confirmAction({ title: "Fork the current session into a separate session?", message: "The current session remains preserved.", confirmLabel: "Fork" }),
+      async (target) => target
+    );
+    if (!captured) return;
     try {
-      const result = await bridge.clone();
+      const result = await bridge.clone(captured);
       if (result.cancelled) return;
       toast("info", "Forked current session");
       await hydrate();
@@ -2047,7 +2072,16 @@ export default function App() {
   // Stable ChatView props (its `items` change per token, but unrelated App
   // renders must not re-render the transcript subtree).
   const chatOnNeedEarlier = useCallback(() => void loadEarlier(), [loadEarlier]);
-  const chatOnRollback = useCallback((entryId: string) => void prepareRollback(entryId), [prepareRollback]);
+  const chatOnRollback = useCallback(
+    (entryId: string) => {
+      // Destructive-op target is the VIEWED session, captured now — never
+      // re-read after prepare's awaits.
+      const target = viewedPathRef.current;
+      if (!target) return;
+      void prepareRollback(target, entryId);
+    },
+    [prepareRollback]
+  );
   // Quote in composer: assistant selection arrives pre-formatted as a
   // blockquote and appends to the draft (never replaces typed text).
   const chatOnQuote = useCallback((text: string) => {
@@ -2714,8 +2748,14 @@ export default function App() {
                     if (activeSideTab) closeSideTab(activeSideTab);
                   }}
                   refreshToken={historyRevision}
-                  onRollback={(entryId) => void prepareRollback(entryId)}
-                  onUndoRollback={() => void undoRollback()}
+                  onRollback={(entryId) => {
+                    const target = viewedPathRef.current;
+                    if (target) void prepareRollback(target, entryId);
+                  }}
+                  onUndoRollback={() => {
+                    const target = viewedPathRef.current;
+                    if (target) void undoRollback(target);
+                  }}
                   onForkCurrent={() => void forkCurrent()}
                   toast={toast}
                 />

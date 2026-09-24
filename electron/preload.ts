@@ -58,7 +58,7 @@ const api: Bridge = {
 
   prompt: (message: string, images?, streamingBehavior?: "steer" | "followUp", sessionFile?: string | null) =>
     ipcRenderer.invoke("pideck:prompt", message, images, streamingBehavior, sessionFile ?? undefined),
-  abort: (sessionFile?: string) => ipcRenderer.invoke("pideck:abort", { sessionFile }),
+  abort: (sessionFile: string) => ipcRenderer.invoke("pideck:abort", { sessionFile }),
   goalGet: (sessionId: string, cwd: string) => ipcRenderer.invoke("pideck:goal-get", sessionId, cwd),
   goalControl: (sessionFile: string, args: string) => ipcRenderer.invoke("pideck:goal-control", { sessionFile, args }),
   executionList: () => ipcRenderer.invoke("pideck:execution-list"),
@@ -77,7 +77,7 @@ const api: Bridge = {
   refreshSession: (path: string): Promise<boolean> => ipcRenderer.invoke("pideck:refresh-session", path),
 
   getMessages: () => ipcRenderer.invoke("pideck:get-messages"),
-  getState: () => ipcRenderer.invoke("pideck:get-state"),
+  getState: (sessionFile?: string) => ipcRenderer.invoke("pideck:get-state", { sessionFile }),
   getStats: () => ipcRenderer.invoke("pideck:get-stats"),
   gitStatus: (cwd: string) => ipcRenderer.invoke("pideck:git-status", cwd),
   gitStatusDetails: (cwd: string) => ipcRenderer.invoke("pideck:git-status-details", cwd),
@@ -104,14 +104,14 @@ const api: Bridge = {
   getModels: () => ipcRenderer.invoke("pideck:get-models"),
   warmProject: (cwd: string) => ipcRenderer.invoke("pideck:warm-project", cwd),
   getCommands: () => ipcRenderer.invoke("pideck:get-commands"),
-  setModel: (provider: string, modelId: string) =>
-    ipcRenderer.invoke("pideck:set-model", provider, modelId),
-  setThinking: (level: string) => ipcRenderer.invoke("pideck:set-thinking", level),
+  setModel: (sessionFile: string, provider: string, modelId: string) =>
+    ipcRenderer.invoke("pideck:set-model", sessionFile, provider, modelId),
+  setThinking: (sessionFile: string, level: string) => ipcRenderer.invoke("pideck:set-thinking", sessionFile, level),
   getThinkingLevels: (): Promise<string[]> => ipcRenderer.invoke("pideck:get-thinking-levels"),
   listFonts: (): Promise<string[]> => ipcRenderer.invoke("pideck:list-fonts"),
-  setSessionName: (name: string) => ipcRenderer.invoke("pideck:set-session-name", name),
+  setSessionName: (sessionFile: string, name: string) => ipcRenderer.invoke("pideck:set-session-name", sessionFile, name),
   renameSession: (path: string, name: string) => ipcRenderer.invoke("pideck:rename-session", { path, name }),
-  compact: () => ipcRenderer.invoke("pideck:compact"),
+  compact: (sessionFile: string, customInstructions?: string) => ipcRenderer.invoke("pideck:compact", sessionFile, customInstructions),
   getSettings: () => ipcRenderer.invoke("pideck:get-settings"),
   setSettings: (patch) => ipcRenderer.invoke("pideck:set-settings", patch),
 
@@ -121,12 +121,12 @@ const api: Bridge = {
   getTurnChanges: (entryId: string) => ipcRenderer.invoke("pideck:turn-changes", entryId),
   getTurnFileDiff: (entryId: string, path: string) =>
     ipcRenderer.invoke("pideck:turn-file-diff", entryId, path),
-  prepareRollback: (entryId: string) => ipcRenderer.invoke("pideck:rollback:prepare", entryId),
+  prepareRollback: (sessionFile: string, entryId: string) => ipcRenderer.invoke("pideck:rollback:prepare", sessionFile, entryId),
   commitRollback: (planId: string) => ipcRenderer.invoke("pideck:rollback:commit", planId),
-  undoRollback: () => ipcRenderer.invoke("pideck:rollback:undo"),
+  undoRollback: (sessionFile: string) => ipcRenderer.invoke("pideck:rollback:undo", sessionFile),
   getForkMessages: () => ipcRenderer.invoke("pideck:get-fork-messages"),
-  fork: (entryId: string) => ipcRenderer.invoke("pideck:fork", entryId),
-  clone: () => ipcRenderer.invoke("pideck:clone"),
+  fork: (sessionFile: string, entryId: string) => ipcRenderer.invoke("pideck:fork", sessionFile, entryId),
+  clone: (sessionFile: string) => ipcRenderer.invoke("pideck:clone", sessionFile),
   taskList: () => ipcRenderer.invoke("pideck:task-list"),
   taskGet: (id: string) => ipcRenderer.invoke("pideck:task-get", id),
   taskSpawn: (taskId: string, command: string, cwd: string) =>

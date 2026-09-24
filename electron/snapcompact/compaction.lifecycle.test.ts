@@ -87,6 +87,8 @@ describe("snapcompact lifecycle regression (real PiHost.compact)", () => {
     const sm0 = SessionManager.create(cwd, join(root, "sessions"));
     sessionFile = sm0.getSessionFile()!;
     await host.switchTo(sessionFile, { cwdOverride: cwd });
+    // Addressed mutators require execution ownership of the target chat.
+    await host.activateExecution(cwd, sessionFile);
 
     // Ensure vision model with context window and fake auth so Pi's compact does not require real LLM
     const model = host.session.model!;
@@ -133,7 +135,7 @@ describe("snapcompact lifecycle regression (real PiHost.compact)", () => {
     const beforeTokens = beforeStats.contextUsage!.tokens;
 
     // 2. Run actual PiHost.compact
-    const result = await host.compact();
+    const result = await host.compact(sessionFile);
     expect(result).toBeDefined();
     const resultDetails = wireOf(result.details);
     expect(wireStr(resultDetails, "snapcompactGeneration")).toBeDefined();

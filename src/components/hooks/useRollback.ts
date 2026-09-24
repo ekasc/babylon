@@ -15,9 +15,9 @@ export function useRollback(deps: {
   const [rollbackPlan, setRollbackPlan] = useState<RollbackPlan | null>(null);
   const [rollbackBusy, setRollbackBusy] = useState(false);
 
-  const prepareRollback = useCallback(async (entryId: string) => {
+  const prepareRollback = useCallback(async (sessionFile: string, entryId: string) => {
     try {
-      setRollbackPlan(await bridge.prepareRollback(entryId));
+      setRollbackPlan(await bridge.prepareRollback(sessionFile, entryId));
     } catch (error) {
       toast("error", errorMessage(error, "rollback is unavailable"));
     }
@@ -41,11 +41,11 @@ export function useRollback(deps: {
     }
   }, [rollbackBusy, rollbackPlan, hydrate, toast]);
 
-  const undoRollback = useCallback(async () => {
+  const undoRollback = useCallback(async (sessionFile: string) => {
     if (rollbackBusy) return;
     setRollbackBusy(true);
     try {
-      const result = await bridge.undoRollback();
+      const result = await bridge.undoRollback(sessionFile);
       setHistory(result.history);
       setHistoryRevision((revision) => revision + 1);
       setDraftRequest({ id: Date.now(), text: "" });

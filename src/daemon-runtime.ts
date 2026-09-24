@@ -283,7 +283,7 @@ export function createDaemonRuntime(client: DaemonClient): RuntimeFacade {
       const res = await client.request("pi.prompt", { message: m, images: i, streamingBehavior: s, sessionFile: f ?? undefined });
       return res.payload;
     },
-    async abort(sessionFile?: string) {
+    async abort(sessionFile: string) {
       const res = await client.request("pi.abort", { sessionFile });
       return res.payload;
     },
@@ -315,8 +315,8 @@ export function createDaemonRuntime(client: DaemonClient): RuntimeFacade {
       const res = await client.request("pi.designBeginPrompt", { sessionFile: f, subject: s, message: m, images: i, streamingBehavior: b });
       return unwrapDesignBeginResult(res.payload, "pi.designBeginPrompt");
     },
-    async getState() {
-      const res = await client.request("pi.getState", {});
+    async getState(sessionFile?: string) {
+      const res = await client.request("pi.getState", { sessionFile });
       return res.payload;
     },
     async getMessages() {
@@ -335,16 +335,16 @@ export function createDaemonRuntime(client: DaemonClient): RuntimeFacade {
       const res = await client.request("pi.warmProject", { cwd });
       return res.payload;
     },
-    async setModel(p, id) {
-      const res = await client.request("pi.setModel", { provider: p, modelId: id });
+    async setModel(f, p, id) {
+      const res = await client.request("pi.setModel", { sessionFile: f, provider: p, modelId: id });
       return res.payload;
     },
     async getThinkingLevels() {
       const res = await client.request("pi.getThinkingLevels", {});
       return (res.payload as { levels?: string[] }).levels ?? [];
     },
-    async setThinking(l) {
-      const res = await client.request("pi.setThinking", { level: l });
+    async setThinking(f, l) {
+      const res = await client.request("pi.setThinking", { sessionFile: f, level: l });
       return res.payload;
     },
     async getSettings() {
@@ -355,16 +355,16 @@ export function createDaemonRuntime(client: DaemonClient): RuntimeFacade {
       const res = await client.request("pi.setSettings", { patch: p });
       return res.payload;
     },
-    async setSessionName(n) {
-      const res = await client.request("pi.setSessionName", { name: n });
+    async setSessionName(f, n) {
+      const res = await client.request("pi.setSessionName", { sessionFile: f, name: n });
       return res.payload;
     },
     async renameSession(f, n) {
       const res = await client.request("pi.renameSession", { sessionFile: f, name: n });
       return res.payload;
     },
-    async compact() {
-      const res = await client.request("pi.compact", {});
+    async compact(f, c) {
+      const res = await client.request("pi.compact", { sessionFile: f, customInstructions: c });
       return res.payload;
     },
     async getTree() {
@@ -383,8 +383,8 @@ export function createDaemonRuntime(client: DaemonClient): RuntimeFacade {
       const res = await client.request("pi.getTurnFileDiff", { entryId: e, path: p });
       return toTurnFileDiff(res.payload, "pi.getTurnFileDiff");
     },
-    async prepareRollback(e) {
-      const res = await client.request("pi.prepareRollback", { entryId: e });
+    async prepareRollback(f, e) {
+      const res = await client.request("pi.prepareRollback", { sessionFile: f, entryId: e });
       return toRollbackPlan(res.payload, "pi.prepareRollback");
     },
     async commitRollback(p) {
@@ -394,8 +394,8 @@ export function createDaemonRuntime(client: DaemonClient): RuntimeFacade {
         return { editorText: reqStr(record, "pi.commitRollback", "editorText"), history: toHistoryProjection(record.history, "pi.commitRollback") };
       }
     },
-    async undoRollback() {
-      const res = await client.request("pi.undoRollback", {});
+    async undoRollback(f) {
+      const res = await client.request("pi.undoRollback", { sessionFile: f });
       {
         const record = asRecord(res.payload, "pi.undoRollback");
         return { history: toHistoryProjection(record.history, "pi.undoRollback") };
@@ -405,8 +405,8 @@ export function createDaemonRuntime(client: DaemonClient): RuntimeFacade {
       const res = await client.request("pi.getForkMessages", {});
       return (res.payload as { messages?: unknown[] }).messages ?? [];
     },
-    async fork(e) {
-      const res = await client.request("pi.fork", { entryId: e });
+    async fork(f, e) {
+      const res = await client.request("pi.fork", { sessionFile: f, entryId: e });
       {
         const record = asRecord(res.payload, "pi.fork");
         const text = record.text;
@@ -416,8 +416,8 @@ export function createDaemonRuntime(client: DaemonClient): RuntimeFacade {
         return { ...(typeof text === "string" ? { text } : {}), ...(typeof cancelled === "boolean" ? { cancelled } : {}) };
       }
     },
-    async clone() {
-      const res = await client.request("pi.clone", {});
+    async clone(f) {
+      const res = await client.request("pi.clone", { sessionFile: f });
       {
         const record = asRecord(res.payload, "pi.clone");
         const cancelled = record.cancelled;

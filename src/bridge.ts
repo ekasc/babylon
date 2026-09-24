@@ -604,7 +604,7 @@ export interface Bridge {
   prompt(message: string, images?: PromptImage[], streamingBehavior?: "steer" | "followUp", sessionFile?: string | null): Promise<unknown>;
   /** Abort one session's run (defaults to the foreground session). Other
    *  sessions keep running untouched. */
-  abort(sessionFile?: string): Promise<unknown>;
+  abort(sessionFile: string): Promise<unknown>;
   /** Read a session's durable goal (null when none is set). */
   goalGet(sessionId: string, cwd: string): Promise<{ goal: DurableGoalState | null }>;
   /** Run a `/goal …` control invocation; resolves with the fresh durable goal. */
@@ -640,7 +640,7 @@ export interface Bridge {
   onCanvasScenes(cb: (scenes: CanvasSceneSummary[]) => void): () => void;
 
   getMessages(): Promise<unknown[]>;
-  getState(): Promise<AgentState | null>;
+  getState(sessionFile?: string): Promise<AgentState | null>;
   getStats(): Promise<SessionStats | null>;
   gitStatus(cwd: string): Promise<GitStatusResult | null>;
   gitStatusDetails(cwd: string): Promise<GitStatusDetails>;
@@ -666,25 +666,25 @@ export interface Bridge {
   /** Best-effort pre-warm of a project before its first session. */
   warmProject(cwd: string): Promise<{ warmed: boolean }>;
   getCommands(): Promise<CommandInfo[]>;
-  setModel(provider: string, modelId: string): Promise<unknown>;
-  setThinking(level: string): Promise<unknown>;
+  setModel(sessionFile: string, provider: string, modelId: string): Promise<unknown>;
+  setThinking(sessionFile: string, level: string): Promise<unknown>;
   getThinkingLevels(): Promise<string[]>;
   listFonts(): Promise<string[]>;
-  setSessionName(name: string): Promise<unknown>;
+  setSessionName(sessionFile: string, name: string): Promise<unknown>;
   /** Path-addressed rename (any session, no need to open it first). */
   renameSession(path: string, name: string): Promise<unknown>;
-  compact(): Promise<unknown>;
+  compact(sessionFile: string, customInstructions?: string): Promise<unknown>;
 
   getTree(): Promise<{ rows: SessionTreeRow[]; leafId: string | null }>;
   getHistory(): Promise<HistoryProjection>;
   getTurnChanges(entryId: string): Promise<TurnChanges>;
   getTurnFileDiff(entryId: string, path: string): Promise<TurnFileDiff>;
-  prepareRollback(entryId: string): Promise<RollbackPlan>;
+  prepareRollback(sessionFile: string, entryId: string): Promise<RollbackPlan>;
   commitRollback(planId: string): Promise<{ editorText: string; history: HistoryProjection }>;
-  undoRollback(): Promise<{ history: HistoryProjection }>;
+  undoRollback(sessionFile: string): Promise<{ history: HistoryProjection }>;
   getForkMessages(): Promise<{ entryId: string; text: string }[]>;
-  fork(entryId: string): Promise<{ text?: string; cancelled?: boolean }>;
-  clone(): Promise<{ cancelled?: boolean }>;
+  fork(sessionFile: string, entryId: string): Promise<{ text?: string; cancelled?: boolean }>;
+  clone(sessionFile: string): Promise<{ cancelled?: boolean }>;
 
   taskList(): Promise<Task[]>;
   taskGet(id: string): Promise<Task | null>;

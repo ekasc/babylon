@@ -421,15 +421,29 @@ describe("PiHost independent session execution", () => {
       const fileB = await makeSessionFile(b.cwd);
       await host.open({ path: fileA, cwd: a.cwd });
       await host.open({ path: fileB, cwd: b.cwd });
-      // Unknown model fails before touching anything: A keeps its state.
-      await expect(host.setModel("nope", "missing")).rejects.toThrow(/Model not found/);
+      // Each project's chat owns its own execution slot (I1): mutations
+      // require the addressed session to BE the owner, never the foreground.
+      await host.activateExecution(a.cwd, fileA);
+      await host.activateExecution(b.cwd, fileB);
+      // Unknown model fails before touching anything: B keeps its state.
+      await expect(host.setModel(fileB, "nope", "missing")).rejects.toThrow(/Model not found/);
       const stateB = await host.getState();
       expect(stateB.sessionFile).toBe(fileB);
       // Idle aborts resolve without affecting the other runtime.
       await host.abort(fileA);
       await host.abort(fileB);
+      // A same-project session that is NOT the owner is rejected outright
+      // (never "mutate foreground", never "mutate the other session").
+      const fileA2 = await makeSessionFile(a.cwd);
+      await host.open({ path: fileA2, cwd: a.cwd });
+      await expect(host.compact(fileA2)).rejects.toThrow(/execution session/);
+      // setModel has the same gate: a non-owner address is rejected, never
+      // redirected to whichever session happens to be foreground.
+      await expect(host.setModel(fileA2, "nope", "missing")).rejects.toThrow(/execution session/);
+      // Addressing the owner itself proceeds past the ownership gate.
+      await expect(host.compact(fileA)).rejects.toThrow(/Nothing to compact/);
       const sessions = host.testSessions();
-      expect(sessions.size).toBe(2);
+      expect(sessions.size).toBe(3);
     } finally {
       await host.dispose();
     }
