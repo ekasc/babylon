@@ -33,6 +33,7 @@ function makeBridge(over: Partial<BridgeMock> = {}): BridgeMock {
     beginDesignPrompt: vi.fn<SendBridge["beginDesignPrompt"]>(async () => ({
       design: null,
       stage: "elicit" as const,
+      maxRounds: 3,
       started: true,
       error: null,
     })),

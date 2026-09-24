@@ -86,6 +86,44 @@ export async function persistReviewShots(
   return shots;
 }
 
+/** The newest completed review, read back from disk.
+ *
+ *  This is the only authority for "which round are we on". A capture that
+ *  crashed half way leaves no `review.json`, so it can never be counted — the
+ *  label cannot claim a round that never happened. */
+export async function latestReview(
+  cwd: string,
+  slug: string
+): Promise<{ round: number; verdict: "pass" | "fail"; escalated: boolean } | null> {
+  const dir = reviewsDir(cwd, slug);
+  if (!existsSync(dir)) return null;
+  const entries = await fsp.readdir(dir);
+  let latest: { round: number; verdict: "pass" | "fail"; escalated: boolean } | null = null;
+  for (const entry of entries) {
+    const match = /^round-(\d+)$/.exec(entry);
+    if (!match) continue;
+    const round = Number(match[1]);
+    try {
+      const record = JSON.parse(await fsp.readFile(join(dir, entry, "review.json"), "utf-8")) as {
+        round?: unknown;
+        verdict?: unknown;
+        escalated?: unknown;
+      };
+      if (typeof record.round !== "number") continue;
+      if (record.verdict !== "pass" && record.verdict !== "fail") continue;
+      if (latest && record.round <= latest.round) continue;
+      latest = {
+        round: record.round,
+        verdict: record.verdict,
+        escalated: record.escalated === true,
+      };
+    } catch {
+      // A half-written round is not a round: skip it rather than guess.
+    }
+  }
+  return latest;
+}
+
 /** Record one judged round: the machine-readable record plus a human-readable
  *  log entry, so the design log and the review surface never disagree. */
 export async function recordDesignReview(input: {

@@ -37,6 +37,31 @@ describe("design prompts", () => {
     expect(DIRECTION_TEMPLATE).toContain("evolve");
     expect(DIRECTION_TEMPLATE).toContain("rethink");
   });
+  it("reads before it asks, and caps the interview at two blockers", () => {
+    const elicit = renderDesignSystemPrompt(state, "elicit");
+    // The repo answers most of the brief: investigate first.
+    expect(elicit).toContain("reading the repository first");
+    expect(elicit).toContain("Infer from the repository");
+    expect(elicit).toContain("Never ask what you just read");
+    expect(elicit).toContain("at most TWO blocking questions");
+    // The intent decides how much freedom the work has.
+    expect(elicit).toContain("EXTEND");
+    expect(elicit).toContain("EVOLVE");
+    expect(elicit).toContain("RETHINK");
+    // The checklist is gone: the follow-up asks for decisions, not categories.
+    const followUp = renderStageFollowUp(state, "elicit");
+    expect(followUp).toContain("at most TWO blocking questions");
+    expect(followUp).toContain("EXTEND");
+    expect(followUp).not.toContain("5. required content");
+    // The brief records the intent and the system to preserve.
+    expect(BRIEF_TEMPLATE).toContain("## Intent");
+    expect(BRIEF_TEMPLATE).toContain("## Existing system to preserve");
+  });
+
+  it("asks the model to report its build phase", () => {
+    expect(renderDesignSystemPrompt(state, "build")).toContain("design_set_phase");
+  });
+
   it("elicitation happens in plain chat, never via dialogs or commands", () => {
     expect(renderStageFollowUp(state, "elicit")).not.toContain("Use ask_question");
     expect(renderStageFollowUp(state, "elicit")).not.toContain("/design approve-brief");

@@ -9,7 +9,7 @@ import { wireOf, wireStr } from "../src/store";
 import type { DaemonClient } from "../src/daemon-client";
 import type { PiHost } from "./pi-host";
 import { loadSessionGoal } from "./goal-mode/store";
-import { designDir, loadDesignState, stageOfState, unwrapDesignBeginResult, unwrapDesignResult } from "./design-mode/store";
+import { designDir, JUDGE_MAX_ROUNDS, loadDesignState, stageOfState, unwrapDesignBeginResult, unwrapDesignResult } from "./design-mode/store";
 import { unwrapDurableGoalResult, unwrapGoalBeginResult } from "../src/lib/durable-goal";
 import { unwrapExecutionActivateResult, unwrapExecutionDeactivateResult, unwrapExecutionListResult } from "../src/execution";
 
@@ -230,7 +230,7 @@ export function registerSessionRuntimeIpc(
     // source of truth, read straight off disk in both modes.
     if (typeof sessionId !== "string" || typeof cwd !== "string") throw new Error("invalid design request");
     const design = await loadDesignState(cwd, sessionId);
-    return { design, stage: stageOfState(cwd, design) };
+    return { design, stage: stageOfState(cwd, design), maxRounds: JUDGE_MAX_ROUNDS };
   });
   // Review screenshots are written next to the design artifacts and are read
   // back on demand: the transcript keeps only the path, so a session log never

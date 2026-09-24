@@ -250,7 +250,7 @@ describe("babylon daemon server", () => {
     const piHost = fakePiHost({
       beginGoalPrompt: async (sessionFile: string, objective: string, message: string) => {
         seen.push([sessionFile, objective, message]);
-        return { goal, started: true, error: null };
+        return { goal, started: true, error: null, maxRounds: 3 };
       },
     });
     const server = await start({ piHost });
@@ -259,7 +259,7 @@ describe("babylon daemon server", () => {
     const r = reader(socket);
     await request(socket, "pi.goalBeginPrompt", { sessionFile: "/s/a.jsonl", objective: "Fix it", message: "Fix it" });
     const res = await r.next("pi.goalBeginPrompt");
-    expect(res.payload).toEqual({ goal, started: true, error: null });
+    expect(res.payload).toEqual({ goal, started: true, error: null, maxRounds: 3 });
     expect(seen).toEqual([["/s/a.jsonl", "Fix it", "Fix it"]]);
     await request(socket, "pi.goalBeginPrompt", { sessionFile: "/s/a.jsonl" });
     const err = await r.next("error");
@@ -280,7 +280,7 @@ describe("babylon daemon server", () => {
   });
 
   it("serves pi.designControl addressed to a session", async () => {
-    const status = { design: null, stage: "idle" as const };
+    const status = { design: null, stage: "idle" as const, maxRounds: 3 };
     const seen: Array<[string, string]> = [];
     const piHost = fakePiHost({
       execDesignCommand: async (sessionFile: string, args: string) => {
@@ -302,7 +302,7 @@ describe("babylon daemon server", () => {
   });
 
   it("serves pi.designBeginPrompt with the full turn payload", async () => {
-    const outcome = { design: null, stage: "elicit" as const, started: true, error: null };
+    const outcome = { design: null, stage: "elicit" as const, started: true, error: null, maxRounds: 3 };
     const seen: Array<[string, string, string]> = [];
     const piHost = fakePiHost({
       beginDesignPrompt: async (sessionFile: string, subject: string, message: string) => {

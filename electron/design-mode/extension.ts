@@ -29,6 +29,7 @@ import {
 } from "./store";
 import { loadSessionGoal } from "../goal-mode/store";
 import {
+  latestReview,
   nextReviewRound,
   persistReviewShots,
   recordDesignReview,
@@ -360,6 +361,13 @@ export function createDesignModeExtension(deps: DesignModeExtensionDeps): Extens
   // verdict is structured (not prose in chat) so the transcript can show the
   // screenshots and the punchlist together, and so the round budget is
   // enforced by the tool instead of trusted to the model.
+  const phaseParams = Type.Object({
+    phase: Type.Union(
+      [Type.Literal("implementing"), Type.Literal("revising"), Type.Literal("needs-user")],
+      { description: "What the build loop is doing right now." }
+    ),
+  });
+
   const reviewParams = Type.Object({
     verdict: Type.Union([Type.Literal("pass"), Type.Literal("fail")], {
       description: "Does the current build satisfy the brief and direction?",
@@ -385,6 +393,32 @@ export function createDesignModeExtension(deps: DesignModeExtensionDeps): Extens
   });
 
   const tools = new Map<string, RegisteredTool>([
+    [
+      "design_set_phase",
+      {
+        definition: {
+          name: "design_set_phase",
+          label: "Set design phase",
+          description:
+            "Report what the build loop is doing right now. Call 'implementing' when a build turn starts, and 'needs-user' when the work cannot continue without the user (judge inconclusive, native screenshots missing, or the round budget spent). A failing review sets 'revising' itself, so never set that by hand. Never report a round number: the reviews on disk are the only authority for that.",
+          parameters: phaseParams,
+          execute: async (_toolCallId: string, params: Static<typeof phaseParams>): Promise<AgentToolResult<unknown>> => {
+            const at = context();
+            if (!at) throw new Error("No active session for design control.");
+            const state = await loadDesignState(at.cwd, at.sessionId);
+            if (!state) throw new Error("No design session. Start one before reporting a phase.");
+            if (state.done) throw new Error("This design session is finished.");
+            const phase = (params as { phase?: unknown }).phase;
+            if (phase !== "implementing" && phase !== "revising" && phase !== "needs-user") {
+              throw new Error("Unknown phase.");
+            }
+            await saveDesignState(at.cwd, at.sessionId, { ...state, phase });
+            return { content: [{ type: "text", text: `Design phase: ${phase}.` }], details: { phase } };
+          },
+        },
+        sourceInfo,
+      },
+    ],
     [
       "design_review",
       {
@@ -431,6 +465,18 @@ export function createDesignModeExtension(deps: DesignModeExtensionDeps): Extens
               punchlist,
               ...(params.note ? { note: String(params.note) } : {}),
               shots,
+            });
+
+            // The phase follows from the verdict, never from a guess: a fail
+            // means another build turn is coming, and spending the budget means
+            // the user is needed.
+            await saveDesignState(at.cwd, at.sessionId, {
+              ...state,
+              ...(record.escalated
+                ? { phase: "needs-user" as const }
+                : record.verdict === "fail"
+                  ? { phase: "revising" as const }
+                  : { phase: undefined }),
             });
 
             // The model judges the same pixels the transcript will show.

@@ -25,7 +25,7 @@ import { createGoalModeExtension, isExternalGoalModeExtension } from "./goal-mod
 import { createDesignModeExtension } from "./design-mode/extension";
 import { loadSessionGoal, saveSessionGoal, clearSessionGoal, loadGoalModeConfig } from "./goal-mode/store";
 import { createDurableGoalState, defaultDurableGoalModeConfig, type GoalBeginResult } from "../src/lib/durable-goal";
-import { loadDesignState, saveDesignState, clearDesignState, createDesignState, slugFor, stageOfState, type DesignStatus, type DesignState, type DesignBeginResult } from "./design-mode/store";
+import { loadDesignState, saveDesignState, clearDesignState, createDesignState, slugFor, stageOfState, JUDGE_MAX_ROUNDS, type DesignStatus, type DesignState, type DesignBeginResult } from "./design-mode/store";
 import type { DurableGoalState } from "../src/lib/durable-goal";
 import { shouldRelayImagesThrough, toPiImages } from "./prompt-images";
 import { clampToolOutput, readSessionTail, readToolOutput } from "./sessions";
@@ -2268,7 +2268,7 @@ export class PiHost implements LocalPiHost {
     const entry = this.requireExecutionEntry(sessionFile);
     await entry.runtime.session.prompt(text, {});
     const design = await loadDesignState(entry.cwd, entry.sessionId);
-    return { design, stage: stageOfState(entry.cwd, design) };
+    return { design, stage: stageOfState(entry.cwd, design), maxRounds: JUDGE_MAX_ROUNDS };
   }
 
   /**
@@ -2325,10 +2325,16 @@ export class PiHost implements LocalPiHost {
       } else {
         design = await loadDesignState(entry.cwd, entry.runtime.session.sessionId).catch(() => null);
       }
-      return { design, stage: stageOfState(entry.cwd, design), started, error: errorMessage(e, "design turn failed") };
+      return {
+        design,
+        stage: stageOfState(entry.cwd, design),
+        started,
+        error: errorMessage(e, "design turn failed"),
+        maxRounds: JUDGE_MAX_ROUNDS,
+      };
     }
     const design = await loadDesignState(entry.cwd, entry.runtime.session.sessionId).catch(() => null);
-    return { design, stage: stageOfState(entry.cwd, design), started: true, error: null };
+    return { design, stage: stageOfState(entry.cwd, design), started: true, error: null, maxRounds: JUDGE_MAX_ROUNDS };
   }
   /** Abort one session's run. Explicit execution identity — never the
    *  foreground pointer (I8); other sessions keep running untouched. */

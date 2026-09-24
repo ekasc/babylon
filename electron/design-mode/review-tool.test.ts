@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDesignModeExtension, type DesignModeExtensionDeps } from "./extension";
 import type { RegisteredTool } from "@earendil-works/pi-coding-agent";
-import { createDesignState, saveDesignState, JUDGE_MAX_ROUNDS } from "./store";
+import { createDesignState, loadDesignState, saveDesignState, JUDGE_MAX_ROUNDS } from "./store";
 import { nextReviewRound, reviewRoundDir } from "./review";
 import type { ReviewBundle } from "../sim-controller";
 
@@ -83,6 +83,29 @@ async function approvedState(cwd: string, target: "web" | "mobile-web" | "native
   return state;
 }
 
+describe("design_set_phase tool", () => {
+  it("stores only the reported phase, and rejects an unknown one", async () => {
+    const cwd = await makeProject("setphase");
+    const state = await approvedState(cwd);
+    const { execute } = harness(cwd, state);
+    const extension = createDesignModeExtension({
+      getCwd: () => cwd,
+      getSessionId: () => SESSION_ID,
+      sendFollowUp: () => undefined,
+    });
+    const tool = extension.tools?.get("design_set_phase");
+
+    await runTool(tool, { phase: "implementing" });
+    expect((await loadDesignState(cwd, SESSION_ID))?.phase).toBe("implementing");
+    await runTool(tool, { phase: "needs-user" });
+    expect((await loadDesignState(cwd, SESSION_ID))?.phase).toBe("needs-user");
+    // "reviewing" is deliberately not a phase: an in-flight review is visible
+    // as a running tool call, and persisting it would survive a crash.
+    await expect(runTool(tool, { phase: "reviewing" })).rejects.toThrow(/Unknown phase/);
+    void execute;
+  });
+});
+
 describe("design_review tool", () => {
   it("captures, persists, and records one round as a single call", async () => {
     const cwd = await makeProject("round");
@@ -118,6 +141,33 @@ describe("design_review tool", () => {
     // The model sees the same pixels the transcript will show.
     const images = result.content.filter((c) => c.type === "image");
     expect(images).toHaveLength(1);
+  });
+
+  it("records the phase the verdict implies, never a round counter", async () => {
+    const cwd = await makeProject("phase");
+    const state = await approvedState(cwd);
+    const { execute } = harness(cwd, state);
+
+    // A failing review means another build turn is coming.
+    await execute("call-1", { verdict: "fail", punchlist: ["x"], url: "http://x" });
+    expect((await loadDesignState(cwd, SESSION_ID))?.phase).toBe("revising");
+
+    // A passing one clears it: there is nothing left to revise.
+    await execute("call-2", { verdict: "pass", punchlist: [], url: "http://x" });
+    const afterPass = await loadDesignState(cwd, SESSION_ID);
+    expect(afterPass?.phase).toBeUndefined();
+    // The rounds live in the review records, not in the state file.
+    expect(JSON.stringify(afterPass)).not.toContain("round");
+  });
+
+  it("marks needs-user when the budget is spent", async () => {
+    const cwd = await makeProject("needsuser");
+    const state = await approvedState(cwd);
+    const { execute } = harness(cwd, state);
+    for (let round = 1; round <= JUDGE_MAX_ROUNDS; round++) {
+      await execute(`call-${round}`, { verdict: "fail", punchlist: ["x"], url: "http://x" });
+    }
+    expect((await loadDesignState(cwd, SESSION_ID))?.phase).toBe("needs-user");
   });
 
   it("refuses to judge before the brief and direction are approved", async () => {

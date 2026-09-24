@@ -221,6 +221,26 @@ describe("composer design toggle", () => {
     expect(container.querySelector(".goal-strip")).toBeNull();
   });
 
+  it("reports the build sub-phase instead of a bare Build", () => {
+    const { unmount } = render(
+      <Composer {...baseProps({ onToggleDesign: vi.fn(), designMode: "active", designStage: "build" })} />
+    );
+    expect(document.body.textContent).toContain("Design · Building");
+    unmount();
+
+    render(
+      <Composer
+        {...baseProps({
+          onToggleDesign: vi.fn(),
+          designMode: "active",
+          designStage: "build",
+          designSubphase: { kind: "reviewing", label: "Reviewing 2/3", round: 2, maxRounds: 3 },
+        })}
+      />
+    );
+    expect(document.body.textContent).toContain("Design · Reviewing 2/3");
+  });
+
   it("opens the design menu from the stage indicator, not a toggle-off", async () => {
     const onEndDesign = vi.fn();
     const onRestartDesign = vi.fn();

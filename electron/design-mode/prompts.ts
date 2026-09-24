@@ -18,8 +18,14 @@ export const BRIEF_TEMPLATE = `# Brief: <subject>
 ## Required content
 <sections, copy, assets that must appear>
 
+## Intent
+<extend | evolve | rethink — and one line on what the repository already answers>
+
 ## Constraints
-<tech, brand, accessibility, performance limits>
+<tech, existing design system, accessibility, performance limits>
+
+## Existing system to preserve
+<tokens, components and patterns already in the repo that this work must not invalidate>
 
 ## Viewports
 <web/mobile-web: mobile + desktop minimum, as sim preset ids, e.g. iphone + chrome-laptop. native: device models + OS versions to review on, e.g. iPhone 15 Pro (iOS 18) + Pixel 9 (Android 15)>
@@ -94,13 +100,20 @@ export function renderDesignSystemPrompt(state: DesignState, stage: DesignStage)
     : `[Design mode] Stage: ${stage}. Brief: ${state.briefPath}. Design direction: ${state.brandPath}. Log: ${state.logPath}. The user has not named the subject yet — their first message defines it. Never say, write, or echo "untitled".`;
   switch (stage) {
     case "elicit":
-      return `${base} Interview the user in plain chat, one question at a time (target first: web, mobile-web, or native). Do not use ask_question dialogs. Do not paste /design commands or template skeletons into chat. Record the target with the design_set_target tool call, then write the brief file and summarize it briefly in chat. Do not build anything yet.`;
+      return `${base} Establish the brief by reading the repository first, then asking only what the code and the request cannot answer.
+
+- Investigate before interrogating: the request plus the repo usually settle target, scope, audience, platform and the existing visual system. Read it.
+- Infer from the repository and state your reading in one line, so the user can correct it cheaply.
+- Ask only for genuine decisions, at most TWO blocking questions in the whole interview, one at a time, in plain chat. Never ask what you just read.
+- Choose the intent: EXTEND (keep the existing design language), EVOLVE (keep recognizable foundations, change some visual rules), or RETHINK (a new direction is allowed). For EXTEND and EVOLVE, derive the direction from what exists rather than inventing a palette.
+- Do not use ask_question dialogs. Do not paste /design commands or template skeletons into chat.
+- Record the target with the design_set_target tool call, then write the brief file and summarize it briefly in chat. Do not build anything yet.`;
     case "brief-confirm":
       return `${base} The brief exists and awaits the user's approval (composer Approve brief button). Summarize it briefly in plain chat, answer questions, revise the file on request. Do not build yet. Never ask the user to type /design commands.`;
     case "brand":
       return `${base} Propose the design direction in plain chat, write ${state.brandPath}, and summarize the proposal briefly. Read the repository first: when the design system already answers, derive the direction from it and say so instead of inventing a new palette. The user approves via the composer Approve direction button. Do not use ask_question dialogs. Do not implement anything until the direction is approved.`;
     case "build":
-      return `${base} Brief + direction are approved. Implement on a branch/worktree (file writes are permission-governed), then judge: ${state.target === "native" ? "attached simulator screenshots against brief + direction" : "browser_capture_review against brief + direction"}. Pass/fail with a punchlist in plain chat, at most ${JUDGE_MAX_ROUNDS} revise rounds, then escalate in plain chat with captures and punchlist attached. Log every round to ${state.logPath}. Never use ask_question dialogs or /design commands in chat.`;
+      return `${base} Brief + direction are approved. Call design_set_phase with "implementing" when a build turn starts, and with "needs-user" if the work cannot continue without them (judge inconclusive, native screenshots missing). A design_review verdict sets the phase itself. Implement on a branch/worktree (file writes are permission-governed), then judge: ${state.target === "native" ? "attached simulator screenshots against brief + direction" : "browser_capture_review against brief + direction"}. Pass/fail with a punchlist in plain chat, at most ${JUDGE_MAX_ROUNDS} revise rounds, then escalate in plain chat with captures and punchlist attached. Log every round to ${state.logPath}. Never use ask_question dialogs or /design commands in chat.`;
     case "done":
       return `${base} Finished. Answer follow-up questions only.`;
     case "idle":
@@ -146,14 +159,11 @@ export function renderStageFollowUp(state: DesignState, stage: DesignStage): str
       return (
         head +
         [
-          "Interview the user in plain chat before writing anything (one question at a time):",
-          "1. target (web, mobile-web, or native app — and which platforms)",
-          "2. subject + scope (what screen/flow, what is out of scope)",
-          "3. goals (what success looks like, in order)",
-          "4. audience (who, what device/context)",
-          "5. required content (sections, copy, assets that must appear)",
-          "6. constraints (tech, brand, a11y, performance)",
-          "7. review surface (web/mobile-web: viewports as sim preset ids, mobile + desktop minimum. native: device models + OS versions to review on)",
+          "Read the repository before asking anything. A request plus an existing codebase usually answers target, scope, audience, platform and the current visual system.",
+          "Then interview the user in plain chat — only for decisions the code and the request cannot answer, at most TWO blocking questions, one at a time:",
+          "1. the intent: EXTEND (keep the existing design language), EVOLVE (keep recognizable foundations, change some visual rules), or RETHINK (new direction allowed)",
+          "2. whatever is still genuinely undecided (usually scope boundaries, or the review surface: web viewports as sim preset ids, mobile + desktop minimum; native device models + OS versions)",
+          "State what you inferred from the repository in one line so it can be corrected cheaply. Never ask what you just read.",
           "Then record the target and write the brief to the brief path using this skeleton:",
           BRIEF_TEMPLATE,
           "Present a short summary and wait for GUI approval. Never paste /design commands into chat.",

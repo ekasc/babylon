@@ -911,10 +911,11 @@ export const bridge: Bridge = window.pideck ?? {
   relocateExecution: () => Promise.reject(new Error("bridge unavailable")),
   executionDeactivate: () => Promise.resolve(false),
   onExecutionChanged: () => () => {},
-  designGet: () => Promise.resolve({ design: null, stage: "idle" as const }),
+  designGet: () => Promise.resolve({ design: null, stage: "idle" as const, maxRounds: 3 }),
   designReviewShot: () => Promise.reject(new Error("bridge unavailable")),
-  designControl: () => Promise.resolve({ design: null, stage: "idle" as const }),
-  beginDesignPrompt: () => Promise.resolve({ design: null, stage: "idle" as const, started: true, error: null }),
+  designControl: () => Promise.resolve({ design: null, stage: "idle" as const, maxRounds: 3 }),
+  beginDesignPrompt: () =>
+    Promise.resolve({ design: null, stage: "idle" as const, started: true, error: null, maxRounds: 3 }),
   refreshSession: () => Promise.resolve(false),
 
   getMessages: () => Promise.resolve([]),

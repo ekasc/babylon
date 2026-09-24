@@ -95,8 +95,8 @@ describe("design stage against the worktree", () => {
 describe("unwrapDesignResult", () => {
   it("passes state plus stage through, null when no session", () => {
     const state = createDesignState("Us screen", "us-screen");
-    expect(unwrapDesignResult({ design: state, stage: "brand" }, "t")).toEqual({ design: state, stage: "brand" });
-    expect(unwrapDesignResult({ design: null, stage: "idle" }, "t")).toEqual({ design: null, stage: "idle" });
+    expect(unwrapDesignResult({ design: state, stage: "brand" }, "t")).toEqual({ design: state, stage: "brand", maxRounds: 3 });
+    expect(unwrapDesignResult({ design: null, stage: "idle" }, "t")).toEqual({ design: null, stage: "idle", maxRounds: 3 });
   });
   it("fails closed on malformed payloads", () => {
     expect(() => unwrapDesignResult(null, "t")).toThrow("malformed payload");
@@ -107,35 +107,46 @@ describe("unwrapDesignResult", () => {
 describe("unwrapDesignBeginResult", () => {
   it("passes the full envelope through", () => {
     const state = createDesignState("Us screen", "us-screen");
-    expect(unwrapDesignBeginResult({ design: state, stage: "elicit", started: true, error: null }, "t")).toEqual({
+    expect(
+      unwrapDesignBeginResult({ design: state, stage: "elicit", started: true, error: null, maxRounds: 3 }, "t")
+    ).toEqual({
       design: state,
       stage: "elicit",
       started: true,
       error: null,
+      maxRounds: 3,
     });
-    expect(unwrapDesignBeginResult({ design: null, stage: "idle", started: false, error: "boom" }, "t")).toEqual({
+    expect(
+      unwrapDesignBeginResult({ design: null, stage: "idle", started: false, error: "boom", maxRounds: 3 }, "t")
+    ).toEqual({
       design: null,
       stage: "idle",
       started: false,
       error: "boom",
+      maxRounds: 3,
     });
+    // The round budget belongs to the backend: a payload without it is
+    // malformed rather than silently defaulted in the renderer.
+    expect(() =>
+      unwrapDesignBeginResult({ design: state, stage: "elicit", started: true, error: null }, "t")
+    ).toThrow("malformed payload");
   });
 
   it("fails closed on missing keys and unknown stages (no silent fallback)", () => {
     const state = createDesignState("Us screen", "us-screen");
     expect(() => unwrapDesignBeginResult(null, "t")).toThrow("malformed payload");
-    expect(() => unwrapDesignBeginResult({ stage: "elicit", started: true, error: null }, "t")).toThrow("malformed payload");
-    expect(() => unwrapDesignBeginResult({ design: state, started: true, error: null }, "t")).toThrow("malformed payload");
-    expect(() => unwrapDesignBeginResult({ design: state, stage: "potato", started: true, error: null }, "t")).toThrow(
+    expect(() => unwrapDesignBeginResult({ stage: "elicit", started: true, error: null, maxRounds: 3 }, "t")).toThrow("malformed payload");
+    expect(() => unwrapDesignBeginResult({ design: state, started: true, error: null, maxRounds: 3 }, "t")).toThrow("malformed payload");
+    expect(() => unwrapDesignBeginResult({ design: state, stage: "potato", started: true, error: null, maxRounds: 3 }, "t")).toThrow(
       "malformed payload"
     );
-    expect(() => unwrapDesignBeginResult({ design: state, stage: "elicit", started: "yes", error: null }, "t")).toThrow(
+    expect(() => unwrapDesignBeginResult({ design: state, stage: "elicit", started: "yes", error: null, maxRounds: 3 }, "t")).toThrow(
       "malformed payload"
     );
-    expect(() => unwrapDesignBeginResult({ design: state, stage: "elicit", started: true, error: 42 }, "t")).toThrow(
+    expect(() => unwrapDesignBeginResult({ design: state, stage: "elicit", started: true, error: 42, maxRounds: 3 }, "t")).toThrow(
       "malformed payload"
     );
-    expect(() => unwrapDesignBeginResult({ design: { slug: 1 }, stage: "elicit", started: true, error: null }, "t")).toThrow(
+    expect(() => unwrapDesignBeginResult({ design: { slug: 1 }, stage: "elicit", started: true, error: null, maxRounds: 3 }, "t")).toThrow(
       "malformed payload"
     );
   });

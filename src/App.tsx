@@ -3,6 +3,8 @@ import { bridge, bridgeAvailable, type ActivityUpdate, type AgentModel, type Age
 import type { Bot, BotGroup, BotPatch, DefaultBot, NewBotInput, NewGroupInput } from "./bots";
 import { isBotMainSession, isGroupRoom } from "./bots";
 import { initialState, mergeLiveMessages, reducer, wireOf, wireStr } from "./store";
+import { deriveDesignSubphase, parseDesignPhase } from "./lib/design-phase";
+import { isDesignReviewDetails } from "./components/DesignReviewCard";
 import { groupChatCwd, projectFocusTarget, projectSettingsCwd, reconnectExecutions } from "./lib/app-orchestration";
 import { planApprovalRequest, planRuntimeEvents } from "./lib/runtime-events";
 import { useRuntimeHealth } from "./lib/runtime-health";
@@ -1127,6 +1129,40 @@ export default function App() {
   const sharedSpeakers = activeGroup == null && activeBot == null && (sharedStaff?.length ?? 0) > 0;
 
   // Keep the per-session transcript cache fresh (skipped while a switch is in
+  /**
+   * Design build sub-phase, DERIVED rather than persisted: every completed
+   * review is a `design_review` tool call already in this transcript, the phase
+   * comes from the design state, and the round budget from the backend. Nothing
+   * here can claim a round that has no review behind it — a capture that dies
+   * mid-flight leaves no record, so the count cannot drift.
+   */
+  const designReviews = useMemo(
+    () =>
+      state.items.flatMap((item) => {
+        if (item.kind !== "tool" || item.name !== "design_review") return [];
+        if (!isDesignReviewDetails(item.details)) return [];
+        return [{ round: item.details.round, verdict: item.details.verdict }];
+      }),
+    [state.items]
+  );
+  const designReviewRunning = useMemo(
+    () =>
+      state.items.some(
+        (item) => item.kind === "tool" && item.name === "design_review" && item.status === "running"
+      ),
+    [state.items]
+  );
+  const designSubphase = useMemo(
+    () =>
+      deriveDesignSubphase({
+        phase: parseDesignPhase(designStatus?.design?.phase),
+        reviews: designReviews,
+        reviewInFlight: designReviewRunning,
+        maxRounds: designStatus?.maxRounds ?? 0,
+      }),
+    [designReviews, designReviewRunning, designStatus?.design?.phase, designStatus?.maxRounds]
+  );
+
   // flight so the previous session's items never land under the new path).
   useEffect(() => {
     if (viewSwitchingRef.current || state.streaming) return;
@@ -1694,7 +1730,11 @@ export default function App() {
           setDesignPendingSubject(null);
           const designResult = stage.result;
           if (designResult.design && viewedPathRef.current === target) {
-            setDesignStatus({ design: designResult.design, stage: designResult.stage });
+            setDesignStatus({
+              design: designResult.design,
+              stage: designResult.stage,
+              maxRounds: designResult.maxRounds,
+            });
           }
           if (designResult.error) {
             if (!designResult.started) {

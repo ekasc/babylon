@@ -2,6 +2,7 @@ import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { CommandInfo } from "../bridge";
 import type { AgentModel, AgentState, SessionStats } from "../bridge";
 import { type ComposerExecutionAccessUi } from "../lib/composer-execution";
+import type { DesignSubphase } from "../lib/design-phase";
 import type { Dialog } from "../store";
 import type { Bot } from "../bots";
 import { expandSkillMentions } from "../lib/skillRef";
@@ -80,6 +81,8 @@ interface Props {
 	designMode?: "off" | "armed" | "active";
 	/** Active stage key for the indicator (elicit, brief-confirm, brand, build). */
 	designStage?: string;
+	/** Derived build sub-phase: what the loop is doing inside `build`. */
+	designSubphase?: DesignSubphase;
 	/** Active design subject, for the indicator tooltip. Null when none. */
 	designSubject?: string | null;
 	/** Toggle: arm when off, disarm when armed. Active designs end/restart
@@ -102,7 +105,7 @@ function trunc(s: string, n = 42): string {
 }
 
 /** Indicator labels for live design stages (idle/done never display). */
-function designStageLabel(stage: string): string {
+function designStageLabel(stage: string, subphase?: DesignSubphase): string {
 	switch (stage) {
 		case "elicit":
 			return "Interview";
@@ -112,7 +115,9 @@ function designStageLabel(stage: string): string {
 			// Internal stage stays "brand" (persisted contract); users see Direction.
 			return "Direction";
 		case "build":
-			return "Build";
+			// Inside the build stage the subphase is the useful fact: building,
+			// judging, revising, or waiting on the user.
+			return subphase?.label ?? "Building";
 		default:
 			return "Active";
 	}
@@ -213,6 +218,7 @@ const Composer = memo(function Composer({
 	onToggleGoal,
 	designMode = "off",
 	designStage = "idle",
+	designSubphase,
 	designSubject = null,
 	onToggleDesign,
 	onEndDesign,
@@ -866,14 +872,14 @@ const Composer = memo(function Composer({
 										goalMode !== "off"
 											? "Design is unavailable while a Goal is armed or active"
 											: designMode === "active"
-												? `Design · ${designStageLabel(designStage)}${designSubject ? `: ${trunc(designSubject, 80)}` : ""}`
+												? `Design · ${designStageLabel(designStage, designSubphase)}${designSubject ? `: ${trunc(designSubject, 80)}` : ""}`
 												: designMode === "armed"
 													? "Design armed. Your next message starts the interview. (Click to disarm)"
 													: "Design mode: your next message starts the design interview"
 									}
 									className={`operator-meta-control composer-pressable ${designMode !== "off" ? "text-fg underline underline-offset-2" : ""}`}
 								>
-									{designMode === "active" ? `Design · ${designStageLabel(designStage)}` : "Design"}
+									{designMode === "active" ? `Design · ${designStageLabel(designStage, designSubphase)}` : "Design"}
 								</button>
 								{designMode === "active" && designMenuOpen ? (
 									<div

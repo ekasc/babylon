@@ -1,6 +1,7 @@
 import Composer, { type Attachment } from "./Composer";
 import type { AgentModel, AgentState, CommandInfo, SessionStats } from "../bridge";
 import type { Dialog } from "../store";
+import type { DesignSubphase } from "../lib/design-phase";
 
 interface Props {
 	agentState?: AgentState | null;
@@ -39,6 +40,7 @@ interface Props {
       No strip is ever rendered — the button state is the entire UI. */
   designMode?: "off" | "armed" | "active";
   designStage?: string;
+  designSubphase?: DesignSubphase;
   designSubject?: string | null;
   onToggleDesign?: () => void;
   onEndDesign?: () => void;
@@ -74,6 +76,7 @@ export default function SessionFooter({
   goalObjective = null,
   onToggleGoal = () => {},
   designMode = "off",
+  designSubphase,
   designStage = "idle",
   designSubject = null,
   onToggleDesign = () => {},
@@ -122,6 +125,7 @@ export default function SessionFooter({
             onToggleGoal={onToggleGoal}
             designMode={designMode}
             designStage={designStage}
+            designSubphase={designSubphase}
             designSubject={designSubject}
             onToggleDesign={onToggleDesign}
             onEndDesign={onEndDesign}

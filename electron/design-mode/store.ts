@@ -33,8 +33,17 @@ export interface DesignState {
   briefApproved: boolean;
   brandApproved: boolean;
   done: boolean;
+  /** What the build loop is doing right now. Deliberately NOT a round
+   *  counter: the rounds live in the review records, so this can only ever be
+   *  the phase the model reported, never a second copy of a derived fact. */
+  phase?: DesignPhase;
   updatedAt: string;
 }
+
+/** The sub-phase inside the build stage. `reviewing` is absent on purpose: an
+ *  in-flight review is visible as a running tool call, and persisting it would
+ *  let a crash mid-capture leave a "reviewing" claim with no review behind it. */
+export type DesignPhase = "implementing" | "revising" | "needs-user";
 
 export type DesignStage =
   | "idle"
@@ -192,6 +201,9 @@ export function stageOfState(cwd: string, state: DesignState | null): DesignStag
 export interface DesignStatus {
   design: DesignState | null;
   stage: DesignStage;
+  /** The review round budget, owned by the backend: the renderer displays the
+   *  budget, it never hardcodes its own copy. */
+  maxRounds: number;
 }
 /** Unwrap a `pi.designControl` / `pideck:design-control` payload: null design
  *  when no design session, never a bare non-object. Throws on malformed state. */
@@ -208,7 +220,7 @@ export function unwrapDesignResult(payload: unknown, type: string): DesignStatus
       : design
         ? "elicit"
         : "idle";
-  return { design, stage };
+  return { design, stage, maxRounds: JUDGE_MAX_ROUNDS };
 }
 
 /**
@@ -222,6 +234,7 @@ export interface DesignBeginResult {
   stage: DesignStage;
   started: boolean;
   error: string | null;
+  maxRounds: number;
 }
 
 /** Unwrap a `DesignBeginResult` wire envelope. Strict: every key required,
@@ -230,7 +243,13 @@ export interface DesignBeginResult {
 export function unwrapDesignBeginResult(payload: unknown, type: string): DesignBeginResult {
   if (payload === null || typeof payload !== "object") throw new Error(`${type} returned a malformed payload`);
   const record = payload as Record<string, unknown>;
-  if (!("design" in record) || !("stage" in record) || !("started" in record) || !("error" in record)) {
+  if (
+    !("design" in record) ||
+    !("stage" in record) ||
+    !("started" in record) ||
+    !("error" in record) ||
+    !("maxRounds" in record)
+  ) {
     throw new Error(`${type} returned a malformed payload`);
   }
   const rawDesign = record.design ?? null;
@@ -251,7 +270,14 @@ export function unwrapDesignBeginResult(payload: unknown, type: string): DesignB
   if (record.error !== null && typeof record.error !== "string") {
     throw new Error(`${type} returned a malformed payload`);
   }
-  return { design, stage: rawStage, started: record.started, error: record.error };
+  if (typeof record.maxRounds !== "number") throw new Error(`${type} returned a malformed payload`);
+  return {
+    design,
+    stage: rawStage,
+    started: record.started,
+    error: record.error,
+    maxRounds: record.maxRounds,
+  };
 }
 
 /** Prepend a timestamped entry to the design log (newest-first), creating
