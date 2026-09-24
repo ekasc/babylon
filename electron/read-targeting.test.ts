@@ -5,9 +5,9 @@
  * history/tree reads are cold-capable while runtime reads need a retained
  * runtime; and issuing reads never moves the foreground.
  */
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { PiHost } from "./pi-host";
@@ -127,8 +127,11 @@ describe("addressed reads require explicit identity", () => {
       expect(host.activeSessionFile).toBe(fileB);
 
       await host.getState(fileA);
+      const stateA = await host.getState(fileA);
       const historyA = await host.getHistory(fileA);
       const messagesA = await host.getMessages(fileA);
+      // getState is addressed too: never the foreground session's state.
+      expect(stateA.sessionFile).toBe(fileA);
       // Addressed content: A's turn, never the foreground's.
       expect(JSON.stringify(historyA.turns)).toContain("alpha-session-marker");
       expect(JSON.stringify(historyA.turns)).not.toContain("beta-session-marker");
@@ -136,6 +139,114 @@ describe("addressed reads require explicit identity", () => {
       // Addressing a read never steals the foreground.
       expect(host.activeSessionFile).toBe(fileB);
       expect(host.testForegroundSessionFile()).toBe(fileB);
+    } finally {
+      await host.dispose();
+    }
+  });
+
+  it("reads tool output from the addressed transcript, never the foreground's", async () => {
+    const { cwd, agentDir } = await makeProject("toolout");
+    const host = makeHost(cwd, agentDir);
+    await host.start();
+    try {
+      const smA = SessionManager.create(cwd);
+      const fileA = smA.getSessionFile();
+      const smB = SessionManager.create(cwd);
+      const fileB = smB.getSessionFile();
+      if (!fileA || !fileB) throw new Error("no canonical session file");
+      // A full turn first: SessionManager only flushes to disk once an
+      // assistant message exists, and B must open as a real session.
+      const seedTurn = (sm: SessionManager) => {
+        const when = Date.now();
+        sm.appendMessage({ role: "user", content: [{ type: "text", text: "run it" }], timestamp: when });
+        sm.appendMessage({
+          role: "assistant",
+          content: [{ type: "text", text: "done" }],
+          api: "test",
+          provider: "test",
+          model: "test",
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+          stopReason: "stop",
+          timestamp: when + 1,
+        });
+      };
+      seedTurn(smA);
+      seedTurn(smB);
+      // Identically-named tool call in BOTH transcripts with different output:
+      // expanding A while B is foregrounded must read A's bytes. Entry keeps
+      // the SDK's top-level id/parentId/timestamp so the loader indexes it.
+      const line = (id: string, text: string) =>
+        JSON.stringify({
+          type: "message",
+          id,
+          parentId: null,
+          timestamp: new Date().toISOString(),
+          message: { role: "toolResult", toolCallId: "call-shared", content: [{ type: "text", text }], timestamp: Date.now() },
+        }) + "\n";
+      await appendFile(fileA, line("tool-out-a", "OUTPUT-FROM-A"));
+      await appendFile(fileB, line("tool-out-b", "OUTPUT-FROM-B"));
+      // A stays historical (never opened); B is the foreground session.
+      await host.open({ path: fileB, cwd });
+      expect(host.activeSessionFile).toBe(fileB);
+      expect(host.testSessions().has(fileA)).toBe(false);
+
+      const fromA = await host.getToolOutput(fileA, "call-shared");
+      expect(fromA.content).toBe("OUTPUT-FROM-A");
+      const fromB = await host.getToolOutput(fileB, "call-shared");
+      expect(fromB.content).toBe("OUTPUT-FROM-B");
+      expect(host.activeSessionFile).toBe(fileB);
+    } finally {
+      await host.dispose();
+    }
+  });
+
+  it("getModels serves the requested project, never the foreground project's catalogue", async () => {
+    const a = await makeProject("models-a");
+    const b = await makeProject("models-b");
+    const writeCatalog = async (agentDir: string, modelId: string) =>
+      writeFile(
+        join(agentDir, "models.json"),
+        JSON.stringify({
+          providers: {
+            fixture: {
+              name: "Fixture",
+              baseUrl: "http://127.0.0.1:9/v1",
+              api: "openai-completions",
+              apiKey: "sk-fixture",
+              models: [{ id: modelId, name: modelId, reasoning: false, input: ["text"], contextWindow: 200_000, maxTokens: 8_192 }],
+            },
+          },
+        })
+      );
+    const ids = (list: Array<{ provider: string; id: string }>) => list.map((m) => `${m.provider}/${m.id}`);
+    // v1 catalogue loads into project A's runtime at start().
+    await writeCatalog(a.agentDir, "fixture-a");
+    const host = makeHost(a.cwd, a.agentDir);
+    await host.start();
+    try {
+      const idsA = ids(await host.getModels(a.cwd));
+      expect(idsA).toContain("fixture/fixture-a");
+      expect(idsA).not.toContain("fixture/fixture-b");
+
+      // v2 on disk: project B's runtime is created AFTER the rewrite (its
+      // session opens now), so the two projects' catalogues genuinely differ.
+      await writeCatalog(a.agentDir, "fixture-b");
+      const smB = SessionManager.create(b.cwd);
+      const fileB = smB.getSessionFile();
+      if (!fileB) throw new Error("no canonical session file");
+      await host.open({ path: fileB, cwd: b.cwd });
+      expect(host.activeSessionFile).toBe(fileB);
+
+      const idsB = ids(await host.getModels(b.cwd));
+      expect(idsB).toContain("fixture/fixture-b");
+      expect(idsB).not.toContain("fixture/fixture-a");
+
+      // Requesting project A while B is foreground must serve A's catalogue.
+      const idsA2 = ids(await host.getModels(a.cwd));
+      expect(idsA2).toContain("fixture/fixture-a");
+      expect(idsA2).not.toContain("fixture/fixture-b");
+      expect(host.testProjectRuntimes().has(resolve(a.cwd))).toBe(true);
+      expect(host.activeSessionFile).toBe(fileB);
     } finally {
       await host.dispose();
     }
