@@ -26,8 +26,6 @@ import type { DurableGoalState } from "./lib/durable-goal";
  * error instead of a runtime TypeError.
  */
 export interface LocalPiHost {
-  readonly activeSessionFile: string | null;
-  open(opts: { path?: string; cwd: string; requestId?: number; systemPrompt?: string | null }): Promise<AgentState>;
   prompt(message: string, images: PromptImage[] | undefined, streamingBehavior: "steer" | "followUp" | undefined, sessionFile: string): Promise<void>;
   abort(sessionFile: string): Promise<void>;
   getState(sessionFile: string): Promise<AgentState>;
@@ -57,14 +55,14 @@ export interface LocalPiHost {
   generateGitCommitMessage(context: PreparedCommitContext): Promise<GeneratedCommitMessage>;
   getRecaps(sessionFile: string): Promise<Recap[]>;
   refreshFromDisk(sessionPath: string): Promise<boolean>;
-  switchTo(sessionPath: string, options?: { cwdOverride?: string }): Promise<AgentState>;
   respondUi(id: string, resp: unknown): void;
   controlThread(action: "steer" | "follow-up" | "stop", threadId: string, message?: string): Promise<unknown>;
   promoteThread(threadId: string): Promise<{ sessionFile: string; cwd: string; parentSessionFile: string | null }>;
   controlSubagent(action: SubagentControlAction, runId: string, message?: string): Promise<unknown>;
   promoteSubagent(runId: string): Promise<{ sessionFile: string; cwd: string; parentSessionFile: string | null }>;
   warmProject(cwd: string): { warmed: boolean };
-  releaseSession(sessionFile: string): Promise<boolean>;
+  hasSessionRuntime(sessionFile: string): boolean;
+  sessionCwdFor(sessionFile: string): string | null;
   /** Run a `/goal …` control invocation without opening a turn; returns the fresh durable goal. */
   execGoalCommand(sessionFile: string, args: string): Promise<DurableGoalState | null>;
   listProjectExecutions(): Promise<import("./execution").ProjectExecution[]>;

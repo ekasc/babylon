@@ -26,15 +26,23 @@ async function makeSessionFile(cwd: string) {
 }
 
 function makeHost(cwd: string, agentDir: string) {
-  const statuses: Array<Parameters<HostOptions["onStatus"]>[0]> = [];
   const host = new PiHost({
     cwd,
     agentDir,
     stateDir: join(agentDir, "pideck-state"),
     onEvent: () => undefined,
-    onStatus: (s) => statuses.push(s),
   });
-  return { host, statuses };
+  return { host };
+}
+
+/** Drive Pi's INTERNAL switch callback (private execution handoff) in tests. */
+async function stageHandoff(host: PiHost, sourceFile: string, targetFile: string): Promise<void> {
+  const source = host.testSessions().get(sourceFile);
+  if (!source) throw new Error("source runtime is not installed");
+  const seam = host as unknown as {
+    stageExecutionHandoff(entry: SessionEntry, sessionPath: string, options?: { cwdOverride?: string }): Promise<unknown>;
+  };
+  await seam.stageExecutionHandoff(source, targetFile);
 }
 
 function setStreaming(host: PiHost, sessionFile: string, value: boolean): void {
@@ -415,7 +423,7 @@ describe("C10 retention: Pi fork/clone handoffs converge", () => {
       const target = await makeSessionFile(a.cwd);
       // Pi signals the switch from inside fork(); that is the handoff trigger.
       vi.spyOn(entryA.runtime, "fork").mockImplementation(async () => {
-        await host.switchTo(target);
+        await stageHandoff(host, fileA, target);
         return { cancelled: false, selectedText: "forked" };
       });
 
@@ -443,7 +451,7 @@ describe("C10 retention: Pi fork/clone handoffs converge", () => {
       const target = await makeSessionFile(a.cwd);
       vi.spyOn(entryA.runtime, "fork").mockImplementation(async () => {
         // The target transient exists for a moment, then the user cancels.
-        await host.switchTo(target);
+        await stageHandoff(host, fileA, target);
         return { cancelled: true };
       });
 
@@ -469,7 +477,7 @@ describe("C10 retention: Pi fork/clone handoffs converge", () => {
       const entryA = host.testSessions().get(fileA)!;
       const target = await makeSessionFile(a.cwd);
       vi.spyOn(entryA.runtime, "fork").mockImplementation(async () => {
-        await host.switchTo(target);
+        await stageHandoff(host, fileA, target);
         // The source starts streaming while the handoff is still staged.
         setStreaming(host, fileA, true);
         return { cancelled: false, selectedText: "forked" };
@@ -480,6 +488,44 @@ describe("C10 retention: Pi fork/clone handoffs converge", () => {
       expect(host.testSessions().get(fileA)).toBe(entryA);
       expect(host.testSessions().has(target)).toBe(false);
       expect(host.testExecutionByCwd().get(a.cwd)).toBe(fileA);
+      host.testAssertRetentionInvariant();
+    } finally {
+      await host.dispose();
+    }
+  }, 60_000);
+});
+
+describe("C11: Pi's internal switch is a private, source-bound handoff", () => {
+  it("stays in the SOURCE project even when the host booted in another cwd", async () => {
+    const bootstrap = await makeProject("handoff-bootstrap");
+    const a = await makeProject("handoff-a");
+    const b = await makeProject("handoff-b");
+    // The host was constructed for `bootstrap`, and project B also has an
+    // owner. An internal switch from A must touch NEITHER: no host-global cwd
+    // may leak into a handoff (C8/E).
+    const { host } = makeHost(bootstrap.cwd, bootstrap.agentDir);
+    await host.start();
+    try {
+      const fileA = await makeSessionFile(a.cwd);
+      const fileB = await makeSessionFile(b.cwd);
+      await host.activateExecution(a.cwd, fileA);
+      await host.activateExecution(b.cwd, fileB);
+      const target = await makeSessionFile(a.cwd);
+
+      const source = host.testSessions().get(fileA)!;
+      const seam = host as unknown as {
+        stageExecutionHandoff(entry: SessionEntry, sessionPath: string, options?: { cwdOverride?: string }): Promise<unknown>;
+      };
+      // Outside a fork/clone the handoff finalizes immediately: the source's
+      // project changes owner, and nothing else does.
+      await seam.stageExecutionHandoff(source, target);
+
+      // A's project handed over; B and the bootstrap cwd are untouched.
+      expect(host.testExecutionByCwd().get(a.cwd)).toBe(target);
+      expect(host.testExecutionByCwd().get(b.cwd)).toBe(fileB);
+      expect(host.testSessions().has(fileA)).toBe(false);
+      expect(host.testSessions().has(fileB)).toBe(true);
+      expect(host.testSessions().size).toBe(2);
       host.testAssertRetentionInvariant();
     } finally {
       await host.dispose();

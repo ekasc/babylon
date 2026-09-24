@@ -2,34 +2,34 @@ import { describe, expect, it } from "vitest";
 import { isAgentLive, shouldAcceptEvent } from "./sessionLifecycle";
 
 describe("shouldAcceptEvent", () => {
-  it("rejects all events while a session replacement is in flight", () => {
+  it("rejects every event while a view switch is in flight", () => {
     expect(
-      shouldAcceptEvent({ type: "message_update", sessionId: "old" }, {
-        activeSessionId: "old",
+      shouldAcceptEvent({ type: "message_update", sessionId: "viewed" }, {
+        viewedSessionId: "viewed",
         switching: true,
       })
     ).toBe(false);
   });
 
-  it("accepts only events from the active live session", () => {
-    const context = { activeSessionId: "session-b", switching: false };
+  it("accepts only events from the viewed session", () => {
+    const context = { viewedSessionId: "session-b", switching: false };
     expect(shouldAcceptEvent({ type: "agent_start", sessionId: "session-b" }, context)).toBe(true);
     expect(shouldAcceptEvent({ type: "agent_settled", sessionId: "session-a" }, context)).toBe(false);
   });
 
-  it("rejects stamped events until the first live session is known", () => {
+  it("rejects stamped events when no session is being viewed", () => {
     expect(
       shouldAcceptEvent({ type: "extension_ui_request", sessionId: "warming" }, {
-        activeSessionId: null,
+        viewedSessionId: null,
         switching: false,
       })
     ).toBe(false);
   });
 
-  it("keeps compatibility with host-level events that have no session id", () => {
+  it("rejects unstamped events: identity is required, never assumed", () => {
     expect(
-      shouldAcceptEvent({ type: "host_notice" }, { activeSessionId: "session-a", switching: false })
-    ).toBe(true);
+      shouldAcceptEvent({ type: "host_notice" }, { viewedSessionId: "session-a", switching: false })
+    ).toBe(false);
   });
 });
 

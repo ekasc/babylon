@@ -40,13 +40,13 @@ describe("PiHost rollback integration", () => {
     await writeFile(join(cwd, "file.txt"), "before\n");
     await git(cwd, ["add", "file.txt"]);
 
-    const host = new PiHost({ cwd, agentDir, stateDir, onEvent: () => undefined, onStatus: () => undefined });
+    const host = new PiHost({ cwd, agentDir, stateDir, onEvent: () => undefined });
     await host.start();
-    await host.open({ cwd });
+    // The test drives one exact transcript: create it, then let it own the
+    // project. Ownership identity comes back from the activation itself.
     const isolated = (await import("@earendil-works/pi-coding-agent")).SessionManager.create(cwd, sessionDir);
-    await host.switchTo(isolated.getSessionFile()!, { cwdOverride: cwd });
-    const sessionFile = host.activeSessionFile as string;
-    await host.activateExecution(cwd, sessionFile);
+    const owner = await host.activateExecution(cwd, isolated.getSessionFile()!);
+    const sessionFile = owner.sessionFile;
 
     const start = await host.testCaptureTurnStart(sessionFile);
     expect(start).not.toBeNull();
@@ -84,9 +84,8 @@ describe("PiHost rollback integration", () => {
     expect((await host.getHistory(sessionFile)).activeRollback).toMatchObject({ undoAvailable: true });
     await host.dispose();
 
-    const reopened = new PiHost({ cwd, agentDir, stateDir, onEvent: () => undefined, onStatus: () => undefined });
+    const reopened = new PiHost({ cwd, agentDir, stateDir, onEvent: () => undefined });
     await reopened.start();
-    await reopened.open({ cwd, path: sessionFile });
     await reopened.activateExecution(cwd, sessionFile);
     expect(sessionOf(reopened, sessionFile).sessionManager.getLeafId()).toBe(parentLeafId);
     expect((await reopened.getHistory(sessionFile)).activeRollback).toMatchObject({ undoAvailable: true });
@@ -111,13 +110,13 @@ describe("PiHost rollback integration", () => {
     await writeFile(join(cwd, "file.txt"), "before\n");
     await git(cwd, ["add", "file.txt"]);
 
-    const host = new PiHost({ cwd, agentDir, stateDir, onEvent: () => undefined, onStatus: () => undefined });
+    const host = new PiHost({ cwd, agentDir, stateDir, onEvent: () => undefined });
     await host.start();
-    await host.open({ cwd });
+    // The test drives one exact transcript: create it, then let it own the
+    // project. Ownership identity comes back from the activation itself.
     const isolated = (await import("@earendil-works/pi-coding-agent")).SessionManager.create(cwd, sessionDir);
-    await host.switchTo(isolated.getSessionFile()!, { cwdOverride: cwd });
-    const sessionFile = host.activeSessionFile as string;
-    await host.activateExecution(cwd, sessionFile);
+    const owner = await host.activateExecution(cwd, isolated.getSessionFile()!);
+    const sessionFile = owner.sessionFile;
     const appendTurn = (text: string) => {
       const userEntryId = sessionOf(host, sessionFile).sessionManager.appendMessage({
         role: "user",
@@ -147,8 +146,7 @@ describe("PiHost rollback integration", () => {
     await writeFile(join(cwd, ".pi", "state", "guardrails", "decisions.jsonl"), '{"at":1}\n');
     await host.testCaptureTurnEnd(start, sessionFile);
     expect((await host.getHistory(sessionFile)).turns.find((t) => t.entryId === u1)?.changedCount).toBe(1);
-    const sessionFile2 = host.activeSessionFile as string;
-    await host.activateExecution(cwd, sessionFile2);
+    const sessionFile2 = sessionFile;
     const plan = await host.prepareRollback(sessionFile2, u1);
     expect(plan.changes.map((c) => c.path)).toEqual(["file.txt"]);
 
@@ -175,13 +173,13 @@ describe("PiHost rollback integration", () => {
     await writeFile(join(cwd, "file.txt"), "before\n");
     await git(cwd, ["add", "file.txt"]);
 
-    const host = new PiHost({ cwd, agentDir, stateDir, onEvent: () => undefined, onStatus: () => undefined });
+    const host = new PiHost({ cwd, agentDir, stateDir, onEvent: () => undefined });
     await host.start();
-    await host.open({ cwd });
+    // The test drives one exact transcript: create it, then let it own the
+    // project. Ownership identity comes back from the activation itself.
     const isolated = (await import("@earendil-works/pi-coding-agent")).SessionManager.create(cwd, sessionDir);
-    await host.switchTo(isolated.getSessionFile()!, { cwdOverride: cwd });
-    const sessionFile = host.activeSessionFile as string;
-    await host.activateExecution(cwd, sessionFile);
+    const owner = await host.activateExecution(cwd, isolated.getSessionFile()!);
+    const sessionFile = owner.sessionFile;
 
     const start = await host.testCaptureTurnStart(sessionFile);
     expect(start).not.toBeNull();
@@ -208,8 +206,7 @@ describe("PiHost rollback integration", () => {
     // user now immediately edits to C with no settle() / no wait, and clicks
     // Rollback. The drift guard inside commitRollback must see the changed
     // worktree and refuse; the file must remain at C.
-    const sessionFile3 = host.activeSessionFile as string;
-    await host.activateExecution(cwd, sessionFile3);
+    const sessionFile3 = sessionFile;
     const plan = await host.prepareRollback(sessionFile3, userEntryId);
     expect(plan).toMatchObject({ abandonedCount: 1 });
     await writeFile(join(cwd, "file.txt"), "manual-C\n");
@@ -240,13 +237,13 @@ describe("PiHost rollback integration", () => {
     const huge = join(cwd, "huge.log");
     await writeFile(huge, Buffer.alloc(3 * 1024 * 1024, "x"));
 
-    const host = new PiHost({ cwd, agentDir, stateDir, onEvent: () => undefined, onStatus: () => undefined });
+    const host = new PiHost({ cwd, agentDir, stateDir, onEvent: () => undefined });
     await host.start();
-    await host.open({ cwd });
+    // The test drives one exact transcript: create it, then let it own the
+    // project. Ownership identity comes back from the activation itself.
     const isolated = (await import("@earendil-works/pi-coding-agent")).SessionManager.create(cwd, sessionDir);
-    await host.switchTo(isolated.getSessionFile()!, { cwdOverride: cwd });
-    const sessionFile = host.activeSessionFile as string;
-    await host.activateExecution(cwd, sessionFile);
+    const owner = await host.activateExecution(cwd, isolated.getSessionFile()!);
+    const sessionFile = owner.sessionFile;
 
     const start = await host.testCaptureTurnStart(sessionFile);
     expect(start).not.toBeNull();
@@ -299,13 +296,13 @@ describe("PiHost rollback integration", () => {
     await writeFile(join(cwd, "file.txt"), "before\n");
     await git(cwd, ["add", "file.txt"]);
 
-    const host = new PiHost({ cwd, agentDir, stateDir, onEvent: () => undefined, onStatus: () => undefined });
+    const host = new PiHost({ cwd, agentDir, stateDir, onEvent: () => undefined });
     await host.start();
-    await host.open({ cwd });
+    // The test drives one exact transcript: create it, then let it own the
+    // project. Ownership identity comes back from the activation itself.
     const isolated = (await import("@earendil-works/pi-coding-agent")).SessionManager.create(cwd, sessionDir);
-    await host.switchTo(isolated.getSessionFile()!, { cwdOverride: cwd });
-    const sessionFile = host.activeSessionFile as string;
-    await host.activateExecution(cwd, sessionFile);
+    const owner = await host.activateExecution(cwd, isolated.getSessionFile()!);
+    const sessionFile = owner.sessionFile;
 
     // Real turn → checkpoint → rollback plan against the OWNER session.
     const start = await host.testCaptureTurnStart(sessionFile);

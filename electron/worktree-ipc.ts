@@ -26,9 +26,7 @@ export function registerWorktreeIpc(
     daemonTaskBySessionFileStrict: (client: DaemonClient, file: string | null | undefined) => Promise<Task | undefined>;
     taskManager: TaskManager;
     processManager: ProcessManager;
-    getActiveCwd: () => string;
-    applyCwd: (cwd: string) => void;
-    sendStatus: (status: string, extra?: Record<string, unknown>) => void;
+    getFocusedCwd: () => string;
   },
 ): void {
   const {
@@ -40,9 +38,7 @@ export function registerWorktreeIpc(
     daemonTaskBySessionFileStrict,
     taskManager,
     processManager,
-    getActiveCwd,
-    applyCwd,
-    sendStatus,
+    getFocusedCwd,
   } = deps;
   handle("pideck:worktree-info", async (_e, sessionFile: unknown) => {
     if (typeof sessionFile !== "string" || sessionFile.length < 1 || sessionFile.length > 4096) {
@@ -56,7 +52,7 @@ export function registerWorktreeIpc(
         ? await daemonTaskBySessionFile(file)
         : taskManager.findBySessionFile(file);
       const parentSession = wireStr(header ?? undefined, "parentSession") ?? task?.parentSessionFile;
-      const cwd = wireStr(header ?? undefined, "cwd") ?? task?.cwd ?? getActiveCwd();
+      const cwd = wireStr(header ?? undefined, "cwd") ?? task?.cwd ?? getFocusedCwd();
       const g = cwd ? await gitInfo(cwd) : { isRepo: false };
       return {
         isWorktree: !!parentSession,
@@ -86,7 +82,7 @@ export function registerWorktreeIpc(
         throw new Error("no persisted session to worktree yet, send at least one message first");
       }
       const originalPath = before.sessionFile;
-      const originalCwd = getActiveCwd();
+      const originalCwd = getFocusedCwd();
       let gitWorktree: { path: string; branch: string; baseBranch?: string } | null = null;
       let gitRoot: string | undefined;
 
@@ -100,12 +96,12 @@ export function registerWorktreeIpc(
         const safeName = sanitizeWorktreeName(opts.name) || `exp-${Date.now().toString(36)}`;
         await getRuntime().setSessionName(worktreePath, `worktree: ${safeName}`);
         const afterNameState = await getRuntime().getState(worktreePath);
-        await ensureClonedSessionFile(worktreePath, originalPath, getActiveCwd(), afterNameState?.sessionId);
-        let workCwd = getActiveCwd();
+        await ensureClonedSessionFile(worktreePath, originalPath, originalCwd, afterNameState?.sessionId);
+        let workCwd = originalCwd;
 
         if (opts.useGit) {
           const header = (await readSessionHeader(worktreePath)) ?? {};
-          const baseCwd = wireStr(header ?? undefined, "cwd") ?? getActiveCwd();
+          const baseCwd = wireStr(header ?? undefined, "cwd") ?? originalCwd;
           const info = await gitInfo(baseCwd);
           if (!info.isRepo || !info.root) {
             throw new Error("project is not a git repository, uncheck the git worktree option");
@@ -122,9 +118,8 @@ export function registerWorktreeIpc(
           // worktree RELOCATES that ownership: the runtime is rebuilt under
           // the worktree cwd (services, permissions, tool contexts are
           // cwd-bound) instead of being re-pointed in place.
-          await getRuntime().relocateExecution(worktreePath, getActiveCwd(), wtPath);
+          await getRuntime().relocateExecution(worktreePath, originalCwd, wtPath);
           workCwd = wtPath;
-          applyCwd(wtPath);
         }
 
         if (opts.description?.trim()) {
@@ -173,8 +168,9 @@ export function registerWorktreeIpc(
             worktreePath: gitWorktree?.path,
           });
         }
-        sendStatus("ready", { state, sessionPath: worktreePath, cwd: workCwd });
-        return { task, taskId: task.id, worktreePath, originalPath, gitWorktree };
+        // Explicit navigation identity: the renderer views exactly this
+        // session. The backend never selects anything for it (items 138-141).
+        return { task, taskId: task.id, worktreePath, originalPath, gitWorktree, sessionFile: worktreePath, cwd: workCwd };
       } catch (error) {
         // Clone + git worktree creation is transactional: restore the original
         // runtime first, then remove only artifacts this attempt created.
@@ -184,7 +180,6 @@ export function registerWorktreeIpc(
           // never via a hidden runtime-creating switch.
           await getRuntime().executionActivate(originalCwd, originalPath);
           restored = true;
-          applyCwd(originalCwd);
         } catch {
           // Preserve the cloned session if restoration failed; deleting the
           // active file would make recovery harder.
@@ -225,7 +220,8 @@ export function registerWorktreeIpc(
       // Leaving the worktree is an execution hand-back: the original session
       // becomes the project's owner again (its runtime is rebuilt under the
       // original cwd, never merely foregrounded).
-      await getRuntime().executionActivate(wireStr(header ?? undefined, "cwd") ?? getActiveCwd(), originalPath);
+      const originalCwd = wireStr(header ?? undefined, "cwd") ?? getFocusedCwd();
+      await getRuntime().executionActivate(originalCwd, originalPath);
 
       let gitRemoved = false;
       if (!opts.keep) {
@@ -240,11 +236,10 @@ export function registerWorktreeIpc(
         await fsp.rm(file);
       }
 
-      const newState = await getRuntime().getState(originalPath);
       const origHeader = await readSessionHeader(originalPath);
-      applyCwd(wireStr(origHeader ?? undefined, "cwd") ?? getActiveCwd());
-      sendStatus("ready", { state: newState, sessionPath: originalPath, cwd: getActiveCwd() });
-      return { originalPath, kept: opts.keep, gitRemoved };
+      // The renderer views the returned session explicitly; nothing here
+      // navigates or reports readiness (items 140-141).
+      return { originalPath, kept: opts.keep, gitRemoved, sessionFile: originalPath, cwd: wireStr(origHeader ?? undefined, "cwd") ?? originalCwd };
     };
 
     if (task) {

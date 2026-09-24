@@ -43,7 +43,15 @@ function makeHarness(host: PiHost, botStore: BotStore, projectSettings: ProjectS
   const compatOpen = vi.fn(async () => {
     throw new Error("compat openSession must not be used by bots");
   });
+  const prompted: string[] = [];
   const runtime = {
+    prompt: async (_message: string, _images: unknown[] | undefined, _behavior: string | undefined, sessionFile: string) => {
+      prompted.push(sessionFile);
+    },
+    getMessages: async (sessionFile: string) => {
+      const entry = host.testSessions().get(sessionFile);
+      return entry?.runtime.session.messages ?? [];
+    },
     executionActivate: async (cwd: string, sessionFile?: string, opts?: { systemPrompt?: string | null }) => {
       try {
         const entry = await host.activateExecution(cwd, sessionFile, opts);
@@ -71,13 +79,13 @@ function makeHarness(host: PiHost, botStore: BotStore, projectSettings: ProjectS
     sessionsRoot,
     botStore,
     projectSettings,
-    sessionIndex: { get: () => null, set: () => undefined, all: () => [] } as unknown as SessionIndex,
+    sessionIndex: { get: () => null, set: () => undefined, all: () => [], touch: () => undefined } as unknown as SessionIndex,
     taskManager: { resumeForSession: () => undefined } as unknown as TaskManager,
     getRuntime: () => runtime,
     getHost: () => host,
     isDaemonOwned: () => false,
     getHostReady: () => null,
-    getActiveCwd: () => activeCwd,
+    getFocusedCwd: () => activeCwd,
     broadcastBots: () => undefined,
     broadcastGroups: () => undefined,
     projectSettingsForCwd: (cwd: string) => {
@@ -95,7 +103,7 @@ function makeHarness(host: PiHost, botStore: BotStore, projectSettings: ProjectS
     }),
     lastAssistantText: () => "",
   });
-  return { handlers, invoke: (channel: string, ...args: unknown[]) => {
+  return { handlers, prompted, invoke: (channel: string, ...args: unknown[]) => {
     const fn = handlers.get(channel);
     if (!fn) throw new Error(`no handler for ${channel}`);
     return fn({}, ...args);
@@ -108,7 +116,6 @@ function makeHost(cwd: string, agentDir: string) {
     agentDir,
     stateDir: join(agentDir, "pideck-state"),
     onEvent: () => undefined,
-    onStatus: () => undefined,
   } satisfies HostOptions);
   return host;
 }
@@ -133,6 +140,49 @@ describe("C10 retention: bot and group opens claim execution", () => {
       // Nothing was built: the busy owner is still the only runtime.
       expect(h.compatOpen).not.toHaveBeenCalled();
       expect(host.testRuntimeCreationCount()).toBe(createdBefore);
+      expect(host.testSessions().size).toBe(1);
+      expect(host.testExecutionByCwd().get(p.cwd)).toBe(owner);
+      host.testAssertRetentionInvariant();
+    } finally {
+      await host.dispose();
+    }
+  }, 60_000);
+
+  it("a bot DM refuses a historical origin and relays only to the explicit owner", async () => {
+    const p = await makeProject("bot-dm");
+    const host = makeHost(p.cwd, p.agentDir);
+    await host.start();
+    try {
+      const botStore = new BotStore(join(p.state, "bots.json"));
+      const target = botStore.create({ name: "target", cwd: p.cwd });
+      const h = makeHarness(host, botStore, new ProjectSettingsStore(join(p.state, "projects")), p.state, p.cwd);
+
+      // The project has a real execution owner plus a cold historical chat.
+      const owner = SessionManager.create(p.cwd).getSessionFile()!;
+      const historical = SessionManager.create(p.cwd).getSessionFile()!;
+      await host.activateExecution(p.cwd, owner);
+
+      // A DM whose origin is the HISTORICAL chat is refused: replies must
+      // never land in a conversation that does not own its project.
+      await expect(
+        h.invoke("pideck:bots-message", {
+          targetId: target.id,
+          text: "hi",
+          originSessionFile: historical,
+          originCwd: p.cwd,
+        })
+      ).rejects.toThrow(/Return to the live session/);
+      expect(host.testExecutionByCwd().get(p.cwd)).toBe(owner);
+      expect(host.testSessions().has(historical)).toBe(false);
+
+      // The explicit OWNER origin is accepted and the relay round trip
+      // leaves exactly one runtime, owned by the origin again.
+      await h.invoke("pideck:bots-message", {
+        targetId: target.id,
+        text: "hi",
+        originSessionFile: owner,
+        originCwd: p.cwd,
+      });
       expect(host.testSessions().size).toBe(1);
       expect(host.testExecutionByCwd().get(p.cwd)).toBe(owner);
       host.testAssertRetentionInvariant();

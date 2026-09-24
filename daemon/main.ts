@@ -83,7 +83,6 @@ const piHost = new PiHost({
     listRules: () => permissionEngine.listRules(),
   },
   onEvent: () => {},
-  onStatus: () => {},
 });
 await piHost.start();
 

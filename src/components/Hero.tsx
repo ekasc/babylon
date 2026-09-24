@@ -1,10 +1,12 @@
 import { useMemo } from "react";
-import type { ProjectGroup, SessionMeta, SessionStatus } from "../bridge";
+import type { ProjectGroup, RuntimeStatus, SessionMeta } from "../bridge";
 
 interface Props {
-  status: SessionStatus;
+  /** Runtime health for the shell. It can never select a conversation. */
+  runtimeStatus: RuntimeStatus;
   groups: ProjectGroup[];
-  onOpen(path: string | undefined, cwd: string): void;
+  /** Every Hero row is an EXISTING conversation: viewing, never activating. */
+  onOpen(path: string, cwd: string): void;
   onNew(): void;
   /** Active project folder: shows the "What are we doing in X?" heading. */
   spaceCwd?: string | null;
@@ -23,7 +25,7 @@ function timeAgo(ms: number): string {
   return new Date(ms).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-export default function Hero({ status, groups, onOpen, onNew, spaceCwd = null }: Props) {
+export default function Hero({ runtimeStatus, groups, onOpen, onNew, spaceCwd = null }: Props) {
   // Project-scoped recents: under a "What are we doing in X?" heading only
   // X's sessions make sense. Global recents belong to the no-project state.
   const recent = useMemo(() => {
@@ -47,11 +49,11 @@ export default function Hero({ status, groups, onOpen, onNew, spaceCwd = null }:
             </p>
           </div>
         ) : null}
-        {status.status === "starting" ? (
+        {runtimeStatus.status === "starting" ? (
           <p className="mt-4 text-[13px] text-accent">Preparing Pi…</p>
         ) : null}
-        {status.status === "error" ? (
-          <p className="mt-4 text-[14px] leading-6 text-err">{status.message}</p>
+        {runtimeStatus.status === "error" ? (
+          <p className="mt-4 text-[14px] leading-6 text-err">{runtimeStatus.message}</p>
         ) : null}
         {recent.length > 0 ? (
           <div className="mt-6">

@@ -219,13 +219,11 @@ export type CanvasSceneSummary = { name: string; path: string; mtime: number; si
 export type CanvasScenePayload = { path: string; name: string; text: string | null };
 export type CanvasChangedEvent = { path: string; name: string; text: string | null };
 
-export interface SessionStatus {
-  status: "idle" | "starting" | "ready" | "exited" | "error";
-  cwd?: string;
+/** Runtime health only. It carries NO session or project identity, so it can
+ *  never select, prepare, or navigate a conversation (C4). */
+export interface RuntimeStatus {
+  status: "starting" | "ready" | "error";
   message?: string;
-  state?: AgentState | null;
-  sessionPath?: string;
-  requestId?: number;
   code?: number;
 }
 
@@ -571,7 +569,6 @@ export interface Bridge {
   getToolOutput(sessionFile: string, toolCallId: string): Promise<{ content: string; truncated: boolean }>;
   deleteSession(path: string): Promise<void>;
   pickFolder(): Promise<string | null>;
-  openSession(opts: { path?: string; cwd: string; requestId?: number; botId?: string }): Promise<void>;
   botsList(): Promise<Bot[]>;
   botsCreate(input: NewBotInput): Promise<Bot>;
   botsUpdate(id: string, patch: BotPatch): Promise<Bot>;
@@ -589,7 +586,11 @@ export interface Bridge {
   groupSend(groupId: string, text: string): Promise<{ rounds: number; turns: number; spoke: number; stopped: boolean }>;
   /** Bot-to-bot DM: runs one attributed turn in the target's chat and relays
    *  the reply into the origin as a bot-message line. Idle sessions only. */
-  botsMessage(targetId: string, text: string, fromId?: string): Promise<{ reply: string | null; pass: boolean }>;
+  /** Bot DM. The origin is explicit and must own its project — the backend
+   *  never guesses a "current session". */
+  botsMessage(input: { targetId: string; text: string; fromId?: string; originSessionFile: string; originCwd: string }): Promise<{ reply: string | null; pass: boolean }>;
+  /** Which project the desktop UI is focused on. Never execution ownership. */
+  projectFocus(cwd: string | null): Promise<void>;
   botsDefaultGet(): Promise<DefaultBot>;
   botsDefaultSet(input: DefaultBot): Promise<DefaultBot>;
   projectSettingsGet(cwd: string): Promise<{ settings: ProjectSettings; hash: string }>;
@@ -630,7 +631,6 @@ export interface Bridge {
   /** Transactional design start + first interview turn for an addressed session. */
   beginDesignPrompt(sessionFile: string, subject: string, message: string, images?: unknown[], streamingBehavior?: string): Promise<import("../electron/design-mode/store").DesignBeginResult>;
   /** Release an idle session runtime (tab closed). Live runtimes refuse. */
-  releaseSession(path: string): Promise<{ released: boolean }>;
   refreshSession(path: string): Promise<boolean>;
 
   canvasList(cwd: string): Promise<CanvasSceneSummary[]>;
@@ -717,6 +717,9 @@ export interface Bridge {
     worktreePath: string;
     originalPath: string;
     gitWorktree?: { path: string; branch: string; baseBranch?: string } | null;
+    /** Explicit navigation identity: the renderer views exactly this. */
+    sessionFile: string;
+    cwd: string;
   }>;
   worktreeExit(opts: { keep: boolean }, sessionFile: string): Promise<{
     originalPath: string;
@@ -724,6 +727,8 @@ export interface Bridge {
     gitRemoved: boolean;
     task?: Task;
     removed?: boolean;
+    sessionFile: string;
+    cwd: string;
   }>;
 
   uiRespond(resp: Record<string, unknown>): Promise<void>;
@@ -746,7 +751,7 @@ export interface Bridge {
 
   onAgentEvents(cb: (events: AgentEvent[]) => void): () => void;
   onAgentEvent(cb: (event: AgentEvent) => void): () => void;
-  onStatus(cb: (status: SessionStatus) => void): () => void;
+  onRuntimeStatus(cb: (status: RuntimeStatus) => void): () => void;
   simOpenTab(url?: string): Promise<SimTabState>;
   simActivate(tabId: string): Promise<SimTabState>;
   simCloseTab(tabId?: string | null): Promise<{ closed: boolean }>;
@@ -864,7 +869,6 @@ export const bridge: Bridge = window.pideck ?? {
   onCanvasScenes: () => () => {},
   deleteSession: () => Promise.reject(new Error("bridge unavailable")),
   pickFolder: () => Promise.resolve(null),
-  openSession: () => Promise.resolve(),
 
   botsList: () => Promise.resolve([]),
   botsCreate: () => Promise.reject(new Error("bridge unavailable")),
@@ -880,6 +884,7 @@ export const bridge: Bridge = window.pideck ?? {
   onGroupsUpdate: () => () => {},
   groupSend: () => Promise.reject(new Error("bridge unavailable")),
   botsMessage: () => Promise.reject(new Error("bridge unavailable")),
+  projectFocus: () => Promise.resolve(),
   botsDefaultGet: () => Promise.reject(new Error("bridge unavailable")),
   botsDefaultSet: () => Promise.reject(new Error("bridge unavailable")),
   projectSettingsGet: () => Promise.reject(new Error("bridge unavailable")),
@@ -904,7 +909,6 @@ export const bridge: Bridge = window.pideck ?? {
   designGet: () => Promise.resolve({ design: null, stage: "idle" as const }),
   designControl: () => Promise.resolve({ design: null, stage: "idle" as const }),
   beginDesignPrompt: () => Promise.resolve({ design: null, stage: "idle" as const, started: true, error: null }),
-  releaseSession: () => Promise.resolve({ released: false }),
   refreshSession: () => Promise.resolve(false),
 
   getMessages: () => Promise.resolve([]),
@@ -992,7 +996,7 @@ export const bridge: Bridge = window.pideck ?? {
 
   onAgentEvents: () => () => {},
   onAgentEvent: () => () => {},
-  onStatus: () => () => {},
+  onRuntimeStatus: () => () => {},
   simOpenTab: () => Promise.reject(new Error("bridge unavailable")),
   simActivate: () => Promise.reject(new Error("bridge unavailable")),
   simCloseTab: () => Promise.resolve({ closed: false }),

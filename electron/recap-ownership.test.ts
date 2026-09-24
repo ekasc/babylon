@@ -60,21 +60,21 @@ describe("recap sweep targets execution owners only", () => {
   it("recaps quiet owners across projects, never the viewed non-owner, and skips busy owners", async () => {
     const a = await makeProject("a");
     const b = await makeProject("b");
-    const host = new PiHost({ cwd: a.cwd, agentDir: a.agentDir, stateDir: join(a.agentDir, "state"), onEvent: () => undefined, onStatus: () => undefined });
+    const host = new PiHost({ cwd: a.cwd, agentDir: a.agentDir, stateDir: join(a.agentDir, "state"), onEvent: () => undefined });
     await host.start();
     try {
       const fileA = seed(a.cwd);
       const fileB = seed(b.cwd);
       const fileC = seed(a.cwd); // supersedes fileA: one runtime per project
 
-      await host.open({ path: fileA, cwd: a.cwd });
       await host.activateExecution(a.cwd, fileA);
-      await host.open({ path: fileB, cwd: b.cwd });
+      await host.activateExecution(a.cwd, fileA);
+      await host.activateExecution(b.cwd, fileB);
       await host.activateExecution(b.cwd, fileB);
       // Project A's owner moves to C: A is released, so only the CURRENT
       // owners are sweep targets (never a released runtime).
-      await host.open({ path: fileC, cwd: a.cwd });
-      expect(host.activeSessionFile).toBe(fileC);
+      await host.activateExecution(a.cwd, fileC);
+      expect(host.testExecutionByCwd().get(a.cwd)).toBe(fileC);
       expect(host.testSessions().has(fileA)).toBe(false);
       host.testAssertRetentionInvariant();
 
@@ -91,7 +91,7 @@ describe("recap sweep targets execution owners only", () => {
       tailCalls.length = 0;
       await host.testSweepRecap();
       expect(tailCalls).toEqual([fileC]);
-      expect(host.activeSessionFile).toBe(fileC);
+      expect(host.testExecutionByCwd().get(a.cwd)).toBe(fileC);
     } finally {
       if (originalRecapMs === undefined) delete process.env.PIDECK_RECAP_MS;
       else process.env.PIDECK_RECAP_MS = originalRecapMs;

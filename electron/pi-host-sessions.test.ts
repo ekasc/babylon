@@ -37,16 +37,14 @@ async function makeSessionFile(cwd: string) {
 
 function makeHost(cwd: string, agentDir: string, sessionsRoot?: string) {
   const events: AgentEvent[] = [];
-  const statuses: Array<Parameters<HostOptions["onStatus"]>[0]> = [];
   const host = new PiHost({
     cwd,
     agentDir,
     stateDir: join(agentDir, "pideck-state"),
     ...(sessionsRoot ? { sessionsRoot } : {}),
     onEvent: (ev) => events.push(ev),
-    onStatus: (s) => statuses.push(s),
   });
-  return { host, events, statuses };
+  return { host, events };
 }
 
 describe("Babylon state location", () => {
@@ -63,7 +61,7 @@ describe("rollback snapshot warming", () => {
     const capture = vi.spyOn(SnapshotStore.prototype, "capture");
     try {
       const file = await makeSessionFile(cwd);
-      await host.open({ path: file, cwd });
+      await host.activateExecution(cwd, file);
       await vi.waitFor(() => {
         const warmed = capture.mock.calls.some(
           (call) => call[0] === cwd && (call[1] as { authoritative?: boolean } | undefined)?.authoritative === true
@@ -105,7 +103,7 @@ describe("PiHost independent session execution", () => {
     await host.start();
     try {
       const fileA = await makeSessionFile(a.cwd);
-      await host.open({ path: fileA, cwd: a.cwd });
+      await host.activateExecution(a.cwd, fileA);
       await host.activateExecution(a.cwd, fileA);
       const entry = host.testSessions().get(fileA)!;
       const delivered: string[] = [];
@@ -122,7 +120,7 @@ describe("PiHost independent session execution", () => {
         // Exactly one turn — the message itself — never a synthetic
         // [Goal Mode Start] follow-up.
         expect(delivered).toEqual([`${fileA}:Fix the race`]);
-        expect(host.activeSessionFile).toBe(fileA);
+        expect(host.testExecutionByCwd().get(a.cwd)).toBe(fileA);
       } finally {
         promptSpy.mockRestore();
       }
@@ -137,7 +135,7 @@ describe("PiHost independent session execution", () => {
     await host.start();
     try {
       const fileA = await makeSessionFile(a.cwd);
-      await host.open({ path: fileA, cwd: a.cwd });
+      await host.activateExecution(a.cwd, fileA);
       await host.activateExecution(a.cwd, fileA);
       const entry = host.testSessions().get(fileA)!;
       const promptSpy = vi.spyOn(entry.runtime.session, "prompt").mockRejectedValue(new Error("pre-start boom"));
@@ -162,7 +160,7 @@ describe("PiHost independent session execution", () => {
     await host.start();
     try {
       const fileA = await makeSessionFile(a.cwd);
-      await host.open({ path: fileA, cwd: a.cwd });
+      await host.activateExecution(a.cwd, fileA);
       await host.activateExecution(a.cwd, fileA);
       const entry = host.testSessions().get(fileA)!;
       // The turn started (user message landed) and then died mid-flight —
@@ -194,7 +192,7 @@ describe("PiHost independent session execution", () => {
     await host.start();
     try {
       const fileA = await makeSessionFile(a.cwd);
-      await host.open({ path: fileA, cwd: a.cwd });
+      await host.activateExecution(a.cwd, fileA);
       await host.activateExecution(a.cwd, fileA);
       const entry = host.testSessions().get(fileA)!;
       await saveSessionGoal(a.cwd, entry.sessionId, createDurableGoalState("Old goal", defaultDurableGoalModeConfig()));
@@ -219,7 +217,7 @@ describe("PiHost independent session execution", () => {
     await host.start();
     try {
       const fileA = await makeSessionFile(a.cwd);
-      await host.open({ path: fileA, cwd: a.cwd });
+      await host.activateExecution(a.cwd, fileA);
       await expect(host.beginGoalPrompt(fileA, "   ", "   ")).rejects.toThrow("invalid goal objective");
       await expect(host.beginGoalPrompt(fileA, "x".repeat(4001), "x")).rejects.toThrow("invalid goal objective");
       await expect(host.beginGoalPrompt(join(a.cwd, "nope.jsonl"), "Fix X", "Fix X")).rejects.toThrow();
@@ -236,10 +234,10 @@ describe("PiHost independent session execution", () => {
     try {
       const fileA = await makeSessionFile(a.cwd);
       const fileB = await makeSessionFile(b.cwd);
-      await host.open({ path: fileA, cwd: a.cwd });
       await host.activateExecution(a.cwd, fileA);
-      await host.open({ path: fileB, cwd: b.cwd });
-      expect(host.activeSessionFile).toBe(fileB);
+      await host.activateExecution(a.cwd, fileA);
+      await host.activateExecution(b.cwd, fileB);
+      expect(host.testExecutionByCwd().get(b.cwd)).toBe(fileB);
       const delivered: string[] = [];
       for (const entry of host.testSessions().values()) {
         vi.spyOn(entry.runtime.session, "prompt").mockImplementation(async (message: string) => {
@@ -250,7 +248,7 @@ describe("PiHost independent session execution", () => {
       // The cancel ran on A while B stayed foreground — no global
       // foreground coupling in GUI goal controls.
       expect(delivered).toEqual([`${fileA}:/goal cancel`]);
-      expect(host.activeSessionFile).toBe(fileB);
+      expect(host.testExecutionByCwd().get(b.cwd)).toBe(fileB);
     } finally {
       await host.dispose();
     }
@@ -262,7 +260,7 @@ describe("PiHost independent session execution", () => {
     await host.start();
     try {
       const fileA = await makeSessionFile(a.cwd);
-      await host.open({ path: fileA, cwd: a.cwd });
+      await host.activateExecution(a.cwd, fileA);
       await host.activateExecution(a.cwd, fileA);
       const entry = host.testSessions().get(fileA)!;
       const delivered: string[] = [];
@@ -277,7 +275,7 @@ describe("PiHost independent session execution", () => {
         expect(result.stage).toBe("elicit");
         // Exactly one turn — the message itself, never a synthetic kickoff.
         expect(delivered).toEqual([`${fileA}:Redesign settings`]);
-        expect(host.activeSessionFile).toBe(fileA);
+        expect(host.testExecutionByCwd().get(a.cwd)).toBe(fileA);
       } finally {
         promptSpy.mockRestore();
       }
@@ -292,7 +290,7 @@ describe("PiHost independent session execution", () => {
     await host.start();
     try {
       const fileA = await makeSessionFile(a.cwd);
-      await host.open({ path: fileA, cwd: a.cwd });
+      await host.activateExecution(a.cwd, fileA);
       await host.activateExecution(a.cwd, fileA);
       const entry = host.testSessions().get(fileA)!;
       const promptSpy = vi.spyOn(entry.runtime.session, "prompt").mockRejectedValue(new Error("pre-start boom"));
@@ -316,7 +314,7 @@ describe("PiHost independent session execution", () => {
     await host.start();
     try {
       const fileA = await makeSessionFile(a.cwd);
-      await host.open({ path: fileA, cwd: a.cwd });
+      await host.activateExecution(a.cwd, fileA);
       await host.activateExecution(a.cwd, fileA);
       const entry = host.testSessions().get(fileA)!;
       const promptSpy = vi.spyOn(entry.runtime.session, "prompt").mockImplementation(async () => {
@@ -343,7 +341,7 @@ describe("PiHost independent session execution", () => {
     await host.start();
     try {
       const fileA = await makeSessionFile(a.cwd);
-      await host.open({ path: fileA, cwd: a.cwd });
+      await host.activateExecution(a.cwd, fileA);
       await expect(host.beginDesignPrompt(fileA, "   ", "   ")).rejects.toThrow("invalid design subject");
       await expect(host.beginDesignPrompt(join(a.cwd, "nope.jsonl"), "Redesign", "Redesign")).rejects.toThrow();
     } finally {
@@ -357,7 +355,7 @@ describe("PiHost independent session execution", () => {
     await host.start();
     try {
       const fileA = await makeSessionFile(a.cwd);
-      await host.open({ path: fileA, cwd: a.cwd });
+      await host.activateExecution(a.cwd, fileA);
       await host.activateExecution(a.cwd, fileA);
       const entry = host.testSessions().get(fileA)!;
       // Active design blocks goal starts (backend invariant, not just UI).
@@ -382,10 +380,10 @@ describe("PiHost independent session execution", () => {
     try {
       const fileA = await makeSessionFile(a.cwd);
       const fileB = await makeSessionFile(b.cwd);
-      await host.open({ path: fileA, cwd: a.cwd });
       await host.activateExecution(a.cwd, fileA);
-      await host.open({ path: fileB, cwd: b.cwd });
-      expect(host.activeSessionFile).toBe(fileB);
+      await host.activateExecution(a.cwd, fileA);
+      await host.activateExecution(b.cwd, fileB);
+      expect(host.testExecutionByCwd().get(b.cwd)).toBe(fileB);
       const delivered: string[] = [];
       for (const entry of host.testSessions().values()) {
         vi.spyOn(entry.runtime.session, "prompt").mockImplementation(async (message: string) => {
@@ -394,7 +392,7 @@ describe("PiHost independent session execution", () => {
       }
       await host.execDesignCommand(fileA, "done");
       expect(delivered).toEqual([`${fileA}:/design done`]);
-      expect(host.activeSessionFile).toBe(fileB);
+      expect(host.testExecutionByCwd().get(b.cwd)).toBe(fileB);
     } finally {
       await host.dispose();
     }
@@ -408,10 +406,10 @@ describe("PiHost independent session execution", () => {
     try {
       const fileA = await makeSessionFile(a.cwd);
       const fileB = await makeSessionFile(b.cwd);
-      await host.open({ path: fileA, cwd: a.cwd });
-      expect(host.activeSessionFile).toBe(fileA);
-      await host.open({ path: fileB, cwd: b.cwd });
-      expect(host.activeSessionFile).toBe(fileB);
+      await host.activateExecution(a.cwd, fileA);
+      expect(host.testExecutionByCwd().get(a.cwd)).toBe(fileA);
+      await host.activateExecution(b.cwd, fileB);
+      expect(host.testExecutionByCwd().get(b.cwd)).toBe(fileB);
       const sessions = host.testSessions();
       expect(sessions.size).toBe(2);
       expect(sessions.has(fileA)).toBe(true);
@@ -429,8 +427,8 @@ describe("PiHost independent session execution", () => {
     try {
       const fileA = await makeSessionFile(a.cwd);
       const fileB = await makeSessionFile(b.cwd);
-      await host.open({ path: fileA, cwd: a.cwd });
-      await host.open({ path: fileB, cwd: b.cwd });
+      await host.activateExecution(a.cwd, fileA);
+      await host.activateExecution(b.cwd, fileB);
       // Each project's chat owns its own execution slot (I1): mutations
       // require the addressed session to BE the owner, never the foreground.
       await host.activateExecution(a.cwd, fileA);
@@ -445,7 +443,7 @@ describe("PiHost independent session execution", () => {
       // A new same-project conversation TAKES the slot: A is released
       // (cold, disk-only) and A2 becomes project a's execution owner.
       const fileA2 = await makeSessionFile(a.cwd);
-      await host.open({ path: fileA2, cwd: a.cwd });
+      await host.activateExecution(a.cwd, fileA2);
       expect(host.testExecutionByCwd().get(a.cwd)).toBe(fileA2);
       expect(host.testSessions().has(fileA)).toBe(false);
       // Mutations never auto-open or fall back to "whatever is foreground":
@@ -474,10 +472,10 @@ describe("PiHost independent session execution", () => {
     try {
       const fileA = await makeSessionFile(a.cwd);
       const fileB = await makeSessionFile(b.cwd);
-      await host.open({ path: fileA, cwd: a.cwd });
       await host.activateExecution(a.cwd, fileA);
-      await host.open({ path: fileB, cwd: b.cwd });
-      expect(host.activeSessionFile).toBe(fileB);
+      await host.activateExecution(a.cwd, fileA);
+      await host.activateExecution(b.cwd, fileB);
+      expect(host.testExecutionByCwd().get(b.cwd)).toBe(fileB);
       const delivered: string[] = [];
       for (const entry of host.testSessions().values()) {
         vi.spyOn(entry.runtime.session, "prompt").mockImplementation(async (message: string) => {
@@ -487,50 +485,44 @@ describe("PiHost independent session execution", () => {
       await host.prompt("hello A", undefined, undefined, fileA);
       expect(delivered).toEqual([`${fileA}:hello A`]);
       // Explicit identity never moves the foreground pointer.
-      expect(host.activeSessionFile).toBe(fileB);
+      expect(host.testExecutionByCwd().get(b.cwd)).toBe(fileB);
     } finally {
       await host.dispose();
     }
   }, 60_000);
 
-  it("a slow open never foregrounds over a faster later open", async () => {
+  it("a slow activation in one project never blocks or steals a faster one in another", async () => {
     const a = await makeProject("slow-a");
     const b = await makeProject("fast-b");
-    const { host, statuses } = makeHost(a.cwd, a.agentDir);
+    const { host } = makeHost(a.cwd, a.agentDir);
     await host.start();
     try {
       const fileA = await makeSessionFile(a.cwd);
       const fileB = await makeSessionFile(b.cwd);
-      await host.open({ path: fileB, cwd: b.cwd }); // warm B: its re-open is the fast path.
-      const slow = host.open({ path: fileA, cwd: a.cwd, requestId: 1 });
-      const fast = host.open({ path: fileB, cwd: b.cwd, requestId: 2 });
-      const [stateA, stateB] = await Promise.all([slow, fast]);
-      // The slow runtime still builds (its state resolves), but the
-      // foreground follows the last invocation, not the last completion.
-      expect(stateA.sessionFile).toBe(fileA);
-      expect(stateB.sessionFile).toBe(fileB);
-      expect(host.activeSessionFile).toBe(fileB);
-      // No ready emission for the superseded open: the renderer never sees
-      // a foreground claim for A.
-      const readyFor = statuses
-        .filter((s) => s.status === "ready")
-        .map((s) => s.sessionPath);
-      expect(readyFor[readyFor.length - 1]).toBe(fileB);
-      expect(readyFor).not.toContain(fileA);
+      await host.activateExecution(b.cwd, fileB); // warm B: its re-claim is the fast path.
+      const slow = host.activateExecution(a.cwd, fileA);
+      const fast = host.activateExecution(b.cwd, fileB);
+      const [ownerA, ownerB] = await Promise.all([slow, fast]);
+      // Both projects converge on their own owner: no global race, no
+      // foreground, and nothing that could navigate the renderer.
+      expect(ownerA.sessionFile).toBe(fileA);
+      expect(ownerB.sessionFile).toBe(fileB);
+      expect(host.testExecutionByCwd().get(a.cwd)).toBe(fileA);
+      expect(host.testExecutionByCwd().get(b.cwd)).toBe(fileB);
+      host.testAssertRetentionInvariant();
     } finally {
       await host.dispose();
     }
   }, 60_000);
 
-  it("protects the owner from direct release; deactivation is the release path", async () => {
+  it("deactivation is the only release path and it cold-stores the project", async () => {
     const a = await makeProject("e");
     const { host } = makeHost(a.cwd, a.agentDir);
     await host.start();
     try {
       const fileA = await makeSessionFile(a.cwd);
-      await host.open({ path: fileA, cwd: a.cwd });
-      // R3: releaseSession may never strip a project of its execution owner.
-      expect(await host.releaseSession(fileA)).toBe(false);
+      await host.activateExecution(a.cwd, fileA);
+      // A busy/idle owner is only ever released through deactivation.
       expect(host.testSessions().has(fileA)).toBe(true);
       expect(host.testExecutionByCwd().get(a.cwd)).toBe(fileA);
 
@@ -543,10 +535,11 @@ describe("PiHost independent session execution", () => {
       expect(host.testRuntimeCreationCount()).toBe(before);
       host.testAssertRetentionInvariant();
 
-      // With no owner left the same file is releasable/no-op, and unknown
-      // paths are harmless.
-      expect(await host.releaseSession(fileA)).toBe(true);
-      expect(await host.releaseSession("/nonexistent.json")).toBe(true);
+      // With no owner left, deactivation reports "nothing to release", and a
+      // mismatched expected file never touches the real owner.
+      expect(await host.deactivateExecution(a.cwd, fileA)).toBe(false);
+      expect(await host.deactivateExecution(a.cwd, "/nonexistent.json")).toBe(false);
+      expect(host.testSessions().size).toBe(0);
     } finally {
       await host.dispose();
     }
@@ -560,9 +553,9 @@ describe("PiHost independent session execution", () => {
     try {
       const fileA = await makeSessionFile(a.cwd);
       const fileB = await makeSessionFile(b.cwd);
-      await host.open({ path: fileA, cwd: a.cwd });
-      await host.open({ path: fileB, cwd: b.cwd });
-      expect(host.activeSessionFile).toBe(fileB);
+      await host.activateExecution(a.cwd, fileA);
+      await host.activateExecution(b.cwd, fileB);
+      expect(host.testExecutionByCwd().get(b.cwd)).toBe(fileB);
 
       // Gate the thread scan inside deactivateExecution(A) so a concurrent
       // addressed read lands mid-scan: without post-await lifecycle
@@ -612,8 +605,8 @@ describe("PiHost independent session execution", () => {
     try {
       const fileA = await makeSessionFile(a.cwd);
       const fileB = await makeSessionFile(b.cwd);
-      await host.open({ path: fileA, cwd: a.cwd });
-      await host.open({ path: fileB, cwd: b.cwd });
+      await host.activateExecution(a.cwd, fileA);
+      await host.activateExecution(b.cwd, fileB);
       await host.activateExecution(b.cwd, fileB);
 
       let releaseGate!: () => void;
@@ -664,8 +657,8 @@ describe("PiHost independent session execution", () => {
     try {
       const fileA = await makeSessionFile(a.cwd);
       const fileB = await makeSessionFile(b.cwd);
-      await host.open({ path: fileA, cwd: a.cwd });
-      await host.open({ path: fileB, cwd: b.cwd });
+      await host.activateExecution(a.cwd, fileA);
+      await host.activateExecution(b.cwd, fileB);
       const projects = host.testProjectRuntimes();
       expect([...projects.keys()].sort()).toEqual([a.cwd, b.cwd].sort());
     } finally {
@@ -682,8 +675,8 @@ describe("PiHost independent session execution", () => {
     try {
       const fileA = await makeSessionFile(a.cwd);
       const fileB = await makeSessionFile(b.cwd);
-      await host.open({ path: fileA, cwd: a.cwd });
-      await host.open({ path: fileB, cwd: b.cwd });
+      await host.activateExecution(a.cwd, fileA);
+      await host.activateExecution(b.cwd, fileB);
       // Force fileA onto disk (new sessions start as unflushed future
       // paths). The SDK only persists once an assistant message exists
       // (user-only prefixes wait for the turn), so append both and persist
@@ -708,14 +701,14 @@ describe("PiHost independent session execution", () => {
       (managerA as unknown as { _persist: (entry: unknown) => void })._persist(managerA.getEntry(seedAssistantId));
       // Same-owner activation is a structural no-op: no rebuild, no reparse.
       openSpy.mockClear();
-      await host.open({ path: fileA, cwd: a.cwd });
-      expect(host.activeSessionFile).toBe(fileA);
+      await host.activateExecution(a.cwd, fileA);
+      expect(host.testExecutionByCwd().get(a.cwd)).toBe(fileA);
       expect(openSpy).not.toHaveBeenCalled();
       // A → B → A is no different: A never stopped being project a's owner,
       // so it is never torn down and re-parsed.
-      await host.open({ path: fileB, cwd: b.cwd });
-      await host.open({ path: fileA, cwd: a.cwd });
-      expect(host.activeSessionFile).toBe(fileA);
+      await host.activateExecution(b.cwd, fileB);
+      await host.activateExecution(a.cwd, fileA);
+      expect(host.testExecutionByCwd().get(a.cwd)).toBe(fileA);
       expect(openSpy).not.toHaveBeenCalled();
       // An external append is pulled by the EXPLICIT disk sync, never as a
       // side effect of activation.
@@ -744,8 +737,8 @@ describe("PiHost independent session execution", () => {
     try {
       const fileA = await makeSessionFile(a.cwd);
       const fileB = await makeSessionFile(b.cwd);
-      await host.open({ path: fileA, cwd: a.cwd });
-      await host.open({ path: fileB, cwd: b.cwd });
+      await host.activateExecution(a.cwd, fileA);
+      await host.activateExecution(b.cwd, fileB);
       const managerA = host.testSessions().get(fileA)!.runtime.session.sessionManager;
       managerA.appendMessage({
         role: "user",
@@ -774,8 +767,8 @@ describe("PiHost independent session execution", () => {
         utimesSync(fileA, raced, raced);
         return manager;
       });
-      await host.open({ path: fileA, cwd: a.cwd });
-      expect(host.activeSessionFile).toBe(fileA);
+      await host.activateExecution(a.cwd, fileA);
+      expect(host.testExecutionByCwd().get(a.cwd)).toBe(fileA);
       expect(openSpy).toHaveBeenCalled();
       // The raced append was NOT recorded as ingested: the next sync sees
       // the mismatch and re-parses instead of going invisible.
@@ -798,8 +791,8 @@ describe("PiHost independent session execution", () => {
     try {
       const fileA = await makeSessionFile(a.cwd);
       const fileB = await makeSessionFile(b.cwd);
-      await host.open({ path: fileA, cwd: a.cwd });
-      await host.open({ path: fileB, cwd: b.cwd });
+      await host.activateExecution(a.cwd, fileA);
+      await host.activateExecution(b.cwd, fileB);
       const managerA = host.testSessions().get(fileA)!.runtime.session.sessionManager;
       managerA.appendMessage({
         role: "user",
@@ -841,23 +834,20 @@ describe("PiHost independent session execution", () => {
     }
   }, 60_000);
 
-  it("a superseded activation never commits or emits after newer work", async () => {
+  it("a superseded activation never disturbs another project's owner", async () => {
     const a = await makeProject("act-a");
     const b = await makeProject("act-b");
-    const { host, statuses } = makeHost(a.cwd, a.agentDir);
+    const { host } = makeHost(a.cwd, a.agentDir);
     await host.start();
     try {
       const fileA = await makeSessionFile(a.cwd);
       const fileB = await makeSessionFile(b.cwd);
-      await host.open({ path: fileA, cwd: a.cwd });
-      await host.open({ path: fileB, cwd: b.cwd });
-      statuses.length = 0;
+      await host.activateExecution(a.cwd, fileA);
+      await host.activateExecution(b.cwd, fileB);
 
       // Gate the FIRST rollback-leaf restore (A's activation prep) so B's
-      // activation fully completes while A is still awaiting preparation.
-      // A and B live in different projects (independent ownership), so both
-      // activations are in flight at once; a stale ready from A would be
-      // accepted by the renderer — it must never be sent.
+      // activation fully completes while A is still preparing. A and B are
+      // different projects, so both activations are genuinely in flight.
       const origLoad = RollbackStore.prototype.load;
       let releaseGate!: () => void;
       const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
@@ -873,17 +863,17 @@ describe("PiHost independent session execution", () => {
         return origLoad.apply(this, args);
       });
       try {
-        const slowA = host.open({ path: fileA, cwd: a.cwd });
+        const slowA = host.activateExecution(a.cwd, fileA);
         // Let A's activation reach the gated restore before B starts.
         await vi.waitFor(() => expect(gated).toBe(true));
-        await host.open({ path: fileB, cwd: b.cwd });
-        expect(host.activeSessionFile).toBe(fileB);
+        await host.activateExecution(b.cwd, fileB);
+        expect(host.testExecutionByCwd().get(b.cwd)).toBe(fileB);
         releaseGate();
         await slowA;
-        // B's foreground stands; A emitted nothing (no stale ready).
-        expect(host.activeSessionFile).toBe(fileB);
-        const readies = statuses.filter((s) => s.status === "ready").map((s) => s.sessionPath);
-        expect(readies).toEqual([fileB]);
+        // B's ownership stands, and A's late completion never disturbs it.
+        expect(host.testExecutionByCwd().get(b.cwd)).toBe(fileB);
+        expect(host.testExecutionByCwd().get(a.cwd)).toBe(fileA);
+        host.testAssertRetentionInvariant();
       } finally {
         load.mockRestore();
       }
@@ -901,7 +891,7 @@ describe("PiHost independent session execution", () => {
       for (let i = 0; i < 11; i++) {
         const file = await makeSessionFile(cwd);
         files.push(file);
-        await host.open({ path: file, cwd });
+        await host.activateExecution(cwd, file);
         // Every open transfers the project's slot: one installed runtime,
         // owned by the newest file, and every evicted-away file is cold
         // (disk-only) with zero AgentSession memory (R1/R2/R6).
@@ -932,7 +922,7 @@ describe("PiHost independent session execution", () => {
       for (const p of projects) {
         const file = await makeSessionFile(p.cwd);
         owners.push(file);
-        await host.open({ path: file, cwd: p.cwd });
+        await host.activateExecution(p.cwd, file);
         host.testAssertRetentionInvariant();
       }
       // 9 projects → 9 installed owners, one each, no global cap.
@@ -959,9 +949,9 @@ describe("PiHost independent session execution", () => {
     try {
       const fileA = await makeSessionFile(a.cwd);
       const fileB = await makeSessionFile(b.cwd);
-      await host.open({ path: fileA, cwd: a.cwd });
-      await host.open({ path: fileB, cwd: b.cwd });
-      expect(host.activeSessionFile).toBe(fileB);
+      await host.activateExecution(a.cwd, fileA);
+      await host.activateExecution(b.cwd, fileB);
+      expect(host.testExecutionByCwd().get(b.cwd)).toBe(fileB);
 
       // Both projects warmed by their opens: no warm captures can leak into
       // the assertion below. Call-through spy; filter authoritative
@@ -990,8 +980,8 @@ describe("PiHost independent session execution", () => {
         });
         // Foreground moves mid-turn; the checkpoint must still finish
         // against B's project.
-        await host.open({ path: fileA, cwd: a.cwd });
-        expect(host.activeSessionFile).toBe(fileA);
+        await host.activateExecution(a.cwd, fileA);
+        expect(host.testExecutionByCwd().get(a.cwd)).toBe(fileA);
         await host.testCaptureTurnEnd(start, fileB);
         // Pre-turn + post-turn captures, both B's cwd — never the
         // foreground's. (Failing shape: [cwdB, cwdA].)
@@ -1011,7 +1001,7 @@ describe("PiHost independent session execution", () => {
 describe("PiHost.renameSession", () => {
   const seedPersistedFile = async (host: PiHost, cwd: string): Promise<string> => {
     const file = await makeSessionFile(cwd);
-    await host.open({ path: file, cwd });
+    await host.activateExecution(cwd, file);
     const manager = host.testSessions().get(file)!.runtime.session.sessionManager;
     manager.appendMessage({ role: "user", content: [{ type: "text", text: "seed" }], timestamp: Date.now() });
     const assistantId = manager.appendMessage({
@@ -1036,17 +1026,17 @@ describe("PiHost.renameSession", () => {
     try {
       const fileA = await seedPersistedFile(host, a.cwd);
       const fileB = await seedPersistedFile(host, b.cwd);
-      await host.open({ path: fileB, cwd: b.cwd });
-      expect(host.activeSessionFile).toBe(fileB);
+      await host.activateExecution(b.cwd, fileB);
+      expect(host.testExecutionByCwd().get(b.cwd)).toBe(fileB);
       await host.renameSession(fileA, "Idle chat");
       expect(host.testSessions().get(fileA)!.runtime.session.sessionManager.getSessionName()).toBe("Idle chat");
-      expect(host.activeSessionFile).toBe(fileB);
+      expect(host.testExecutionByCwd().get(b.cwd)).toBe(fileB);
     } finally {
       await host.dispose();
     }
   }, 60_000);
 
-  it("renames a never-opened session without creating a runtime", async () => {
+  it("renames a cold session without creating a runtime", async () => {
     const a = await makeProject("rename-cold");
     const { host } = makeHost(a.cwd, a.agentDir);
     await host.start();
@@ -1059,7 +1049,7 @@ describe("PiHost.renameSession", () => {
       expect(host.testExecutionByCwd().size).toBe(0);
       await host.renameSession(file, "Cold chat");
       expect(host.testSessions().size).toBe(0);
-      expect(host.activeSessionFile).toBeNull();
+      expect(host.testExecutionByCwd().size).toBe(0);
       expect(SessionManager.open(file, undefined, a.cwd).getSessionName()).toBe("Cold chat");
     } finally {
       await host.dispose();
@@ -1163,9 +1153,9 @@ describe("instance session fork", () => {
     const { host } = makeHost(cwd, agentDir, root);
     await host.start();
     try {
-      await host.open({ path: inside, cwd });
-      expect(host.testForegroundSessionFile()).toBe(inside);
-      await expect(host.open({ path: outside, cwd })).rejects.toThrow(/outside/i);
+      await host.activateExecution(cwd, inside);
+      expect(host.testExecutionByCwd().get(cwd)).toBe(inside);
+      await expect(host.activateExecution(cwd, outside)).rejects.toThrow(/outside/i);
     } finally {
       await host.dispose();
     }

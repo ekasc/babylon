@@ -34,17 +34,15 @@ async function makeSessionFile(cwd: string) {
 }
 
 function makeHost(cwd: string, agentDir: string) {
-  const statuses: Array<Parameters<HostOptions["onStatus"]>[0]> = [];
   const ownershipPushes: ProjectExecution[] = [];
   const host = new PiHost({
     cwd,
     agentDir,
     stateDir: join(agentDir, "pideck-state"),
     onEvent: () => undefined,
-    onStatus: (s) => statuses.push(s),
     onExecutionChanged: (execution) => ownershipPushes.push(execution),
   });
-  return { host, statuses, ownershipPushes };
+  return { host, ownershipPushes };
 }
 
 /** Shadow the streaming getter on a retained session (instance property
@@ -201,15 +199,14 @@ describe("projects remain independent", () => {
 });
 
 describe("I3/I8: reading history never installs a runtime", () => {
-  it("open() is an explicit activation; history reads stay cold", async () => {
+  it("activation claims the project; history reads stay cold", async () => {
     const { cwd, agentDir } = await makeProject("view-no-own");
     const { host } = makeHost(cwd, agentDir);
     await host.start();
     try {
       const fileA1 = await makeSessionFile(cwd);
-      await host.open({ path: fileA1, cwd });
-      // C10: open()/openSession is the activation entry point — it claims
-      // the project's slot rather than being a silent view.
+      await host.activateExecution(cwd, fileA1);
+      // Activation is the ONLY way a runtime becomes a project's owner.
       expect(host.testExecutionByCwd().get(cwd)).toBe(fileA1);
       expect((await host.listProjectExecutions())[0]?.sessionFile).toBe(fileA1);
 
@@ -225,7 +222,7 @@ describe("I3/I8: reading history never installs a runtime", () => {
     }
   }, 60_000);
 
-  it("opening a historical session while the owner runs leaves ownership unchanged", async () => {
+  it("activating another session while the owner runs leaves ownership unchanged", async () => {
     const { cwd, agentDir } = await makeProject("view-while-running");
     const { host } = makeHost(cwd, agentDir);
     await host.start();
@@ -236,7 +233,7 @@ describe("I3/I8: reading history never installs a runtime", () => {
       setStreaming(host, fileA1, true);
       // A busy owner is never displaced (I4): the request rejects, nothing
       // is built, and the running turn keeps the project.
-      await expect(host.open({ path: fileA2, cwd })).rejects.toThrow(/project execution busy/);
+      await expect(host.activateExecution(cwd, fileA2)).rejects.toThrow(/project execution busy/);
       expect(host.testSessions().size).toBe(1);
       expect(host.testSessions().has(fileA2)).toBe(false);
       expect(host.executionForCwd(cwd)?.sessionFile).toBe(fileA1);
@@ -248,7 +245,7 @@ describe("I3/I8: reading history never installs a runtime", () => {
   }, 60_000);
 });
 
-describe("I5 backend: release never controls a busy execution", () => {
+describe("I5 backend: deactivation never controls a busy execution", () => {
   it("deactivation refuses a busy owner and the slot keeps it", async () => {
     const { cwd, agentDir } = await makeProject("release-busy");
     const { host } = makeHost(cwd, agentDir);
@@ -257,9 +254,8 @@ describe("I5 backend: release never controls a busy execution", () => {
       const fileA1 = await makeSessionFile(cwd);
       await host.activateExecution(cwd, fileA1);
       setStreaming(host, fileA1, true);
-      // A direct release may never strip a project of its owner at all, and
-      // deactivation refuses while the turn runs.
-      expect(await host.releaseSession(fileA1)).toBe(false);
+      // Deactivation is the only release path, and it refuses while the
+      // turn runs: the owner keeps its project.
       expect(await host.deactivateExecution(cwd, fileA1)).toBe(false);
       expect(host.executionForCwd(cwd)?.sessionFile).toBe(fileA1);
       setStreaming(host, fileA1, false);

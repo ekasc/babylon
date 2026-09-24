@@ -19,8 +19,6 @@ const api: Bridge = {
     ipcRenderer.invoke("pideck:get-tool-output", sessionFile, toolCallId),
   deleteSession: (path: string): Promise<void> => ipcRenderer.invoke("pideck:delete-session", path),
   pickFolder: (): Promise<string | null> => ipcRenderer.invoke("pideck:pick-folder"),
-  openSession: (opts: { path?: string; cwd: string; requestId?: number }): Promise<void> =>
-    ipcRenderer.invoke("pideck:open-session", opts),
 
   botsList: () => ipcRenderer.invoke("pideck:bots-list"),
   botsCreate: (input) => ipcRenderer.invoke("pideck:bots-create", input),
@@ -38,8 +36,9 @@ const api: Bridge = {
   onGroupsUpdate: (cb) => on("pideck:groups-update", cb),
   groupSend: (groupId: string, text: string) =>
     ipcRenderer.invoke("pideck:group-send", groupId, text),
-  botsMessage: (targetId: string, text: string, fromId?: string) =>
-    ipcRenderer.invoke("pideck:bots-message", targetId, text, fromId),
+  botsMessage: (input: { targetId: string; text: string; fromId?: string; originSessionFile: string; originCwd: string }) =>
+    ipcRenderer.invoke("pideck:bots-message", input),
+  projectFocus: (cwd: string | null) => ipcRenderer.invoke("pideck:project-focus", cwd),
   botsDefaultGet: () => ipcRenderer.invoke("pideck:bots-default-get"),
   botsDefaultSet: (input) => ipcRenderer.invoke("pideck:bots-default-set", input),
   projectSettingsGet: (cwd: string) => ipcRenderer.invoke("pideck:project-settings-get", cwd),
@@ -73,8 +72,6 @@ const api: Bridge = {
   designControl: (sessionFile: string, args: string) => ipcRenderer.invoke("pideck:design-control", { sessionFile, args }),
   beginDesignPrompt: (sessionFile: string, subject: string, message: string, images?: unknown[], streamingBehavior?: string) =>
     ipcRenderer.invoke("pideck:design-begin-prompt", { sessionFile, subject, message, images, streamingBehavior }),
-  releaseSession: (path: string): Promise<{ released: boolean }> =>
-    ipcRenderer.invoke("pideck:session:release", path),
   refreshSession: (path: string): Promise<boolean> => ipcRenderer.invoke("pideck:refresh-session", path),
 
   getMessages: (sessionFile: string) => ipcRenderer.invoke("pideck:get-messages", sessionFile),
@@ -256,7 +253,7 @@ const api: Bridge = {
   onCanvasChanged: (cb) => on("pideck:canvas-changed", cb),
   onCanvasScenes: (cb) => on("pideck:canvas-scenes", cb),
 
-  onStatus: (cb) => on("pideck:session-status", cb),
+  onRuntimeStatus: (cb) => on("pideck:runtime-status", cb),
 };
 
 contextBridge.exposeInMainWorld("pideck", api);

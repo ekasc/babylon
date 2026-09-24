@@ -81,12 +81,12 @@ describe("snapcompact lifecycle regression (real PiHost.compact)", () => {
     );
     await exec("git", ["init"], { cwd });
 
-    host = new PiHost({ cwd, agentDir, stateDir, onEvent: () => {}, onStatus: () => {} });
+    host = new PiHost({ cwd, agentDir, stateDir, onEvent: () => {}, });
     await host.start();
 
     const sm0 = SessionManager.create(cwd, join(root, "sessions"));
     sessionFile = sm0.getSessionFile()!;
-    await host.switchTo(sessionFile, { cwdOverride: cwd });
+    await host.activateExecution(cwd, sessionFile);
     // Addressed mutators require execution ownership of the target chat.
     await host.activateExecution(cwd, sessionFile);
     const entry = host.testSessions().get(sessionFile)!;
@@ -181,9 +181,9 @@ describe("snapcompact lifecycle regression (real PiHost.compact)", () => {
     expect(freshCtx[0]?.id).toBe(compId);
     expect(freshCtx.some((e) => e.id === firstUserId)).toBe(false);
 
-    const host2 = new PiHost({ cwd, agentDir, stateDir, onEvent: () => {}, onStatus: () => {} });
+    const host2 = new PiHost({ cwd, agentDir, stateDir, onEvent: () => {}, });
     await host2.start();
-    await host2.open({ cwd, path: sessionFile });
+    await host2.activateExecution(cwd, sessionFile);
     const entry2 = host2.testSessions().get(sessionFile)!;
     const session2 = entry2.runtime.session;
     // Re-apply fake key for the reopened host's model (may be same provider)

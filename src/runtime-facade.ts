@@ -40,11 +40,9 @@ export interface RuntimeFacade {
   attentionRaise(item: import("./attention").AttentionItem): Promise<void>;
   attentionResolve(id: string): Promise<void>;
   // Pi
-  openSession(opts: { path?: string; cwd: string; requestId?: number; systemPrompt?: string | null }): Promise<unknown>;
-  /** Explicit sessionFile wins over the foreground pointer (send-while-switching). */
+  /** Every Pi call is addressed by explicit session/project identity. */
   prompt(message: string, images: unknown[] | undefined, streamingBehavior: string | undefined, sessionFile: string): Promise<unknown>;
   abort(sessionFile: string): Promise<unknown>;
-  releaseSession?(path: string): Promise<{ released: boolean }>;
   getState(sessionFile: string): Promise<AgentState | null>;
   getMessages(sessionFile: string): Promise<unknown[]>;
   getToolOutput(sessionFile: string, toolCallId: string): Promise<unknown>;
@@ -74,7 +72,6 @@ export interface RuntimeFacade {
   generateCommitMessage(context: PreparedCommitContext): Promise<GeneratedCommitMessage>;
   getRecaps(sessionFile: string): Promise<unknown>;
   refreshFromDisk(sessionFile: string): Promise<boolean>;
-  switchTo(sessionFile: string): Promise<AgentState>;
   respondUi(id: string, resp: unknown): Promise<void>;
   getCommands(sessionFile: string): Promise<unknown[]>;
 
@@ -104,5 +101,4 @@ export interface RuntimeFacade {
   onTaskUpdate(cb: (tasks: Task[]) => void): () => void;
   onAttentionUpdate(cb: (reg: AttentionRegistry) => void): () => void;
   onAgentEvent(cb: (ev: unknown) => void): () => void;
-  onStatus(cb: (s: unknown) => void): () => void;
 }

@@ -49,6 +49,20 @@ export const RETENTION_INVARIANTS: readonly string[] = [
   "R10. ModelRuntime/project services are project resources and are not governed by the one-SessionEntry rule.",
 ];
 
+/** Compatibility-deletion invariants: what C11 makes unrepresentable. The old
+ *  "one current Pi session" model had no home after this block — every former
+ *  question it answered now has exactly one authority. */
+export const COMPATIBILITY_INVARIANTS: readonly string[] = [
+  "C1. View identity comes only from viewedSessionPath.",
+  "C2. UI project identity comes only from activeSpace.",
+  "C3. Execution identity comes only from executionsByCwd / explicit session arguments.",
+  "C4. Runtime health carries no session or project identity.",
+  "C5. No backend foreground session exists.",
+  "C6. Runtime activation never navigates the renderer.",
+  "C7. Renderer navigation never activates a runtime.",
+  "C8. Pi-internal session switching is a private execution handoff, not a public navigation API.",
+];
+
 /** Lifecycle of a project's execution session. */
 export type ExecutionState =
   | "idle"

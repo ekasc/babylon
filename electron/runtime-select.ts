@@ -47,15 +47,13 @@ function unstartedHost(): LocalPiHost {
     getMessages: async (): Promise<unknown[]> => [],
   };
   return {
-    get activeSessionFile(): null {
-      return null;
-    },
     generateGitCommitMessage: notReady("generateGitCommitMessage"),
     getRecaps: notReady("getRecaps"),
     warmProject: notReady("warmProject"),
+    hasSessionRuntime: () => false,
+    sessionCwdFor: () => null,
     ...fallback,
     refreshFromDisk: notReady("refreshFromDisk"),
-    switchTo: notReady("switchTo"),
     relocateExecution: notReady("relocateExecution"),
     compact: notReady("compact"),
     getToolOutput: notReady("getToolOutput"),
@@ -83,7 +81,6 @@ function unstartedHost(): LocalPiHost {
     promoteThread: notReady("promoteThread"),
     controlSubagent: notReady("controlSubagent"),
     promoteSubagent: notReady("promoteSubagent"),
-    releaseSession: notReady("releaseSession"),
     respondUi: notReady("respondUi"),
     execGoalCommand: notReady("execGoalCommand"),
     listProjectExecutions: notReady("listProjectExecutions"),

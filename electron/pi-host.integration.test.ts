@@ -29,11 +29,11 @@ describe("PiHost resource and command integration", () => {
     await writeFile(join(agentDir, "prompts", "review.md"), `---\ndescription: Review test\n---\nReview this.\n`);
 
     const events: AgentEvent[] = [];
-    const host = new PiHost({ cwd, agentDir, onEvent: (event) => events.push(event), onStatus: () => undefined });
+    const host = new PiHost({ cwd, agentDir, onEvent: (event) => events.push(event) });
     await host.start();
     // Independent runtimes: commands/prompt need an explicitly opened session
     // (no implicit warm singleton anymore).
-    const opened = await host.open({ cwd });
+    const opened = await host.activateExecution(cwd);
     const sessionFile = opened.sessionFile as string;
     await host.activateExecution(cwd, sessionFile);
     const commands = await host.getCommands(sessionFile);
@@ -66,9 +66,9 @@ describe("PiHost resource and command integration", () => {
     );
 
     const events: AgentEvent[] = [];
-    const host = new PiHost({ cwd, agentDir, onEvent: (event) => events.push(event), onStatus: () => undefined });
+    const host = new PiHost({ cwd, agentDir, onEvent: (event) => events.push(event) });
     await host.start();
-    const openedA = await host.open({ cwd });
+    const openedA = await host.activateExecution(cwd);
     const fileA = openedA.sessionFile as string;
     await host.activateExecution(cwd, fileA);
     // Project B's session becomes the foreground (the view) AFTER the
@@ -76,8 +76,8 @@ describe("PiHost resource and command integration", () => {
     // must observe A, not B.
     const smB = (await import("@earendil-works/pi-coding-agent")).SessionManager.create(cwdB);
     const fileB = smB.getSessionFile()!;
-    await host.open({ path: fileB, cwd: cwdB });
-    expect(host.activeSessionFile).toBe(fileB);
+    await host.activateExecution(cwdB, fileB);
+    expect(host.testExecutionByCwd().get(cwdB)).toBe(fileB);
 
     await host.prompt("/whoami", undefined, undefined, fileA);
 
@@ -88,7 +88,7 @@ describe("PiHost resource and command integration", () => {
     expect(report).toBeDefined();
     expect(report).toContain(fileA);
     expect(report).not.toContain(fileB);
-    expect(host.activeSessionFile).toBe(fileB);
+    expect(host.testExecutionByCwd().get(cwdB)).toBe(fileB);
     await host.dispose();
   }, 20_000);
 });

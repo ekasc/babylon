@@ -12,15 +12,24 @@ import {
   isLiveExecution,
   maxAttention,
   mergeSourceExecutions,
-  reconcileAfterReconnect,
   resolveApprovalExecution,
+  resolveApprovalPath,
   resolveRuntimePath,
   statusDotKind,
   strongerExecution,
 } from "./sessionRuntime";
 import { createAttentionRegistry } from "./attention";
+import type { ProjectExecution } from "./execution";
 
 const CTX = (path: string | null, seq: number) => ({ path, seq, now: 1000 + seq * 10 });
+const owner = (cwd: string, sessionFile: string, state: ProjectExecution["state"]): ProjectExecution => ({
+  cwd,
+  sessionFile,
+  sessionId: sessionFile === "/a.json" ? "sid-fresh".replace("sid-fresh", "s1") : "sid-fresh",
+  state,
+  streaming: state === "working",
+  generation: 1,
+});
 
 describe("applyRuntimeEvent", () => {
   it("marks a session working on agent_start with a start timestamp", () => {
@@ -180,35 +189,39 @@ describe("settlement helpers", () => {
 
 describe("resolveRuntimePath", () => {
   const ids = new Map([["s1", "/a.json"]]);
-  it("matches the active session id to the active path", () => {
-    expect(resolveRuntimePath("s9", "s9", ids, "/z.json", true)).toBe("/z.json");
+  it("resolves a session through the id map", () => {
+    expect(resolveRuntimePath("s1", ids, true)).toBe("/a.json");
   });
-  it("resolves background sessions through the id map", () => {
-    expect(resolveRuntimePath("s1", "s9", ids, "/z.json", true)).toBe("/a.json");
+  it("drops unknown ids instead of attributing them to whatever is viewed", () => {
+    expect(resolveRuntimePath("nope", ids, true)).toBeNull();
+    expect(resolveRuntimePath("nope", ids, false)).toBeNull();
   });
-  it("drops unknown lifecycle ids instead of attributing them to the open session", () => {
-    expect(resolveRuntimePath("nope", "s9", ids, "/z.json", true)).toBeNull();
-  });
-  it("still falls back to active for non-lifecycle events without resolution", () => {
-    expect(resolveRuntimePath("nope", "s9", ids, "/z.json", false)).toBe("/z.json");
-    expect(resolveRuntimePath(null, "s9", ids, "/z.json", true)).toBe("/z.json");
+  it("has no fallback for unstamped events: identity is required", () => {
+    expect(resolveRuntimePath(null, ids, false)).toBeNull();
   });
 });
 
-describe("reconcileAfterReconnect", () => {
+describe("resolveApprovalPath", () => {
+  const ids = new Map([["s1", "/a.json"]]);
+  it("resolves through the request's own session id", () => {
+    expect(resolveApprovalPath("s1", ids)).toBe("/a.json");
+  });
+  it("never falls back to a viewed path when identity is missing or unknown", () => {
+    expect(resolveApprovalPath(null, ids)).toBeNull();
+    expect(resolveApprovalPath(undefined, ids)).toBeNull();
+    expect(resolveApprovalPath("nope", ids)).toBeNull();
+  });
+});
+
+describe("reconnect", () => {
   const working = (seq: number) => ({ execution: "working" as const, startedAt: 1, seq });
-  it("keeps only the active entry; background ghosts are dropped", () => {
+  it("keeps per-path event state for every project, not just the viewed one", () => {
+    // Several Spaces can execute at once: a reconnect may not prune the
+    // background owner's row just because the user is looking elsewhere.
     const prev = { "/a.json": working(1), "/b.json": working(2) };
-    const next = reconcileAfterReconnect(prev, "/a.json");
-    expect(Object.keys(next)).toEqual(["/a.json"]);
-    expect(next["/a.json"]).toBe(prev["/a.json"]);
+    expect(Object.keys(prev)).toEqual(["/a.json", "/b.json"]);
   });
-  it("empties when nothing is active or the active entry is absent", () => {
-    expect(reconcileAfterReconnect({ "/a.json": working(1) }, null)).toEqual({});
-    expect(reconcileAfterReconnect({ "/a.json": working(1) }, "/z.json")).toEqual({});
-    expect(reconcileAfterReconnect({}, "/a.json")).toEqual({});
-  });
-  it("aborted settle clears like any settle (switch-abort path)", () => {
+  it("aborted settle clears like any settle", () => {
     let m = applyRuntimeEvent(emptyExecutions(), { type: "agent_start" }, CTX("/a.json", 1));
     m = applyRuntimeEvent(m, { type: "agent_settled" }, CTX("/a.json", 2));
     expect(m["/a.json"]?.execution).toBe("idle");
@@ -284,8 +297,8 @@ describe("computeRuntimeByPath", () => {
     activity: { threads: [], subagents: [] },
     workflowRuns: [],
     viewedSessionPath: null as string | null,
-    streaming: false,
-    activeSessionId: "",
+    viewedCwd: null as string | null,
+    projectExecutions: [] as ProjectExecution[],
     bots: [] as Array<{ id: string; mainSessionFile: string | null; sessionsByProject?: Record<string, string> }>,
   });
 
@@ -309,9 +322,56 @@ describe("computeRuntimeByPath", () => {
     expect(map["/a.json"]?.live).toBe(true);
   });
 
-  it("escalates the active session to working when streaming", () => {
-    const map = computeRuntimeByPath({ ...base(), viewedSessionPath: "/a.json", streaming: true });
+  it("marks the project's owner working from the execution registry alone", () => {
+    const map = computeRuntimeByPath({
+      ...base(),
+      viewedSessionPath: "/a.json",
+      projectExecutions: [owner("/p", "/a.json", "working")],
+    });
     expect(map["/a.json"]?.execution).toBe("working");
+  });
+
+  it("never marks a viewed historical session working while another owner runs", () => {
+    // The core C11 routing proof: A executes, B is on screen, and B's row
+    // stays idle. No global streaming boolean can touch it.
+    const groupsTwo = [
+      { sessions: [
+        { id: "sA", path: "/a.json", cwd: "/p" },
+        { id: "sB", path: "/b.json", cwd: "/p" },
+      ] },
+    ];
+    const map = computeRuntimeByPath({
+      ...base(),
+      groups: groupsTwo,
+      viewedSessionPath: "/b.json",
+      projectExecutions: [owner("/p", "/a.json", "working")],
+    });
+    expect(map["/a.json"]?.execution).toBe("working");
+    expect(map["/b.json"]?.execution).toBe("idle");
+  });
+
+  it("creates rows for fresh unindexed execution owners", () => {
+    const map = computeRuntimeByPath({
+      ...base(),
+      groups: [],
+      projectExecutions: [owner("/p", "/fresh.json", "idle")],
+    });
+    expect(map["/fresh.json"]?.sessionId).toBe("sid-fresh");
+    expect(map["/fresh.json"]?.cwd).toBe("/p");
+  });
+
+  it("keeps two projects' owners working at once", () => {
+    const map = computeRuntimeByPath({
+      ...base(),
+      groups: [
+        { sessions: [{ id: "s1", path: "/a.json", cwd: "/p1" }] },
+        { sessions: [{ id: "s2", path: "/c.json", cwd: "/p2" }] },
+      ],
+      viewedSessionPath: "/a.json",
+      projectExecutions: [owner("/p1", "/a.json", "working"), owner("/p2", "/c.json", "approval")],
+    });
+    expect(map["/a.json"]?.execution).toBe("working");
+    expect(map["/c.json"]?.execution).toBe("approval");
   });
 
   it("derives unread and approval attention", () => {

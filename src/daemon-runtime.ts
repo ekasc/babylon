@@ -275,10 +275,6 @@ export function createDaemonRuntime(client: DaemonClient): RuntimeFacade {
     async attentionResolve(id) {
       await client.request("attention.resolved", { id });
     },
-    async openSession(opts) {
-      const res = await client.request("pi.openSession", opts);
-      return res.payload;
-    },
     async prompt(m, i, s, f) {
       const res = await client.request("pi.prompt", { message: m, images: i, streamingBehavior: s, sessionFile: f });
       return res.payload;
@@ -455,10 +451,6 @@ export function createDaemonRuntime(client: DaemonClient): RuntimeFacade {
       const res = await client.request("pi.refreshFromDisk", { sessionFile: f });
       return (res.payload as { refreshed: boolean }).refreshed;
     },
-    async switchTo(f) {
-      const res = await client.request("pi.switchTo", { sessionFile: f });
-      return toAgentState(res.payload, "pi.switchTo");
-    },
     async respondUi(id, r) {
       await client.request("pi.ui.respond", { id, resp: r });
     },
@@ -511,11 +503,6 @@ export function createDaemonRuntime(client: DaemonClient): RuntimeFacade {
     onAgentEvent(cb) {
       return client.onEvent((env) => {
         if (env.type === "pi.event") cb(env.payload);
-      });
-    },
-    onStatus(cb) {
-      return client.onEvent((env) => {
-        if (env.type === "pi.session.status") cb(env.payload);
       });
     },
   };

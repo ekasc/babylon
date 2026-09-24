@@ -35,7 +35,6 @@ function fakePiHost(overrides: Partial<DaemonPiHost>): DaemonPiHost {
     throw new Error(`not stubbed: ${name}`);
   };
   return {
-    open: fail("open"),
     prompt: fail("prompt"),
     abort: fail("abort"),
     respondUi: fail("respondUi"),
@@ -65,7 +64,6 @@ function fakePiHost(overrides: Partial<DaemonPiHost>): DaemonPiHost {
     generateGitCommitMessage: fail("generateGitCommitMessage"),
     getRecaps: fail("getRecaps"),
     refreshFromDisk: fail("refreshFromDisk"),
-    switchTo: fail("switchTo"),
     controlThread: fail("controlThread"),
     promoteThread: fail("promoteThread"),
     controlSubagent: fail("controlSubagent"),

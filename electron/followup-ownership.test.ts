@@ -53,7 +53,7 @@ async function makeProject(tag: string) {
 }
 
 function makeHost(cwd: string, agentDir: string) {
-  return new PiHost({ cwd, agentDir, stateDir: join(agentDir, "state"), onEvent: () => undefined, onStatus: () => undefined });
+  return new PiHost({ cwd, agentDir, stateDir: join(agentDir, "state"), onEvent: () => undefined });
 }
 
 describe("goal follow-up owner mapping", () => {
@@ -73,10 +73,10 @@ describe("goal follow-up owner mapping", () => {
       const smB = SessionManager.create(b.cwd);
       const fileB = smB.getSessionFile();
       if (!fileA || !fileB) throw new Error("no canonical session file");
-      await host.open({ path: fileA, cwd: a.cwd });
       await host.activateExecution(a.cwd, fileA);
-      await host.open({ path: fileB, cwd: b.cwd });
-      expect(host.activeSessionFile).toBe(fileB);
+      await host.activateExecution(a.cwd, fileA);
+      await host.activateExecution(b.cwd, fileB);
+      expect(host.testExecutionByCwd().get(b.cwd)).toBe(fileB);
 
       const entryA = host.testSessions().get(fileA)!;
       const entryB = host.testSessions().get(fileB)!;
@@ -102,7 +102,7 @@ describe("goal follow-up owner mapping", () => {
       // not the foreground session B.
       expect(sendB).not.toHaveBeenCalled();
       expect(sendA).not.toHaveBeenCalled();
-      expect(host.activeSessionFile).toBe(fileB);
+      expect(host.testExecutionByCwd().get(b.cwd)).toBe(fileB);
     } finally {
       await host.dispose();
     }
@@ -121,21 +121,20 @@ describe("thread tool parent ownership", () => {
       const smB = SessionManager.create(b.cwd);
       const fileB = smB.getSessionFile();
       if (!fileA || !fileB) throw new Error("no canonical session file");
-      await host.open({ path: fileA, cwd: a.cwd });
       await host.activateExecution(a.cwd, fileA);
-      await host.open({ path: fileB, cwd: b.cwd });
-      expect(host.activeSessionFile).toBe(fileB);
+      await host.activateExecution(b.cwd, fileB);
+      expect(host.testExecutionByCwd().get(b.cwd)).toBe(fileB);
       const entryA = host.testSessions().get(fileA)!;
 
       const seam = host as unknown as { getSessionTools(sessionId: string | null | undefined): { cwd: string } };
       // Missing identity is a protocol error, never a foreground default.
       expect(() => seam.getSessionTools(undefined)).toThrow(/requires parent session identity/);
       expect(() => seam.getSessionTools(null)).toThrow(/requires parent session identity/);
-      // An unknown parent id must not execute tools against foreground B.
+      // An unknown parent id must not execute tools against B's runtime.
       expect(() => seam.getSessionTools("019ff998-0000-4000-8000-000000000000")).toThrow(/parent session runtime is unavailable/);
       // The real parent resolves to ITS project.
       expect(seam.getSessionTools(entryA.sessionId).cwd).toBe(a.cwd);
-      expect(host.activeSessionFile).toBe(fileB);
+      expect(host.testExecutionByCwd().get(b.cwd)).toBe(fileB);
     } finally {
       await host.dispose();
     }

@@ -89,11 +89,6 @@ export function registerLspProcessIpc(
           : undefined;
       return processManager.spawn({ command, cwd, owner, ownerSession });
     }
-    const activeFile = getHost()?.activeSessionFile ?? null;
-    const activeTask = taskManager.findBySessionFile(activeFile);
-    if (activeTask) {
-      return taskManager.spawn(activeTask.id, command, cwd);
-    }
     const owner = typeof (opts as { owner?: unknown })?.owner === "string" ? (opts as { owner: string }).owner.slice(0, 500) : undefined;
     const ownerSession =
       typeof (opts as { ownerSession?: unknown })?.ownerSession === "string"

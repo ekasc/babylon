@@ -22,9 +22,10 @@ export function registerSessionRuntimeIpc(
     isDaemonOwned: () => boolean;
     requireDaemonClient: () => DaemonClient;
     driveSharedChatExtras: (sessionFile: string, userText: string) => Promise<void>;
+    applyProjectFocus: (cwd: string) => void;
   },
 ): void {
-  const { sessionsRoot, getRuntime, getHost, isDaemonOwned, requireDaemonClient, driveSharedChatExtras } = deps;
+  const { sessionsRoot, getRuntime, getHost, isDaemonOwned, requireDaemonClient, driveSharedChatExtras, applyProjectFocus } = deps;
   handle("pideck:prompt", async (_e, message: string, images?: unknown[], streamingBehavior?: string, sessionFile?: string | null) => {
     if (typeof message !== "string" || message.length > 2_000_000) throw new Error("invalid prompt payload");
     if (streamingBehavior !== undefined && streamingBehavior !== "steer" && streamingBehavior !== "followUp") {
@@ -105,6 +106,14 @@ export function registerSessionRuntimeIpc(
       return unwrapExecutionListResult(res.payload, "pi.executionList");
     }
     return getRuntime().executionList();
+  });
+  // Which project the DESKTOP UI is focused on (LSP/activity/git scope). It is
+  // never execution ownership and never a task-resume trigger (item 118).
+  handle("pideck:project-focus", (_e, cwd: string | null) => {
+    if (cwd === null) return { focused: false };
+    if (typeof cwd !== "string" || cwd.length < 1 || cwd.length > 4096) throw new Error("invalid project focus");
+    applyProjectFocus(cwd);
+    return { focused: true };
   });
   handle("pideck:execution-activate", async (_e, opts: { cwd: string; sessionFile?: string; systemPrompt?: string | null }) => {
     if (!opts || typeof opts.cwd !== "string" || opts.cwd.length < 1 || opts.cwd.length > 4096) {
@@ -261,12 +270,6 @@ export function registerSessionRuntimeIpc(
       return getRuntime().beginDesignPrompt(opts.sessionFile, opts.subject, opts.message, cleanImages, opts.streamingBehavior);
     }
   );
-  handle("pideck:session:release", async (_e, path: string) => {
-    const target = await validateSessionPath(sessionsRoot, path);
-    if (isDaemonOwned()) return { released: false };
-    const host = getHost();
-    return { released: await host.releaseSession(target) };
-  });
   handle("pideck:refresh-session", async (_e, path: string) => {
     const p = await validateSessionPath(sessionsRoot, path);
     // Route through the runtime facade so local and daemon modes behave the

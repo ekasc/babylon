@@ -240,8 +240,6 @@ export interface HostOptions {
   onExecutionChanged?: (execution: ProjectExecution) => void;
   /** Called for every agent event (mirrors RPC stdout events). */
   onEvent: (event: AgentEvent) => void;
-  /** Called with status changes. */
-  onStatus: (status: { status: string; message?: string; cwd?: string; sessionPath?: string; requestId?: number; state?: AgentState | null }) => void;
   /**
    * Called when a session's stored cwd no longer exists. Return the replacement
    * cwd (e.g. from a folder picker), or null/undefined to abort the open.
@@ -263,9 +261,9 @@ export interface HostOptions {
   getSimController?: () => SimController | null;
 }
 
-/** One retained session runtime. Execution belongs to the entry; the
- *  foreground pointer only decides which entry active-scoped commands
- *  (composer prompt, pickers, panels) address by default. */
+/** One installed execution runtime. Identity and ownership live in the
+ *  entry and the project's execution slot — there is no foreground pointer
+ *  and no host-global "current session" (C3/C5). */
 export interface SessionEntry {
   runtime: AgentSessionRuntime;
   services: AgentSessionServices;
@@ -330,9 +328,6 @@ export class PiHost implements LocalPiHost {
   private readonly sessions = new Map<string, SessionEntry>();
   /** Set while the host is draining for restart: new turns fail fast. */
   private draining = false;
-  /** Foreground pointer: renderer convenience for active-scoped commands,
-   *  never an execution primitive. */
-  private foregroundSessionFile: string | null = null;
   /** Per-session transition chains (open/compact/model changes serialize
    *  within a session, never across unrelated sessions). */
   private readonly transitionQueues = new Map<string, Promise<unknown>>();
@@ -350,7 +345,9 @@ export class PiHost implements LocalPiHost {
   /** Nesting depth of source operations (fork/clone) that can trigger a Pi
    *  switch callback; a handoff staged inside one is finalized by them. */
   private sourceOperationDepth = 0;
-  private _cwd: string;
+  /** The project this host was constructed for. Bootstrap/discovery only:
+   *  execution activation NEVER mutates it (C2/C6). */
+  private readonly bootstrapCwd: string;
   private readonly snapshots: SnapshotStore;
   private readonly rollbacks: RollbackStore;
   private readonly recaps: RecapStore;
@@ -369,12 +366,6 @@ export class PiHost implements LocalPiHost {
    *  sweep never reads the session file unless a recap might be due. */
   private readonly lastMessageAt = new Map<string, number>();
   private recapTimer: ReturnType<typeof setInterval> | null = null;
-  /** The session file in the foreground, if any (renderer convenience). */
-  get activeSessionFile(): string | null {
-    return this.foregroundSessionFile;
-  }
-
-
   /**
    * Bump an entry's lifecycle counter. Strictly increasing and NOT
    * wall-clock: the release/dispose TOCTOU guard snapshots it across an
@@ -385,17 +376,17 @@ export class PiHost implements LocalPiHost {
     entry.lifecycleVersion += 1;
   }
 
-  /** Every project this host knows about — explicit, never foreground-derived
-   *  (thread/subagent scans and other discovery use this set). */
+  /** Every project this host knows about — explicit, never inferred from a
+   *  "current session" (thread/subagent scans and other discovery use it). */
   private knownProjectCwds(): Set<string> {
     const cwds = new Set<string>(this.projectRuntimes.keys());
     for (const key of this.executionByCwd.keys()) cwds.add(key);
     for (const entry of this.sessions.values()) cwds.add(entry.cwd);
-    cwds.add(this._cwd);
+    cwds.add(this.bootstrapCwd);
     return cwds;
   }
 
-  /** Retained-runtime probes (no foreground, no auto-open). */
+  /** Installed-runtime probes (never navigate, never auto-open). */
   hasSessionRuntime(sessionFile: string): boolean {
     return this.findEntry(sessionFile) !== undefined;
   }
@@ -410,9 +401,9 @@ export class PiHost implements LocalPiHost {
 
   // ── Execution ownership (src/execution.ts) ──────────────────────────────
   // I1: ONE top-level execution session per project. This map is the backend
-  // source of truth; `foregroundSessionFile` is only a compatibility pointer
-  // to the last execution activation and is NEVER an ownership fallback (I8).
-  // I3: view-side calls (open/navigation) never touch these maps.
+  // source of truth; there is no second, weaker "which session is current"
+  // answer anywhere in the host (C3/C5).
+  // I3: view-side navigation never touches these maps.
   private readonly executionByCwd = new Map<string, string>();
   private readonly executionGenerationByCwd = new Map<string, number>();
 
@@ -442,7 +433,7 @@ export class PiHost implements LocalPiHost {
 
   /** One definition of execution liveness (I4): everything that means the
    *  project is still being worked on. The sync half is the same set
-   *  releaseSession() checks first (streaming, pending UI/approval,
+   *  release checks first (streaming, pending UI/approval,
    *  subagents); the async half adds compaction, threads, and workflow
    *  runs. isExecutionBusy ⊇ releaseSession, so deactivate can never
    *  release past busy work. */
@@ -522,21 +513,16 @@ export class PiHost implements LocalPiHost {
   private transferExecution(
     targetFile: string | null,
     cwd: string,
-    opts?: { systemPrompt?: string | null; requestId?: number },
+    opts?: { systemPrompt?: string | null },
   ): Promise<SessionEntry> {
-    // Claim the foregrounding sequence at invocation, BEFORE any await:
-    // invocation order is intent order, so a slow cross-project build may
-    // never foreground over a newer open that already committed.
-    const seq = this.claimActivation();
     const key = projectKey(cwd);
     return this.enqueueTransition(`project:${key}`, async () => {
       const owner = this.entryForProject(key);
       if (owner && targetFile && owner.sessionFile === targetFile) {
         // Same-owner activation is the Send path: cheap, no rebuild, no
-        // dispose, no generation bump. Compatibility presentation still runs
-        // so the renderer's ready lifecycle is unchanged.
+        // dispose, no generation bump, no ownership push.
         this.touchEntry(owner);
-        await this.activate(owner, { cwd: owner.cwd, seq, requestId: opts?.requestId });
+        await this.prepareExecutionEntry(owner);
         // No ownership change → no execution_changed push: the registry is
         // pushed only when a project's owner or generation actually moves.
         return owner;
@@ -565,9 +551,7 @@ export class PiHost implements LocalPiHost {
       if (owner && projectKey(owner.cwd) === key) this.executionByCwd.delete(key);
       this.installExecutionEntry(candidate);
       this.touchEntry(candidate);
-      // Compatibility presentation (foreground pointer + ready status); C11
-      // deletes it once the renderer stops depending on the legacy lifecycle.
-      await this.activate(candidate, { cwd: candidate.cwd, seq, requestId: opts?.requestId });
+      await this.prepareExecutionEntry(candidate);
       this.emitExecutionChanged(candidate.cwd);
       return candidate;
     });
@@ -669,8 +653,7 @@ export class PiHost implements LocalPiHost {
       this.executionByCwd.delete(fromKey);
       this.installExecutionEntry(candidate);
       this.touchEntry(candidate);
-      const seq = this.claimActivation();
-      await this.activate(candidate, { cwd: toCwd, seq });
+      await this.prepareExecutionEntry(candidate);
       this.emitExecutionChanged(toCwd);
       return candidate;
     });
@@ -684,51 +667,16 @@ export class PiHost implements LocalPiHost {
   }
 
   /**
-   * Latest-wins activation ordering. Opens serialize per target file, so a
-   * slow open A and a fast open B run concurrently; the foreground must
-   * follow the LAST user invocation, not the last completion. Every path
-   * that foregrounds claims a sequence number at invocation; only the
-   * holder of the latest number may mutate foreground state.
+   * Runtime preparation for an owner: restore the project's rollback leaf and
+   * mark the entry used. It publishes NOTHING — no global pointer, no global
+   * cwd, no ready/status event, no requestId, no navigation (C6). Ordering is
+   * provided by the per-project transition queue, not a global sequence.
    */
-  private activationSeq = 0;
-
-  /** Claim the activation slot for a foregrounding invocation. Call at
-   *  method entry, before any await, so invocation order is intent order. */
-  private claimActivation(): number {
-    return ++this.activationSeq;
-  }
-
-  /** True when no newer foregrounding invocation has started since seq. */
-  private isLatestActivation(seq: number): boolean {
-    return seq === this.activationSeq;
-  }
-
-  /**
-   * The single foreground-mutation point: pointer, cwd, rollback leaf,
-   * ready emission. A superseded invocation warms its runtime but leaves
-   * the foreground alone and emits nothing (the renderer already moved
-   * on; a stale ready would be ignored anyway). Latest-wins is rechecked
-   * AFTER the awaited preparation: checking only at entry leaves a hole
-   * where a slow activation publishes a stale foreground (and a stale
-   * requestId-less ready, which the renderer cannot reject) after a newer
-   * activation already committed.
-   */
-  private async activate(
-    entry: SessionEntry,
-    opts: { cwd: string; requestId?: number; seq: number },
-  ): Promise<AgentState> {
-    if (!this.isLatestActivation(opts.seq)) return this.getStateFor(entry);
+  private async prepareExecutionEntry(entry: SessionEntry): Promise<AgentState> {
     await this.restoreRollbackLeafFor(entry.runtime.session);
-    if (!this.isLatestActivation(opts.seq)) return this.getStateFor(entry);
-    // Synchronous commit section: pointer, cwd, and recency flip together
-    // with no await in between, so no interleaving can split them.
-    this.foregroundSessionFile = entry.sessionFile;
-    this._cwd = opts.cwd;
     this.touchEntry(entry);
     const state = await this.getStateFor(entry);
-    if (!this.isLatestActivation(opts.seq)) return state;
     this.lastMessageAt.set(state.sessionFile ?? entry.sessionFile, Date.now());
-    this.opts.onStatus({ status: "ready", cwd: opts.cwd, sessionPath: state.sessionFile ?? entry.sessionFile, requestId: opts.requestId, state });
     return state;
   }
 
@@ -830,16 +778,14 @@ export class PiHost implements LocalPiHost {
     return this.opts.settingsProvider?.saveSettings(patch) ?? defaultSaveSettings(patch);
   }
 
-  /** Rewire event/status sinks. The daemon attaches its broadcast here so
+  /** Rewire event/execution sinks. The daemon attaches its broadcast here so
    *  thin clients receive live agent streaming (replaces direct opts
    *  mutation, which cannot cross the private boundary). */
   attachSinks(sinks: {
     onEvent: (event: unknown) => void;
-    onStatus: HostOptions["onStatus"];
     onExecutionChanged?: (execution: ProjectExecution) => void;
   }): void {
     this.opts.onEvent = sinks.onEvent;
-    this.opts.onStatus = sinks.onStatus;
     if (sinks.onExecutionChanged) this.opts.onExecutionChanged = sinks.onExecutionChanged;
   }
 
@@ -906,10 +852,6 @@ export class PiHost implements LocalPiHost {
     return this.uiRequests;
   }
 
-  testForegroundSessionFile(): string | null {
-    return this.foregroundSessionFile;
-  }
-
   /** Drive the ownership-scoped recap sweep deterministically (the timer
    *  path is too slow/brittle for tests). */
   testSweepRecap(): Promise<void> {
@@ -918,7 +860,7 @@ export class PiHost implements LocalPiHost {
 
   constructor(opts: HostOptions) {
     this.opts = opts;
-    this._cwd = opts.cwd;
+    this.bootstrapCwd = opts.cwd;
     const stateDir = opts.stateDir ?? defaultStateDir(opts.agentDir);
     this.snapshots = new SnapshotStore(join(stateDir, "snapshots"));
     this.rollbacks = new RollbackStore(join(stateDir, "rollbacks"));
@@ -1146,6 +1088,11 @@ export class PiHost implements LocalPiHost {
     }
     const existing = this.sessions.get(sessionFile);
     if (existing) return existing;
+    // Instance isolation: a file from another instance's store is refused even
+    // when the activation is perfectly well formed. An owned-but-unflushed
+    // canonical path (containment-checked lexically) still resolves, because
+    // the host already holds that exact runtime identity.
+    if (this.opts.sessionsRoot) await this.assertSessionInRoot(sessionFile);
     let pending = this.creatingCandidates.get(sessionFile);
     if (!pending) {
       pending = this.buildSessionFromFile(sessionFile, cwd, systemPrompt).finally(() => {
@@ -1154,6 +1101,22 @@ export class PiHost implements LocalPiHost {
       this.creatingCandidates.set(sessionFile, pending);
     }
     return pending;
+  }
+
+  /** Containment check for every runtime this host materializes from a file. */
+  private async assertSessionInRoot(sessionFile: string): Promise<void> {
+    const root = this.opts.sessionsRoot;
+    if (!root) return;
+    try {
+      await validateSessionPath(root, sessionFile);
+    } catch (error: unknown) {
+      if (!isSessionNotFound(error)) throw error;
+      // Missing on disk is only legitimate for an owned, not-yet-flushed path
+      // that is still inside this instance's root.
+      if (!contained(root, resolve(sessionFile))) {
+        throw new Error("session path is outside this instance's sessions root");
+      }
+    }
   }
 
   private async buildSessionFromFile(
@@ -1270,7 +1233,6 @@ export class PiHost implements LocalPiHost {
     // not be able to reach the NEXT owner through a stale mapping.
     if (entry.services && typeof entry.services === "object") this.sessionForServices.delete(entry.services);
     this.sessions.delete(entry.sessionFile);
-    if (this.foregroundSessionFile === entry.sessionFile) this.foregroundSessionFile = null;
   }
 
   /** Dispose a candidate that never became an owner. No candidate survives a
@@ -1432,12 +1394,12 @@ export class PiHost implements LocalPiHost {
           }
           return { cancelled: r.cancelled };
         },
-        // Extension/Pi-requested "switch" is an EXECUTION HANDOFF, not
-        // foregrounding: the target becomes this project's owner and the
-        // source goes cold. Never dispose the source from inside this
-        // callback — it may be the very runtime performing the fork.
+        // Pi's internal switch is a PRIVATE EXECUTION HANDOFF bound to the
+        // calling entry — never a navigation API and never a host-global cwd
+        // (C8). Never dispose the source from inside this callback: it may be
+        // the very runtime performing the fork.
         switchSession: async (sessionPath: string, options?: SwitchSessionOptions) => {
-          await this.stageHandoff(sessionPath, options);
+          await this.stageExecutionHandoff(entry, sessionPath, options);
           return { cancelled: false };
         },
         reload: async () => {
@@ -1831,43 +1793,14 @@ export class PiHost implements LocalPiHost {
     return this.ensureProjectRuntime(cwd);
   }
 
-  /** Pre-warm a project before its first session: build the rollback shadow
-   *  index and start the project's shared model runtime. Both are idempotent
-   *  and the first session open would do the same work, so this only moves the
-   *  cold cost off the critical path of the first send. */
+  /** Pre-warm a project BEFORE its execution activation: build the rollback
+   *  shadow index and start the project's shared model runtime. Both are
+   *  idempotent and the first activation would do the same work, so this only
+   *  moves the cold cost off the critical path of the first send. */
   warmProject(cwd: string): { warmed: true } {
     this.warmSnapshots(cwd);
     void this.ensureProjectRuntime(cwd).catch(() => undefined);
     return { warmed: true };
-  }
-
-  /**
-   * Compatibility entry point (C11 deletes it). It is exactly "explicit
-   *  execution activation + legacy ready status" — NEVER "materialize an
-   *  arbitrary retained runtime" (R2/R5). Historical viewing is the
-   *  renderer's disk-only viewSession, not this.
-   *  systemPrompt is an immutable creation argument for a runtime this call
-   *  materializes; an already-installed owner keeps its own.
-   */
-  async open(opts: { path?: string; cwd: string; requestId?: number; systemPrompt?: string | null }): Promise<AgentState> {
-    if (opts.path && this.opts.sessionsRoot) {
-      // Sessions are forked per instance: refuse anything outside this
-      // instance's root instead of interleaving turns into another owner's file.
-      try {
-        await validateSessionPath(this.opts.sessionsRoot, opts.path);
-      } catch (error: unknown) {
-        if (isSessionNotFound(error)) {
-          if (!contained(this.opts.sessionsRoot, resolve(opts.path))) {
-            throw new Error("session path is outside this instance's sessions root");
-          }
-        } else throw error;
-      }
-    }
-    const entry = await this.transferExecution(opts.path ?? null, opts.cwd, {
-      systemPrompt: opts.systemPrompt,
-      requestId: opts.requestId,
-    });
-    return this.getStateFor(entry);
   }
 
   /** Pi's switch callback: an EXECUTION HANDOFF, not foregrounding. The
@@ -1876,16 +1809,17 @@ export class PiHost implements LocalPiHost {
    *  on the stack, so the source is never disposed from this callback (it
    *  would destroy the runtime performing the fork) — the handoff is staged
    *  and finalized by the operation that triggered it. */
-  private async stageHandoff(
+  private async stageExecutionHandoff(
+    source: SessionEntry,
     sessionPath: string,
     options?: SwitchSessionOptions & { cwdOverride?: string },
   ): Promise<AgentState> {
-    const seq = this.claimActivation();
-    const targetCwd = options?.cwdOverride ?? this._cwd;
-    const source = this.entryForProject(targetCwd);
-    if (source && source.sessionFile === sessionPath) {
+    // The SOURCE entry defines the project: an internal Pi switch can never
+    // inherit a host-global current cwd (C8).
+    const targetCwd = options?.cwdOverride ?? source.cwd;
+    if (source.sessionFile === sessionPath) {
       this.touchEntry(source);
-      return this.activate(source, { cwd: source.cwd, seq });
+      return this.prepareExecutionEntry(source);
     }
     // Detached first: a busy or failing build never installs anything.
     const candidate = await this.materializeExecutionRuntime(sessionPath, targetCwd);
@@ -1898,9 +1832,9 @@ export class PiHost implements LocalPiHost {
     // current owner there is nothing to hand off from — just install.
     this.installExecutionEntry(candidate);
     this.touchEntry(candidate);
-    if (source) this.pendingHandoff = { source, candidate, targetFile: sessionPath, targetCwd };
-    await this.activate(candidate, { cwd: candidate.cwd, seq });
-    if (this.sourceOperationDepth === 0) await this.finalizeHandoff();
+    this.pendingHandoff = { source, candidate, targetFile: sessionPath, targetCwd };
+    await this.prepareExecutionEntry(candidate);
+    if (this.sourceOperationDepth === 0) await this.finalizeExecutionHandoff();
     return this.getStateFor(candidate);
   }
 
@@ -1908,7 +1842,7 @@ export class PiHost implements LocalPiHost {
    *  the file owning the project afterwards, or null when the handoff was
    *  abandoned because the source went busy (it keeps the project — its work
    *  is never aborted). */
-  private async finalizeHandoff(): Promise<string | null> {
+  private async finalizeExecutionHandoff(): Promise<string | null> {
     const staged = this.pendingHandoff;
     if (!staged) return null;
     this.pendingHandoff = null;
@@ -1925,7 +1859,7 @@ export class PiHost implements LocalPiHost {
 
   /** Drop a staged handoff without transferring ownership (cancel/failure):
    *  the transient target is disposed and the source keeps the project. */
-  private async abandonHandoff(): Promise<void> {
+  private async abandonExecutionHandoff(): Promise<void> {
     const staged = this.pendingHandoff;
     if (!staged) return;
     this.pendingHandoff = null;
@@ -2033,14 +1967,6 @@ export class PiHost implements LocalPiHost {
     ) {
       session.agent.state.thinkingLevel = level;
     }
-  }
-
-  /** Compatibility switch API (C11 deletes it). Semantics match Pi's switch
-   *  callback: the target becomes the project owner, the source goes cold,
-   *  and no public call returns with two installed entries for one project. */
-  async switchTo(sessionPath: string, options?: { cwdOverride?: string }): Promise<AgentState> {
-    const state = await this.stageHandoff(sessionPath, options);
-    return state;
   }
 
   // -------------------------------------------------------------------------
@@ -3201,8 +3127,8 @@ export class PiHost implements LocalPiHost {
       } finally {
         this.sourceOperationDepth -= 1;
       }
-      if (r.cancelled) await this.abandonHandoff();
-      else await this.finalizeHandoff();
+      if (r.cancelled) await this.abandonExecutionHandoff();
+      else await this.finalizeExecutionHandoff();
       if (!r.cancelled) await this.rollbacks.clearActive(sourceSessionId).catch(() => undefined);
       return { text: r.selectedText, cancelled: r.cancelled };
     });
@@ -3228,10 +3154,10 @@ export class PiHost implements LocalPiHost {
         this.sourceOperationDepth -= 1;
       }
       if (r.cancelled) {
-        await this.abandonHandoff();
+        await this.abandonExecutionHandoff();
         return { cancelled: true };
       }
-      const ownerFile = await this.finalizeHandoff();
+      const ownerFile = await this.finalizeExecutionHandoff();
       if (!ownerFile) return { cancelled: true };
       await this.rollbacks.clearActive(sourceSessionId).catch(() => undefined);
       return { cancelled: false, sessionFile: ownerFile };
@@ -3252,12 +3178,9 @@ export class PiHost implements LocalPiHost {
    *  file (thread records don't carry cwd). Cheap: few projects, cached
    *  readState misses. */
   private async findThreadCwd(threadId: string): Promise<string> {
-    const cwds = new Set<string>();
-    const active = this.foregroundSessionFile ? this.sessions.get(this.foregroundSessionFile)?.cwd : undefined;
-    if (active) cwds.add(active);
-    for (const key of this.projectRuntimes.keys()) cwds.add(key);
-    cwds.add(this._cwd);
-    for (const cwd of cwds) {
+    // Explicit project set: thread records carry no cwd, and no "current
+    // session" gets a vote (I8/C5).
+    for (const cwd of this.knownProjectCwds()) {
       try {
         const state = await this.threads.readState(cwd, threadId);
         if (state) return cwd;
@@ -3484,10 +3407,8 @@ export class PiHost implements LocalPiHost {
 
   private async hasActiveThreadsForSession(sessionId: string): Promise<boolean> {
     // Scan every known project: threads belong to their parent session, not
-    // to whatever project happens to be foregrounded.
-    const cwds = new Set<string>(this.projectRuntimes.keys());
-    cwds.add(this._cwd);
-    for (const cwd of cwds) {
+    // to whichever project the UI happens to be looking at.
+    for (const cwd of this.knownProjectCwds()) {
       try {
         const dir = join(cwd, ".pi", "state", "threads");
         const entries = await fsp.readdir(dir, { withFileTypes: true }).catch(() => []);
@@ -3564,21 +3485,6 @@ export class PiHost implements LocalPiHost {
     this.creatingCandidates.clear();
     this.pendingHandoff = null;
     this.transitionQueues.clear();
-    this.foregroundSessionFile = null;
-  }
-
-  /**
-   * Release one idle runtime. Refuses live runtimes (streaming sessions,
-   * sessions with pending UI, sessions with active children) — live work is
-   * never evicted — and refuses to remove an EXECUTION OWNER: ownership only
-   * changes through activateExecution/deactivateExecution, so a random
-   * release can never strand the ownership index (R2/R3).
-   */
-  async releaseSession(sessionFile: string): Promise<boolean> {
-    const entry = this.sessions.get(sessionFile);
-    if (!entry) return true;
-    if (this.executionByCwd.get(projectKey(entry.cwd)) === sessionFile) return false;
-    return this.releaseInstalledEntry(entry);
   }
 
   /** Release the project's CURRENT owner from inside an ownership

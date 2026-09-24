@@ -7,7 +7,7 @@
  * execution identity. `PiHost` (via executionActivate) is the sole
  * arbiter of I1/I4: same-owner sends are a map lookup, idle owners
  * transfer, busy owners reject with a structured envelope. Nothing here
- * reads liveReady/requestId/onStatus — executionActivate IS the warmup.
+ * reads any runtime status — executionActivate IS the warmup.
  */
 import type { Bridge, PromptImage } from "../bridge";
 import type { ProjectExecution } from "../execution";
@@ -27,7 +27,7 @@ export type SendStage =
 
 export interface SendExecutionDeps {
   bridge: Pick<Bridge, "executionActivate" | "prompt" | "beginGoalPrompt" | "beginDesignPrompt" | "groupSend">;
-  /** preparingTurn = waiting for executionActivate() (never onStatus). */
+  /** preparingTurn = waiting for executionActivate(). */
   setPreparingTurn(v: boolean): void;
   /** Synchronous registry merge on successful activation — the push event
    *  is only an idempotent generation-filtered echo. */
@@ -99,7 +99,7 @@ export async function performSend(deps: SendExecutionDeps, input: SendExecutionI
     return { stage: "activation-failed" };
   } finally {
     // preparingTurn covers execution activation only — legacy openSession
-    // readiness (liveReady/requestId) is not part of the Send contract.
+    // runtime readiness is not part of the Send contract.
     deps.setPreparingTurn(false);
   }
 

@@ -35,13 +35,10 @@ function makeDeps(overrides: Partial<ViewNavigationDeps> = {}) {
   const deps: ViewNavigationDeps = {
     epochRef: { current: 0 },
     viewedPathRef: { current: null },
-    activeCwdRef: { current: null },
-    activeSessionIdRef: { current: null },
-    liveReadyRef: { current: false },
+    viewedCwdRef: { current: null },
     hasSessionRef: { current: false },
     setViewedSessionPath: vi.fn(),
     setHasSession: vi.fn(),
-    setLiveReady: vi.fn(),
     setStats: vi.fn(),
     setCommands: vi.fn(),
     resetHistory: vi.fn(),
@@ -56,15 +53,15 @@ function makeDeps(overrides: Partial<ViewNavigationDeps> = {}) {
     clearUnread: vi.fn(),
     clearArmings: vi.fn(),
     registerTab: vi.fn(),
-    claimSwitch: vi.fn(() => 1),
-    releaseSwitch: vi.fn(),
+    claimViewSwitch: vi.fn(() => 1),
+    releaseViewSwitch: vi.fn(),
     evictDeadTab: vi.fn(),
     showLanding: vi.fn(),
     toast: vi.fn(),
     bridge,
     ...overrides,
   };
-  return { bridge, deps };
+  return { bridge, deps, viewedSessionIdRef: { current: null as string | null } };
 }
 
 const neverActivated = (bridge: ReturnType<typeof makeDeps>["bridge"]) => {
@@ -110,23 +107,22 @@ describe("viewSession is disk-only (I2/I3)", () => {
   });
 
   it("3: a running A survives viewing B, and A's events cannot enter B's transcript", async () => {
-    const { bridge, deps } = makeDeps();
+    const { bridge, deps, viewedSessionIdRef } = makeDeps();
     const a = execution("/p", "/s/a", { state: "working", streaming: true });
     let registry = indexExecutions([a]);
-    // A was live: the active session id belongs to A before the view.
-    deps.activeSessionIdRef.current = a.sessionId;
+    // A owns the project; the view starts on A.
+    viewedSessionIdRef.current = a.sessionId;
 
     await viewSession("/s/b", "/p", deps);
 
-    // B's view drops the runtime session id — the transcript event guard
-    // then rejects every session-scoped event (A's stream included), while
-    // A keeps running in the execution registry.
-    expect(deps.activeSessionIdRef.current).toBeNull();
+    // The viewed session is now B: the transcript guard rejects A's stream,
+    // while A keeps running in the execution registry.
+    viewedSessionIdRef.current = "sid-b";
     registry = mergeExecution(registry, { ...a, generation: 2, streaming: true });
     expect(registry["/p"]?.state).toBe("working");
     const aStreamEvent = { sessionId: a.sessionId, type: "message_update" } as unknown as AgentEvent;
     expect(
-      shouldAcceptEvent(aStreamEvent, { activeSessionId: deps.activeSessionIdRef.current, switching: false })
+      shouldAcceptEvent(aStreamEvent, { viewedSessionId: viewedSessionIdRef.current, switching: false })
     ).toBe(false);
     neverActivated(bridge);
   });
@@ -160,8 +156,6 @@ describe("viewSession is disk-only (I2/I3)", () => {
     bridge.executionList.mockResolvedValue([execution("/p", "/s/a", { state: "working", streaming: true })]);
     let registry = indexExecutions(await bridge.executionList());
     deps.viewedPathRef.current = "/s/b";
-    deps.activeSessionIdRef.current = "sid-x";
-    deps.liveReadyRef.current = true;
     deps.setViewedSessionPath("/s/b");
     deps.setHasSession(true);
 
@@ -169,7 +163,7 @@ describe("viewSession is disk-only (I2/I3)", () => {
 
     expect(deps.viewedPathRef.current).toBeNull();
     expect(deps.setViewedSessionPath).toHaveBeenCalledWith(null);
-    expect(deps.activeSessionIdRef.current).toBeNull();
+    expect(deps.viewedCwdRef.current).toBeNull();
     expect(deps.setHasSession).toHaveBeenCalledWith(false);
     expect(deps.clearArmings).toHaveBeenCalled();
     // Landing is not an execution operation: the registry entry survives
@@ -276,17 +270,21 @@ describe("mutation guard", () => {
   });
 });
 
-describe("fresh-session activation view (path null)", () => {
-  it("commits an empty awaiting-ready view without fetching or registering", async () => {
+describe("view navigation requires a concrete path", () => {
+  it("views the path an activation returned; a null fresh session is not a thing", async () => {
     const { bridge, deps } = makeDeps();
-    const out = await viewSession(null, "/p", deps);
+    // A brand-new conversation is never viewed as null: executionActivate
+    // returns a concrete sessionFile, and THAT is what gets viewed.
+    bridge.executionActivate.mockResolvedValueOnce({ ok: true as const, execution: execution("/p", "/s") });
+    const result = await bridge.executionActivate();
+    expect(result.ok).toBe(true);
+    // The activation itself is the only activation the test performs; the
+    // view that follows must be disk-only.
+    const out = await viewSession("/s", "/p", deps);
     expect(out.status).toBe("committed");
-    expect(bridge.getSessionMessages).not.toHaveBeenCalled();
-    expect(deps.setViewedSessionPath).toHaveBeenCalledWith(null);
-    expect(deps.viewedPathRef.current).toBeNull();
-    expect(deps.registerTab).not.toHaveBeenCalled();
-    expect(deps.resetTranscript).toHaveBeenCalled();
-    expect(deps.setHasSession).toHaveBeenCalledWith(true);
+    expect(bridge.getSessionMessages).toHaveBeenCalledWith("/s");
+    expect(deps.registerTab).toHaveBeenCalledWith("/p", "/s");
+    bridge.executionActivate.mockClear();
     neverActivated(bridge);
   });
 });

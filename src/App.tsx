@@ -1,15 +1,16 @@
 import { lazy, Suspense, useCallback, useEffect, useEffectEvent, useMemo, useReducer, useRef, useState } from "react";
-import { bridge, bridgeAvailable, type ActivityUpdate, type AgentModel, type AgentState, type CommandInfo, type HistoryProjection, type ProjectGroup, type ProjectSettings, type SessionMeta, type SessionStats, type SessionStatus, type SessionWindow, type SimTabState, type WorkflowRunSummary } from "./bridge";
+import { bridge, bridgeAvailable, type ActivityUpdate, type AgentModel, type AgentState, type CommandInfo, type HistoryProjection, type ProjectGroup, type ProjectSettings, type SessionMeta, type RuntimeStatus, type SessionStats, type SessionWindow, type SimTabState, type WorkflowRunSummary } from "./bridge";
 import type { Bot, BotGroup, BotPatch, DefaultBot, NewBotInput, NewGroupInput } from "./bots";
 import { isBotMainSession, isGroupRoom } from "./bots";
 import { initialState, mergeLiveMessages, reducer, wireOf, wireStr } from "./store";
 import { shouldAcceptEvent } from "./sessionLifecycle";
+import { applyRuntimeStatus, groupChatCwd, projectSettingsCwd, reconnectExecutions } from "./lib/app-orchestration";
 import {
   applyRuntimeEvent,
   canSettle,
   computeRuntimeByPath,
-  reconcileAfterReconnect,
   resolveApprovalExecution,
+  resolveApprovalPath,
   resolveRuntimePath as resolveRuntimePathPure,
   type PathExecutionMap,
   type SessionRuntimeState,
@@ -139,7 +140,9 @@ export default function App() {
     void navigator.clipboard?.writeText(value);
     toast("info", `Copied ${kind}`);
   }, []);
-  const [status, setStatus] = useState<SessionStatus>({ status: "idle" });
+  // Runtime health ONLY: can Babylon talk to Pi? It carries no session or
+  // project identity and can never select or prepare a conversation (C4).
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus>({ status: "starting" });
   const [projectFilter, setProjectFilter] = useState("all");
   // Global session working set (browser model): open tabs in insertion
   // order, independent of Space. Versioned blob (v2; legacy per-space
@@ -156,7 +159,7 @@ export default function App() {
   }, [activeSpace]);
   // Single choke point for a successfully opened session: register the tab
   // (no reorder), remember it per space, adopt its project context.
-  const registerOpenSession = useCallback((cwd: string, path: string) => {
+  const registerViewedSession = useCallback((cwd: string, path: string) => {
     setNavTabs((prev) => {
       const tabs = addNavTab(prev.tabs, cwd, path);
       return { tabs, activeBySpace: { ...prev.activeBySpace, [cwd]: path } };
@@ -167,19 +170,15 @@ export default function App() {
   const [models, setModels] = useState<AgentModel[]>([]);
   // Invariant-read caches for hydrate (every tab switch re-hydrates).
   // Lifecycle rule: caches must not outlive the runtimes they describe.
-  // Backend eviction is invisible to the renderer (no runtime-eviction
-  // event) and a reopened session reuses its file, so session-file keys
-  // would serve stale registrations after an evict+reopen cycle. Instead:
-  // models are project-scoped (the ModelRuntime is cwd-owned and retained
-  // alongside the project), thinking levels are model-defined, and commands
-  // stay uncached — extension registrations belong to the runtime instance,
-  // and getCommands is not expensive enough to justify the staleness risk.
+  // Project models survive execution runtime changes (the ModelRuntime is
+  // cwd-owned); thinking levels are model-defined; commands stay uncached
+  // because extension registrations belong to the owning execution runtime.
   // Settings saves clear the models map (context-window overrides remap it).
   const modelsCacheRef = useRef(new Map<string, AgentModel[]>());
   const levelsCacheRef = useRef(new Map<string, string[]>());
-  // Project of the session on screen, tracked alongside viewedPathRef
-  // (openSession targets it explicitly; ready statuses carry it).
-  const activeCwdRef = useRef<string | null>(null);
+  // Project of the conversation on screen — the cwd Send captures. It is view
+  // state, not a runtime pointer.
+  const viewedCwdRef = useRef<string | null>(null);
 
   const { themePref, themeId, setThemePref, setThemeId } = useTheme();
   const [commands, setCommands] = useState<CommandInfo[]>([]);
@@ -242,11 +241,8 @@ export default function App() {
   // highlights instantly; the host's status confirm later keeps it exact.
   const [viewedSessionPath, setViewedSessionPath] = useState<string | null>(null);
 
-  // "Preparing…" only appears if the host stays not-ready past a beat, fast
-  // switches (now <100ms) never flash it; cold first-opens still get the hint.
-  const [preparingVisible, setPreparingVisible] = useState(false);
-  // True while a sent message is queued behind a cold session open (message
-  // already on screen; the turn has not started).
+  // True while a sent message waits for this project's execution activation
+  // (the message is on screen; the turn has not started).
   const [preparingTurn, setPreparingTurn] = useState(false);
   // Whether a stored-transcript window older than the current one exists.
   const [canLoadMore, setCanLoadMore] = useState(false);
@@ -255,48 +251,30 @@ export default function App() {
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [activity, setActivity] = useState<ActivityUpdate>({ threads: [], subagents: [] });
   const [workflowRuns, setWorkflowRuns] = useState<WorkflowRunSummary[]>([]);
-  // `hasSession` = a session's content is on screen (preview or live).
-  // `liveReady` = the pi process is live on that session. Opening a session
-  // flips hasSession immediately (instant file preview); liveReady follows
-  // once the in-process switch completes, no Hero flash, no blocking.
+  // `hasSession` = a conversation's content is on screen (history or live).
+  // Runtime existence is NOT a second view flag: it is project execution
+  // ownership (executionsByCwd), so there is nothing to "wait for ready" on.
   const [hasSession, setHasSession] = useState(false);
-  const [liveReady, setLiveReady] = useState(false);
-
-  // Debounce the "Preparing…" indicator: show it only when the host has been
-  // not-ready for >250ms (cold first-opens), so sub-100ms switches never flash it.
-  useEffect(() => {
-    if (liveReady) {
-      setPreparingVisible(false);
-      return;
-    }
-    if (!hasSession) {
-      setPreparingVisible(false);
-      return;
-    }
-    const timer = setTimeout(() => setPreparingVisible(true), 250);
-    return () => clearTimeout(timer);
-  }, [liveReady, hasSession]);
   // The epoch of the session currently on screen. Agent events are tagged with
   // the epoch captured when they start; events from a stale (previous) session
   // are dropped so streams can't bleed into a freshly-opened transcript.
   const epochRef = useRef(0);
-  const latestRequestRef = useRef(0);
-  const activeSessionIdRef = useRef<string | null>(null);
-  const switchingRef = useRef(false);
+  const viewSwitchingRef = useRef(false);
   // Ownership generation for the switching flag: overlapping async
   // operations (tab switch vs stale disk refresh) each claim a token, and
   // only the latest token holder may clear the flag. A boolean alone lets
   // a stale refresh clear a newer tab switch's in-flight state.
-  const switchGenerationRef = useRef(0);
-  const claimSwitch = useCallback(() => {
-    switchingRef.current = true;
-    return ++switchGenerationRef.current;
+  const viewSwitchGenerationRef = useRef(0);
+  const claimViewSwitch = useCallback(() => {
+    viewSwitchingRef.current = true;
+    return ++viewSwitchGenerationRef.current;
   }, []);
-  const releaseSwitch = useCallback((token: number) => {
-    if (token === switchGenerationRef.current) switchingRef.current = false;
+  const releaseViewSwitch = useCallback((token: number) => {
+    if (token === viewSwitchGenerationRef.current) viewSwitchingRef.current = false;
   }, []);
-  const liveReadyRef = useRef(false);
   const viewedPathRef = useRef<string | null>(null);
+  // The viewed conversation's id, used ONLY to gate transcript dispatch.
+  const viewedSessionIdRef = useRef<string | null>(null);
   // Event-driven execution per session path (all sessions, not just the open
   // one). Updated from every agent event batch; keyed by path so background
   // runs survive navigation and switching never redefines what is alive.
@@ -325,7 +303,6 @@ export default function App() {
   const hasSessionRef = useRef(false);
   const rollbackDraftRef = useRef<string | null>(null);
   useEffect(() => { hasSessionRef.current = hasSession; }, [hasSession]);
-  useEffect(() => { liveReadyRef.current = liveReady; }, [liveReady]);
   useEffect(() => { streamingRef.current = state.streaming; }, [state.streaming]);
 
   const toast = useCallback(
@@ -608,7 +585,10 @@ export default function App() {
     return bridge.onGroupsUpdate(setBotGroups);
   }, []);
   useEffect(() => {
-    const cwd = status.cwd;
+    // Project settings follow the UI's active project, never a runtime
+    // activation (items 62, 176).
+    // Project settings are the ACTIVE PROJECT's, never a runtime's.
+    const cwd = projectSettingsCwd(activeSpace);
     if (!cwd) {
       setProjectSettings(null);
       return;
@@ -625,7 +605,7 @@ export default function App() {
     return () => {
       live = false;
     };
-  }, [status.cwd]);
+  }, [activeSpace]);
 
   // Attention Inbox: raise an item when the agent needs the user (here, a
   // permission request). The id is keyed to the approval id so repeats of the
@@ -640,13 +620,13 @@ export default function App() {
           type: "permission",
           title: "Approval required",
           detail: req.action.description ?? req.action.category,
-          source: source ?? viewedSessionPath ?? status.sessionPath ?? undefined,
+          source: source ?? viewedSessionPath ?? undefined,
           createdAt: Date.now(),
           resolved: false,
         })
       );
     },
-    [viewedSessionPath, status.sessionPath]
+    [viewedSessionPath]
   );
   useEffect(() => {
     return bridge.onApprovalRequested((req) => {
@@ -730,26 +710,6 @@ export default function App() {
     []
   );
 
-  // Daemon socket transitions: on loss, warn (calls already fail fast with
-  // explicit errors); on reconnect, drop everything but the active entry —
-  // the singleton runtime means nothing else can still be executing — and
-  // refresh host truth plus the aggregate activity snapshot.
-  useEffect(() => {
-    return bridge.onDaemonStatus(({ connected }) => {
-      if (!connected) {
-        toast("warning", "Pi runtime disconnected — reconnecting…");
-        return;
-      }
-      toast("info", "Pi runtime reconnected");
-      setExecutions((prev) => reconcileAfterReconnect(prev, viewedPathRef.current));
-      const reconnectPath = viewedPathRef.current;
-      if (reconnectPath) bridge.getState(reconnectPath).then(setAgentState).catch(() => undefined);
-      bridge
-        .activityList()
-        .then(setActivity)
-        .catch(() => undefined);
-    });
-  }, [toast]);
 
   // Drop the matching attention item when the approval is actually resolved
   // (allowed or denied), so the inbox stops over-reporting outstanding work.
@@ -759,8 +719,9 @@ export default function App() {
   useEffect(() => {
     return bridge.onApprovalResolved((payload) => {
       setAttention((prev) => removeAttention(prev, `perm-${payload.id}`));
-      const sid = payload.sessionId ?? null;
-      const ap = (sid && sessionIdToPathRef.current.get(sid)) || viewedPathRef.current;
+      // Identity only: a resolution without a resolvable session must not
+      // mutate whatever the user happens to be looking at (item 96).
+      const ap = resolveApprovalPath(payload.sessionId ?? null, sessionIdToPathRef.current);
       if (ap) {
         const seq = ++runtimeSeqRef.current;
         const at = Date.now();
@@ -769,15 +730,16 @@ export default function App() {
     });
   }, []);
 
+  // Aggregate activity/workflows are ordinary reads: load them on mount and
+  // never wait for a runtime status (items 106-108).
   useEffect(() => {
-    if (status.status !== "ready") return;
     void Promise.all([bridge.activityList(), bridge.workflowsList()])
       .then(([nextActivity, nextRuns]) => {
         setActivity(nextActivity);
         setWorkflowRuns(nextRuns);
       })
       .catch(() => undefined);
-  }, [status.status, status.cwd]);
+  }, []);
 
   // Resync from the source of truth. Manual compaction doesn't fire
   // a run-end event, so without this the StatsPopover context % and the
@@ -835,7 +797,7 @@ export default function App() {
         activePath &&
         update.changedPaths.includes(activePath) &&
         !streamingRef.current &&
-        !switchingRef.current
+        !viewSwitchingRef.current
       ) {
         // Disk sync never emits a foreground ready (see PiHost.refreshFromDisk):
         // hydrate the session we display explicitly from the boolean result.
@@ -847,7 +809,7 @@ export default function App() {
         // cleared by this stale operation, nor receive this refresh's data.
         const refreshEpoch = epochRef.current;
         const refreshPath = activePath;
-        const switchToken = claimSwitch();
+        const switchToken = claimViewSwitch();
         void bridge
           .refreshSession(activePath)
           .then((refreshed) => {
@@ -861,7 +823,7 @@ export default function App() {
           })
           .catch(() => undefined)
           .finally(() => {
-            releaseSwitch(switchToken);
+            releaseViewSwitch(switchToken);
           });
       }
     });
@@ -879,25 +841,75 @@ export default function App() {
     void resyncFromSource();
   }, [state.settledNonce, resyncFromSource]);
 
+  // PROJECT EXECUTION REGISTRY: which conversation executes, per project.
+  // The ONLY ownership authority in the renderer. Seeded/refreshed from
+  // executionList(), updated by execution_changed pushes, and written
+  // synchronously by the renderer itself when IT calls executionActivate.
+  // View navigation never writes it (C3/C7).
+  const [executionsByCwd, setExecutionsByCwd] = useState<Record<string, ProjectExecution>>({});
+  const refreshExecutions = useCallback(async (): Promise<ProjectExecution[]> => {
+    const list = await bridge.executionList();
+    setExecutionsByCwd(indexExecutions(list));
+    return list;
+  }, []);
+  useEffect(() => {
+    void refreshExecutions().catch(() => undefined);
+    return bridge.onExecutionChanged((execution) =>
+      setExecutionsByCwd((prev) => mergeExecution(prev, execution))
+    );
+  }, [refreshExecutions]);
+
+  // Daemon socket transitions: on loss, warn (calls already fail fast with
+  // explicit errors). On reconnect, EVERY project's owner is re-read from the
+  // authoritative registry — several Spaces may be executing at once, so
+  // nothing is pruned to whatever happens to be on screen (items 109-115).
+  useEffect(() => {
+    return bridge.onDaemonStatus(({ connected }) => {
+      if (!connected) {
+        toast("warning", "Pi runtime disconnected — reconnecting…");
+        return;
+      }
+      toast("info", "Pi runtime reconnected");
+      void refreshExecutions()
+        .then((owners) => {
+          // Event rows are re-derived from the registry; every project owner
+          // that survived the reconnect stands, and only a viewed OWNER is
+          // rehydrated.
+          const outcome = reconnectExecutions(owners, viewedPathRef.current);
+          setExecutions({});
+          if (outcome.rehydratePath) {
+            bridge.getState(outcome.rehydratePath).then(setAgentState).catch(() => undefined);
+          }
+        })
+        .catch(() => undefined);
+      void Promise.all([bridge.activityList(), bridge.workflowsList()])
+        .then(([nextActivity, nextRuns]) => {
+          setActivity(nextActivity);
+          setWorkflowRuns(nextRuns);
+        })
+        .catch(() => undefined);
+    });
+  }, [refreshExecutions, toast]);
+
   // sessionId -> path mirror for resolving background events to rows.
   useEffect(() => {
     const m = new Map<string, string>();
     for (const g of groups) for (const s of g.sessions) m.set(s.id, s.path);
+    // Fresh/unflushed execution sessions are not in the disk index yet; the
+    // execution registry carries their identity until the next refresh.
+    for (const execution of Object.values(executionsByCwd)) m.set(execution.sessionId, execution.sessionFile);
     sessionIdToPathRef.current = m;
-  }, [groups]);
+  }, [groups, executionsByCwd]);
 
   // Resolve an agent event to the session path it describes (pure helper in
   // sessionRuntime; lifecycle events require a known session so stale or
   // foreign ids can never resurrect activity on the open session).
+  // Events carry their own identity. There is no "active session" to fall
+  // back to: a path comes from event.sessionFile, or from the sessionId index
+  // (items 90, 91).
   const resolveRuntimePath = useCallback(
     (sessionId?: string | null, requireKnown = false): string | null =>
-      resolveRuntimePathPure(
-        sessionId ?? null,
-        activeSessionIdRef.current,
-        sessionIdToPathRef.current,
-        viewedPathRef.current,
-        requireKnown
-      ),
+      resolveRuntimePathPure(sessionId ?? null, sessionIdToPathRef.current, requireKnown),
     []
   );
 
@@ -905,9 +917,12 @@ export default function App() {
     () =>
       bridge.onAgentEvents((events) => {
         if (!hasSessionRef.current) return;
+        // Transcript dispatch rule: an event mutates the viewed transcript
+        // only when it belongs to the viewed session and no view switch is in
+        // flight. Background bookkeeping below still processes everything.
         const context = {
-          activeSessionId: activeSessionIdRef.current,
-          switching: switchingRef.current,
+          viewedSessionId: viewedSessionIdRef.current,
+          switching: viewSwitchingRef.current,
         };
         let stateChanged = false;
         let needsResync = false;
@@ -985,7 +1000,7 @@ export default function App() {
     // Cache keys captured at entry (epoch+path guarded below, so a switch
     // mid-flight drops the whole result — keys cannot leak across sessions).
     const hydratePath = viewedPathRef.current;
-    const hydrateCwd = activeCwdRef.current;
+    const hydrateCwd = viewedCwdRef.current;
     const cachedModels = hydrateCwd != null ? modelsCacheRef.current.get(hydrateCwd) : undefined;
     try {
       const [msgs, ms, commandData, st, statsData, nextHistory] = await Promise.all([
@@ -1086,36 +1101,31 @@ export default function App() {
     toast,
   });
 
+  // In daemon-owned mode there is no local host to announce readiness, so
+  // health IS the connection: connected → ready, reconnecting → starting.
   useEffect(
     () =>
-      bridge.onStatus((s) => {
-        if (s.requestId !== undefined && s.requestId !== latestRequestRef.current) return;
-        setStatus(s);
-        if (s.status === "ready") {
-          switchingRef.current = false;
-          liveReadyRef.current = true;
-          activeSessionIdRef.current = s.state?.sessionId ?? null;
-          viewedPathRef.current = s.sessionPath ?? s.state?.sessionFile ?? viewedPathRef.current;
-          if (s.cwd) activeCwdRef.current = s.cwd;
-          setViewedSessionPath(viewedPathRef.current);
-          setLiveReady(true);
-          if (s.sessionPath && s.cwd) registerOpenSession(s.cwd, s.sessionPath);
-          void hydrate(epochRef.current);
-          // Approval recovery phase two: a still-pending request for this
-          // session rebuilds its dialog + execution marking (no hijack of
-          // other sessions; background approvals stay inbox-only).
-          if (s.sessionPath) restoreApprovalsForSession(s.sessionPath);
-        } else if (s.status === "starting") {
-          liveReadyRef.current = false;
-          setLiveReady(false);
-        } else if (s.status === "exited" || s.status === "error") {
-          switchingRef.current = false;
-          liveReadyRef.current = false;
-          setLiveReady(false);
-        }
-        if (s.status === "error" && s.message) toast("error", s.message);
+      bridge.onDaemonStatus(({ connected }) => {
+        setRuntimeStatus((prev) =>
+          connected ? { status: "ready" } : prev.status === "error" ? prev : { status: "starting" }
+        );
       }),
-    [hydrate, toast, restoreApprovalsForSession]
+    []
+  );
+
+  // Runtime health is a SHELL concern: it can start, fail, or be ready, and
+  // that is all it may say. It never names a session, never navigates, and
+  // never prepares a transcript (C4/C6).
+  useEffect(
+    () =>
+      bridge.onRuntimeStatus((s) => {
+        // The ONLY thing a health update can do: update health, report a
+        // startup error. It cannot name, select, or prepare a conversation.
+        const outcome = applyRuntimeStatus(runtimeStatus, s);
+        setRuntimeStatus(outcome.status);
+        if (outcome.errorMessage) toast("error", outcome.errorMessage);
+      }),
+    [toast]
   );
 
   // Git status keyed by project cwd is owned by useGitStatus.
@@ -1143,7 +1153,7 @@ export default function App() {
   // Bot Mode: the bot whose canonical chat is on screen, if any. Drives the
   // header badge (a bot's chat is forever: reopening it resumes the same file).
   const activeBot: Bot | null = useMemo(() => {
-    const file = viewedSessionPath ?? status.sessionPath ?? null;
+    const file = viewedSessionPath;
     if (!file) return null;
     return (
       bots.find(
@@ -1152,7 +1162,7 @@ export default function App() {
           isBotMainSession(b, file)
       ) ?? null
     );
-  }, [bots, viewedSessionPath, status.sessionPath]);
+  }, [bots, viewedSessionPath]);
   // Staffed extras for the active project (null = unknown: keep global behavior).
   const sharedStaff = useMemo(() => {
     if (!projectSettings) return null;
@@ -1161,10 +1171,10 @@ export default function App() {
       .filter((b): b is Bot => !!b);
   }, [projectSettings, bots]);
   const activeGroup: BotGroup | null = useMemo(() => {
-    const file = viewedSessionPath ?? status.sessionPath ?? null;
+    const file = viewedSessionPath;
     if (!file) return null;
     return botGroups.find((g) => isGroupRoom(g, file)) ?? null;
-  }, [botGroups, viewedSessionPath, status.sessionPath]);
+  }, [botGroups, viewedSessionPath]);
   // A rule-3 default chat with staff: extra-bot turns render speaker headers
   // (thinking stays visible, unlike rooms).
   const sharedSpeakers = activeGroup == null && activeBot == null && (sharedStaff?.length ?? 0) > 0;
@@ -1172,7 +1182,7 @@ export default function App() {
   // Keep the per-session transcript cache fresh (skipped while a switch is in
   // flight so the previous session's items never land under the new path).
   useEffect(() => {
-    if (switchingRef.current || state.streaming) return;
+    if (viewSwitchingRef.current || state.streaming) return;
     const path = viewedPathRef.current;
     if (!path || !state.items.length) return;
     const cache = sessionCacheRef.current;
@@ -1198,23 +1208,6 @@ export default function App() {
   // and reconnect, updated ONLY by execution_changed pushes (stale
   // generations rejected inside mergeExecution). View navigation never
   // writes it (I3) — Send and the historical-view composer read it.
-  const [executionsByCwd, setExecutionsByCwd] = useState<Record<string, ProjectExecution>>({});
-  useEffect(() => {
-    let cancelled = false;
-    void bridge
-      .executionList()
-      .then((list) => {
-        if (!cancelled) setExecutionsByCwd(indexExecutions(list));
-      })
-      .catch(() => undefined);
-    const off = bridge.onExecutionChanged((execution) =>
-      setExecutionsByCwd((prev) => mergeExecution(prev, execution))
-    );
-    return () => {
-      cancelled = true;
-      off();
-    };
-  }, []);
   // Derived view/execution relationship (I-canvas): which slot this Space
   // executes in, and whether the viewed session is that slot. Consumed by
   // the Send ownership commit and the historical-view composer commit.
@@ -1222,40 +1215,33 @@ export default function App() {
   const viewingExecution = viewedSessionPath != null && currentExecution?.sessionFile === viewedSessionPath;
 
   const showLanding = useCallback(() => {
-    // Activation supersession (an in-flight open must not resurrect over
-    // the landing) stays here; view identity + liveness delegate to the
-    // extracted view landing, which never reads executionsByCwd (I3).
-    ++latestRequestRef.current;
-    ++switchGenerationRef.current;
-    switchingRef.current = false;
+    // Landing is pure view identity: it invalidates the in-flight view switch
+    // so a late disk load cannot resurrect a session, and clears view state.
+    // It never reads or writes execution ownership (I3).
+    ++viewSwitchGenerationRef.current;
+    viewSwitchingRef.current = false;
     showViewLanding({
       epochRef,
       viewedPathRef,
-      activeSessionIdRef,
-      liveReadyRef,
+      viewedCwdRef,
       hasSessionRef,
       setViewedSessionPath,
       setHasSession,
-      setLiveReady,
       clearArmings: clearComposerArmings,
     });
   }, [clearComposerArmings]);
 
-  // Disk-only navigation (I2/I3): ordinary clicks load the stored
-  // transcript and register the tab — never Pi activation, execution
-  // ownership, or runtime lifetime. openSession reuses these deps for its
-  // view half before activating.
+  // Disk-only navigation (C7): ordinary clicks load the stored transcript and
+  // register the tab — never execution activation, ownership, or runtime
+  // lifetime. A conversation you look at and one that executes are unrelated.
   const viewDeps = useCallback(
     (): ViewNavigationDeps => ({
       epochRef,
       viewedPathRef,
-      activeCwdRef,
-      activeSessionIdRef,
-      liveReadyRef,
+      viewedCwdRef,
       hasSessionRef,
       setViewedSessionPath,
       setHasSession,
-      setLiveReady,
       setStats,
       setCommands,
       resetHistory: () => setHistory({ turns: [], leafId: null, hasBranches: false }),
@@ -1269,9 +1255,9 @@ export default function App() {
       rebuildTranscript: (messages) => dispatch({ type: "rebuild", messages }),
       clearUnread,
       clearArmings: clearComposerArmings,
-      registerTab: registerOpenSession,
-      claimSwitch,
-      releaseSwitch,
+      registerTab: registerViewedSession,
+      claimViewSwitch,
+      releaseViewSwitch,
       evictDeadTab: (dead) => {
         setNavTabs((prev) => {
           const tabs = prev.tabs.filter((t) => t.path !== dead);
@@ -1286,7 +1272,7 @@ export default function App() {
       toast,
       bridge,
     }),
-    [clearComposerArmings, registerOpenSession, refreshSessions, showLanding, toast, claimSwitch, releaseSwitch, setNavTabs]
+    [clearComposerArmings, registerViewedSession, refreshSessions, showLanding, toast, claimViewSwitch, releaseViewSwitch, setNavTabs]
   );
 
   /** View a stored session: disk transcript + selected tab + Space. Never
@@ -1296,53 +1282,25 @@ export default function App() {
     [viewDeps]
   );
 
-  // Clear the switch cover shortly after it fades (animation is 120ms; the
-  // timeout also covers the reduced-motion path where no animation fires). The
-  // Activation path: Pi runtime work ON TOP of a view — new sessions
-  // (path null), bot/group rooms, and (until Send moves onto execution
-  // ownership) sends waiting for their historical ready. Ordinary
-  // navigation never calls this; viewSession is disk-only (I3).
-  const openSession = useCallback(
-    async (path: string | undefined, cwd: string, opts?: { quietMissing?: boolean }) => {
-      // View half via the extracted path navigation uses: identity, unread,
-      // armings, disk transcript, tab. Fresh sessions commit an empty
-      // awaiting-ready view (path null skips fetch/register).
-      const view = await viewSessionImpl(path ?? null, cwd, viewDeps());
-      if (path && view.status !== "committed") return; // stale/missing/failed handled inside
-      const expectedEpoch = epochRef.current;
-      const requestId = ++latestRequestRef.current;
-      const switchToken = claimSwitch();
-      try {
-        await bridge.openSession({ path, cwd, requestId });
-      } catch (e) {
-        if (expectedEpoch !== epochRef.current) return;
-        releaseSwitch(switchToken);
-        const missingFile = path != null && isSessionNotFound(e);
-        if (missingFile) {
-          const dead = path;
-          setNavTabs((prev) => {
-            const tabs = prev.tabs.filter((t) => t.path !== dead);
-            const activeBySpace = Object.fromEntries(
-              Object.entries(prev.activeBySpace).filter(([, p]) => p !== dead)
-            );
-            return { tabs, activeBySpace };
-          });
-          void refreshSessions();
-          if (opts?.quietMissing) {
-            showLanding();
-            return;
-          }
-          // Explicit opens still explain what happened.
-          toast("info", "That session file no longer exists — cleaned up its tab.");
-        } else {
-          toast("error", errorMessage(e, "failed to open session"));
-        }
-        // Undo the optimistic disk view: back to whatever was on screen.
-        view.rollback();
-      }
-    },
-    [viewDeps, toast, refreshSessions, showLanding]
-  );
+  // OWNER-VIEW HYDRATION: live runtime UI exists exactly when the viewed
+  // conversation IS its project's execution owner. That single condition
+  // replaces the old "status became ready" trigger, so a fresh New Session,
+  // a returned-to-live owner, and a background transfer all hydrate
+  // naturally — and a COLD historical view clears runtime-only UI instead
+  // of calling reads that would reject (items 97-103).
+  useEffect(() => {
+    if (!viewedSessionPath || !viewingExecution) {
+      setAgentState(null);
+      setStats(null);
+      setCommands([]);
+      setThinkingLevels([]);
+      return;
+    }
+    const epoch = epochRef.current;
+    void hydrate(epoch);
+    restoreApprovalsForSession(viewedSessionPath);
+  }, [viewedSessionPath, viewingExecution, currentExecution?.generation]);
+
 
   // User-curated spaces (herdr): folders you add explicitly. The pi session
   // index is never auto-imported into the sidebar.
@@ -1454,6 +1412,9 @@ export default function App() {
           toast("warning", "This project is busy — wait for the current turn before starting a new chat.");
           return false;
         }
+        // Merge immediately instead of waiting for the ownership push, so
+        // viewing the new owner hydrates on the very next render (item 104).
+        setExecutionsByCwd((prev) => mergeExecution(prev, result.execution));
         await viewSession(result.execution.sessionFile, cwd);
         return true;
       } catch (e) {
@@ -1464,13 +1425,13 @@ export default function App() {
     [toast, viewSession]
   );
   const newSession = useCallback(() => {
-    const cwd = activeSpace ?? status.cwd;
+    const cwd = activeSpace;
     if (cwd) {
       void claimNewSession(cwd);
       return;
     }
     setShowNewSession(true);
-  }, [activeSpace, status.cwd, claimNewSession]);
+  }, [activeSpace, claimNewSession]);
   const chooseNewSessionProject = useCallback(
     async (cwd: string) => {
       setShowNewSession(false);
@@ -1488,7 +1449,7 @@ export default function App() {
       setShowProject(true);
       return;
     }
-    const cwd = status.cwd;
+    const cwd = activeSpace;
     if (!cwd) {
       toast("info", "Open a project folder first");
       return;
@@ -1500,7 +1461,7 @@ export default function App() {
     } catch (e) {
       toast("error", errorMessage(e, "could not load project settings"));
     }
-  }, [projectSettings, status.cwd, toast]);
+  }, [projectSettings, activeSpace, toast]);
 
   // Switch to a different (or new) project folder.
   const openFolder = useCallback(async () => {
@@ -1525,7 +1486,7 @@ export default function App() {
     try {
       const result = await bridge.botsOpen(bot.id);
       void bridge.botsList().then(setBots).catch(() => undefined);
-      let cwd = bot.cwd ?? (projectFilter !== "all" ? projectFilter : status.cwd) ?? status.cwd;
+      let cwd = bot.cwd ?? (projectFilter !== "all" ? projectFilter : null) ?? activeSpace;
       if (!cwd) {
         const picked = await bridge.pickFolder();
         if (!picked) {
@@ -1539,11 +1500,11 @@ export default function App() {
       if (result.sessionFile) await viewSession(result.sessionFile, cwd);
     } catch (e) {
       // Drop the optimistic row/header so a failed open can't strand the UI
-      // on a session that never displayed (header falls back to live status).
+      // on a session that never displayed.
       setViewedSessionPath(null);
       toast("error", errorMessage(e, "could not open bot chat"));
     }
-  }, [viewSession, projectFilter, status.cwd, toast]);
+  }, [viewSession, projectFilter, activeSpace, toast]);
 
   const createBot = useCallback(async (input: NewBotInput) => {
     const created = await bridge.botsCreate(input);
@@ -1590,7 +1551,7 @@ export default function App() {
       const result = await bridge.groupsOpen(group.id);
       void bridge.groupsList().then(setBotGroups).catch(() => undefined);
       const memberCwd = bots.find((b) => b.id === group.memberIds[0])?.cwd;
-      let cwd = group.cwd ?? memberCwd ?? (projectFilter !== "all" ? projectFilter : status.cwd) ?? status.cwd;
+      let cwd = groupChatCwd({ groupCwd: group.cwd, memberCwd, projectFilter, activeSpace });
       if (!cwd) {
         const picked = await bridge.pickFolder();
         if (!picked) {
@@ -1599,12 +1560,14 @@ export default function App() {
         }
         cwd = picked;
       }
-      await openSession(result.sessionFile ?? undefined, cwd);
+      // groupsOpen already claimed execution and returned the owner: view it,
+      // never activate a second time (item 28).
+      if (result.sessionFile) await viewSession(result.sessionFile, cwd);
     } catch (e) {
       setViewedSessionPath(null);
       toast("error", errorMessage(e, "could not open group room"));
     }
-  }, [openSession, projectFilter, status.cwd, toast, bots]);
+  }, [viewSession, projectFilter, activeSpace, toast, bots]);
 
   const createGroup = useCallback(async (input: NewGroupInput) => {
     const created = await bridge.groupsCreate(input);
@@ -1652,7 +1615,7 @@ export default function App() {
   );
   const consumeHandoff = useCallback(
     async (sourcePath: string) => {
-      const live = viewedSessionPath ?? status.sessionPath;
+      const live = viewedSessionPath;
       if (!live) {
         toast("error", "Open the live chat first, handoffs install there");
         return;
@@ -1670,7 +1633,7 @@ export default function App() {
         toast("error", errorMessage(e, "could not consume handoff"));
       }
     },
-    [viewedSessionPath, status.sessionPath, toast]
+    [viewedSessionPath, toast]
   );
   // Session metadata lookup for Send's busy-owner toast (the canonical
   // sessionTitle helper below is declared after send, so resolve inline —
@@ -1679,7 +1642,7 @@ export default function App() {
 
   // Send = acquire project execution ownership, then execute one turn in
   // the session captured AT SUBMISSION (src/lib/send-execution.ts). The
-  // legacy warmup (openSession ready / requestId / liveReadyRef) is gone:
+  // No compatibility warmup: executionActivate is the whole contract:
   // executionActivate IS the warmup, and navigation after submission is
   // presentation state — it never re-targets a submitted send (I7/I8).
   const send = useCallback(
@@ -1688,7 +1651,7 @@ export default function App() {
       // Execution identity captured at submission — validated immediately,
       // never re-resolved from view state after an await (I7/I8).
       const target = viewedPathRef.current;
-      const cwd = activeCwdRef.current;
+      const cwd = viewedCwdRef.current;
       const rollbackOptimistic = () => {
         if (hasContent) dispatch({ type: "local-user-rollback", text });
       };
@@ -1920,7 +1883,6 @@ export default function App() {
     }
   }, [hydrate, refreshSessions, toast]);
 
-  const ready = status.status === "ready";
   const activeBranch: string | undefined =
     agentState?.gitWorktree?.branch ?? agentState?.git?.branch;
   const runningWorkflows = workflowRuns.filter((r) => r.status === "running" || r.status === "paused").length;
@@ -1935,6 +1897,18 @@ export default function App() {
   // attention derived ONCE per render from every source, then consumed by the
   // sidebar, Space dots, header, and Agents dock. No consumer reconstructs
   // liveness from its own boolean mix anymore.
+  // The viewed conversation's identity, from ONE consistent source: the
+  // session index for the path and its cwd, the live state for the id
+  // (items 78, 79). Never a runtime status.
+  const viewedEntry = useMemo(
+    () => (viewedSessionPath ? sessionByPath.get(viewedSessionPath) ?? null : null),
+    [sessionByPath, viewedSessionPath]
+  );
+  const viewedCwd = viewedEntry?.cwd ?? activeSpace ?? null;
+  const goalSessionId =
+    viewedSessionPath == null ? null : agentState?.sessionId ?? viewedEntry?.session.id ?? null;
+  const goalCwd = viewedCwd;
+
   const runtimeByPath = useMemo(
     () =>
       computeRuntimeByPath({
@@ -1946,14 +1920,13 @@ export default function App() {
         activity,
         workflowRuns,
         viewedSessionPath,
-        statusSessionPath: status.sessionPath,
-        statusCwd: status.cwd,
-        streaming: state.streaming,
-        agentIsStreaming,
-        activeSessionId: activeSessionIdRef.current ?? "",
+        projectExecutions: Object.values(executionsByCwd),
+        viewedCwd: viewedSessionPath
+          ? sessionByPath.get(viewedSessionPath)?.cwd ?? activeSpace ?? null
+          : null,
         bots,
       }),
-    [groups, executions, settled, unread, attention, activity, workflowRuns, viewedSessionPath, status.sessionPath, status.cwd, state.streaming, agentIsStreaming, bots]
+    [groups, executions, settled, unread, attention, activity, workflowRuns, viewedSessionPath, viewedCwd, executionsByCwd, bots]
   );
 
   // Per-session liveness is dead: runtimeByPath (above) owns it now.
@@ -1982,11 +1955,11 @@ export default function App() {
         threads: activity.threads,
         subagents: activity.subagents,
         workflows: workflowRuns,
-        scope: activeSpace ?? status.cwd ?? null,
+        scope: activeSpace,
         resolveCwd: resolveSessionCwd,
         resolveRunCwd,
       }),
-    [activity, workflowRuns, activeSpace, status.cwd, resolveSessionCwd, resolveRunCwd]
+    [activity, workflowRuns, activeSpace, resolveSessionCwd, resolveRunCwd]
   );
   const sessionTitle = useCallback(
     (path: string) => resolveSessionTitle(sessionByPath, path),
@@ -2043,9 +2016,9 @@ export default function App() {
   // Tabs are per project: the header only shows the active space's working
   // set. Other projects keep their tabs, restored on space switch.
   const visibleTabItems = useMemo(() => {
-    const cwd = activeSpace ?? status.cwd;
+    const cwd = activeSpace;
     return visibleSpaceTabs(tabItems, cwd ?? null);
-  }, [tabItems, activeSpace, status.cwd]);
+  }, [tabItems, activeSpace]);
   const attentionByPath = useMemo(() => buildAttentionByPath(runtimeByPath), [runtimeByPath]);
   const historyEntries = useMemo(
     () => buildHistoryEntries(groups, new Set(navTabs.tabs.map((t) => t.path))),
@@ -2063,9 +2036,9 @@ export default function App() {
         subagents: activity.subagents,
         workflows: workflowRuns,
         titleFor: sessionTitle,
-        activeCwd: activeSpace ?? status.cwd ?? null,
+        activeCwd: activeSpace,
       }),
-    [executionsByCwd, runtimeByPath, activity.threads, activity.subagents, workflowRuns, sessionTitle, activeSpace, status.cwd]
+    [executionsByCwd, runtimeByPath, activity.threads, activity.subagents, workflowRuns, sessionTitle, activeSpace]
   );
   const allSpaceCwds = useMemo(() => buildAllSpaceCwds(spaces, activeSpace), [spaces, activeSpace]);
 
@@ -2082,9 +2055,11 @@ export default function App() {
       // Existing transcript → disk-only view; an undefined path (new
       // session row) still goes through activation to create the file.
       if (path) void viewSession(path, cwd);
-      else void openSession(path, cwd);
+      // A row with no path means "new conversation in this project", which is
+      // an execution claim, not a view (item 29).
+      else void claimNewSession(cwd);
     },
-    [openSession, viewSession]
+    [claimNewSession, viewSession]
   );
   const onDeleteSession = useCallback(
     async (path: string, name: string) => {
@@ -2142,14 +2117,12 @@ export default function App() {
     [activeGroup, bots, sharedSpeakers, sharedStaff]
   );
   const chatProjectName = useMemo(() => {
-    const cwd = activeSpace ?? status.cwd;
+    const cwd = activeSpace;
     return cwd ? cwd.split("/").filter(Boolean).pop() || cwd : null;
-  }, [activeSpace, status.cwd]);
+  }, [activeSpace]);
 
   // Strip identity follows the visible session; a change refetches the
   // durable goal (or clears the strip when nothing is open).
-  const goalSessionId = agentState?.sessionId ?? null;
-  const goalCwd = status.cwd ?? null;
   useEffect(() => {
     if (!goalSessionId || !goalCwd) {
       goalTargetRef.current = null;
@@ -2181,20 +2154,14 @@ export default function App() {
         id: "branches",
         label: "History",
         icon: <BranchIcon size={16} />,
-        hint: ready
-          ? "Session history: branch tree and turn timeline"
-          : "Session history, needs the background daemon",
-        disabled: !ready,
+        hint: "Session history: branch tree and turn timeline",
       },
       {
         id: "activity",
         label: "Activity",
         icon: <LayersIcon size={16} />,
-        hint: ready
-          ? "Workflows, threads and subagents for this session"
-          : "Workflows, threads and subagents, needs the background daemon",
+        hint: "Workflows, threads and subagents for this session",
         badge: activityBadge,
-        disabled: !ready,
       },
       {
         id: "canvas",
@@ -2203,7 +2170,7 @@ export default function App() {
         hint: "Diagram scenes the agent and the human share, in .pi/canvas",
       },
     ],
-    [activityBadge, ready]
+    [activityBadge]
   );
 
   // Tabs for the one right sidebar. Browser tabs mirror the backend tab list:
@@ -2449,17 +2416,19 @@ export default function App() {
         if (ae instanceof HTMLInputElement || ae instanceof HTMLTextAreaElement || (ae instanceof HTMLElement && ae.isContentEditable)) return;
         if (!viewedSessionPath) return;
         event.preventDefault();
-        copySession("path", { id: viewedSessionPath, path: viewedSessionPath, cwd: status.cwd ?? "", mtime: Date.now() });
+        void navigator.clipboard?.writeText(viewedSessionPath);
+        toast("info", "Copied path");
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [toggleFeatureTab, copySession, viewedSessionPath, status.cwd]);
+  }, [toggleFeatureTab, viewedSessionPath, toast]);
 
   const onOpenTree = useCallback(() => {
-    if (!ready || !hasSession) return;
+    // History reads are cold-capable: a branch view never needs a live runtime.
+    if (!hasSession) return;
     toggleFeatureTab("branches");
-  }, [ready, hasSession, toggleFeatureTab]);
+  }, [hasSession, toggleFeatureTab]);
 
   const chatOnOpenLaunch = useCallback(() => {
     openFeatureTab("activity");
@@ -2497,7 +2466,7 @@ export default function App() {
       <Suspense fallback={null}>
       <SettingsPage
         models={models}
-        projectCwd={activeSpace ?? status.cwd ?? null}
+        projectCwd={activeSpace}
         agentState={agentState}
         theme={themePref}
         themeId={themeId}
@@ -2532,10 +2501,10 @@ export default function App() {
       />
       </Suspense>
     ) : null}
-      {showProject && projectSettings && status.cwd ? (
+      {showProject && projectSettings && activeSpace ? (
         <Suspense fallback={null}>
         <ProjectPanel
-          projectPath={status.cwd}
+          projectPath={activeSpace}
           settings={projectSettings.settings}
           hash={projectSettings.hash}
           employees={bots}
@@ -2551,10 +2520,10 @@ export default function App() {
       ) : null}
       <Sidebar
         groups={groups}
-        activePath={viewedSessionPath ?? status.sessionPath}
-        activeCwd={activeSpace ?? status.cwd}
+        activePath={viewedSessionPath ?? undefined}
+        activeCwd={activeSpace ?? undefined}
         treeOpen={activeTab?.feature === "branches"}
-        canOpenTree={ready && hasSession}
+        canOpenTree={hasSession}
         minimized={sidebarMinimized}
         onOpenSettings={onOpenSettings}
         onToggleMinimize={onToggleMinimize}
@@ -2619,7 +2588,6 @@ export default function App() {
               selectedPath={viewedSessionPath}
               execution={tabExecution}
               attentionByPath={attentionByPath}
-              preparingSelected={preparingVisible}
               onActivate={(tab) => {
                 setPromotedParent(null);
                 void viewSession(tab.path, tab.cwd);
@@ -2678,7 +2646,7 @@ export default function App() {
                   roomName={activeGroup?.name ?? ""}
                   showSpeakers={sharedSpeakers}
                   projectName={chatProjectName}
-                  sessionKey={viewedSessionPath ?? status.sessionPath ?? null}
+                  sessionKey={viewedSessionPath}
                   streamResponses={streamResponses}
                   historyTurns={history.turns}
                   pinNonce={pinNonce}
@@ -2690,7 +2658,18 @@ export default function App() {
                 </ErrorBoundary>
               ) : (
                 <div className="flex flex-1 min-h-0 overflow-hidden">
-                  <Hero status={status} groups={groups} onOpen={(path, cwd) => { setPromotedParent(null); if (path) void viewSession(path, cwd); else void openSession(path, cwd); }} onNew={newSession} spaceCwd={activeSpace ?? status.cwd ?? null} />
+                  <Hero
+                    runtimeStatus={runtimeStatus}
+                    groups={groups}
+                    onOpen={(path: string, cwd: string) => {
+                      // Hero rows are EXISTING conversations: viewing only.
+                      // New conversations have their own button (item 30).
+                      setPromotedParent(null);
+                      void viewSession(path, cwd);
+                    }}
+                    onNew={newSession}
+                    spaceCwd={activeSpace}
+                  />
                 </div>
               )}
 
@@ -2717,7 +2696,7 @@ export default function App() {
                 followUp={state.followUp}
                 commands={commands}
                 draftRequest={draftRequest}
-                sessionKey={viewedSessionPath ?? status.sessionPath ?? null}
+                sessionKey={viewedSessionPath}
                 toast={toast}
                 onSend={send}
                 onAbort={abort}
@@ -2763,7 +2742,7 @@ export default function App() {
 
         {/* The browser backend lives in the main process, not the daemon socket,
             so it renders on toggle alone. Branch/Activity still need the daemon. */}
-        {sideOpen && (activeSpace ?? status.cwd) ? (
+        {sideOpen && activeSpace ? (
           <SessionSidebar
             width={contextWidth}
             onResizeStart={beginContextResize}
@@ -2785,7 +2764,7 @@ export default function App() {
                 <SimSidebar />
               ) : activeTab?.feature === "branches" ? (
                 <BranchPanel
-                  sessionFile={viewedSessionPath ?? status.sessionPath ?? null}
+                  sessionFile={viewedSessionPath}
                   onClose={() => {
                     if (activeSideTab) closeSideTab(activeSideTab);
                   }}
@@ -2803,13 +2782,15 @@ export default function App() {
                 />
               ) : activeTab?.feature === "activity" ? (
                 <WorkflowsPanel
-                  cwd={activeSpace ?? status.cwd ?? null}
+                  cwd={activeSpace}
                   resolveCwd={resolveSessionCwd}
                   resolveRunCwd={resolveRunCwd}
                   onOpenSession={(path, targetCwd, parentPath) => {
-                    const cwd = targetCwd ?? status.cwd;
+                    const cwd = targetCwd ?? activeSpace ?? viewedCwd;
                     if (cwd) {
-                      if (parentPath && status.cwd) setPromotedParent({ path: parentPath, cwd: status.cwd });
+                      // The promoted parent's project comes from explicit
+                      // data, never a global status cwd (item 77).
+                      if (parentPath && cwd) setPromotedParent({ path: parentPath, cwd });
                       void viewSession(path, cwd);
                     }
                     if (activeSideTab) closeSideTab(activeSideTab);
@@ -2820,7 +2801,7 @@ export default function App() {
                   toast={toast}
                 />
               ) : activeTab?.feature === "canvas" ? (
-                <CanvasPanel cwd={(activeSpace ?? status.cwd) ?? ""} mermaid={activeTab?.mermaid ?? null} onImported={() => {
+                <CanvasPanel cwd={activeSpace ?? ""} mermaid={activeTab?.mermaid ?? null} onImported={() => {
                   if (activeSideTab) clearTabMermaid(activeSideTab);
                 }} />
               ) : null}
@@ -2852,7 +2833,7 @@ export default function App() {
       {showNewSession && (
         <NewSessionModal
           projects={newSessionProjects}
-          defaultCwd={activeSpace ?? status.cwd ?? null}
+          defaultCwd={activeSpace}
           onChoose={(cwd) => void chooseNewSessionProject(cwd)}
           onPickFolder={() => {
             setShowNewSession(false);
@@ -2872,7 +2853,7 @@ export default function App() {
       ) : null}
 
       {showCommitPopover && (
-        <GitCommitPopover cwd={status.cwd} onClose={() => setShowCommitPopover(false)} toast={toast} onChanged={refreshGitStatuses} />
+        <GitCommitPopover cwd={activeSpace ?? undefined} onClose={() => setShowCommitPopover(false)} toast={toast} onChanged={refreshGitStatuses} />
       )}
       <DialogHost
         dialogs={state.dialogs}

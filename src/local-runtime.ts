@@ -94,7 +94,6 @@ export function createLocalRuntime(opts: {
     async attentionList() { return attentionManager.list(); },
     async attentionRaise(item) { attentionManager.add(item); },
     async attentionResolve(id) { attentionManager.resolve(id); },
-    async openSession(o) { return piHost.open(o); },
     async prompt(m, i, s, f) {
       const behavior = s === "steer" || s === "followUp" ? s : undefined;
       // The facade loosens images to unknown[]; the host needs image
@@ -153,9 +152,6 @@ export function createLocalRuntime(opts: {
         : undefined;
       return piHost.beginDesignPrompt(f, s, m, images, behavior);
     },
-    async releaseSession(path: string) {
-      return { released: await piHost.releaseSession(path) };
-    },
     async getState(sessionFile) { return piHost.getState(sessionFile); },
     async getMessages(sessionFile) { return piHost.getMessages(sessionFile); },
     async getToolOutput(sessionFile, id) { return piHost.getToolOutput(sessionFile, id); },
@@ -187,7 +183,6 @@ export function createLocalRuntime(opts: {
     async generateCommitMessage(c) { return piHost.generateGitCommitMessage(c); },
     async getRecaps(f) { return piHost.getRecaps(f); },
     async refreshFromDisk(f) { return piHost.refreshFromDisk(f); },
-    async switchTo(f) { return piHost.switchTo(f); },
     async respondUi(id, r) { return piHost.respondUi(id, r); },
     async getCommands(sessionFile) { return piHost.getCommands(sessionFile); },
     async controlThread(a, id, m) { return piHost.controlThread(a, id, m); },
@@ -198,6 +193,5 @@ export function createLocalRuntime(opts: {
     onTaskUpdate(cb) { return taskManager.subscribe(cb); },
     onAttentionUpdate(cb) { return attentionManager.subscribe(cb); },
     onAgentEvent() { return () => {}; },
-    onStatus() { return () => {}; },
   };
 }

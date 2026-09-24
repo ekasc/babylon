@@ -101,7 +101,6 @@ export type DaemonListenOptions =
  * the wire through toPayload, which rejects non-objects.
  */
 export interface DaemonPiHost {
-  open(opts: { path?: string; cwd: string; requestId?: number; systemPrompt?: string | null }): Promise<unknown>;
   prompt(message: string, images: PromptImage[] | undefined, streamingBehavior: "steer" | "followUp" | undefined, sessionFile: string): Promise<unknown>;
   /** Run a `/goal …` control invocation without opening a turn; returns the fresh durable goal. */
   execGoalCommand(sessionFile: string, args: string): Promise<DurableGoalState | null>;
@@ -144,7 +143,6 @@ export interface DaemonPiHost {
   generateGitCommitMessage(context: PreparedCommitContext): Promise<GeneratedCommitMessage>;
   getRecaps(sessionFile: string): Promise<Recap[]>;
   refreshFromDisk(sessionFile: string): Promise<boolean>;
-  switchTo(sessionFile: string): Promise<unknown>;
   controlThread(action: "steer" | "follow-up" | "stop", threadId: string, message?: string): Promise<unknown>;
   promoteThread(threadId: string): Promise<{ sessionFile: string; cwd: string; parentSessionFile: string | null }>;
   controlSubagent(action: SubagentControlAction, runId: string, message?: string): Promise<unknown>;
@@ -153,10 +151,9 @@ export interface DaemonPiHost {
   getMessages(sessionFile: string): Promise<unknown[]>;
   getStats(sessionFile: string): Promise<SessionStats>;
   getCommands(sessionFile: string): Promise<CommandInfo[]>;
-  /** Rewire event/status sinks (daemon broadcast attaches here). */
+  /** Rewire event/execution sinks (daemon broadcast attaches here). */
   attachSinks(sinks: {
     onEvent: (event: unknown) => void;
-    onStatus: (status: unknown) => void;
     onExecutionChanged?: (execution: ProjectExecution) => void;
   }): void;
 }
@@ -455,7 +452,6 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
   if (options.piHost) {
     options.piHost.attachSinks({
       onEvent: (ev: unknown) => broadcast("pi.event", ev),
-      onStatus: (s: unknown) => broadcast("pi.session.status", s),
       onExecutionChanged: (execution: ProjectExecution) => broadcast("pi.executionChanged", execution),
     });
   }
@@ -750,11 +746,6 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
               // The thin client's getCommands() reads payload.commands, so the
               // daemon must wrap the array rather than send it bare.
               payload = { commands: await piHost.getCommands(sessionFile) };
-              break;
-            }
-            case "pi.openSession": {
-              const { path, cwd, requestId, systemPrompt } = request.payload as { path?: string; cwd: string; requestId?: number; systemPrompt?: string | null };
-              payload = await piHost.open({ path, cwd, requestId, systemPrompt });
               break;
             }
             case "pi.prompt": {
@@ -1085,11 +1076,6 @@ export async function startDaemonServer(options: DaemonServerOptions): Promise<D
             case "pi.refreshFromDisk": {
               const { sessionFile } = request.payload as { sessionFile: string };
               payload = { refreshed: await piHost.refreshFromDisk(sessionFile) };
-              break;
-            }
-            case "pi.switchTo": {
-              const { sessionFile } = request.payload as { sessionFile: string };
-              payload = await piHost.switchTo(sessionFile);
               break;
             }
             case "pi.controlThread": {

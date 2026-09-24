@@ -16,19 +16,19 @@ describe("PiHost open new session while already in project", () => {
     const otherCwd = join(root, "other-project");
     await Promise.all([mkdir(agentDir, { recursive: true }), mkdir(cwd, { recursive: true }), mkdir(otherCwd, { recursive: true })]);
 
-    const host = new PiHost({ cwd, agentDir, onEvent: () => undefined, onStatus: () => undefined });
+    const host = new PiHost({ cwd, agentDir, onEvent: () => undefined });
     await host.start();
 
     // Real flow: host starts in `cwd`, the user then asks for a new session in a
     // different project, so runtime.cwd !== opts.cwd and host.open takes the
     // SessionManager.create + switchSession branch.
-    const first = await host.open({ path: undefined, cwd: otherCwd });
+    const first = await host.activateExecution(otherCwd, undefined);
     expect(first?.sessionFile).toBeTruthy();
 
     // A second "new session" while already in the project must NOT reuse the
     // first session file — otherwise the old conversation is silently lost and
     // the action appears to do nothing.
-    const second = await host.open({ path: undefined, cwd: otherCwd });
+    const second = await host.activateExecution(otherCwd, undefined);
     expect(second?.sessionFile).toBeTruthy();
     expect(second?.sessionFile).not.toBe(first?.sessionFile);
 

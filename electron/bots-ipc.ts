@@ -16,7 +16,7 @@ import type { BotStore } from "./bots";
 import type { ProjectSettings } from "../src/bridge";
 import type { TaskManager } from "./task-manager";
 import type { RuntimeFacade } from "../src/runtime-facade";
-import type { PiHost } from "./pi-host";
+import { projectKey, type PiHost } from "./pi-host";
 
 type Handle = IpcHandle;
 
@@ -32,7 +32,7 @@ export function registerBotsIpc(
     getHost: () => PiHost;
     isDaemonOwned: () => boolean;
     getHostReady: () => Promise<void> | null;
-    getActiveCwd: () => string;
+    getFocusedCwd: () => string;
     broadcastBots: () => void;
     broadcastGroups: () => void;
     projectSettingsForCwd: (cwd: string) => { settings: ProjectSettings; hash: string };
@@ -52,7 +52,7 @@ export function registerBotsIpc(
     getHost,
     isDaemonOwned,
     getHostReady,
-    getActiveCwd,
+    getFocusedCwd,
     broadcastBots,
     broadcastGroups,
     projectSettingsForCwd,
@@ -108,7 +108,7 @@ export function registerBotsIpc(
     const bot = botStore.get(id);
     if (!bot) throw new Error("Bot not found");
     const botPrompt = buildBotSystemPrompt(bot, botStore.list());
-    const cwd = bot.cwd && bot.cwd.length > 0 ? bot.cwd : getActiveCwd() || homedir();
+    const cwd = bot.cwd && bot.cwd.length > 0 ? bot.cwd : getFocusedCwd() || homedir();
     const projectHash = projectHashForCwd(cwd);
     // Per-project chat first, legacy canonical second (owned-or-on-disk).
     const path = await resolveCanonicalSessionFile(botChatForProject(bot, projectHash));
@@ -182,7 +182,7 @@ export function registerBotsIpc(
     if (members.length < 2) throw new Error("A group needs at least 2 bots");
     if (!group.projectHash) {
       // One-time anchor for pre-project groups; same fallback chain as cwd below.
-      const anchorCwd = groupAnchorCwd(group, botStore.list()) ?? getActiveCwd() ?? homedir();
+      const anchorCwd = groupAnchorCwd(group, botStore.list()) ?? getFocusedCwd() ?? homedir();
       try {
         botStore.updateGroup(group.id, { projectHash: projectHashForCwd(anchorCwd) });
         broadcastGroups();
@@ -190,7 +190,7 @@ export function registerBotsIpc(
         // Anchor persists on the next open instead.
       }
     }
-    const cwd = group.cwd && group.cwd.length > 0 ? group.cwd : members[0]?.cwd && members[0].cwd.length > 0 ? members[0].cwd! : getActiveCwd() || homedir();
+    const cwd = group.cwd && group.cwd.length > 0 ? group.cwd : members[0]?.cwd && members[0].cwd.length > 0 ? members[0].cwd! : getFocusedCwd() || homedir();
     const path = await resolveCanonicalSessionFile(group.mainSessionFile);
     // Same contract as bot open: claim execution (with the room overlay as a
     // creation argument) so a busy owner rejects BEFORE a room runtime is
@@ -300,7 +300,7 @@ export function registerBotsIpc(
     if (!deltaText.trim()) throw new Error("Nothing to summarize yet, the thread is still fresh");
     if (getHostReady()) await getHostReady();
     const header = await readSessionHeader(target);
-    const summarizeCwd = wireStr(header ?? undefined, "cwd") ?? getActiveCwd();
+    const summarizeCwd = wireStr(header ?? undefined, "cwd") ?? getFocusedCwd();
     const summary = normalizeHandoffText(
       (await getHost().summarizeHandoff(summarizeCwd, buildHandoffPrompt(deltaText, settings.defaultBot))) ?? ""
     );
@@ -354,64 +354,83 @@ export function registerBotsIpc(
 
   // -------------------------------------------------------------------------
   // Bot-to-bot DM: one attributed turn in the target's chat, reply relayed
-  // into the origin as a bot-message line. Idle sessions only, the single
-  // runtime cannot background turns, so delivery is synchronous and visible.
+  // into the EXPLICIT origin as a bot-message line. The origin must own its
+  // project, so delivery is synchronous and always lands where the user is
+  // actually looking.
   // -------------------------------------------------------------------------
 
-  handle("pideck:bots-message", async (_e, targetId: string, text: string, fromId?: string) => {
-    if (typeof targetId !== "string" || typeof text !== "string" || !text.trim() || text.length > 200_000) {
-      throw new Error("invalid bot message");
-    }
-    if (isDaemonOwned()) throw new Error("Bot chats need the local runtime (turn off the daemon to use Bots)");
-    if (getHostReady()) await getHostReady();
-    const target = botStore.get(targetId);
-    if (!target) throw new Error("Bot not found");
-    const from = typeof fromId === "string" ? botStore.get(fromId) : undefined;
-    const origin = getHost().activeSessionFile;
-    if (!origin) throw new Error("Open a chat first, replies need a home");
-    const originCwd = getHost().sessionCwdFor(origin);
-    if (!originCwd) throw new Error("Open a project chat first, replies need a home");
-    // Run the target turn in the target's canonical chat.
-    const targetCwd = target.cwd && target.cwd.length > 0 ? target.cwd : getActiveCwd() || homedir();
-    const targetHash = projectHashForCwd(targetCwd);
-    const targetPath = await resolveCanonicalSessionFile(botChatForProject(target, targetHash));
-    const targetClaim = await getRuntime().executionActivate(targetCwd, targetPath ?? undefined, {
-      systemPrompt: buildBotSystemPrompt(target, botStore.list()),
-    });
-    if (!targetClaim.ok) throw new Error("that bot's project is busy — wait for the current turn");
-    const targetFile = targetClaim.execution.sessionFile;
-    if (targetFile && targetFile !== botChatForProject(target, targetHash)) {
-      botStore.setProjectSession(targetId, targetHash, targetFile);
-      broadcastBots();
-    }
-    if (target.model) {
-      try {
-        // Already the claimed owner (the activation above) — the pin may
-        // target the execution session only.
-        await getHost().setModel(targetFile, target.model.provider, target.model.modelId);
-      } catch (err) {
-        console.warn(`[pideck] bot model pin unavailable (${target.model.provider}/${target.model.modelId}):`, err);
+  handle(
+    "pideck:bots-message",
+    async (
+      _e,
+      input: { targetId: string; text: string; fromId?: string; originSessionFile: string; originCwd: string },
+    ) => {
+      if (
+        !input ||
+        typeof input.targetId !== "string" ||
+        typeof input.text !== "string" || !input.text.trim() || input.text.length > 200_000 ||
+        typeof input.originSessionFile !== "string" || input.originSessionFile.length < 1 || input.originSessionFile.length > 4096 ||
+        typeof input.originCwd !== "string" || input.originCwd.length < 1 || input.originCwd.length > 4096 ||
+        (input.fromId !== undefined && typeof input.fromId !== "string")
+      ) {
+        throw new Error("invalid bot message");
       }
+      const { targetId, text, originSessionFile: origin, originCwd } = input;
+      const fromId = input.fromId;
+      if (isDaemonOwned()) throw new Error("Bot chats need the local runtime (turn off the daemon to use Bots)");
+      if (getHostReady()) await getHostReady();
+      const target = botStore.get(targetId);
+      if (!target) throw new Error("Bot not found");
+      const from = typeof fromId === "string" ? botStore.get(fromId) : undefined;
+      // The origin is EXPLICIT and validated against the project's real
+      // ownership: a relay never lands in an arbitrary transcript, and never
+      // in a historical chat that does not own its project (items 13, 14).
+      const originOwnerCwd = getHost().sessionCwdFor(origin);
+      if (originOwnerCwd !== projectKey(originCwd)) {
+        throw new Error("Return to the live session first");
+      }
+      // Run the target turn in the target's canonical chat.
+      const targetCwd = target.cwd && target.cwd.length > 0 ? target.cwd : getFocusedCwd() || homedir();
+      const targetHash = projectHashForCwd(targetCwd);
+      const targetPath = await resolveCanonicalSessionFile(botChatForProject(target, targetHash));
+      const targetClaim = await getRuntime().executionActivate(targetCwd, targetPath ?? undefined, {
+        systemPrompt: buildBotSystemPrompt(target, botStore.list()),
+      });
+      if (!targetClaim.ok) throw new Error("that bot's project is busy — wait for the current turn");
+      const targetFile = targetClaim.execution.sessionFile;
+      if (targetFile && targetFile !== botChatForProject(target, targetHash)) {
+        botStore.setProjectSession(targetId, targetHash, targetFile);
+        broadcastBots();
+      }
+      if (target.model) {
+        try {
+          // Already the claimed owner (the activation above) — the pin may
+          // target the execution session only.
+          await getHost().setModel(targetFile, target.model.provider, target.model.modelId);
+        } catch (err) {
+          console.warn(`[pideck] bot model pin unavailable (${target.model.provider}/${target.model.modelId}):`, err);
+        }
+      }
+      if (getHost().isSessionStreaming(targetFile)) throw new Error("The agent is busy, wait for this turn to finish");
+      const sender = from ? `@${botHandle(from)} (${from.name})` : "you (the human)";
+      await getRuntime().prompt(`[DM from ${sender}, reply briefly in your voice, or PASS if nothing to add]\n\n${text}`, undefined, undefined, targetFile);
+      const reply = lastAssistantText(await getRuntime().getMessages(targetFile));
+      const pass = isPassReply(reply);
+      // Switch home and relay the reply as an attributed activity line.
+      // Switch home by claiming the origin back as this project's execution
+      // session (never by materializing a historical runtime).
+      await getRuntime().executionActivate(originCwd, origin, { systemPrompt: overlayForSessionFile(origin, originCwd) });
+      if (!pass) {
+        const clipped = reply.length > 6000 ? `${reply.slice(0, 6000)}\n… (truncated, full reply lives in @${botHandle(target)}'s chat)` : reply;
+        await getHost().postBotMessage(
+          origin,
+          `[Babylon Bot Message]\n@${from ? botHandle(from) : "you"} asked @${botHandle(target)}: ${text.length > 500 ? `${text.slice(0, 500)}…` : text}\n\n@${botHandle(target)} replied:\n\n${clipped}`,
+          { fromId: from?.id ?? null, targetId, text: text.slice(0, 500) }
+        );
+      }
+      taskManager.resumeForSession(origin);
+      sessionIndex.touch();
+      return { reply: pass ? null : reply, pass };
     }
-    if (getHost().isSessionStreaming(targetFile)) throw new Error("The agent is busy, wait for this turn to finish");
-    const sender = from ? `@${botHandle(from)} (${from.name})` : "you (the human)";
-    await getRuntime().prompt(`[DM from ${sender}, reply briefly in your voice, or PASS if nothing to add]\n\n${text}`, undefined, undefined, targetFile);
-    const reply = lastAssistantText(await getRuntime().getMessages(targetFile));
-    const pass = isPassReply(reply);
-    // Switch home and relay the reply as an attributed activity line.
-    // Switch home by claiming the origin back as this project's execution
-    // session (never by materializing a historical runtime).
-    await getRuntime().executionActivate(originCwd, origin, { systemPrompt: overlayForSessionFile(origin, originCwd) });
-    if (!pass) {
-      const clipped = reply.length > 6000 ? `${reply.slice(0, 6000)}\n… (truncated, full reply lives in @${botHandle(target)}'s chat)` : reply;
-      await getHost().postBotMessage(
-        origin,
-        `[Babylon Bot Message]\n@${from ? botHandle(from) : "you"} asked @${botHandle(target)}: ${text.length > 500 ? `${text.slice(0, 500)}…` : text}\n\n@${botHandle(target)} replied:\n\n${clipped}`,
-        { fromId: from?.id ?? null, targetId, text: text.slice(0, 500) }
-      );
-    }
-    taskManager.resumeForSession(origin);
-    sessionIndex.touch();
-    return { reply: pass ? null : reply, pass };
-  });
+  );
 }

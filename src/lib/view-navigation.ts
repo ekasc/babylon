@@ -1,11 +1,8 @@
 /**
- * View/execution split (src/execution.ts invariants I2/I3): disk-only
- * session navigation. `viewSession` is what ordinary navigation does —
- * select transcript, load stored messages, register the tab — and never
- * touches Pi activation, execution ownership, or runtime lifetime.
- *
- * The activation path (PiHost open) stays a separate caller
- * (App.openSession delegates its view half here, then activates).
+ * Disk navigation, nothing else (C7). `viewSession` selects a conversation,
+ * loads its stored messages, and registers the tab. It never activates a
+ * runtime, never changes execution ownership, and never releases one: those
+ * belong to `executionActivate` and deactivation alone.
  */
 import type { Bridge, CommandInfo, SessionWindow } from "../bridge";
 import type { ProjectExecution } from "../execution";
@@ -15,9 +12,8 @@ export type ViewSessionStatus = "committed" | "stale" | "missing" | "failed";
 
 export interface ViewSessionOutcome {
   status: ViewSessionStatus;
-  /** Restore the pre-view transcript + identity. Meaningful only after
-   *  `status === "committed"`: activation failed after a successful disk
-   *  view, so the caller rolls the view back to what was on screen. */
+  /** Restore the pre-view transcript + identity after a FAILED view load, so
+   *  a broken switch leaves the user exactly where they were. */
   rollback(): void;
 }
 
@@ -31,13 +27,11 @@ export interface ViewNavigationDeps {
   // View identity.
   epochRef: { current: number };
   viewedPathRef: { current: string | null };
-  activeCwdRef: { current: string | null };
-  activeSessionIdRef: { current: string | null };
-  liveReadyRef: { current: boolean };
+  /** Project of the conversation on screen. */
+  viewedCwdRef: { current: string | null };
   hasSessionRef: { current: boolean };
   setViewedSessionPath(path: string | null): void;
   setHasSession(v: boolean): void;
-  setLiveReady(v: boolean): void;
   setStats(v: null): void;
   setCommands(v: CommandInfo[]): void;
   resetHistory(): void;
@@ -53,10 +47,10 @@ export interface ViewNavigationDeps {
   // Navigation side effects.
   clearUnread(path: string): void;
   clearArmings(): void;
-  /** Register/select the open tab and adopt its Space (view-side). */
+  /** Register/select the viewed tab and adopt its Space (view-side). */
   registerTab(cwd: string, path: string): void;
-  claimSwitch(): number;
-  releaseSwitch(token: number): void;
+  claimViewSwitch(): number;
+  releaseViewSwitch(token: number): void;
   /** Evict a vanished session's tab and refresh the index. */
   evictDeadTab(path: string): void;
   /** Project home (used by the quietMissing fallback). */
@@ -68,14 +62,13 @@ export interface ViewNavigationDeps {
 type Win = SessionWindow;
 
 /**
- * Disk-only view navigation. Returns an outcome so callers can distinguish
- * a committed view (activation may proceed) from stale/missing/failed loads.
- * Never calls openSession / executionActivate / releaseSession (I3).
+ * Disk-only view navigation. Returns an outcome so callers can distinguish a
+ * committed view from stale/missing/failed loads. Never activates anything.
  */
 export async function viewSession(
-  /** Session to view; null only for the activation path creating a fresh
-   *  session (no transcript exists yet — identity lands null until ready). */
-  path: string | null,
+  /** The conversation to view. Always concrete: a fresh session is only ever
+   *  viewed after `executionActivate` returned its real path. */
+  path: string,
   cwd: string,
   deps: ViewNavigationDeps,
   opts?: { quietMissing?: boolean }
@@ -105,16 +98,12 @@ export async function viewSession(
     } else {
       d.hasSessionRef.current = false;
       d.setHasSession(false);
-      d.liveReadyRef.current = false;
-      d.setLiveReady(false);
     }
   };
 
-  const token = d.claimSwitch();
-  d.liveReadyRef.current = false;
-  d.activeSessionIdRef.current = null;
+  const token = d.claimViewSwitch();
   d.viewedPathRef.current = path;
-  d.activeCwdRef.current = cwd;
+  d.viewedCwdRef.current = cwd;
   // Optimistic identity: the row highlights immediately; the old chat stays
   // visible until the new transcript is ready, then swaps in one frame.
   d.setViewedSessionPath(path);
@@ -139,17 +128,17 @@ export async function viewSession(
         // (speculative restore) or explain + restore the previous view.
         d.evictDeadTab(path);
         if (opts?.quietMissing) {
-          d.releaseSwitch(token);
+          d.releaseViewSwitch(token);
           d.showLanding();
           return { status: "missing", rollback };
         }
         d.toast("info", "That session file no longer exists — cleaned up its tab.");
-        d.releaseSwitch(token);
+        d.releaseViewSwitch(token);
         rollback();
         return { status: "missing", rollback };
       }
       d.toast("error", "failed to load session");
-      d.releaseSwitch(token);
+      d.releaseViewSwitch(token);
       rollback();
       return { status: "failed", rollback };
     }
@@ -157,13 +146,12 @@ export async function viewSession(
   if (expectedEpoch !== d.epochRef.current) {
     // A newer view superseded this one while the tail loaded: drop the
     // stale result entirely (test: rapid A→B→A, latest wins).
-    d.releaseSwitch(token);
+    d.releaseViewSwitch(token);
     return { status: "stale", rollback };
   }
 
   d.hasSessionRef.current = true;
   d.setHasSession(true);
-  d.setLiveReady(false);
   d.setStats(null);
   // Models are project-scoped and cached separately; commands are cwd-bound
   // and reload per project. History/rollback views are session-shaped and
@@ -181,12 +169,10 @@ export async function viewSession(
     d.setCanLoadMore(cached != null && cached.startOffset > 0);
     if (cached?.messages.length) d.rebuildTranscript(cached.messages);
   }
-  // The view owns tab registration + Space adoption (I2: no runtime needed).
-  // A fresh-session activation registers at ready instead (no file yet).
-  if (path) d.registerTab(cwd, path);
-  // No activation follows: release the switch claim here (the ready handler
-  // would otherwise have to clear it for a ready that never comes).
-  d.releaseSwitch(token);
+  // The view owns tab registration + Space adoption; no runtime is needed.
+  d.registerTab(cwd, path);
+  // Nothing follows a disk view, so the switch claim is released here.
+  d.releaseViewSwitch(token);
   return { status: "committed", rollback };
 }
 
@@ -194,12 +180,10 @@ export type ViewLandingDeps = Pick<
   ViewNavigationDeps,
   | "epochRef"
   | "viewedPathRef"
-  | "activeSessionIdRef"
-  | "liveReadyRef"
+  | "viewedCwdRef"
   | "hasSessionRef"
   | "setViewedSessionPath"
   | "setHasSession"
-  | "setLiveReady"
   | "clearArmings"
 >;
 
@@ -211,13 +195,11 @@ export type ViewLandingDeps = Pick<
 export function showViewLanding(deps: ViewLandingDeps): void {
   const d = deps;
   ++d.epochRef.current;
-  d.activeSessionIdRef.current = null;
-  d.liveReadyRef.current = false;
   d.viewedPathRef.current = null;
+  d.viewedCwdRef.current = null;
   d.setViewedSessionPath(null);
   d.hasSessionRef.current = false;
   d.setHasSession(false);
-  d.setLiveReady(false);
   d.clearArmings();
 }
 

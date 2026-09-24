@@ -1,22 +1,23 @@
 export interface SessionEventContext {
-  /** The live pi session currently bound to the transcript. */
-  activeSessionId: string | null;
-  /** True while a session replacement is still in flight. */
+  /** The session whose transcript is on screen. */
+  viewedSessionId: string | null;
+  /** True while a VIEW switch is still in flight. */
   switching: boolean;
 }
 
 /**
- * Agent events are session-local. During a switch, or when an event belongs to
- * another session, accepting it would leak stale TUI/GUI output into the open
- * transcript.
+ * Agent events are session-local. An event may enter the viewed transcript
+ * only when it belongs to the viewed session and no view switch is in flight:
+ * an event from a background owner updates ITS bookkeeping (handled
+ * separately) and never the conversation on screen.
  */
 import type { AgentEvent } from "./bridge";
 
 export function shouldAcceptEvent(event: AgentEvent, context: SessionEventContext): boolean {
   if (!event || typeof event !== "object") return false;
   if (context.switching) return false;
-  if (typeof event.sessionId !== "string") return true;
-  return context.activeSessionId !== null && event.sessionId === context.activeSessionId;
+  if (typeof event.sessionId !== "string") return false;
+  return context.viewedSessionId !== null && event.sessionId === context.viewedSessionId;
 }
 
 export interface AgentLiveness {

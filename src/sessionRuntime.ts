@@ -25,6 +25,7 @@
 
 import { listAttention, type AttentionRegistry } from "./attention";
 import { type Bot } from "./bots";
+import type { ProjectExecution } from "./execution";
 import type { SubagentActivity, ThreadActivity, ThreadStatus, WorkflowRunSummary } from "./bridge";
 
 export type SessionLifecycle = "open" | "settled";
@@ -290,21 +291,15 @@ export function resolveApprovalExecution(
   return setExec(prev, path, "working", seq, now);
 }
 
-/**
- * Reconnect reconciliation (daemon/socket loss): the singleton runtime means
- * at most the ACTIVE session can still be executing — every other entry is
- * necessarily stale, so drop all non-active entries instead of letting them
- * ghost. The active entry is kept as-is; the caller refreshes its truth from
- * getState separately. Lifecycle/attention/unread are untouched.
- */
-export function reconcileAfterReconnect(
-  prev: PathExecutionMap,
-  activePath: string | null
-): PathExecutionMap {
-  if (!activePath) return {};
-  const kept = prev[activePath];
-  if (!kept) return {};
-  return Object.keys(prev).length === 1 ? prev : { [activePath]: kept };
+/** Path an approval resolution targets: the request's OWN session identity
+ *  only. A payload with no (or an unknown) session resolves to null, so it can
+ *  never mutate whatever the user happens to be viewing (C3). */
+export function resolveApprovalPath(
+  sessionId: string | null | undefined,
+  idToPath: Map<string, string> | Record<string, string>
+): string | null {
+  if (!sessionId) return null;
+  return idToPath instanceof Map ? idToPath.get(sessionId) ?? null : idToPath[sessionId] ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -334,26 +329,19 @@ export function formatRunDuration(elapsedMs: number): string {
 }
 
 /**
- * Resolve an agent event to the session path it describes. Background
- * sessions resolve through the id map; events without an id belong to the
- * active stream. Lifecycle events (start/settle/end) naming an UNKNOWN
- * session are dropped when requireKnown: attributing them to whoever happens
- * to be open would resurrect activity on the wrong session.
+ * Resolve an agent event to the session path it describes, by its OWN
+ * identity: the id map, or nothing. There is no active/viewed/foreground
+ * fallback, so an unstamped event can never mutate a random conversation.
  */
 export function resolveRuntimePath(
   sessionId: string | null | undefined,
-  activeSessionId: string | null,
   idToPath: Map<string, string> | Record<string, string>,
-  activePath: string | null,
   requireKnown = false
 ): string | null {
-  if (sessionId && sessionId === activeSessionId) return activePath;
-  if (sessionId) {
-    const p = idToPath instanceof Map ? idToPath.get(sessionId) : idToPath[sessionId];
-    if (p) return p;
-    if (requireKnown) return null;
-  }
-  return activePath;
+  if (!sessionId) return null;
+  const p = idToPath instanceof Map ? idToPath.get(sessionId) : idToPath[sessionId];
+  if (p) return p;
+  return requireKnown ? null : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -370,11 +358,10 @@ export interface RuntimeByPathInput {
   activity: { threads: SourceSnapshots["threads"]; subagents: SourceSnapshots["subagents"] };
   workflowRuns: SourceSnapshots["workflows"];
   viewedSessionPath: string | null;
-  statusSessionPath?: string;
-  statusCwd?: string;
-  streaming: boolean;
-  agentIsStreaming?: boolean;
-  activeSessionId: string;
+  /** Project cwd of the viewed conversation (session metadata, then activeSpace). */
+  viewedCwd: string | null;
+  /** Authoritative project execution owners: who actually runs, per project. */
+  projectExecutions: readonly ProjectExecution[];
   bots: Array<Pick<Bot, "id" | "mainSessionFile"> & { sessionsByProject?: Record<string, string> }>;
 }
 
@@ -388,11 +375,8 @@ export function computeRuntimeByPath(input: RuntimeByPathInput): Record<string, 
     activity,
     workflowRuns,
     viewedSessionPath,
-    statusSessionPath,
-    statusCwd,
-    streaming,
-    agentIsStreaming,
-    activeSessionId,
+    viewedCwd,
+    projectExecutions,
     bots,
   } = input;
 
@@ -411,9 +395,17 @@ export function computeRuntimeByPath(input: RuntimeByPathInput): Record<string, 
     sessionIdToPath.set(s.id, s.path);
     ensure(s.id, s.path, s.cwd);
   }
-  const activePath = viewedSessionPath ?? statusSessionPath ?? undefined;
-  if (activePath && !map[activePath]) {
-    ensure(activeSessionId ?? "", activePath, statusCwd ?? "");
+  // Execution registry CREATES and enriches owner rows: a fresh, unflushed
+  // owner must appear even before the disk index knows it (items 82, 170).
+  for (const execution of projectExecutions) {
+    ensure(execution.sessionId, execution.sessionFile, execution.cwd);
+    const row = map[execution.sessionFile];
+    if (row) row.execution = strongerExecution(row.execution, execution.state);
+  }
+  // A viewed conversation the index has not caught up with yet still gets a
+  // row — from the viewed path and ITS OWN cwd, never a global status cwd.
+  if (viewedSessionPath && !map[viewedSessionPath]) {
+    ensure(viewedSessionPath, viewedSessionPath, viewedCwd ?? "");
   }
   // Event layer (all sessions, survives navigation).
   for (const [path, rec] of Object.entries(executions)) {
@@ -431,14 +423,6 @@ export function computeRuntimeByPath(input: RuntimeByPathInput): Record<string, 
   for (const [path, exec] of Object.entries(sourceExec)) {
     const e = map[path];
     if (e) e.execution = strongerExecution(e.execution, exec);
-  }
-  // Active transcript + host truth (covers reload-mid-turn, where the fresh
-  // transcript reports idle while the agent still runs).
-  if (activePath) {
-    const e = map[activePath];
-    if (e && (streaming || agentIsStreaming === true)) {
-      e.execution = strongerExecution(e.execution, "working");
-    }
   }
   const openAttention = listAttention(attention);
   const unreadSet = new Set(unread);

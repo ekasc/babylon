@@ -65,6 +65,47 @@ describe("runtime-ipc addressed identity validation", () => {
   });
 });
 
+describe("project focus is an explicit, separate operation", () => {
+  it("execution activation never changes the focused project", async () => {
+    // C6/J: activation is execution-only. The UI's project focus is its own
+    // operation, driven by activeSpace — never a side effect of a claim.
+    const applyProjectFocus = vi.fn();
+    const executionActivate = vi.fn(async () => ({
+      ok: true as const,
+      execution: {
+        cwd: "/p",
+        sessionFile: "/p/s.jsonl",
+        sessionId: "s1",
+        state: "idle" as const,
+        streaming: false,
+        generation: 1,
+      },
+    }));
+    const handlers = captureHandlers((handle) =>
+      registerSessionRuntimeIpc(handle as unknown as Parameters<typeof registerRuntimeIpc>[0], {
+        sessionsRoot: "/tmp/never",
+        getRuntime: (() => ({
+          executionActivate,
+          relocateExecution: async () => ({}),
+        })) as unknown as Parameters<typeof registerSessionRuntimeIpc>[1]["getRuntime"],
+        getHost: (() => null) as unknown as Parameters<typeof registerSessionRuntimeIpc>[1]["getHost"],
+        isDaemonOwned: () => false,
+        requireDaemonClient: (() => null) as unknown as Parameters<typeof registerSessionRuntimeIpc>[1]["requireDaemonClient"],
+        driveSharedChatExtras: async () => undefined,
+        applyProjectFocus,
+      })
+    );
+
+    await handlers.get("pideck:execution-activate")!(null, { cwd: "/p" });
+    expect(executionActivate).toHaveBeenCalledTimes(1);
+    expect(applyProjectFocus).not.toHaveBeenCalled();
+
+    // The renderer moves focus explicitly, and only that moves it.
+    await handlers.get("pideck:project-focus")!(null, "/p");
+    expect(applyProjectFocus).toHaveBeenCalledWith("/p");
+  });
+});
+
 describe("session-runtime-ipc abort/getState identity", () => {
   const handlers = captureHandlers((handle) =>
     registerSessionRuntimeIpc(handle as unknown as Parameters<typeof registerRuntimeIpc>[0], {
@@ -74,6 +115,7 @@ describe("session-runtime-ipc abort/getState identity", () => {
       isDaemonOwned: () => false,
       requireDaemonClient: (() => null) as unknown as Parameters<typeof registerSessionRuntimeIpc>[1]["requireDaemonClient"],
       driveSharedChatExtras: async () => undefined,
+    applyProjectFocus: () => undefined,
     })
   );
 

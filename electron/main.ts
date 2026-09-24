@@ -131,7 +131,9 @@ const RENDERER_ENTRY = pathToFileURL(join(__dirname, "../dist/index.html")).href
 let win: BrowserWindow | null = null;
 let host: PiHost | null = null;
 let hostReady: Promise<void> | null = null;
-let activeCwd = "";
+/** Which project the desktop UI is focused on (`activeSpace` from the
+ *  renderer). Display/tooling scope only — never execution ownership. */
+let focusedCwd = "";
 
 // In-app browser simulator: single shared controller for the renderer IPC
 // surface and the agent tools. Created once; the window is resolved lazily.
@@ -332,15 +334,16 @@ function driveExtrasIO(sessionFile: string) {
     },
   };
 }
-/** New bot/room sessions have a canonical future path before first flush ,
- *  resolve them lexically (containment-checked) when the live host owns them. */
+/** New bot/room sessions have a canonical future path before first flush:
+ *  resolve them when that exact path is an INSTALLED EXECUTION RUNTIME
+ *  (containment-checked), else fall back to the on-disk session. */
 async function resolveCanonicalSessionFile(stored: string | null | undefined): Promise<string | undefined> {
   if (!stored) return undefined;
-  let owned: string | null = null;
   try {
-    owned = getHost().activeSessionFile;
-  } catch {}
-  if (owned && owned === stored) return owned;
+    if (getHost().hasSessionRuntime(stored)) return stored;
+  } catch {
+    /* no live host yet: the on-disk check below is the whole story */
+  }
   try {
     const validated = await validateSessionPath(sessionsRoot(), stored);
     if (!existsSync(validated)) return undefined;
@@ -474,8 +477,9 @@ function requireDaemonClient(): DaemonClient {
  *  PiHost. Called both at startup (when the socket is live) and on reconnect
  *  (when the socket was down at startup but came back later). */
 function installDaemonNotifier(client: DaemonClient): void {
+  // No focus filter: the daemon routes diagnostics to that project's
+  // execution owner, whoever the UI is looking at (item 127).
   lspManager.setPiNotifier((diagCwd, diagnostics) => {
-    if (diagCwd !== activeCwd) return;
     client.request("pi.notifyDiagnostics", { cwd: diagCwd, diagnostics }).catch(() => {});
   });
 }
@@ -591,11 +595,12 @@ const daemonViewRefresh = createCoalescingWorker<string, void>({
 // Workflows bridge (pi-dynamic-workflows run state)
 // ---------------------------------------------------------------------------
 
-/** (Re)create the workflows bridge when the session cwd changes. */
-function applyCwd(cwd: string): void {
+/** Apply the UI's project focus (renderer `activeSpace`). This is display and
+ *  tooling scope ONLY: it never changes execution ownership, never resumes a
+ *  task, and is never driven by runtime activation (C2/C6, items 120-122). */
+function applyProjectFocus(cwd: string): void {
   if (!cwd) return;
-  activeCwd = cwd;
-  taskManager.resumeForSession(host?.activeSessionFile);
+  focusedCwd = cwd;
   updateActivityBridge(cwd);
   // LSP: set active project; failures are best-effort (e.g. cwd deleted).
   void lspManager.setActiveProject(cwd).catch(() => undefined);
@@ -730,8 +735,10 @@ function createWindow(): void {
   }
 }
 
-function sendStatus(status: string, extra: Record<string, unknown> = {}): void {
-  win?.webContents.send("pideck:session-status", { status, cwd: activeCwd, ...extra });
+/** Runtime health only: startup/error for the shell, with NO session or
+ *  project identity attached (C4). It can never select or navigate anything. */
+function sendRuntimeStatus(status: "starting" | "ready" | "error", extra: Record<string, unknown> = {}): void {
+  win?.webContents.send("pideck:runtime-status", { status, ...extra });
 }
 
 // ---------------------------------------------------------------------------
@@ -745,12 +752,12 @@ function getHost(): PiHost {
 
 async function startHost(): Promise<void> {
   if (host) return;
-  sendStatus("starting");
+  sendRuntimeStatus("starting");
   try {
     const groups = await sessionIndex.list();
     const latest = groups.flatMap((g) => g.sessions).sort((a, b) => b.mtime - a.mtime)[0];
     const cwd = latest?.cwd ?? homedir();
-    activeCwd = cwd;
+    focusedCwd = cwd;
     // Babylon permission system: load persistent rules + mode once, outside any
     // Pi session file, so policy survives restarts and is shared across projects.
     const permissionDir = join(app.getPath("userData"), "pideck-state", "permissions");
@@ -810,28 +817,22 @@ async function startHost(): Promise<void> {
           /* best effort */
         }
       },
-      onStatus: (s: { status: string; message?: string; cwd?: string; sessionPath?: string; requestId?: number; state?: AgentState | null }) => {
-        if (s?.cwd) applyCwd(s.cwd);
-        // Forward requestId: the renderer matches ready/error against its
-        // latest open to ignore stale switches. Dropping it deadens that
-        // guard and lets an old ready rebind the live session id.
-        sendStatus(s.status, { state: s.state, sessionPath: s.sessionPath, requestId: s.requestId });
-      },
     });
     await host.start();
-    // Wire LSP -> Pi diagnostics delivery (bounded, newly introduced only).
+    // Wire LSP -> Pi diagnostics delivery. Ownership is explicit: the host
+    // routes by the diagnostics' own project, never by UI focus (items 125-127).
     lspManager.setPiNotifier((diagCwd, diagnostics) => {
-      if (diagCwd !== activeCwd) return;
       try {
         host!.notifyDiagnostics(diagCwd, diagnostics);
       } catch {}
     });
-    applyCwd(activeCwd);
-    // Warm but invisible, the user hasn't opened a session yet.
+    applyProjectFocus(focusedCwd);
+    sendRuntimeStatus("ready");
+    // Warm but invisible, the user hasn't activated a project session yet.
     console.log("[pideck] pi host ready (in-process)");
   } catch (err) {
     host = null;
-    sendStatus("error", { message: (err as Error).message });
+    sendRuntimeStatus("error", { message: (err as Error).message });
   }
 }
 
@@ -861,15 +862,7 @@ function registerIpc(): void {
     sessionsRoot: sessionsRoot(),
     sessionIndex,
     getRuntime,
-    getHost,
-    isDaemonOwned,
-    requireDaemonClient,
-    daemonTaskBySessionFile,
     getWindow: () => win,
-    getHostReady: () => hostReady,
-    botStore,
-    overlayForSessionFile,
-    taskManager,
   });
 
   registerBotsIpc(handle, {
@@ -882,7 +875,7 @@ function registerIpc(): void {
     getHost,
     isDaemonOwned,
     getHostReady: () => hostReady,
-    getActiveCwd: () => activeCwd,
+    getFocusedCwd: () => focusedCwd,
     broadcastBots,
     broadcastGroups,
     projectSettingsForCwd,
@@ -899,6 +892,7 @@ function registerIpc(): void {
     isDaemonOwned,
     requireDaemonClient,
     driveSharedChatExtras,
+    applyProjectFocus,
   });
   registerGitIpc(handle, { getRuntime });
 
@@ -919,9 +913,7 @@ function registerIpc(): void {
     daemonTaskBySessionFileStrict,
     taskManager,
     processManager,
-    getActiveCwd: () => activeCwd,
-    applyCwd,
-    sendStatus,
+    getFocusedCwd: () => focusedCwd,
   });
 
   registerPermissionsIpc(handle, {
@@ -1169,15 +1161,6 @@ async function ensureDaemon(): Promise<boolean> {
           ingestAgentEvent(payload as AgentEvent);
         }
       }
-      if (envelope.type === "pi.session.status") {
-        // In daemon mode there is no local PiHost whose onStatus would call
-        // applyCwd, so the thin client must sync the active cwd (and thus LSP
-        // + git, which the Electron process still owns) from the daemon's
-        // status broadcast before forwarding it to the renderer.
-        const status = envelope.payload as { cwd?: string };
-        if (status.cwd) applyCwd(status.cwd);
-        win?.webContents.send("pideck:session-status", envelope.payload);
-      }
       if (envelope.type === "approval.requested") {
         win?.webContents.send("pideck:approval-requested", envelope.payload);
       }
@@ -1274,7 +1257,6 @@ app.whenReady().then(async () => {
     else installDeferredDaemonNotifier();
   } else {
     lspManager.setPiNotifier((diagCwd, diagnostics) => {
-      if (diagCwd !== activeCwd) return;
       try {
         host!.notifyDiagnostics(diagCwd, diagnostics);
       } catch {}

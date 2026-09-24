@@ -14,7 +14,7 @@ const groups: ProjectGroup[] = [
 ];
 
 const base = {
-  status: { status: "idle" as const },
+  runtimeStatus: { status: "ready" as const },
   onOpen: vi.fn(),
   onNew: vi.fn(),
 };

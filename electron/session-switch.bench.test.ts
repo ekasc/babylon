@@ -103,7 +103,7 @@ function seedTranscript(cwd: string, turns: number): string {
 describe("session-switch bench", () => {
   it("measures retained, dirty, cold, churn, and hydration costs", async () => {
     const { cwd, agentDir } = await makeProject("switch");
-    const host = new PiHost({ cwd, agentDir, onEvent: () => undefined, onStatus: () => undefined });
+    const host = new PiHost({ cwd, agentDir, onEvent: () => undefined });
     await host.start();
     const openSpy = vi.spyOn(SessionManager, "open");
     const scales: ScaleResult[] = [];
@@ -119,23 +119,23 @@ describe("session-switch bench", () => {
         // Cold open: full runtime construction for a flushed session.
         openSpy.mockClear();
         let start = performance.now();
-        await host.open({ path: fileA, cwd });
+        await host.activateExecution(cwd, fileA);
         const coldOpenMs = performance.now() - start;
 
         // Warm clean A→B→A: retained reactivations. One unmeasured round
         // trip first: creation seeds the fingerprint, but the SDK flushes
         // during the build, so the first reactivation legitimately syncs
         // once per session — steady state is what we measure.
-        await host.open({ path: fileB, cwd });
-        await host.open({ path: fileA, cwd });
+        await host.activateExecution(cwd, fileB);
+        await host.activateExecution(cwd, fileA);
         openSpy.mockClear();
         const samples: number[] = [];
         for (let i = 0; i < SWITCH_ITERATIONS; i++) {
           start = performance.now();
-          await host.open({ path: fileB, cwd });
+          await host.activateExecution(cwd, fileB);
           samples.push(performance.now() - start);
           start = performance.now();
-          await host.open({ path: fileA, cwd });
+          await host.activateExecution(cwd, fileA);
           samples.push(performance.now() - start);
         }
         const warmCleanReparses = openSpy.mock.calls.length;
@@ -146,14 +146,14 @@ describe("session-switch bench", () => {
         const future = new Date(Date.now() + 60_000);
         await fsp.utimes(fileA, future, future);
         start = performance.now();
-        await host.open({ path: fileA, cwd });
+        await host.activateExecution(cwd, fileA);
         const warmDirtySwitchMs = performance.now() - start;
         const warmDirtyReparses = openSpy.mock.calls.length;
 
         // Clean again: the post-dirty round trip reparses nothing.
         openSpy.mockClear();
-        await host.open({ path: fileB, cwd });
-        await host.open({ path: fileA, cwd });
+        await host.activateExecution(cwd, fileB);
+        await host.activateExecution(cwd, fileA);
         const warmCleanAgainReparses = openSpy.mock.calls.length;
 
         // Hydration breakdown on the foreground session, plus the
@@ -209,11 +209,11 @@ describe("session-switch bench", () => {
       for (let i = 0; i < 12; i++) {
         const file = seedTranscript(cwd, 5);
         churnFiles.push(file);
-        await host.open({ path: file, cwd });
+        await host.activateExecution(cwd, file);
       }
       const firstEvicted = !host.testSessions().has(churnFiles[0]!);
       const churnStart = performance.now();
-      await host.open({ path: churnFiles[0]!, cwd });
+      await host.activateExecution(cwd, churnFiles[0]!);
       const churn: ChurnResult = {
         sessionsOpened: churnFiles.length,
         firstEvicted,

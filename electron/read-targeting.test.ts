@@ -23,7 +23,7 @@ async function makeProject(tag: string) {
 }
 
 function makeHost(cwd: string, agentDir: string) {
-  return new PiHost({ cwd, agentDir, stateDir: join(agentDir, "state"), onEvent: () => undefined, onStatus: () => undefined });
+  return new PiHost({ cwd, agentDir, stateDir: join(agentDir, "state"), onEvent: () => undefined });
 }
 
 describe("addressed reads require explicit identity", () => {
@@ -91,21 +91,20 @@ describe("addressed reads require explicit identity", () => {
       // Runtime-shaped reads still refuse: no retained runtime, no fallback.
       await expect(host.getState(file)).rejects.toThrow(/not available/i);
       expect(host.testSessions().has(file)).toBe(false);
-      expect(host.testForegroundSessionFile()).toBeNull();
+      expect(host.executionForCwd(cwd)).toBeNull();
     } finally {
       await host.dispose();
     }
   });
 
-  it("reads never move the foreground and never leak the foreground's content", async () => {
+  it("reads are addressed to their own project and never leak another project's content", async () => {
     const a = await makeProject("fg-a");
     const b = await makeProject("fg-b");
     const { cwd, agentDir } = a;
     const host = makeHost(cwd, agentDir);
     await host.start();
     try {
-      // One runtime per project (R1): two live sessions means two projects,
-      // so the addressed-vs-foreground distinction is not a retention quirk.
+      // One runtime per project (R1): two live sessions means two projects.
       const seedTurn = (marker: string, project: string) => {
         const sm = SessionManager.create(project);
         const file = sm.getSessionFile();
@@ -126,29 +125,28 @@ describe("addressed reads require explicit identity", () => {
       };
       const fileA = seedTurn("alpha-session-marker", a.cwd);
       const fileB = seedTurn("beta-session-marker", b.cwd);
-      await host.open({ path: fileA, cwd: a.cwd });
-      await host.open({ path: fileB, cwd: b.cwd });
-      expect(host.activeSessionFile).toBe(fileB);
+      await host.activateExecution(a.cwd, fileA);
+      await host.activateExecution(b.cwd, fileB);
+      expect(host.testExecutionByCwd().get(b.cwd)).toBe(fileB);
 
       await host.getState(fileA);
       const stateA = await host.getState(fileA);
       const historyA = await host.getHistory(fileA);
       const messagesA = await host.getMessages(fileA);
-      // getState is addressed too: never the foreground session's state.
+      // getState is addressed too: never another session's state.
       expect(stateA.sessionFile).toBe(fileA);
-      // Addressed content: A's turn, never the foreground's.
+      // Addressed content: A's turn, never the other project's.
       expect(JSON.stringify(historyA.turns)).toContain("alpha-session-marker");
       expect(JSON.stringify(historyA.turns)).not.toContain("beta-session-marker");
       expect(JSON.stringify(messagesA)).toContain("alpha-session-marker");
-      // Addressing a read never steals the foreground.
-      expect(host.activeSessionFile).toBe(fileB);
-      expect(host.testForegroundSessionFile()).toBe(fileB);
+      // Addressing a read never changes ownership.
+      expect(host.testExecutionByCwd().get(b.cwd)).toBe(fileB);
     } finally {
       await host.dispose();
     }
   });
 
-  it("reads tool output from the addressed transcript, never the foreground's", async () => {
+  it("reads tool output from the addressed transcript only", async () => {
     const { cwd, agentDir } = await makeProject("toolout");
     const host = makeHost(cwd, agentDir);
     await host.start();
@@ -189,22 +187,22 @@ describe("addressed reads require explicit identity", () => {
         }) + "\n";
       await appendFile(fileA, line("tool-out-a", "OUTPUT-FROM-A"));
       await appendFile(fileB, line("tool-out-b", "OUTPUT-FROM-B"));
-      // A stays historical (never opened); B is the foreground session.
-      await host.open({ path: fileB, cwd });
-      expect(host.activeSessionFile).toBe(fileB);
+      // A stays historical (never activated); B owns the project.
+      await host.activateExecution(cwd, fileB);
+      expect(host.testExecutionByCwd().get(cwd)).toBe(fileB);
       expect(host.testSessions().has(fileA)).toBe(false);
 
       const fromA = await host.getToolOutput(fileA, "call-shared");
       expect(fromA.content).toBe("OUTPUT-FROM-A");
       const fromB = await host.getToolOutput(fileB, "call-shared");
       expect(fromB.content).toBe("OUTPUT-FROM-B");
-      expect(host.activeSessionFile).toBe(fileB);
+      expect(host.testExecutionByCwd().get(cwd)).toBe(fileB);
     } finally {
       await host.dispose();
     }
   });
 
-  it("getModels serves the requested project, never the foreground project's catalogue", async () => {
+  it("getModels serves the requested project, never another project's catalogue", async () => {
     const a = await makeProject("models-a");
     const b = await makeProject("models-b");
     const writeCatalog = async (agentDir: string, modelId: string) =>
@@ -238,19 +236,19 @@ describe("addressed reads require explicit identity", () => {
       const smB = SessionManager.create(b.cwd);
       const fileB = smB.getSessionFile();
       if (!fileB) throw new Error("no canonical session file");
-      await host.open({ path: fileB, cwd: b.cwd });
-      expect(host.activeSessionFile).toBe(fileB);
+      await host.activateExecution(b.cwd, fileB);
+      expect(host.testExecutionByCwd().get(b.cwd)).toBe(fileB);
 
       const idsB = ids(await host.getModels(b.cwd));
       expect(idsB).toContain("fixture/fixture-b");
       expect(idsB).not.toContain("fixture/fixture-a");
 
-      // Requesting project A while B is foreground must serve A's catalogue.
+      // Requesting project A while B executes must serve A's catalogue.
       const idsA2 = ids(await host.getModels(a.cwd));
       expect(idsA2).toContain("fixture/fixture-a");
       expect(idsA2).not.toContain("fixture/fixture-b");
       expect(host.testProjectRuntimes().has(resolve(a.cwd))).toBe(true);
-      expect(host.activeSessionFile).toBe(fileB);
+      expect(host.testExecutionByCwd().get(b.cwd)).toBe(fileB);
     } finally {
       await host.dispose();
     }
@@ -263,7 +261,7 @@ describe("addressed reads require explicit identity", () => {
     try {
       await expect(host.getModels(cwd)).resolves.toBeInstanceOf(Array);
       expect(host.testSessions().size).toBe(0);
-      expect(host.testForegroundSessionFile()).toBeNull();
+      expect(host.executionForCwd(cwd)).toBeNull();
     } finally {
       await host.dispose();
     }
